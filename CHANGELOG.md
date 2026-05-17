@@ -5,6 +5,9 @@
 ### Changed
 
 - **PR #TBD** by @Michaelyklam (refs #1925) — Route Stop Generation through the default-off `RuntimeAdapter.cancel_run(...)` seam when `HERMES_WEBUI_RUNTIME_ADAPTER=legacy-journal` is enabled, while preserving the legacy `/api/chat/cancel` response shape and direct `cancel_stream(...)` fallback for the default `legacy-direct` path. This starts Slice 3a cancel-control migration without adding a new cancellation registry, runner, sidecar, approval/clarify migration, queue/goal migration, or chat-start contract changes.
+### Fixed
+
+- **PR #2480** by @Michaelyklam (refs #2472) — Make "Fork from here" use the same merged messaging-session transcript coordinate space that `/api/session` exposes, so forking an older message no longer silently copies the full sidecar when CLI/Gateway history inflated the visible message offset. The frontend now snapshots the source session id across the async full-history load, reloads the forked transcript fully after creation, and the branch handler best-effort saves the source session before slicing to keep undo/retry state coherent.
 
 ## [v0.51.85] — 2026-05-17 — Release BI (stage-378 — 3-PR batch — workspace-prefix display leakage fix + release-tag update banner + Slice 3a cancel-control gate RFC)
 
