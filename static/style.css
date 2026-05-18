@@ -911,6 +911,9 @@
   .notes-search-form select,.notes-search-form input{min-height:34px;border:1px solid var(--border);border-radius:10px;background:var(--panel);color:var(--text);padding:6px 10px;}
   .notes-search-form input{flex:1;min-width:220px;}
   .notes-search-results{display:grid;gap:8px;}
+  .notes-ai-recent-list{display:grid;gap:8px;margin-top:10px;}
+  .notes-ai-recent-head strong{display:inline-flex;align-items:center;gap:7px;}
+  .notes-ai-recent-item span{display:inline-flex;align-items:center;gap:6px;}
   .notes-result-card{display:grid;gap:4px;width:100%;text-align:left;border:1px solid var(--border);border-radius:12px;background:var(--panel-soft);color:var(--text);padding:10px 12px;cursor:pointer;}
   .notes-result-card:hover{border-color:var(--accent);}
   .notes-result-card span{color:var(--muted);font-size:.9rem;}

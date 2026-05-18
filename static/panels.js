@@ -3625,6 +3625,16 @@ function _renderExternalNotesSources() {
     const selected = sources.find(src => (src.name || '').toLowerCase() === (_notesSelectedSource || '').toLowerCase()) || sources[0];
     _notesSelectedSource = (selected && selected.name) || 'joplin';
     const sourceOptions = sources.map(src => `<option value="${esc(src.name||'')}" ${src.name===_notesSelectedSource?'selected':''}>${esc(src.label||src.name||'')}</option>`).join('');
+    const recentAiNotes = Array.isArray(data.recent_ai_notes) ? data.recent_ai_notes : [];
+    const recentAiHtml = recentAiNotes.length
+      ? `<section class="notes-source-card notes-ai-recent-card">
+          <div class="notes-source-card-head notes-ai-recent-head"><strong>${li('bot', 14)}${esc(t('external_notes_recent_ai'))}</strong><span class="detail-badge">${esc(t('external_notes_auto'))}</span></div>
+          <div class="notes-ai-recent-list">${recentAiNotes.map(note => {
+            const updated = note.updated_time ? new Date(Number(note.updated_time)).toLocaleString() : '';
+            return `<button type="button" class="notes-result-card notes-ai-recent-item" onclick="previewExternalNote('${esc(note.source||'joplin')}','${esc(note.id||'')}')"><strong>${esc(note.title||note.label||'Untitled')}</strong><span>${li('clock', 14)}${esc(note.label||t('external_notes_recent_ai_reason'))}${updated ? ` · ${esc(updated)}` : ''}</span></button>`;
+          }).join('')}</div>
+        </section>`
+      : '';
     const searchError = _notesSearchError ? `<div class="detail-form-error">${esc(_notesSearchError)}</div>` : '';
     const resultHtml = _notesSearchResults.length
       ? `<div class="notes-search-results">${_notesSearchResults.map(note => `<button type="button" class="notes-result-card" onclick="previewExternalNote('${esc(note.source||_notesSelectedSource)}','${esc(note.id||'')}')"><strong>${esc(note.title||'Untitled')}</strong>${note.snippet?`<span>${esc(note.snippet)}</span>`:''}</button>`).join('')}</div>`
@@ -3657,7 +3667,7 @@ function _renderExternalNotesSources() {
       ${searchError}
       ${resultHtml}
     </section>`;
-    body.innerHTML = `<div class="main-view-content">${recall}${searchUi}${previewHtml}${cards}</div>`;
+    body.innerHTML = `<div class="main-view-content">${recall}${recentAiHtml}${searchUi}${previewHtml}${cards}</div>`;
   }
   body.style.display = '';
   if (empty) empty.style.display = 'none';

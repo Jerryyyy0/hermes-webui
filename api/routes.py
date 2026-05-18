@@ -10706,6 +10706,7 @@ def _handle_notes_sources_list(handler):
         "inventory_scope": "already_known_runtime_only",
         "attach_supported": False,
         "automatic_recall_unchanged": True,
+        "recent_ai_notes": _joplin_recent_ai_notes(limit=6),
     })
 
 
@@ -10825,6 +10826,93 @@ def _joplin_get_note(note_id: str) -> dict:
         "created_time": data.get("created_time"),
         "source": "joplin",
     }
+
+
+_JOPLIN_AI_RECALL_NOTE_PRIORITY = [
+    ("CURRENT_CONTEXT_ID", "Current Context"),
+    ("OPEN_ISSUES_ID", "Open Issues"),
+    ("AGENT_MEMORY_ID", "Agent Memory"),
+    ("CONVENTIONS_ID", "Conventions / Preferences"),
+    ("INFRA_ID", "Infrastructure"),
+    ("SERVICES_ID", "Services"),
+]
+
+
+def _joplin_prefill_script_path() -> Path | None:
+    cfg = get_config()
+    path_value = cfg.get("prefill_messages_script") if isinstance(cfg, dict) else None
+    if not path_value:
+        return None
+    try:
+        return Path(str(path_value)).expanduser()
+    except Exception:
+        return None
+
+
+def _joplin_recall_note_refs(script_path: Path | None = None) -> list[dict]:
+    """Find stable Joplin note IDs referenced by the configured recall script.
+
+    This keeps the WebUI generic: it does not hard-code a user's note IDs, but
+    can still surface the notes that the configured AI prefill/recall script is
+    known to read for automatic context.
+    """
+    script_path = script_path or _joplin_prefill_script_path()
+    if not script_path or not script_path.exists() or not script_path.is_file():
+        return []
+    try:
+        text = script_path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return []
+    constants = {
+        match.group(1): match.group(2)
+        for match in re.finditer(r'(?m)^\s*([A-Z0-9_]+_ID)\s*=\s*["\']([A-Fa-f0-9]{16,64})["\']', text)
+    }
+    refs = []
+    seen = set()
+    for const_name, label in _JOPLIN_AI_RECALL_NOTE_PRIORITY:
+        note_id = constants.get(const_name)
+        if not note_id or note_id in seen:
+            continue
+        seen.add(note_id)
+        refs.append({
+            "id": note_id,
+            "label": label,
+            "constant": const_name,
+            "used_by": "ai_prefill",
+            "used_reason": "automatic_recall",
+        })
+    return refs
+
+
+def _joplin_recent_ai_notes(*, limit: int = 6) -> list[dict]:
+    """Return safe Joplin notes that the configured AI recall path recently uses."""
+    try:
+        limit = max(1, min(int(limit or 6), 20))
+    except Exception:
+        limit = 6
+    notes = []
+    for ref in _joplin_recall_note_refs()[:limit]:
+        try:
+            data = _joplin_api_get(f"/notes/{ref['id']}", {
+                "fields": "id,title,parent_id,updated_time,user_updated_time,created_time",
+            })
+        except Exception:
+            continue
+        note_id = _mcp_safe_display_text(data.get("id") or ref.get("id") or "", limit=64)
+        if not note_id:
+            continue
+        notes.append({
+            "id": note_id,
+            "title": _mcp_safe_display_text(data.get("title") or ref.get("label") or "Untitled", limit=180),
+            "label": _mcp_safe_display_text(ref.get("label") or "", limit=120),
+            "parent_id": _mcp_safe_display_text(data.get("parent_id") or "", limit=64),
+            "updated_time": data.get("user_updated_time") or data.get("updated_time"),
+            "created_time": data.get("created_time"),
+            "source": "joplin",
+            "used_by": ref.get("used_by") or "ai_prefill",
+            "used_reason": ref.get("used_reason") or "automatic_recall",
+        })
+    return notes
 
 
 def _handle_notes_search(handler, parsed):

@@ -110,3 +110,53 @@ def test_joplin_get_note_validates_id_and_truncates_body(monkeypatch):
     assert note["source"] == "joplin"
     assert len(note["body"]) < 51000
     assert "Preview truncated" in note["body"]
+
+
+def test_joplin_recent_ai_notes_uses_configured_prefill_script(monkeypatch, tmp_path):
+    from api import routes
+
+    script = tmp_path / "joplin_context.py"
+    script.write_text(
+        '\n'.join([
+            'CURRENT_CONTEXT_ID = "5ba9ab822c344115939205ca4e8eaec0"',
+            'OPEN_ISSUES_ID = "623aeb6e55cb4aa39a0541f2ac09aa36"',
+            'AGENT_MEMORY_ID = "0a7a232ea46b4b8bb0bbd4358f725a84"',
+            'RAW_CAPTURES_ID = "cb1087795c7d4129a863ab0a5642233d"',
+        ]),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(routes, "get_config", lambda: {"prefill_messages_script": str(script)})
+
+    def fake_get(path, params=None):
+        note_id = path.rsplit("/", 1)[-1]
+        titles = {
+            "5ba9ab822c344115939205ca4e8eaec0": "Current Context",
+            "623aeb6e55cb4aa39a0541f2ac09aa36": "Open Issues",
+            "0a7a232ea46b4b8bb0bbd4358f725a84": "Agent Memory",
+        }
+        assert note_id in titles
+        return {"id": note_id, "title": titles[note_id], "updated_time": 123, "parent_id": "folder"}
+
+    monkeypatch.setattr(routes, "_joplin_api_get", fake_get)
+
+    notes = routes._joplin_recent_ai_notes(limit=3)
+
+    assert [note["title"] for note in notes] == ["Current Context", "Open Issues", "Agent Memory"]
+    assert all(note["source"] == "joplin" for note in notes)
+    assert all(note["used_by"] == "ai_prefill" for note in notes)
+    assert all(note["used_reason"] == "automatic_recall" for note in notes)
+
+
+def test_external_notes_ui_uses_minimal_lucide_icons_for_ai_recent_notes():
+    from pathlib import Path
+
+    panels = Path("static/panels.js").read_text(encoding="utf-8")
+    start = panels.index("function _renderExternalNotesSources()")
+    end = panels.index("function _renderMemoryDetail", start)
+    notes_block = panels[start:end]
+    assert "notes-ai-recent-card" in notes_block
+    assert "li('bot', 14)" in notes_block
+    assert "li('clock', 14)" in notes_block
+    assert "Recently used by AI" not in notes_block  # i18n key, not hard-coded UI copy
+    assert "🤖" not in notes_block
+    assert "📚" not in notes_block
