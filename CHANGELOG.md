@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Rebuild the WebUI session index during startup recovery when `_index.json` is missing, even when no `.bak` session restore occurs, so large state directories avoid repeated full-scan `/api/sessions` fallback after an index loss.
+
 
 ## [v0.51.96] — 2026-05-20 — Release BT (stage-389 — 8-PR batch — IPv6 dashboard link normalization + configured title-generation provider routing + sidebar pinned-session 3-cap + external-refresh sidecar count preference + Hermes overview docs relocation + legacy dedup timestamp granularity + custom provider /models endpoint error surfacing + RuntimeAdapter Slice 4c harness gate RFC)
 
