@@ -3752,7 +3752,7 @@ def handle_get(handler, parsed) -> bool:
         return t(handler, _page, content_type="text/html; charset=utf-8")
 
     if parsed.path == "/api/auth/status":
-        from api.auth import get_password_hash, is_auth_enabled, parse_cookie, verify_session
+        from api.auth import _passkey_feature_flag_enabled, get_password_hash, is_auth_enabled, parse_cookie, verify_session
         from api.passkeys import registered_credentials
 
         logged_in = False
@@ -3760,7 +3760,8 @@ def handle_get(handler, parsed) -> bool:
         if auth_enabled:
             cv = parse_cookie(handler)
             logged_in = bool(cv and verify_session(cv))
-        passkeys = registered_credentials()
+        passkey_flag = _passkey_feature_flag_enabled()
+        passkeys = registered_credentials() if passkey_flag else []
         password_auth_enabled = get_password_hash() is not None
         return j(handler, {
             "auth_enabled": auth_enabled,
@@ -3769,6 +3770,7 @@ def handle_get(handler, parsed) -> bool:
             "passwordless_enabled": bool(passkeys) and not password_auth_enabled,
             "passkeys_enabled": bool(passkeys),
             "passkeys_count": len(passkeys),
+            "passkey_feature_flag": passkey_flag,
         })
 
     if parsed.path in ("/manifest.json", "/manifest.webmanifest"):
@@ -5897,8 +5899,11 @@ def handle_post(handler, parsed) -> bool:
                     409,
                 )
         if requested_passwordless:
+            from api.auth import _passkey_feature_flag_enabled
             from api.passkeys import registered_credentials
 
+            if not _passkey_feature_flag_enabled():
+                return bad(handler, "Passkey support is disabled. Enable HERMES_WEBUI_PASSKEY before going passwordless.", 409)
             if not registered_credentials():
                 return bad(handler, "Register a passkey before going passwordless.", 409)
         elif requested_clear_password:

@@ -1267,7 +1267,7 @@
               <div style="font-size:11px;color:var(--muted);margin-bottom:8px" data-i18n="settings_desc_shutdown">Gracefully stops the local WebUI server. Useful if you launched via <code>./ctl.sh start</code> and want to stop without switching to a terminal. You'll need to relaunch the server (<code>./ctl.sh start</code> or the native app) before the WebUI is reachable again.</div>
               <button class="sm-btn" id="btnShutdownServer" onclick="shutdownServer()" style="width:100%;padding:8px;font-weight:600;color:#e74c3c;border-color:rgba(231,76,60,.3)" data-i18n="settings_btn_shutdown">Stop server</button>
             </div>
-            <div class="settings-field" style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
+            <div class="settings-field" id="passkeysSettingsBlock" style="display:none;margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
               <label>Passkeys</label>
               <div style="font-size:11px;color:var(--muted);margin-bottom:8px">Register this browser or device for passwordless sign-in. Once at least one passkey exists, you can remove the password and sign in with passkeys only.</div>
               <button class="sm-btn" id="btnRegisterPasskey" onclick="registerPasskey()" style="width:100%;padding:8px;font-weight:600">Add passkey</button>

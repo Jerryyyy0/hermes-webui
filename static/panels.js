@@ -6955,7 +6955,24 @@ function _bytesToB64u(buf){
 
 async function loadPasskeys(){
   const list=$('passkeyList');
+  const block=$('passkeysSettingsBlock');
   if(!list) return;
+  // Stage-batch14: respect the HERMES_WEBUI_PASSKEY feature flag — hide the
+  // whole block when passkey support is disabled at the server level so users
+  // don't see a non-functional "Add passkey" button (clicking it would 404).
+  try{
+    const status=await api('/api/auth/status');
+    if(status && status.passkey_feature_flag === false){
+      if(block) block.style.display='none';
+      return;
+    }
+    if(block) block.style.display='';
+  }catch(_e){
+    // If /api/auth/status fails, keep the block hidden to avoid showing a
+    // broken affordance.
+    if(block) block.style.display='none';
+    return;
+  }
   if(!window.PublicKeyCredential||!navigator.credentials){
     list.textContent='Passkeys are not supported by this browser/context.';
     const btn=$('btnRegisterPasskey'); if(btn) btn.disabled=true;
@@ -6963,6 +6980,10 @@ async function loadPasskeys(){
   }
   try{
     const data=await api('/api/auth/passkeys',{method:'POST',body:'{}'});
+    if(data && data.disabled){
+      if(block) block.style.display='none';
+      return;
+    }
     const creds=(data&&data.credentials)||[];
     if(!creds.length){list.textContent='No passkeys registered.';return;}
     list.innerHTML=creds.map(c=>`<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;border:1px solid var(--border);border-radius:8px;padding:8px;margin-top:6px"><span>${esc(c.label||'Passkey')}</span><button class="btn-tiny" onclick="deletePasskey('${esc(c.id)}')">Remove</button></div>`).join('');
