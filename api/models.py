@@ -2354,6 +2354,12 @@ def _hide_from_default_sidebar(session: dict) -> bool:
     sid = str(session.get('session_id') or '')
     source = session.get('source_tag') or session.get('source')
     if source == 'cron' or sid.startswith('cron_'):
+        try:
+            from integration.crons.session_bridge import cron_sessions_visible_in_sidebar
+            if cron_sessions_visible_in_sidebar(session):
+                return False
+        except ImportError:
+            pass
         return True
     if bool(session.get('pre_compression_snapshot')):
         return not bool(session.get('_show_pre_compression_snapshot'))
@@ -2946,8 +2952,8 @@ CRON_PROJECT_NAME = 'Cron Jobs'
 _CRON_PROJECT_LOCK = threading.Lock()
 
 
-def ensure_cron_project() -> str:
-    """Return the project_id of the system "Cron Jobs" project for the active profile.
+def ensure_cron_project(profile: str | None = None) -> str:
+    """Return the project_id of the system "Cron Jobs" project for a profile.
 
     Each profile gets its own "Cron Jobs" project so cron-spawned sessions in
     profile A don't surface under the cron chip of profile B (#1614). Lookup
@@ -2955,11 +2961,13 @@ def ensure_cron_project() -> str:
     `profile` field) is treated as belonging to whichever profile first calls
     this in a given install, then re-tagged.
 
+    When ``profile`` is omitted, uses the active request profile (legacy behavior).
+
     Thread-safe and idempotent.  Returns a 12-char hex project_id string.
     """
     from api.profiles import get_active_profile_name, _is_root_profile
 
-    active = get_active_profile_name() or 'default'
+    active = (profile or get_active_profile_name() or 'default').strip() or 'default'
     with _CRON_PROJECT_LOCK:
         projects = load_projects()
         # Look for an existing per-profile cron project. Match either an exact

@@ -722,6 +722,16 @@ def _profile_home_for_cron_job(job: dict):
     return get_hermes_home_for_profile(raw)
 
 
+def _execution_home_for_cron_session_lookup(job: dict):
+    """Resolve cron execution home for history/session lookup without TLS drift."""
+    raw = str((job or {}).get("profile") or "").strip()
+    if raw:
+        return _profile_home_for_cron_job(job)
+    from api.profiles import _DEFAULT_HERMES_HOME
+
+    return _DEFAULT_HERMES_HOME
+
+
 def _cron_job_subprocess_main(job, execution_profile_home, result_queue):
     """Run one cron job inside a child process pinned to a profile home."""
     try:
@@ -830,7 +840,20 @@ def _run_cron_job_in_profile_subprocess(job, execution_profile_home):
     raise RuntimeError(message)
 
 
-def _run_cron_tracked(job, profile_home=None, execution_profile_home=None):
+def _cron_context_for_query(parsed):
+    """Cron read context: optional owner_profile query pins jobs/output store."""
+    from urllib.parse import parse_qs
+
+    from api.profiles import cron_profile_context, cron_profile_context_for_home, get_hermes_home_for_profile
+
+    qs = parse_qs(parsed.query)
+    owner_profile = (qs.get("owner_profile") or qs.get("profile") or [""])[0].strip()
+    if owner_profile:
+        return cron_profile_context_for_home(get_hermes_home_for_profile(owner_profile))
+    return cron_profile_context()
+
+
+def _run_cron_tracked(job, profile_home=None, execution_profile_home=None, owner_profile=None):
     """Wrapper that tracks running state around cron.scheduler.run_job.
 
     ``profile_home`` is the cron store that owns the job row/output metadata.
@@ -912,6 +935,16 @@ def _run_cron_tracked(job, profile_home=None, execution_profile_home=None):
     finally:
         _mark_cron_done(job_id)
         publish_session_list_changed("cron_complete")
+        try:
+            from integration.crons.hooks import materialize_after_cron_run
+
+            materialize_after_cron_run(
+                job,
+                owner_profile=owner_profile,
+                execution_home=execution_profile_home or profile_home,
+            )
+        except ImportError:
+            pass
 
 _PROVIDER_ALIASES = {
     "claude": "anthropic",
@@ -4001,6 +4034,14 @@ def _serve_manifest(handler) -> bool:
 def handle_get(handler, parsed) -> bool:
     """Handle all GET routes. Returns True if handled, False for 404."""
 
+    # ── Swagger UI & OpenAPI spec (integration) ──────────────────────────────
+    if parsed.path == "/docs":
+        from integration.swagger.swagger_handler import handle_swagger_ui
+        return handle_swagger_ui(handler)
+    if parsed.path == "/api/openapi.json":
+        from integration.swagger.swagger_handler import handle_openapi_json
+        return handle_openapi_json(handler)
+
     if parsed.path.startswith("/session/static/"):
         # Strip the leading "/session" so _serve_static() sees a path that
         # starts with "/static/" (its required prefix). _serve_static enforces
@@ -4035,11 +4076,28 @@ def handle_get(handler, parsed) -> bool:
             except Exception:
                 csrf_token = ""
 
+            try:
+                from integration.config import integration_enabled as _integration_enabled
+                from integration.config import skillhub_enabled as _skillhub_enabled
+
+                from integration.config import cron_all_profiles_enabled as _cron_all_profiles_enabled
+
+                _integration_skills_flag = "true" if _integration_enabled() else "false"
+                _skillhub_enabled_flag = "true" if _skillhub_enabled() else "false"
+                _integration_cron_flag = "true" if _cron_all_profiles_enabled() else "false"
+            except ImportError:
+                _integration_skills_flag = "false"
+                _skillhub_enabled_flag = "false"
+                _integration_cron_flag = "false"
+
             html = (
                 _INDEX_HTML_PATH.read_text(encoding="utf-8")
                 .replace("__WEBUI_VERSION__", version_token)
                 .replace("__MAX_UPLOAD_BYTES__", str(MAX_UPLOAD_BYTES))
                 .replace("__CSRF_TOKEN_JSON__", json.dumps(csrf_token))
+                .replace("__INTEGRATION_SKILLS__", _integration_skills_flag)
+                .replace("__SKILLHUB_ENABLED__", _skillhub_enabled_flag)
+                .replace("__INTEGRATION_CRON_ALL_PROFILES__", _integration_cron_flag)
             )
             return t(
                 handler,
@@ -4975,6 +5033,15 @@ def handle_get(handler, parsed) -> bool:
     # os.environ (process-global) at call time. Wrap in cron_profile_context
     # so the TLS-active profile's jobs.json is read, not the process default.
     if parsed.path == "/api/crons":
+        if _all_profiles_query_flag(parsed):
+            try:
+                from integration.config import cron_all_profiles_enabled
+                from integration.crons.listing import list_jobs_all_profiles
+
+                if cron_all_profiles_enabled():
+                    return j(handler, list_jobs_all_profiles())
+            except ImportError:
+                pass
         from cron.jobs import list_jobs
         from api.profiles import cron_profile_context
 
@@ -4982,24 +5049,48 @@ def handle_get(handler, parsed) -> bool:
             return j(handler, {"jobs": _cron_jobs_for_api(list_jobs(include_disabled=True))})
 
     if parsed.path == "/api/crons/output":
-        from api.profiles import cron_profile_context
-
-        with cron_profile_context():
+        with _cron_context_for_query(parsed):
             return _handle_cron_output(handler, parsed)
 
     if parsed.path == "/api/crons/history":
-        from api.profiles import cron_profile_context
-
-        with cron_profile_context():
+        with _cron_context_for_query(parsed):
             return _handle_cron_history(handler, parsed)
 
     if parsed.path == "/api/crons/run":
-        from api.profiles import cron_profile_context
-
-        with cron_profile_context():
+        with _cron_context_for_query(parsed):
             return _handle_cron_run_detail(handler, parsed)
 
     if parsed.path == "/api/crons/recent":
+        if _all_profiles_query_flag(parsed):
+            try:
+                from integration.config import cron_all_profiles_enabled
+                from integration.crons.listing import recent_completions_all_profiles
+                from integration.crons.session_bridge import materialize_cron_session_by_job_id
+
+                if cron_all_profiles_enabled():
+                    qs = parse_qs(parsed.query)
+                    since = float(qs.get("since", ["0"])[0])
+                    payload = recent_completions_all_profiles(since)
+                    for completion in payload.get("completions") or []:
+                        owner = completion.get("owner_profile") or ""
+                        job_id = completion.get("job_id") or ""
+                        if not owner or not job_id:
+                            continue
+                        try:
+                            sid = materialize_cron_session_by_job_id(owner, job_id)
+                        except Exception:
+                            logger.debug(
+                                "Failed to materialize cron completion session for %s/%s",
+                                owner,
+                                job_id,
+                                exc_info=True,
+                            )
+                            sid = None
+                        if sid:
+                            completion["session_id"] = sid
+                    return j(handler, payload)
+            except ImportError:
+                pass
         from api.profiles import cron_profile_context
 
         with cron_profile_context():
@@ -5011,11 +5102,30 @@ def handle_get(handler, parsed) -> bool:
         with cron_profile_context():
             return _handle_cron_status(handler, parsed)
 
-    if parsed.path == "/api/crons/delivery-options":
-        from api.profiles import cron_profile_context
+    # ── Integration skills (GET) ──
+    try:
+        from integration.skills.handlers import try_handle_get as _integration_try_get
 
-        with cron_profile_context():
-            return _handle_cron_delivery_options(handler)
+        if _integration_try_get(handler, parsed) is True:
+            return True
+    except ImportError:
+        pass
+
+    try:
+        from integration.profiles.handlers import try_handle_get as _profiles_try_get
+
+        if _profiles_try_get(handler, parsed) is True:
+            return True
+    except ImportError:
+        pass
+
+    try:
+        from integration.crons.handlers import try_handle_get as _crons_try_get
+
+        if _crons_try_get(handler, parsed) is True:
+            return True
+    except ImportError:
+        pass
 
     # ── Skills API (GET) ──
     if parsed.path == "/api/skills":
@@ -5102,10 +5212,23 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/profiles":
         from api.profiles import list_profiles_api, get_active_profile_name
 
-        return j(
-            handler,
-            {"profiles": list_profiles_api(), "active": get_active_profile_name()},
-        )
+        # return j(
+        #     handler,
+        #     {"profiles": list_profiles_api(), "active": get_active_profile_name()},
+        # )
+        payload = {
+            "profiles": list_profiles_api(),
+            "active": get_active_profile_name(),
+        }
+        try:
+            from integration.config import integration_enabled
+            from integration.profiles.enrich import enrich_profiles_response
+
+            if integration_enabled():
+                payload = enrich_profiles_response(payload)
+        except ImportError:
+            pass
+        return j(handler, payload)
 
     if parsed.path == "/api/profile/active":
         from api.profiles import get_active_profile_name, get_active_hermes_home
@@ -5265,6 +5388,15 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/transcribe":
         return handle_transcribe(handler)
+
+    # ── Integration skills (POST, before body read) ──
+    try:
+        from integration.skills.handlers import try_handle_post_early as _integration_try_post_early
+
+        if _integration_try_post_early(handler, parsed) is True:
+            return True
+    except ImportError:
+        pass
 
     if parsed.path == "/api/client-events/log":
         if diag:
@@ -6215,6 +6347,32 @@ def handle_post(handler, parsed) -> bool:
         except RuntimeError as e:
             return bad(handler, _sanitize_error(e), 500)
 
+    # ── Integration skills (POST) ──
+    # Multipart upload: try_handle_post_early() above read_body (see ~5047).
+    try:
+        from integration.skills.handlers import try_handle_post as _integration_try_post
+
+        if _integration_try_post(handler, parsed, body) is True:
+            return True
+    except ImportError:
+        pass
+
+    try:
+        from integration.profiles.handlers import try_handle_post as _profiles_try_post
+
+        if _profiles_try_post(handler, parsed, body) is True:
+            return True
+    except ImportError:
+        pass
+
+    try:
+        from integration.crons.handlers import try_handle_post as _crons_try_post
+
+        if _crons_try_post(handler, parsed, body) is True:
+            return True
+    except ImportError:
+        pass
+
     # ── Skills (POST) ──
     if parsed.path == "/api/skills/save":
         return _handle_skill_save(handler, body)
@@ -7097,6 +7255,43 @@ _STATIC_CACHE_LOCK = threading.Lock()
 
 
 def _serve_static(handler, parsed):
+    if parsed.path.startswith("/static/integration/"):
+        integration_root = (Path(__file__).parent.parent / "integration" / "assets").resolve()
+        rel = parsed.path[len("/static/integration/") :]
+        static_file = (integration_root / rel).resolve()
+        try:
+            static_file.relative_to(integration_root)
+        except ValueError:
+            return j(handler, {"error": "not found"}, status=404)
+        if not static_file.exists() or not static_file.is_file():
+            return j(handler, {"error": "not found"}, status=404)
+        ext = static_file.suffix.lower()
+        ct = _STATIC_MIME.get(ext.lstrip("."), "text/plain")
+        ct_header = f"{ct}; charset=utf-8" if ct in _TEXT_MIME_TYPES else ct
+        raw = static_file.read_bytes()
+        st = static_file.stat()
+        etag = f'W/"{st.st_size:x}-{st.st_mtime_ns:x}"'
+        version_values = parse_qs(parsed.query, keep_blank_values=True).get("v", [""])
+        has_fingerprint = bool(version_values[0])
+        cache_control = (
+            "public, max-age=31536000, immutable" if has_fingerprint
+            else "public, max-age=300"
+        )
+        if handler.headers.get("If-None-Match") == etag:
+            handler.send_response(304)
+            handler.send_header("ETag", etag)
+            handler.send_header("Cache-Control", cache_control)
+            handler.end_headers()
+            return True
+        handler.send_response(200)
+        handler.send_header("Content-Type", ct_header)
+        handler.send_header("Content-Length", str(len(raw)))
+        handler.send_header("ETag", etag)
+        handler.send_header("Cache-Control", cache_control)
+        handler.end_headers()
+        handler.wfile.write(raw)
+        return True
+
     static_root = (Path(__file__).parent.parent / "static").resolve()
     # Strip the leading '/static/' prefix, then resolve and sandbox
     rel = parsed.path[len("/static/") :]
@@ -8743,24 +8938,58 @@ def _handle_cron_history(handler, parsed):
     out_dir = CRON_OUT / job_id
     runs = []
     total = 0
+    job = None
+    owner_profile = (qs.get("owner_profile") or qs.get("profile") or [""])[0].strip()
+    try:
+        from cron.jobs import get_job
+        from api.profiles import get_active_profile_name
+
+        job = get_job(job_id)
+        owner_profile = owner_profile or get_active_profile_name() or "default"
+    except Exception:
+        job = None
+        owner_profile = owner_profile or "default"
     if out_dir.exists():
         all_files = sorted(out_dir.glob("*.md"), key=lambda f: f.stat().st_mtime, reverse=True)
         total = len(all_files)
         page = all_files[offset:offset + limit]
+        materialize_inputs = []
         for f in page:
             try:
                 st = f.stat()
-                usage = _cron_output_usage_metadata(
-                    f.read_text(encoding="utf-8", errors="replace")
-                )
+                output_text = f.read_text(encoding="utf-8", errors="replace")
+                usage = _cron_output_usage_metadata(output_text)
+                if job:
+                    materialize_inputs.append({
+                        "filename": f.name,
+                        "run_mtime": st.st_mtime,
+                        "fallback_output": output_text,
+                    })
                 runs.append({
                     "filename": f.name,
                     "size": st.st_size,
                     "modified": st.st_mtime,
                     "usage": usage,
+                    "session_id": None,
                 })
             except OSError:
                 logger.debug("Failed to stat cron output file %s", f)
+        if job and materialize_inputs:
+            try:
+                from integration.crons.session_bridge import materialize_cron_sessions_for_runs
+
+                session_ids = materialize_cron_sessions_for_runs(
+                    job,
+                    owner_profile=owner_profile,
+                    execution_home=_execution_home_for_cron_session_lookup(job),
+                    runs=materialize_inputs,
+                )
+                for run in runs:
+                    filename = run.get("filename")
+                    if filename in session_ids:
+                        run["session_id"] = session_ids[filename]
+            except Exception:
+                logger.debug("Failed to resolve cron sessions for history %s", job_id, exc_info=True)
     return j(handler, {"job_id": job_id, "runs": runs, "total": total, "offset": offset})
 
 
@@ -8790,9 +9019,30 @@ def _handle_cron_run_detail(handler, parsed):
         content = fpath.read_text(encoding="utf-8", errors="replace")
         snippet = _cron_output_snippet(content)
         usage = _cron_output_usage_metadata(content)
+        session_id = None
+        owner_profile = (qs.get("owner_profile") or qs.get("profile") or [""])[0].strip()
+        try:
+            from cron.jobs import get_job
+            from api.profiles import get_active_profile_name
+            from integration.crons.session_bridge import materialize_cron_session
+
+            job = get_job(job_id)
+            if job:
+                st = fpath.stat()
+                session_id = materialize_cron_session(
+                    job,
+                    owner_profile=owner_profile or get_active_profile_name() or "default",
+                    execution_home=_execution_home_for_cron_session_lookup(job),
+                    run_mtime=st.st_mtime,
+                    fallback_output=content,
+                    fallback_filename=filename,
+                )
+        except Exception:
+            logger.debug("Failed to resolve cron session for run detail %s/%s", job_id, filename, exc_info=True)
+            session_id = None
         return j(handler, {"job_id": job_id, "filename": filename,
                            "content": content, "snippet": snippet,
-                           "usage": usage})
+                           "usage": usage, "session_id": session_id})
     except Exception as e:
         return j(handler, {"error": str(e)}, status=500)
 
@@ -10019,9 +10269,16 @@ def _handle_cron_run(handler, body):
     # cross-profile state.
     from api.profiles import get_active_hermes_home
 
+    from api.profiles import get_active_profile_name
+
     _profile_home = get_active_hermes_home()
     _execution_profile_home = _profile_home_for_cron_job(job)
-    threading.Thread(target=_run_cron_tracked, args=(job, _profile_home, _execution_profile_home), daemon=True).start()
+    _owner_profile = get_active_profile_name()
+    threading.Thread(
+        target=_run_cron_tracked,
+        args=(job, _profile_home, _execution_profile_home, _owner_profile),
+        daemon=True,
+    ).start()
     return j(handler, {"ok": True, "job_id": job_id, "status": "running"})
 
 

@@ -3,3 +3,4 @@
 # All heavy ML/agent deps live in the Hermes agent venv.
 pyyaml>=6.0
 cryptography>=42.0
+httpx>=0.27

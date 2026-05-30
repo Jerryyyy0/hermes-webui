@@ -589,4 +589,8 @@ def main() -> None:
             logger.debug("Failed to drain lifecycle on shutdown", exc_info=True)
 
 if __name__ == '__main__':
+    os.environ['SKILLHUB_URL'] = os.getenv('SKILLHUB_URL', 'http://192.168.1.139:18702/')
+    os.environ['HERMES_INTEGRATION'] = os.getenv('HERMES_INTEGRATION', '1')
+    # from integration.config import ensure_skillhub_no_proxy
+    # ensure_skillhub_no_proxy()
     main()

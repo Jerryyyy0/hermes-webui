@@ -1,3 +1,7 @@
+# Integration test scratch dirs
+.integration-test-workspace/
+.integration-test-state/
+
 # Python cache
 __pycache__/
 *.pyc

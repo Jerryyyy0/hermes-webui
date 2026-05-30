@@ -37,7 +37,7 @@ let _logsSeverityFilter = 'all';
 
 // Map of panel names → i18n keys for the app titlebar label.
 const APP_TITLEBAR_KEYS = {
-  chat: 'tab_chat', tasks: 'tab_tasks', skills: 'tab_skills',
+  chat: 'tab_chat', tasks: 'tab_tasks', skills: 'tab_skills', skillhub: 'tab_skillhub',
   memory: 'tab_memory', workspaces: 'tab_workspaces',
   profiles: 'tab_profiles', todos: 'tab_todos', insights: 'tab_insights', logs: 'tab_logs', settings: 'tab_settings',
 };
@@ -239,11 +239,23 @@ async function switchPanel(name, opts = {}) {
   document.querySelectorAll('.panel-view').forEach(p => p.classList.remove('active'));
   const panelEl = $('panel' + nextPanel.charAt(0).toUpperCase() + nextPanel.slice(1));
   if (panelEl) panelEl.classList.add('active');
+  if (nextPanel === 'skillhub') {
+    const hubPanel = $('panelSkillhub');
+    const hubMain = $('mainSkillhub');
+    if (hubPanel) hubPanel.hidden = false;
+    if (hubMain) hubMain.hidden = false;
+  }
+  if (nextPanel === 'integrationCrons') {
+    const cronPanel = $('panelIntegrationCrons');
+    const cronMain = $('mainIntegrationCrons');
+    if (cronPanel) cronPanel.hidden = false;
+    if (cronMain) cronMain.hidden = false;
+  }
   // Update main content view. Each entry in MAIN_VIEW_PANELS gets a matching
   // showing-<name> class on <main>; no class means chat (the default).
   const mainEl = document.querySelector('main.main');
   if (mainEl) {
-    ['settings','skills','memory','tasks','kanban','workspaces','profiles','insights','logs'].forEach(p => {
+    ['settings','skills','skillhub','memory','tasks','integrationCrons','kanban','workspaces','profiles','insights','logs'].forEach(p => {
       mainEl.classList.toggle('showing-' + p, nextPanel === p);
     });
   }
@@ -251,6 +263,8 @@ async function switchPanel(name, opts = {}) {
   if (nextPanel === 'tasks') await loadCrons();
   if (nextPanel === 'kanban') await loadKanban();
   if (nextPanel === 'skills') await loadSkills();
+  if (nextPanel === 'skillhub' && window.HermesSkillHub?.loadSkillHub) await window.HermesSkillHub.loadSkillHub();
+  if (nextPanel === 'integrationCrons' && window.HermesIntegrationCrons?.load) await window.HermesIntegrationCrons.load();
   if (nextPanel === 'memory') await loadMemory();
   if (nextPanel === 'workspaces') await loadWorkspacesPanel();
   if (nextPanel === 'profiles') await loadProfilesPanel();
@@ -686,10 +700,14 @@ async function _loadCronDetailRuns(jobId){
       const usageStrip = _formatCronRunUsageStrip(run.usage);
       const runExpanded = _cronExpansionGet(_cronRunExpandKey(jobId, run.filename));
       const runToggleLabel = runExpanded ? (t('cron_collapse_output') || 'Collapse output') : (t('cron_expand_output') || 'Expand output');
+      const sessionAction = run.session_id
+        ? `<button type="button" class="detail-expand-toggle" onclick="event.stopPropagation();openCronRunSession('${esc(run.session_id)}')" title="${esc(t('cron_open_session') || 'Open session')}" aria-label="${esc(t('cron_open_session') || 'Open session')}">↗</button>`
+        : '';
       return `<div class="detail-run-item" id="${rid}">
         <div class="detail-run-head" onclick="_loadRunContent('${esc(jobId)}','${esc(run.filename)}','${rid}')">
           <span><span style="opacity:.7">${esc(ts)}</span> <span style="opacity:.4;font-size:11px">${esc(sizeStr)}</span>${usageStrip ? ` <span class="cron-run-usage-strip">${esc(usageStrip)}</span>` : ''}</span>
           <span class="detail-run-actions">
+            ${sessionAction}
             <button type="button" class="detail-expand-toggle" onclick="event.stopPropagation();toggleCronRunExpanded('${esc(jobId)}','${esc(run.filename)}','${rid}')" title="${esc(runToggleLabel)}" aria-label="${esc(runToggleLabel)}">${esc(runExpanded ? '▴' : '▾')}</button>
             <span style="opacity:.6">▸</span>
           </span>
@@ -733,6 +751,11 @@ async function _loadRunContent(jobId, filename, runId){
       usage.textContent = usageStrip;
       body.appendChild(usage);
     }
+    if (data.session_id) {
+      const sessionBtn = _cronSessionButton(data.session_id);
+      sessionBtn.style.marginTop = '8px';
+      body.appendChild(sessionBtn);
+    }
     // Show "View full output" button only for collapsed previews. Expanded rows render the full body inline.
     if (!expanded && data.content && data.snippet && data.content.length > data.snippet.length) {
       const btn = document.createElement('button');
@@ -749,6 +772,27 @@ async function _loadRunContent(jobId, filename, runId){
   } catch(e) {
     body.textContent = 'Error: ' + e.message;
   }
+}
+
+function _cronSessionButton(sessionId) {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'btn secondary';
+  btn.textContent = t('cron_open_session') || 'Open session';
+  btn.onclick = async (ev) => {
+    if (ev) ev.stopPropagation();
+    if (typeof switchPanel === 'function') await switchPanel('chat');
+    if (typeof loadSession === 'function') await loadSession(sessionId);
+    if (typeof renderSessionList === 'function') renderSessionList();
+  };
+  return btn;
+}
+
+async function openCronRunSession(sessionId) {
+  if (!sessionId) return;
+  if (typeof switchPanel === 'function') await switchPanel('chat');
+  if (typeof loadSession === 'function') await loadSession(sessionId);
+  if (typeof renderSessionList === 'function') renderSessionList();
 }
 
 function openCronDetail(id, el){
@@ -1133,6 +1177,17 @@ function _formatCronRunUsageStrip(usage) {
   if (Number.isFinite(cost) && cost > 0) parts.push(`$${cost < 0.01 ? cost.toFixed(4) : cost.toFixed(3)}`);
   if (usage.model) parts.push(String(usage.model));
   return parts.join(' · ');
+}
+
+if (typeof window !== 'undefined') {
+  window.HermesCronShared = {
+    statusMeta: _cronStatusMeta,
+    profileLabel: _cronProfileLabel,
+    profileTitle: _cronProfileTitle,
+    formatRunUsageStrip: _formatCronRunUsageStrip,
+    profileOptions: _cronProfileOptions,
+    loadProfiles: loadCronProfiles,
+  };
 }
 
 // ── Cron run watch ────────────────────────────────────────────────────────────
@@ -4985,6 +5040,7 @@ function _refreshProfileSwitchBackground(gen){
 }
 
 async function loadProfilesPanel() {
+  if (window.HermesProfiles?.loadProfilesPanel) return window.HermesProfiles.loadProfilesPanel();
   const panel = $('profilesPanel');
   if (!panel) return;
   try {
@@ -5072,6 +5128,7 @@ function _renderProfileConceptHelp(activeName){
 }
 
 function _renderProfileDetail(p, activeName){
+  if (window.HermesProfiles?.renderProfileDetail) return window.HermesProfiles.renderProfileDetail(p, activeName);
   _currentProfileDetail = p;
   const title = $('profileDetailTitle');
   const body = $('profileDetailBody');
@@ -5206,6 +5263,7 @@ function renderProfileDropdown(data) {
 }
 
 function toggleProfileDropdown() {
+  if (window.HermesProfiles?.toggleProfileDropdown) return window.HermesProfiles.toggleProfileDropdown();
   const dd = $('profileDropdown');
   if (!dd) return;
   if (dd.classList.contains('open')) { closeProfileDropdown(); return; }
@@ -5383,6 +5441,7 @@ function openProfileCreate(){
 }
 
 function _renderProfileForm(){
+  if (window.HermesProfiles?.renderProfileForm) return window.HermesProfiles.renderProfileForm();
   const title = $('profileDetailTitle');
   const body = $('profileDetailBody');
   const empty = $('profileDetailEmpty');
@@ -5465,6 +5524,7 @@ function cancelProfileForm(){
 }
 
 async function saveProfileForm(){
+  if (window.HermesProfiles?.saveProfileForm) return window.HermesProfiles.saveProfileForm();
   const nameEl = $('profileFormName');
   const cloneEl = $('profileFormClone');
   const modelEl = $('profileFormModel');
@@ -7554,17 +7614,32 @@ window.addEventListener('hermes:cron_created', () => {
 
 function startCronPolling(){
   if(_cronPollTimer) return;
+  const _cronAllProfiles = !!(window.__HERMES_CONFIG__ && window.__HERMES_CONFIG__.integrationCronAllProfiles);
   _cronPollTimer=setInterval(async()=>{
     if(document.hidden) return;  // don't poll when tab is in background
     try{
-      const data=await api(`/api/crons/recent?since=${_cronPollSince}`);
+      const recentPath = _cronAllProfiles
+        ? `/api/crons/recent?all_profiles=1&since=${_cronPollSince}`
+        : `/api/crons/recent?since=${_cronPollSince}`;
+      const data=await api(recentPath);
       if(data.completions&&data.completions.length>0){
         for(const c of data.completions){
           if(c.toast_notifications !== false){
             showToast(t('cron_completion_status', c.name, c.status==='error' ? t('status_failed') : t('status_completed')),4000);
           }
           _cronPollSince=Math.max(_cronPollSince,c.completed_at);
-          if(c.job_id) _cronNewJobIds.add(String(c.job_id));
+          if (_cronAllProfiles && c.owner_profile && c.job_id) {
+            const composite = `${c.owner_profile}:${c.job_id}`;
+            _cronNewJobIds.add(composite);
+            if (window.HermesIntegrationCrons?.markUnreadFromCompletion) {
+              window.HermesIntegrationCrons.markUnreadFromCompletion(c);
+            }
+            if (c.session_id && window.HermesIntegrationCrons?.openSession) {
+              /* session_id surfaced for detail — user opens from Cron Hub */
+            }
+          } else if(c.job_id) {
+            _cronNewJobIds.add(String(c.job_id));
+          }
         }
         // _cronUnreadCount is derived from _cronNewJobIds.size in updateCronBadge.
         updateCronBadge();
