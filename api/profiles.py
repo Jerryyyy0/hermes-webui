@@ -842,6 +842,11 @@ def init_profile_state() -> None:
     home = get_active_hermes_home()
     _set_hermes_home(home)
     install_cron_scheduler_profile_isolation()
+    try:
+        from integration.crons.hooks import install_cron_integration_hooks
+        install_cron_integration_hooks()
+    except ImportError:
+        pass
     _reload_dotenv(home)
 
 

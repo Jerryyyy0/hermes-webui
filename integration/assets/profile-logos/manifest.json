@@ -1,0 +1,186 @@
+{
+  "categories": [
+    {
+      "id": "abstract",
+      "label": "Abstract"
+    },
+    {
+      "id": "roles",
+      "label": "Roles"
+    },
+    {
+      "id": "emoji",
+      "label": "Emoji"
+    }
+  ],
+  "presets": [
+    {
+      "id": "abstract-blue-orbit",
+      "category": "abstract",
+      "label": "Blue Orbit",
+      "file": "abstract/abstract-blue-orbit.png",
+      "license": "dicebear-9-mit"
+    },
+    {
+      "id": "abstract-emerald",
+      "category": "abstract",
+      "label": "Emerald",
+      "file": "abstract/abstract-emerald.png",
+      "license": "dicebear-9-mit"
+    },
+    {
+      "id": "abstract-violet",
+      "category": "abstract",
+      "label": "Violet",
+      "file": "abstract/abstract-violet.png",
+      "license": "dicebear-9-mit"
+    },
+    {
+      "id": "abstract-rose",
+      "category": "abstract",
+      "label": "Rose",
+      "file": "abstract/abstract-rose.png",
+      "license": "dicebear-9-mit"
+    },
+    {
+      "id": "abstract-amber",
+      "category": "abstract",
+      "label": "Amber",
+      "file": "abstract/abstract-amber.png",
+      "license": "dicebear-9-mit"
+    },
+    {
+      "id": "abstract-cyan",
+      "category": "abstract",
+      "label": "Cyan",
+      "file": "abstract/abstract-cyan.png",
+      "license": "dicebear-9-mit"
+    },
+    {
+      "id": "abstract-slate",
+      "category": "abstract",
+      "label": "Slate",
+      "file": "abstract/abstract-slate.png",
+      "license": "dicebear-9-mit"
+    },
+    {
+      "id": "abstract-indigo",
+      "category": "abstract",
+      "label": "Indigo",
+      "file": "abstract/abstract-indigo.png",
+      "license": "dicebear-9-mit"
+    },
+    {
+      "id": "roles-bot",
+      "category": "roles",
+      "label": "Bot",
+      "file": "roles/roles-bot.png",
+      "license": "dicebear-9-mit"
+    },
+    {
+      "id": "roles-code",
+      "category": "roles",
+      "label": "Code",
+      "file": "roles/roles-code.png",
+      "license": "dicebear-9-mit"
+    },
+    {
+      "id": "roles-terminal",
+      "category": "roles",
+      "label": "Terminal",
+      "file": "roles/roles-terminal.png",
+      "license": "dicebear-9-mit"
+    },
+    {
+      "id": "roles-settings",
+      "category": "roles",
+      "label": "Settings",
+      "file": "roles/roles-settings.png",
+      "license": "dicebear-9-mit"
+    },
+    {
+      "id": "roles-user",
+      "category": "roles",
+      "label": "User",
+      "file": "roles/roles-user.png",
+      "license": "dicebear-9-mit"
+    },
+    {
+      "id": "roles-brain",
+      "category": "roles",
+      "label": "Brain",
+      "file": "roles/roles-brain.png",
+      "license": "dicebear-9-mit"
+    },
+    {
+      "id": "roles-sparkles",
+      "category": "roles",
+      "label": "Sparkles",
+      "file": "roles/roles-sparkles.png",
+      "license": "dicebear-9-mit"
+    },
+    {
+      "id": "roles-chart",
+      "category": "roles",
+      "label": "Chart",
+      "file": "roles/roles-chart.png",
+      "license": "dicebear-9-mit"
+    },
+    {
+      "id": "roles-shield",
+      "category": "roles",
+      "label": "Shield",
+      "file": "roles/roles-shield.png",
+      "license": "dicebear-9-mit"
+    },
+    {
+      "id": "roles-search",
+      "category": "roles",
+      "label": "Search",
+      "file": "roles/roles-search.png",
+      "license": "dicebear-9-mit"
+    },
+    {
+      "id": "roles-pencil",
+      "category": "roles",
+      "label": "Pencil",
+      "file": "roles/roles-pencil.png",
+      "license": "dicebear-9-mit"
+    },
+    {
+      "id": "roles-database",
+      "category": "roles",
+      "label": "Database",
+      "file": "roles/roles-database.png",
+      "license": "dicebear-9-mit"
+    },
+    {
+      "id": "emoji-robot",
+      "category": "emoji",
+      "label": "Robot",
+      "file": "emoji/emoji-robot.png",
+      "license": "noto-emoji-apache-2.0"
+    },
+    {
+      "id": "emoji-rocket",
+      "category": "emoji",
+      "label": "Rocket",
+      "file": "emoji/emoji-rocket.png",
+      "license": "noto-emoji-apache-2.0"
+    },
+    {
+      "id": "emoji-gear",
+      "category": "emoji",
+      "label": "Gear",
+      "file": "emoji/emoji-gear.png",
+      "license": "noto-emoji-apache-2.0"
+    },
+    {
+      "id": "emoji-lightning",
+      "category": "emoji",
+      "label": "Lightning",
+      "file": "emoji/emoji-lightning.png",
+      "license": "noto-emoji-apache-2.0"
+    }
+  ]
+}

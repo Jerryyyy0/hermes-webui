@@ -1,0 +1,80 @@
+.integration-cron-filter-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 10px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.integration-cron-filter-stack select {
+  width: 100%;
+  font-size: 12px;
+}
+
+.integration-cron-list .integration-cron-owner-badge {
+  max-width: 72px;
+}
+
+.integration-cron-session-detail {
+  margin-top: 8px;
+}
+
+.integration-cron-session-panel {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-subtle);
+  padding: 12px;
+}
+
+.integration-cron-session-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border-subtle);
+  margin-bottom: 10px;
+}
+
+.integration-cron-session-sub,
+.integration-cron-session-loading,
+.integration-cron-session-empty {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.integration-cron-session-messages {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-height: 640px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.integration-cron-session-message {
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  background: var(--bg);
+  padding: 10px 12px;
+}
+
+.integration-cron-session-message[data-role="user"] {
+  background: color-mix(in srgb, var(--accent-bg) 28%, var(--bg));
+}
+
+.integration-cron-session-message-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 11px;
+  margin-bottom: 8px;
+}
+
+.integration-cron-session-message-body {
+  padding-left: 0;
+  max-width: none;
+  font-size: 13px;
+}

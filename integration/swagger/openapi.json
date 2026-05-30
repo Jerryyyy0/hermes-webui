@@ -1,0 +1,1867 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Hermes WebUI API",
+    "version": "1.0.0",
+    "description": "Hermes WebUI 后端 REST API。所有端点均需通过认证（若已启用），SSE 流式端点除外。"
+  },
+  "servers": [
+    { "url": "/", "description": "由 GET /api/openapi.json 按当前请求动态覆盖" }
+  ],
+  "tags": [
+    { "name": "Auth",        "description": "认证与会话" },
+    { "name": "Session",     "description": "Agent 会话管理" },
+    { "name": "Chat",        "description": "聊天与流式输出" },
+    { "name": "Models",      "description": "模型与 Provider" },
+    { "name": "Settings",    "description": "设置与配置" },
+    { "name": "Workspace",   "description": "工作区与文件" },
+    { "name": "Crons",       "description": "定时任务（Hermes cron.jobs / cron.scheduler）。读写 jobs.json 与 output 均按当前 WebUI 活跃 Profile 的 HERMES_HOME；手动 POST /api/crons/run 在子进程执行并跟踪 running 状态。" },
+    { "name": "Skills",      "description": "技能 / Skills" },
+    { "name": "Memory",      "description": "记忆" },
+    { "name": "Profiles",    "description": "Profile 管理" },
+    { "name": "MCP",         "description": "MCP 服务器与工具" },
+    { "name": "Approval",    "description": "审批队列" },
+    { "name": "Clarify",     "description": "澄清队列" },
+    { "name": "Rollback",    "description": "回滚" },
+    { "name": "Health",      "description": "健康检查" },
+    { "name": "System",      "description": "系统与工具" },
+    { "name": "SkillHub",    "description": "SkillHub 远程技能市场代理（需 HERMES_INTEGRATION=1；市场类接口另需 SKILLHUB_URL）。安装/卸载/custom 读写均使用 shared_skills_dir（{HERMES_HOME}/skills，与 WebUI profile 无关）。" },
+    { "name": "IntegrationCrons", "description": "跨 Profile 定时任务（需 HERMES_INTEGRATION=1）。列表/轮询用 GET /api/crons?all_profiles=1；CRUD/运行用 POST /api/integration/crons/*，body 必填 owner_profile（任务所属存储 Profile）。" }
+  ],
+  "paths": {
+
+    "/api/auth/status": {
+      "get": {
+        "tags": ["Auth"],
+        "summary": "获取认证状态",
+        "responses": {
+          "200": { "description": "认证状态", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/GenericObject" } } } }
+        }
+      }
+    },
+
+    "/api/health/agent": {
+      "get": {
+        "tags": ["Health"],
+        "summary": "Agent 健康状态",
+        "responses": { "200": { "description": "Agent 健康信息" } }
+      }
+    },
+    "/api/system/health": {
+      "get": {
+        "tags": ["Health"],
+        "summary": "系统健康状态",
+        "responses": { "200": { "description": "系统健康信息" } }
+      }
+    },
+    "/api/health": {
+      "get": {
+        "tags": ["Health"],
+        "summary": "服务器心跳",
+        "responses": { "200": { "description": "ok" } }
+      }
+    },
+
+    "/api/models": {
+      "get": {
+        "tags": ["Models"],
+        "summary": "获取可用模型列表",
+        "responses": { "200": { "description": "模型列表" } }
+      }
+    },
+    "/api/models/live": {
+      "get": {
+        "tags": ["Models"],
+        "summary": "实时获取模型列表（跳过缓存）",
+        "responses": { "200": { "description": "模型列表" } }
+      }
+    },
+    "/api/model/auxiliary": {
+      "get": {
+        "tags": ["Models"],
+        "summary": "获取辅助模型配置",
+        "responses": { "200": { "description": "辅助模型信息" } }
+      }
+    },
+    "/api/providers": {
+      "get": {
+        "tags": ["Models"],
+        "summary": "获取 Provider 列表",
+        "responses": { "200": { "description": "Provider 列表" } }
+      }
+    },
+    "/api/provider/quota": {
+      "get": {
+        "tags": ["Models"],
+        "summary": "获取当前 Provider 配额",
+        "responses": { "200": { "description": "配额信息" } }
+      }
+    },
+    "/api/provider/cost-history": {
+      "get": {
+        "tags": ["Models"],
+        "summary": "获取费用历史",
+        "responses": { "200": { "description": "费用历史列表" } }
+      }
+    },
+
+    "/api/settings": {
+      "get": {
+        "tags": ["Settings"],
+        "summary": "获取当前设置",
+        "responses": { "200": { "description": "设置对象" } }
+      },
+      "post": {
+        "tags": ["Settings"],
+        "summary": "保存设置",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/GenericObject" } } }
+        },
+        "responses": { "200": { "description": "保存结果" } }
+      }
+    },
+    "/api/reasoning": {
+      "get": {
+        "tags": ["Settings"],
+        "summary": "获取推理模式配置",
+        "responses": { "200": { "description": "推理配置" } }
+      }
+    },
+    "/api/onboarding/status": {
+      "get": {
+        "tags": ["Settings"],
+        "summary": "获取引导状态",
+        "responses": { "200": { "description": "引导状态" } }
+      }
+    },
+
+    "/api/sessions": {
+      "get": {
+        "tags": ["Session"],
+        "summary": "获取会话列表",
+        "parameters": [
+          { "name": "project", "in": "query", "schema": { "type": "string" }, "description": "按项目过滤" }
+        ],
+        "responses": { "200": { "description": "会话列表" } }
+      }
+    },
+    "/api/session": {
+      "get": {
+        "tags": ["Session"],
+        "summary": "获取当前会话详情",
+        "responses": { "200": { "description": "会话对象" } }
+      },
+      "post": {
+        "tags": ["Session"],
+        "summary": "创建新会话",
+        "requestBody": {
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/GenericObject" } } }
+        },
+        "responses": { "200": { "description": "新会话信息" } }
+      },
+      "delete": {
+        "tags": ["Session"],
+        "summary": "删除会话",
+        "responses": { "200": { "description": "删除结果" } }
+      }
+    },
+    "/api/session/status": {
+      "get": {
+        "tags": ["Session"],
+        "summary": "获取会话运行状态",
+        "responses": { "200": { "description": "状态信息" } }
+      }
+    },
+    "/api/session/usage": {
+      "get": {
+        "tags": ["Session"],
+        "summary": "获取会话 token 用量",
+        "responses": { "200": { "description": "用量信息" } }
+      }
+    },
+    "/api/session/yolo": {
+      "get": {
+        "tags": ["Session"],
+        "summary": "获取 YOLO 模式状态",
+        "responses": { "200": { "description": "YOLO 状态" } }
+      }
+    },
+    "/api/session/export": {
+      "get": {
+        "tags": ["Session"],
+        "summary": "导出会话数据",
+        "responses": { "200": { "description": "会话导出文件" } }
+      }
+    },
+    "/api/session/lineage/report": {
+      "get": {
+        "tags": ["Session"],
+        "summary": "获取会话谱系报告",
+        "responses": { "200": { "description": "谱系报告" } }
+      }
+    },
+    "/api/session/recovery/audit": {
+      "get": {
+        "tags": ["Session"],
+        "summary": "获取会话恢复审计日志",
+        "responses": { "200": { "description": "审计日志" } }
+      }
+    },
+    "/api/session/compress/status": {
+      "get": {
+        "tags": ["Session"],
+        "summary": "获取会话压缩状态",
+        "responses": { "200": { "description": "压缩状态" } }
+      }
+    },
+    "/api/session/worktree/status": {
+      "get": {
+        "tags": ["Session"],
+        "summary": "获取 worktree 状态",
+        "responses": { "200": { "description": "worktree 状态" } }
+      }
+    },
+    "/api/sessions/search": {
+      "get": {
+        "tags": ["Session"],
+        "summary": "搜索会话",
+        "parameters": [
+          { "name": "q", "in": "query", "required": true, "schema": { "type": "string" }, "description": "搜索关键词" }
+        ],
+        "responses": { "200": { "description": "匹配的会话列表" } }
+      }
+    },
+    "/api/projects": {
+      "get": {
+        "tags": ["Session"],
+        "summary": "获取项目列表",
+        "responses": { "200": { "description": "项目列表" } }
+      }
+    },
+    "/api/background/status": {
+      "get": {
+        "tags": ["Session"],
+        "summary": "获取后台任务状态",
+        "responses": { "200": { "description": "后台任务状态" } }
+      }
+    },
+
+    "/api/chat/stream": {
+      "get": {
+        "tags": ["Chat"],
+        "summary": "获取聊天 SSE 流（Server-Sent Events）",
+        "description": "长连接，返回 text/event-stream。",
+        "responses": {
+          "200": { "description": "SSE 事件流", "content": { "text/event-stream": { "schema": { "type": "string" } } } }
+        }
+      },
+      "post": {
+        "tags": ["Chat"],
+        "summary": "发送聊天消息",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "message": { "type": "string", "description": "用户消息内容" },
+                  "session_id": { "type": "string" }
+                },
+                "required": ["message"]
+              }
+            }
+          }
+        },
+        "responses": { "200": { "description": "发送结果" } }
+      }
+    },
+    "/api/chat/stream/status": {
+      "get": {
+        "tags": ["Chat"],
+        "summary": "获取当前流式输出状态",
+        "responses": { "200": { "description": "流状态" } }
+      }
+    },
+    "/api/chat/cancel": {
+      "get": {
+        "tags": ["Chat"],
+        "summary": "取消当前聊天流",
+        "responses": { "200": { "description": "取消结果" } }
+      },
+      "post": {
+        "tags": ["Chat"],
+        "summary": "取消当前聊天流（POST）",
+        "responses": { "200": { "description": "取消结果" } }
+      }
+    },
+    "/api/sessions/gateway/stream": {
+      "get": {
+        "tags": ["Chat"],
+        "summary": "Gateway 会话 SSE 流",
+        "responses": { "200": { "description": "SSE 事件流" } }
+      }
+    },
+    "/api/sessions/events": {
+      "get": {
+        "tags": ["Chat"],
+        "summary": "会话事件 SSE 流",
+        "responses": { "200": { "description": "SSE 事件流" } }
+      }
+    },
+
+    "/api/workspaces": {
+      "get": {
+        "tags": ["Workspace"],
+        "summary": "获取工作区列表",
+        "responses": { "200": { "description": "工作区列表" } }
+      }
+    },
+    "/api/workspaces/suggest": {
+      "get": {
+        "tags": ["Workspace"],
+        "summary": "工作区路径建议",
+        "parameters": [
+          { "name": "q", "in": "query", "schema": { "type": "string" }, "description": "路径前缀" }
+        ],
+        "responses": { "200": { "description": "建议路径列表" } }
+      }
+    },
+    "/api/list": {
+      "get": {
+        "tags": ["Workspace"],
+        "summary": "列出工作区文件",
+        "parameters": [
+          { "name": "path", "in": "query", "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "文件列表" } }
+      }
+    },
+    "/api/file": {
+      "get": {
+        "tags": ["Workspace"],
+        "summary": "读取文件内容",
+        "parameters": [
+          { "name": "path", "in": "query", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "文件内容" } }
+      },
+      "post": {
+        "tags": ["Workspace"],
+        "summary": "写入文件内容",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "type": "object", "properties": { "path": { "type": "string" }, "content": { "type": "string" } } } } }
+        },
+        "responses": { "200": { "description": "写入结果" } }
+      },
+      "delete": {
+        "tags": ["Workspace"],
+        "summary": "删除文件",
+        "parameters": [
+          { "name": "path", "in": "query", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "删除结果" } }
+      }
+    },
+    "/api/file/raw": {
+      "get": {
+        "tags": ["Workspace"],
+        "summary": "下载文件原始内容",
+        "parameters": [
+          { "name": "path", "in": "query", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "文件二进制内容" } }
+      }
+    },
+    "/api/folder/download": {
+      "get": {
+        "tags": ["Workspace"],
+        "summary": "下载文件夹（zip）",
+        "parameters": [
+          { "name": "path", "in": "query", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "zip 压缩包" } }
+      }
+    },
+    "/api/upload": {
+      "post": {
+        "tags": ["Workspace"],
+        "summary": "上传文件",
+        "requestBody": {
+          "content": { "multipart/form-data": { "schema": { "type": "object", "properties": { "file": { "type": "string", "format": "binary" } } } } }
+        },
+        "responses": { "200": { "description": "上传结果" } }
+      }
+    },
+    "/api/git/status": {
+      "get": {
+        "tags": ["Workspace"],
+        "summary": "获取 Git 状态",
+        "responses": { "200": { "description": "Git status" } }
+      }
+    },
+    "/api/git/branches": {
+      "get": {
+        "tags": ["Workspace"],
+        "summary": "获取 Git 分支列表",
+        "responses": { "200": { "description": "分支列表" } }
+      }
+    },
+    "/api/git/diff": {
+      "get": {
+        "tags": ["Workspace"],
+        "summary": "获取 Git diff",
+        "responses": { "200": { "description": "diff 内容" } }
+      }
+    },
+    "/api/git-info": {
+      "get": {
+        "tags": ["Workspace"],
+        "summary": "获取 Git 仓库信息",
+        "responses": { "200": { "description": "Git 信息" } }
+      }
+    },
+    "/api/media": {
+      "get": {
+        "tags": ["Workspace"],
+        "summary": "获取媒体文件",
+        "parameters": [
+          { "name": "path", "in": "query", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "媒体文件内容" } }
+      }
+    },
+
+    "/api/crons": {
+      "get": {
+        "tags": ["Crons"],
+        "summary": "获取定时任务列表",
+        "description": "默认返回当前活跃 Profile 下 `cron/jobs.json`（`{ jobs: [...] }`）。`all_profiles=1` 且 `HERMES_INTEGRATION=1` 时返回按 Profile 分组：`{ all_profiles: true, profiles: [{ profile, jobs }] }`。job 内 `profile` 为执行 Profile；分组层 `profile` 为所属/存储 Profile。",
+        "parameters": [
+          { "name": "all_profiles", "in": "query", "required": false, "schema": { "type": "string", "enum": ["0", "1", "true", "false"] }, "description": "为 1/true 时聚合所有 Profile（需 integration cron 开关）" }
+        ],
+        "responses": {
+          "200": {
+            "description": "任务列表",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/CronJobsListResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/crons/create": {
+      "post": {
+        "tags": ["Crons"],
+        "summary": "创建定时任务",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/CronJobCreateRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "创建成功",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/CronJobMutationResponse" }
+              }
+            }
+          },
+          "400": { "description": "缺少字段、无效 schedule、未知 profile 或 cron 模块错误" }
+        }
+      }
+    },
+    "/api/crons/update": {
+      "post": {
+        "tags": ["Crons"],
+        "summary": "更新定时任务",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/CronJobUpdateRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "更新成功",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/CronJobMutationResponse" }
+              }
+            }
+          },
+          "400": { "description": "缺少 job_id、未知 profile 等" },
+          "404": { "description": "任务不存在" }
+        }
+      }
+    },
+    "/api/crons/delete": {
+      "post": {
+        "tags": ["Crons"],
+        "summary": "删除定时任务",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/CronJobIdRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "删除成功",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/CronJobDeleteResponse" }
+              }
+            }
+          },
+          "400": { "description": "缺少 job_id" },
+          "404": { "description": "任务不存在" }
+        }
+      }
+    },
+    "/api/crons/run": {
+      "get": {
+        "tags": ["Crons"],
+        "summary": "读取单次运行输出全文",
+        "description": "返回 `cron/output/{job_id}/{filename}` 的 markdown 内容及 snippet、usage 元数据。不是触发运行；触发请用 POST 同路径。",
+        "parameters": [
+          { "name": "job_id", "in": "query", "required": true, "schema": { "type": "string" }, "description": "任务 ID（字母数字、_-，最长 64）" },
+          { "name": "filename", "in": "query", "required": true, "schema": { "type": "string" }, "description": "输出文件名，如 2026-05-29_12-00-00.md" },
+          { "name": "owner_profile", "in": "query", "required": false, "schema": { "type": "string" }, "description": "任务所属 Profile（读取其 cron/output）；兼容别名 profile" }
+        ],
+        "responses": {
+          "200": {
+            "description": "输出内容",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/CronRunDetailResponse" }
+              }
+            }
+          },
+          "400": { "description": "缺少参数或 job_id/filename 非法" },
+          "404": { "description": "运行记录不存在" }
+        }
+      },
+      "post": {
+        "tags": ["Crons"],
+        "summary": "立即运行定时任务",
+        "description": "在后台线程启动手动运行：子进程内调用 `cron.scheduler.run_job`，按任务 `profile` 字段（若有）解析执行 Profile；任务元数据写入当前活跃 Profile 的 cron 存储。若已在运行则返回 `already_running`。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/CronJobIdRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "已接受或已在运行",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/CronRunTriggerResponse" }
+              }
+            }
+          },
+          "400": { "description": "缺少 job_id" },
+          "404": { "description": "任务不存在" }
+        }
+      }
+    },
+    "/api/crons/pause": {
+      "post": {
+        "tags": ["Crons"],
+        "summary": "暂停定时任务",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/CronJobPauseRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "暂停成功",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/CronJobPauseResumeResponse" }
+              }
+            }
+          },
+          "400": { "description": "缺少 job_id" },
+          "404": { "description": "任务不存在" }
+        }
+      }
+    },
+    "/api/crons/resume": {
+      "post": {
+        "tags": ["Crons"],
+        "summary": "恢复定时任务",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/CronJobIdRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "恢复成功",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/CronJobPauseResumeResponse" }
+              }
+            }
+          },
+          "400": { "description": "缺少 job_id" },
+          "404": { "description": "任务不存在" }
+        }
+      }
+    },
+    "/api/crons/output": {
+      "get": {
+        "tags": ["Crons"],
+        "summary": "获取定时任务最近输出（带内容）",
+        "description": "按修改时间倒序返回最近 N 个 `.md` 文件；`content` 经窗口截断，优先保留 `## Response` 段。",
+        "parameters": [
+          { "name": "job_id", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "limit", "in": "query", "required": false, "schema": { "type": "integer", "default": 5, "minimum": 1 }, "description": "返回条数上限" },
+          { "name": "owner_profile", "in": "query", "required": false, "schema": { "type": "string" }, "description": "任务所属 Profile" }
+        ],
+        "responses": {
+          "200": {
+            "description": "输出列表",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/CronOutputListResponse" }
+              }
+            }
+          },
+          "400": { "description": "缺少 job_id" }
+        }
+      }
+    },
+    "/api/crons/history": {
+      "get": {
+        "tags": ["Crons"],
+        "summary": "获取定时任务运行历史（元数据）",
+        "description": "列出输出目录下 `.md` 文件的 filename、size、modified、usage，不含正文。",
+        "parameters": [
+          { "name": "job_id", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "offset", "in": "query", "required": false, "schema": { "type": "integer", "default": 0, "minimum": 0 } },
+          { "name": "limit", "in": "query", "required": false, "schema": { "type": "integer", "default": 50, "minimum": 1, "maximum": 500 } },
+          { "name": "owner_profile", "in": "query", "required": false, "schema": { "type": "string" }, "description": "任务所属 Profile（读取其 cron/output）" }
+        ],
+        "responses": {
+          "200": {
+            "description": "分页历史",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/CronHistoryResponse" }
+              }
+            }
+          },
+          "400": { "description": "缺少 job_id、job_id 非法或 offset/limit 非整数" }
+        }
+      }
+    },
+    "/api/crons/recent": {
+      "get": {
+        "tags": ["Crons"],
+        "summary": "获取自某时刻以来完成的任务",
+        "description": "供前端轮询完成 Toast：比较 `last_run_at` 与 `since`（Unix 秒）。`all_profiles=1` 时跨 Profile 聚合，每项含 `owner_profile`、`profile`（执行 Profile）；并尝试 materialize 会话（返回 `session_id` 若成功）。",
+        "parameters": [
+          { "name": "since", "in": "query", "required": false, "schema": { "type": "number", "default": 0 }, "description": "Unix 时间戳（秒）；仅返回 last_run_at 大于该值的完成项" },
+          { "name": "all_profiles", "in": "query", "required": false, "schema": { "type": "string" }, "description": "为 1/true 时跨 Profile 聚合" }
+        ],
+        "responses": {
+          "200": {
+            "description": "完成列表",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/CronRecentCompletionsResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/integration/crons/create": {
+      "post": {
+        "tags": ["IntegrationCrons"],
+        "summary": "在指定 owner_profile 下创建定时任务",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["owner_profile", "prompt", "schedule"],
+                "properties": {
+                  "owner_profile": { "type": "string" },
+                  "profile": { "type": "string", "description": "执行 Profile，可选" },
+                  "name": { "type": "string" },
+                  "schedule": { "type": "string" },
+                  "prompt": { "type": "string" },
+                  "deliver": { "type": "string" },
+                  "toast_notifications": { "type": "boolean" }
+                }
+              }
+            }
+          }
+        },
+        "responses": { "200": { "description": "{ ok, owner_profile, job }" }, "400": { "description": "校验失败" } }
+      }
+    },
+    "/api/integration/crons/update": {
+      "post": {
+        "tags": ["IntegrationCrons"],
+        "summary": "更新指定 owner_profile 下的任务",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["owner_profile", "job_id"],
+                "properties": {
+                  "owner_profile": { "type": "string" },
+                  "job_id": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": { "200": { "description": "ok" }, "404": { "description": "not found" } }
+      }
+    },
+    "/api/integration/crons/delete": {
+      "post": {
+        "tags": ["IntegrationCrons"],
+        "summary": "删除指定 owner_profile 下的任务",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["owner_profile", "job_id"],
+                "properties": {
+                  "owner_profile": { "type": "string" },
+                  "job_id": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": { "200": { "description": "ok" } }
+      }
+    },
+    "/api/integration/crons/run": {
+      "post": {
+        "tags": ["IntegrationCrons"],
+        "summary": "在指定 owner_profile 存储下手动运行任务",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["owner_profile", "job_id"],
+                "properties": {
+                  "owner_profile": { "type": "string" },
+                  "job_id": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": { "200": { "description": "running 或 already_running" } }
+      }
+    },
+    "/api/crons/status": {
+      "get": {
+        "tags": ["Crons"],
+        "summary": "获取手动运行中的任务状态",
+        "description": "仅跟踪经 POST /api/crons/run 触发的 WebUI 手动运行（进程内 `_RUNNING_CRON_JOBS`）。无 job_id 时返回全部 running。",
+        "parameters": [
+          { "name": "job_id", "in": "query", "required": false, "schema": { "type": "string" }, "description": "省略时返回 { running: { job_id: elapsed_seconds } }" }
+        ],
+        "responses": {
+          "200": {
+            "description": "运行状态",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    { "$ref": "#/components/schemas/CronStatusSingleResponse" },
+                    { "$ref": "#/components/schemas/CronStatusAllResponse" }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "/api/skills": {
+      "get": {
+        "tags": ["Skills"],
+        "summary": "获取 Skills 列表",
+        "responses": { "200": { "description": "Skills 列表" } }
+      }
+    },
+    "/api/skills/content": {
+      "get": {
+        "tags": ["Skills"],
+        "summary": "获取 Skill 内容",
+        "parameters": [
+          { "name": "name", "in": "query", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "Skill 内容" } }
+      }
+    },
+
+    "/api/memory": {
+      "get": {
+        "tags": ["Memory"],
+        "summary": "获取记忆内容",
+        "responses": { "200": { "description": "记忆数据" } }
+      },
+      "post": {
+        "tags": ["Memory"],
+        "summary": "写入记忆",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/GenericObject" } } }
+        },
+        "responses": { "200": { "description": "写入结果" } }
+      }
+    },
+
+    "/api/profiles": {
+      "get": {
+        "tags": ["Profiles"],
+        "summary": "获取 Profile 列表",
+        "description": "当 `HERMES_INTEGRATION=1` 时，每条 profile 附加嵌套 `info`（来自 info.json）、完整 `skills` 数组，以及 `memory_snapshot`（MEMORY.md / USER.md / SOUL.md，字段与 GET /api/memory 一致，含脱敏）。",
+        "responses": {
+          "200": {
+            "description": "Profile 列表",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ProfilesListResponse" }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": ["Profiles"],
+        "summary": "创建 Profile",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/GenericObject" } } }
+        },
+        "responses": { "200": { "description": "创建结果" } }
+      }
+    },
+    "/api/profile/active": {
+      "get": {
+        "tags": ["Profiles"],
+        "summary": "获取当前激活的 Profile",
+        "responses": { "200": { "description": "激活的 Profile" } }
+      }
+    },
+    "/api/profile/logo-presets": {
+      "get": {
+        "tags": ["Profiles"],
+        "summary": "获取内置 Profile logo 预设列表",
+        "description": "需 `HERMES_INTEGRATION=1`。可选 query `category` 过滤分类。",
+        "parameters": [
+          {
+            "name": "category",
+            "in": "query",
+            "schema": { "type": "string" },
+            "description": "abstract / roles / emoji"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "分类与 preset 列表",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ProfileLogoPresetsResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/profile/info": {
+      "post": {
+        "tags": ["Profiles"],
+        "summary": "更新 Profile info.json（display / logo）",
+        "description": "需 `HERMES_INTEGRATION=1`。logo 以 Data URI base64 写入 info.json。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/ProfileInfoUpdateRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "更新成功",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ProfileInfoUpdateResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/personalities": {
+      "get": {
+        "tags": ["Profiles"],
+        "summary": "获取人格列表",
+        "responses": { "200": { "description": "人格列表" } }
+      }
+    },
+
+    "/api/mcp/servers": {
+      "get": {
+        "tags": ["MCP"],
+        "summary": "获取 MCP 服务器列表",
+        "responses": { "200": { "description": "MCP 服务器列表" } }
+      }
+    },
+    "/api/mcp/tools": {
+      "get": {
+        "tags": ["MCP"],
+        "summary": "获取 MCP 工具列表",
+        "responses": { "200": { "description": "MCP 工具列表" } }
+      }
+    },
+
+    "/api/approval/pending": {
+      "get": {
+        "tags": ["Approval"],
+        "summary": "获取待审批队列",
+        "responses": { "200": { "description": "待审批列表" } }
+      }
+    },
+    "/api/approval/stream": {
+      "get": {
+        "tags": ["Approval"],
+        "summary": "审批事件 SSE 流",
+        "responses": { "200": { "description": "SSE 事件流" } }
+      }
+    },
+    "/api/approval/respond": {
+      "post": {
+        "tags": ["Approval"],
+        "summary": "响应审批请求",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "type": "object", "properties": { "id": { "type": "string" }, "approved": { "type": "boolean" } }, "required": ["id", "approved"] } } }
+        },
+        "responses": { "200": { "description": "审批结果" } }
+      }
+    },
+
+    "/api/clarify/pending": {
+      "get": {
+        "tags": ["Clarify"],
+        "summary": "获取待澄清队列",
+        "responses": { "200": { "description": "待澄清列表" } }
+      }
+    },
+    "/api/clarify/stream": {
+      "get": {
+        "tags": ["Clarify"],
+        "summary": "澄清事件 SSE 流",
+        "responses": { "200": { "description": "SSE 事件流" } }
+      }
+    },
+    "/api/clarify/respond": {
+      "post": {
+        "tags": ["Clarify"],
+        "summary": "响应澄清请求",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "type": "object", "properties": { "id": { "type": "string" }, "response": { "type": "string" } }, "required": ["id", "response"] } } }
+        },
+        "responses": { "200": { "description": "澄清结果" } }
+      }
+    },
+
+    "/api/rollback/list": {
+      "get": {
+        "tags": ["Rollback"],
+        "summary": "获取回滚点列表",
+        "responses": { "200": { "description": "回滚点列表" } }
+      }
+    },
+    "/api/rollback/diff": {
+      "get": {
+        "tags": ["Rollback"],
+        "summary": "获取回滚 diff",
+        "parameters": [
+          { "name": "id", "in": "query", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "diff 内容" } }
+      }
+    },
+    "/api/rollback/apply": {
+      "post": {
+        "tags": ["Rollback"],
+        "summary": "执行回滚",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "type": "object", "properties": { "id": { "type": "string" } }, "required": ["id"] } } }
+        },
+        "responses": { "200": { "description": "回滚结果" } }
+      }
+    },
+
+    "/api/logs": {
+      "get": {
+        "tags": ["System"],
+        "summary": "获取服务器日志",
+        "responses": { "200": { "description": "日志内容" } }
+      }
+    },
+    "/api/commands": {
+      "get": {
+        "tags": ["System"],
+        "summary": "获取可用命令列表",
+        "responses": { "200": { "description": "命令列表" } }
+      }
+    },
+    "/api/updates/check": {
+      "get": {
+        "tags": ["System"],
+        "summary": "检查更新",
+        "responses": { "200": { "description": "更新信息" } }
+      }
+    },
+    "/api/insights": {
+      "get": {
+        "tags": ["System"],
+        "summary": "获取系统洞察信息",
+        "responses": { "200": { "description": "洞察数据" } }
+      }
+    },
+    "/api/plugins": {
+      "get": {
+        "tags": ["System"],
+        "summary": "获取插件列表",
+        "responses": { "200": { "description": "插件列表" } }
+      }
+    },
+    "/api/dashboard/status": {
+      "get": {
+        "tags": ["System"],
+        "summary": "获取 Dashboard 状态",
+        "responses": { "200": { "description": "Dashboard 状态" } }
+      }
+    },
+    "/api/dashboard/config": {
+      "get": {
+        "tags": ["System"],
+        "summary": "获取 Dashboard 配置",
+        "responses": { "200": { "description": "Dashboard 配置" } }
+      }
+    },
+    "/api/gateway/status": {
+      "get": {
+        "tags": ["System"],
+        "summary": "获取 Gateway 状态",
+        "responses": { "200": { "description": "Gateway 状态" } }
+      }
+    },
+    "/api/terminal/output": {
+      "get": {
+        "tags": ["System"],
+        "summary": "获取终端输出 SSE 流",
+        "responses": { "200": { "description": "SSE 事件流" } }
+      }
+    },
+    "/api/shutdown": {
+      "post": {
+        "tags": ["System"],
+        "summary": "关闭服务器",
+        "responses": { "200": { "description": "关机确认" } }
+      }
+    },
+
+    "/api/skillhub/skills": {
+      "get": {
+        "tags": ["SkillHub"],
+        "summary": "获取 SkillHub 技能列表",
+        "description": "按 scope 返回技能市场目录、已安装/未安装筛选或本地自建技能。无效 scope 回落为 hub。stats 为全库全局计数（不受 category/q 影响）；skills/total 仍受 category 与 q 过滤。",
+        "parameters": [
+          { "name": "scope", "in": "query", "schema": { "type": "string", "enum": ["hub", "installed", "not_installed", "custom"], "default": "hub" }, "description": "hub=市场目录（附 installed 标注）；installed/not_installed=按当前 Cookie profile 的本地安装状态筛选；custom=读取 {HERMES_HOME}/skills 下本地自建（非市场同名），不按 profile 分子目录" },
+          { "name": "category", "in": "query", "schema": { "type": "string" }, "description": "分类过滤；空字符串、all 或 * 表示全部分类" },
+          { "name": "q", "in": "query", "schema": { "type": "string" }, "description": "关键词搜索（仅列表项，不影响 stats 计数）" },
+          { "name": "page", "in": "query", "schema": { "type": "integer", "minimum": 1, "default": 1 }, "description": "页码（从 1 开始）" },
+          { "name": "page_size", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 }, "description": "每页条数（上限 100）" }
+        ],
+        "responses": {
+          "200": {
+            "description": "技能列表",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/SkillHubSkillsListResponse" }
+              }
+            }
+          },
+          "502": { "description": "上游 SkillHub 请求失败" }
+        }
+      }
+    },
+    "/api/skillhub/categories": {
+      "get": {
+        "tags": ["SkillHub"],
+        "summary": "获取 SkillHub 技能分类列表",
+        "responses": {
+          "200": {
+            "description": "分类名称数组",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": { "type": "string" }
+                }
+              }
+            }
+          },
+          "502": { "description": "上游请求失败" }
+        }
+      }
+    },
+    "/api/skillhub/detail": {
+      "get": {
+        "tags": ["SkillHub"],
+        "summary": "获取技能详情",
+        "parameters": [
+          { "name": "name", "in": "query", "required": true, "schema": { "type": "string" }, "description": "技能名称" }
+        ],
+        "responses": {
+          "200": {
+            "description": "技能详情（上游透传）",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/SkillHubDetail" }
+              }
+            }
+          },
+          "400": { "description": "缺少 name 参数" },
+          "502": { "description": "上游请求失败" }
+        }
+      }
+    },
+    "/api/skillhub/content": {
+      "get": {
+        "tags": ["SkillHub"],
+        "summary": "获取技能文档内容（SKILL.md）",
+        "parameters": [
+          { "name": "name", "in": "query", "required": true, "schema": { "type": "string" }, "description": "技能名称" },
+          { "name": "scope", "in": "query", "schema": { "type": "string", "enum": ["hub", "custom"], "default": "hub" }, "description": "custom=从 {HERMES_HOME}/skills 读取本地自建技能文档" }
+        ],
+        "responses": {
+          "200": {
+            "description": "技能文档",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/SkillHubDocContent" }
+              }
+            }
+          },
+          "400": { "description": "缺少 name 参数" },
+          "404": { "description": "本地 custom 技能不存在" },
+          "502": { "description": "上游请求失败" }
+        }
+      }
+    },
+    "/api/skillhub/structure": {
+      "get": {
+        "tags": ["SkillHub"],
+        "summary": "获取技能文件结构",
+        "parameters": [
+          { "name": "name", "in": "query", "required": true, "schema": { "type": "string" }, "description": "技能名称" },
+          { "name": "scope", "in": "query", "schema": { "type": "string", "enum": ["hub", "custom"], "default": "hub" }, "description": "custom=从 {HERMES_HOME}/skills 读取本地自建技能目录结构" }
+        ],
+        "responses": {
+          "200": {
+            "description": "脚本与参考资料列表",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/SkillHubStructure" }
+              }
+            }
+          },
+          "400": { "description": "缺少 name 参数" },
+          "404": { "description": "本地 custom 技能不存在" },
+          "502": { "description": "上游请求失败" }
+        }
+      }
+    },
+    "/api/skillhub/file": {
+      "get": {
+        "tags": ["SkillHub"],
+        "summary": "获取技能内单个文件内容",
+        "parameters": [
+          { "name": "name", "in": "query", "required": true, "schema": { "type": "string" }, "description": "技能名称" },
+          { "name": "path", "in": "query", "schema": { "type": "string" }, "description": "文件相对路径（与 file 二选一）" },
+          { "name": "file", "in": "query", "schema": { "type": "string" }, "description": "path 的别名" },
+          { "name": "scope", "in": "query", "schema": { "type": "string", "enum": ["hub", "custom"], "default": "hub" }, "description": "custom=从 {HERMES_HOME}/skills 读取本地自建技能文件" }
+        ],
+        "responses": {
+          "200": {
+            "description": "文件内容",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/SkillHubFileContent" }
+              }
+            }
+          },
+          "400": { "description": "缺少 name 或 path/file 参数" },
+          "404": { "description": "本地 custom 技能或文件不存在" },
+          "502": { "description": "上游请求失败" }
+        }
+      }
+    },
+    "/api/skillhub/install": {
+      "post": {
+        "tags": ["SkillHub"],
+        "summary": "安装技能到本地技能目录",
+        "description": "从上游下载 zip（失败时回退拉取 doc）并写入 shared_skills_dir（{HERMES_HOME}/skills）。有 category 时落盘 skills/<category>/<name>/，否则平铺 skills/<name>/。category 可由请求体传入，缺省时从上游 detail 补齐。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/SkillHubInstallRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "安装成功",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/SkillHubOkResponse" }
+              }
+            }
+          },
+          "400": { "description": "缺少 name 参数" },
+          "409": { "description": "技能已存在" },
+          "502": { "description": "上游请求失败" },
+          "503": { "description": "SkillHub 服务不可用（如 SKILLHUB_URL 未配置）" }
+        }
+      }
+    },
+    "/api/skillhub/delete": {
+      "post": {
+        "tags": ["SkillHub"],
+        "summary": "删除本地技能（市场安装或 custom）",
+        "description": "从 shared_skills_dir 删除技能目录（含 SkillHub 安装与自建上传）。`dir_name` 优先，否则按 frontmatter `name` 解析。仅需 `HERMES_INTEGRATION=1`，不要求 `SKILLHUB_URL`。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/SkillHubDeleteRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "删除成功",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/SkillHubDeleteResponse" }
+              }
+            }
+          },
+          "400": { "description": "缺少 name" },
+          "403": { "description": "系统技能不可删除" },
+          "404": { "description": "技能未找到" }
+        }
+      }
+    },
+    "/api/skillhub/upload": {
+      "post": {
+        "tags": ["SkillHub"],
+        "summary": "上传本地 custom 技能",
+        "description": "仅写入 `{HERMES_HOME}/skills`（shared_skills_dir），不调用 SkillHub 上游。需要 `HERMES_INTEGRATION=1`；不要求 `SKILLHUB_URL`。支持 `.md` / `.zip`（multipart）或 JSON。单文件 `.md` 的目录名由 `name`/文件名决定；`.zip` 可含多个技能目录（每个含 SKILL.md）。若提供 `category` 则落盘为 `skills/<category>/<leaf>/` 并写入 `.category`；无 category 时平铺 `skills/<leaf>/`。响应含 `skill_count`、`file_count` 与 `skills[]`（每项含 `dir_name`、`name`、`category`）。SKILL.md 须含 frontmatter，必填 `name`、`description`。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": ["file"],
+                "properties": {
+                  "file": {
+                    "type": "string",
+                    "format": "binary",
+                    "description": ".md 或 .zip"
+                  },
+                  "name": {
+                    "type": "string",
+                    "description": "目录名 dir_name（可选；缺省为文件名主干）"
+                  },
+                  "category": {
+                    "type": "string",
+                    "description": "分类（可选）；与 UI 分类 chip 一致，落盘路径前缀并写入 .category"
+                  }
+                }
+              }
+            },
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/SkillHubUploadJsonRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "上传成功",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/SkillHubUploadResponse" }
+              }
+            }
+          },
+          "400": { "description": "参数或文件无效" },
+          "404": { "description": "Integration 未启用" },
+          "409": { "description": "dir_name 已存在" },
+          "413": { "description": "请求体过大" },
+          "500": { "description": "写入失败" }
+        }
+      }
+    }
+  },
+
+  "components": {
+    "schemas": {
+      "GenericObject": {
+        "type": "object",
+        "additionalProperties": true
+      },
+      "CronJob": {
+        "type": "object",
+        "description": "Hermes cron.jobs 持久化字段 + WebUI API 规范化字段。schedule 可为标准 cron 或 Hermes 自然语言（如 every 1h）。",
+        "properties": {
+          "id":                  { "type": "string" },
+          "name":                { "type": "string" },
+          "prompt":              { "type": "string" },
+          "schedule":            { "type": "string", "description": "调度表达式或自然语言间隔" },
+          "schedule_display":    { "type": "string", "description": "人类可读调度说明" },
+          "enabled":             { "type": "boolean" },
+          "deliver":             { "type": "string", "description": "结果投递方式，创建时默认 local" },
+          "skills":              { "type": "array", "items": { "type": "string" } },
+          "model":               { "type": "string", "nullable": true },
+          "profile":             { "type": "string", "nullable": true, "description": "执行 Profile 名称；null 表示沿用服务器默认" },
+          "toast_notifications": { "type": "boolean", "description": "WebUI 完成 Toast；缺省 true" },
+          "state":               { "type": "string", "description": "如 paused" },
+          "last_run_at":         { "description": "ISO8601 字符串或 Unix 时间戳" },
+          "last_status":         { "type": "string", "description": "最近一次运行状态，如 success / error" },
+          "no_agent":            { "type": "boolean", "description": "非 Agent 模式任务" }
+        },
+        "additionalProperties": true
+      },
+      "CronJobCreateRequest": {
+        "type": "object",
+        "required": ["prompt", "schedule"],
+        "properties": {
+          "prompt":              { "type": "string" },
+          "schedule":            { "type": "string" },
+          "name":                { "type": "string" },
+          "deliver":             { "type": "string", "default": "local" },
+          "skills":              { "type": "array", "items": { "type": "string" } },
+          "model":               { "type": "string", "nullable": true },
+          "profile":             { "type": "string", "description": "须为已存在 Profile 名称；空字符串视为未设置" },
+          "toast_notifications": { "type": "boolean", "default": true },
+          "enabled":             { "type": "boolean", "description": "重复创建时可设为 false" }
+        }
+      },
+      "CronJobUpdateRequest": {
+        "type": "object",
+        "required": ["job_id"],
+        "properties": {
+          "job_id":              { "type": "string" },
+          "name":                { "type": "string" },
+          "prompt":              { "type": "string" },
+          "schedule":            { "type": "string" },
+          "deliver":             { "type": "string" },
+          "skills":              { "type": "array", "items": { "type": "string" } },
+          "model":               { "type": "string", "nullable": true },
+          "profile":             { "type": "string", "description": "空字符串清除绑定；须为已存在 Profile" },
+          "toast_notifications": { "type": "boolean" }
+        },
+        "additionalProperties": true,
+        "description": "除 job_id 外字段原样传入 cron.jobs.update_job（null 字段会被跳过）"
+      },
+      "CronJobIdRequest": {
+        "type": "object",
+        "required": ["job_id"],
+        "properties": {
+          "job_id": { "type": "string" }
+        }
+      },
+      "CronJobPauseRequest": {
+        "type": "object",
+        "required": ["job_id"],
+        "properties": {
+          "job_id": { "type": "string" },
+          "reason": { "type": "string" }
+        }
+      },
+      "CronJobsListResponse": {
+        "type": "object",
+        "properties": {
+          "jobs": { "type": "array", "items": { "$ref": "#/components/schemas/CronJob" } }
+        },
+        "required": ["jobs"]
+      },
+      "CronJobMutationResponse": {
+        "type": "object",
+        "properties": {
+          "ok":  { "type": "boolean", "enum": [true] },
+          "job": { "$ref": "#/components/schemas/CronJob" }
+        },
+        "required": ["ok", "job"]
+      },
+      "CronJobDeleteResponse": {
+        "type": "object",
+        "properties": {
+          "ok":     { "type": "boolean", "enum": [true] },
+          "job_id": { "type": "string" }
+        },
+        "required": ["ok", "job_id"]
+      },
+      "CronJobPauseResumeResponse": {
+        "type": "object",
+        "properties": {
+          "ok":  { "type": "boolean", "enum": [true] },
+          "job": { "$ref": "#/components/schemas/CronJob" }
+        },
+        "required": ["ok", "job"]
+      },
+      "CronRunTriggerResponse": {
+        "type": "object",
+        "properties": {
+          "ok":      { "type": "boolean" },
+          "job_id":  { "type": "string" },
+          "status":  { "type": "string", "enum": ["running", "already_running"] },
+          "elapsed": { "type": "number", "description": "status 为 already_running 时已运行秒数" }
+        },
+        "required": ["ok", "job_id", "status"]
+      },
+      "CronOutputUsage": {
+        "type": "object",
+        "description": "从输出 .md 头部解析的用量元数据",
+        "properties": {
+          "model":                { "type": "string" },
+          "provider":             { "type": "string" },
+          "estimated_cost_usd":   { "type": "number" },
+          "duration_seconds":     { "type": "number" },
+          "input_tokens":         { "type": "integer" },
+          "output_tokens":        { "type": "integer" },
+          "total_tokens":         { "type": "integer" }
+        },
+        "additionalProperties": true
+      },
+      "CronOutputListResponse": {
+        "type": "object",
+        "properties": {
+          "job_id":  { "type": "string" },
+          "outputs": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "filename": { "type": "string" },
+                "content":  { "type": "string", "description": "截断后的 markdown 窗口" }
+              },
+              "required": ["filename", "content"]
+            }
+          }
+        },
+        "required": ["job_id", "outputs"]
+      },
+      "CronHistoryRunItem": {
+        "type": "object",
+        "properties": {
+          "filename": { "type": "string" },
+          "size":     { "type": "integer" },
+          "modified": { "type": "number", "description": "Unix 时间戳（秒）" },
+          "usage":    { "$ref": "#/components/schemas/CronOutputUsage" },
+          "session_id": { "type": "string", "nullable": true, "description": "已 materialize 的 cron 会话 ID；可用于打开完整执行步骤" }
+        },
+        "required": ["filename", "size", "modified"]
+      },
+      "CronHistoryResponse": {
+        "type": "object",
+        "properties": {
+          "job_id": { "type": "string" },
+          "runs":   { "type": "array", "items": { "$ref": "#/components/schemas/CronHistoryRunItem" } },
+          "total":  { "type": "integer" },
+          "offset": { "type": "integer" }
+        },
+        "required": ["job_id", "runs", "total", "offset"]
+      },
+      "CronRunDetailResponse": {
+        "type": "object",
+        "properties": {
+          "job_id":   { "type": "string" },
+          "filename": { "type": "string" },
+          "content":  { "type": "string" },
+          "snippet":  { "type": "string", "description": "## Response 段预览，约 600 字符" },
+          "usage":    { "$ref": "#/components/schemas/CronOutputUsage" },
+          "session_id": { "type": "string", "nullable": true, "description": "已 materialize 的 cron 会话 ID" },
+          "error":    { "type": "string" }
+        }
+      },
+      "CronRecentCompletion": {
+        "type": "object",
+        "properties": {
+          "job_id":              { "type": "string" },
+          "name":                { "type": "string" },
+          "status":              { "type": "string", "description": "last_status，如 success / error / unknown" },
+          "completed_at":      { "type": "number", "description": "Unix 时间戳（秒）" },
+          "toast_notifications": { "type": "boolean" }
+        },
+        "required": ["job_id", "name", "status", "completed_at", "toast_notifications"]
+      },
+      "CronRecentCompletionsResponse": {
+        "type": "object",
+        "properties": {
+          "completions": { "type": "array", "items": { "$ref": "#/components/schemas/CronRecentCompletion" } },
+          "since":       { "type": "number" }
+        },
+        "required": ["completions", "since"]
+      },
+      "CronStatusSingleResponse": {
+        "type": "object",
+        "properties": {
+          "job_id":  { "type": "string" },
+          "running": { "type": "boolean" },
+          "elapsed": { "type": "number", "description": "若 running 为 true，已运行秒数（一位小数）" }
+        },
+        "required": ["job_id", "running", "elapsed"]
+      },
+      "CronStatusAllResponse": {
+        "type": "object",
+        "properties": {
+          "running": {
+            "type": "object",
+            "additionalProperties": { "type": "number" },
+            "description": "job_id → 已运行秒数"
+          }
+        },
+        "required": ["running"]
+      },
+      "SkillHubScopeStats": {
+        "type": "object",
+        "description": "各 scope 全库全局条目数（不受列表 category/q 过滤影响）",
+        "properties": {
+          "hub":            { "type": "integer" },
+          "installed":      { "type": "integer" },
+          "not_installed":  { "type": "integer" },
+          "custom":         { "type": "integer" }
+        },
+        "required": ["hub", "installed", "not_installed", "custom"]
+      },
+      "SkillHubCatalogItem": {
+        "type": "object",
+        "description": "技能列表条目；hub/installed/not_installed 含上游字段，WebUI 统一附加 dir_name、installed、hub_installed、custom、disabled",
+        "properties": {
+          "name":           { "type": "string" },
+          "dir_name":       { "type": "string", "description": "相对 shared_skills_dir 的路径；未安装 hub 项为空字符串" },
+          "display_name":   { "type": "string" },
+          "description":    { "type": "string" },
+          "category":       { "type": "string" },
+          "version":        { "type": "string" },
+          "author":         { "type": "string" },
+          "installed":      { "type": "boolean", "description": "是否在 shared_skills_dir 已存在" },
+          "hub_installed":  { "type": "boolean", "description": "是否通过 SkillHub 安装（含 .hub_installed）" },
+          "custom":         { "type": "boolean", "description": "scope=custom 时为 true" },
+          "disabled":       { "type": "boolean" }
+        },
+        "additionalProperties": true
+      },
+      "SkillHubSkillsListResponse": {
+        "type": "object",
+        "properties": {
+          "scope":              { "type": "string", "enum": ["hub", "installed", "not_installed", "custom"] },
+          "category":           { "type": "string" },
+          "skills":             { "type": "array", "items": { "$ref": "#/components/schemas/SkillHubCatalogItem" } },
+          "total":              { "type": "integer" },
+          "page":               { "type": "integer" },
+          "page_size":          { "type": "integer" },
+          "skillhub_enabled":   { "type": "boolean", "enum": [true] },
+          "stats":              { "$ref": "#/components/schemas/SkillHubScopeStats" }
+        },
+        "required": ["scope", "category", "skills", "total", "page", "page_size", "skillhub_enabled", "stats"]
+      },
+      "SkillHubDetail": {
+        "type": "object",
+        "additionalProperties": true
+      },
+      "SkillHubDocContent": {
+        "type": "object",
+        "properties": {
+          "name":         { "type": "string" },
+          "content":      { "type": "string" },
+          "linked_files": { "type": "object", "additionalProperties": true }
+        },
+        "required": ["name", "content"]
+      },
+      "SkillHubStructureFile": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string" },
+          "path": { "type": "string" }
+        }
+      },
+      "SkillHubStructure": {
+        "type": "object",
+        "properties": {
+          "name":       { "type": "string" },
+          "scripts":    { "type": "array", "items": { "$ref": "#/components/schemas/SkillHubStructureFile" } },
+          "references": { "type": "array", "items": { "$ref": "#/components/schemas/SkillHubStructureFile" } }
+        }
+      },
+      "SkillHubFileContent": {
+        "type": "object",
+        "properties": {
+          "name":    { "type": "string" },
+          "path":    { "type": "string" },
+          "content": { "type": "string" }
+        },
+        "required": ["name", "path", "content"]
+      },
+      "SkillHubInstallRequest": {
+        "type": "object",
+        "properties": {
+          "name":         { "type": "string", "description": "市场技能名称（必填）" },
+          "display_name": { "type": "string", "description": "写入 .install_name 的显示名（可选）" },
+          "category":     { "type": "string", "description": "分类目录（可选）；缺省时从上游 detail 读取，仍无则平铺 skills/<name>/" }
+        },
+        "required": ["name"]
+      },
+      "SkillHubDeleteRequest": {
+        "type": "object",
+        "properties": {
+          "name":     { "type": "string", "description": "列表名（SKILL.md frontmatter name，必填）" },
+          "dir_name": { "type": "string", "description": "相对 skills/ 的目录路径（可选，如 apple/apple-notes）" }
+        },
+        "required": ["name"]
+      },
+      "SkillHubDeleteResponse": {
+        "type": "object",
+        "properties": {
+          "ok":            { "type": "boolean", "enum": [true] },
+          "name":          { "type": "string" },
+          "dir_name":      { "type": "string" },
+          "hub_installed": { "type": "boolean", "description": "删除前是否为 SkillHub 市场安装" }
+        },
+        "required": ["ok", "name", "dir_name"]
+      },
+      "SkillHubOkResponse": {
+        "type": "object",
+        "properties": {
+          "ok":       { "type": "boolean", "enum": [true] },
+          "name":     { "type": "string" },
+          "category": { "type": "string", "description": "规范化后的分类；空表示平铺" },
+          "dir_name": { "type": "string", "description": "相对 skills/ 的路径" }
+        },
+        "required": ["ok", "name", "dir_name"]
+      },
+      "SkillHubUploadJsonRequest": {
+        "type": "object",
+        "properties": {
+          "name":     { "type": "string", "description": "dir_name（必填）" },
+          "content":  { "type": "string", "description": "SKILL.md 全文" },
+          "category": { "type": "string", "description": "可选分类" }
+        },
+        "required": ["name", "content"]
+      },
+      "SkillHubUploadResponse": {
+        "type": "object",
+        "properties": {
+          "ok":           { "type": "boolean", "enum": [true] },
+          "skill_count":  { "type": "integer", "description": "成功导入的技能数量" },
+          "file_count":   { "type": "integer", "description": "上传包内文件总数（递归统计各技能目录下的文件）" },
+          "skills": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/SkillHubUploadedSkill" }
+          }
+        },
+        "required": ["ok", "skill_count", "file_count", "skills"]
+      },
+      "SkillHubUploadedSkill": {
+        "type": "object",
+        "properties": {
+          "name":     { "type": "string", "description": "列表 list_name（frontmatter name）" },
+          "dir_name": { "type": "string", "description": "相对 skills/ 的路径" },
+          "custom":   { "type": "boolean", "enum": [true] },
+          "category": { "type": "string", "description": "分类；空表示平铺" }
+        },
+        "required": ["name", "dir_name", "custom"]
+      },
+      "ProfileListItem": {
+        "type": "object",
+        "description": "Profile 运行时字段由 WebUI core 提供；integration 启用时附加 info、skills 与 memory_snapshot。",
+        "properties": {
+          "name":             { "type": "string" },
+          "path":             { "type": "string" },
+          "is_default":       { "type": "boolean" },
+          "is_active":        { "type": "boolean" },
+          "gateway_running":  { "type": "boolean" },
+          "model":            { "type": "string" },
+          "provider":         { "type": "string" },
+          "has_env":          { "type": "boolean" },
+          "skill_count":      { "type": "integer" },
+          "info": {
+            "type": "object",
+            "description": "profile/info.json 内容；logo 为 Data URI base64，单图 raw ≤ 100KB",
+            "properties": {
+              "display_name": { "type": "string" },
+              "description":  { "type": "string" },
+              "logo":         { "type": "string", "description": "data:image/...;base64,..." }
+            },
+            "additionalProperties": true
+          },
+          "skills": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/ProfileSkillItem" }
+          },
+          "memory_snapshot": {
+            "$ref": "#/components/schemas/ProfileMemorySnapshot",
+            "description": "该 profile HERMES_HOME 下的 MEMORY.md / USER.md / SOUL.md（与 GET /api/memory 字段一致，不含 external_notes_enabled）"
+          }
+        },
+        "additionalProperties": true
+      },
+      "ProfileMemorySnapshot": {
+        "type": "object",
+        "description": "单条 profile 的记忆文件快照；内容经 api_redact_enabled 脱敏。",
+        "properties": {
+          "memory":       { "type": "string", "description": "MEMORY.md 正文" },
+          "user":         { "type": "string", "description": "USER.md 正文" },
+          "soul":         { "type": "string", "description": "SOUL.md 正文" },
+          "memory_path":  { "type": "string" },
+          "user_path":    { "type": "string" },
+          "soul_path":    { "type": "string" },
+          "memory_mtime": { "type": "number", "nullable": true },
+          "user_mtime":   { "type": "number", "nullable": true },
+          "soul_mtime":   { "type": "number", "nullable": true }
+        },
+        "required": [
+          "memory", "user", "soul",
+          "memory_path", "user_path", "soul_path",
+          "memory_mtime", "user_mtime", "soul_mtime"
+        ]
+      },
+      "ProfileSkillItem": {
+        "type": "object",
+        "properties": {
+          "name":          { "type": "string" },
+          "full_name":     { "type": "string" },
+          "description":   { "type": "string" },
+          "category":      { "type": "string" },
+          "version":       { "type": "string" },
+          "author":        { "type": "string" },
+          "hub_installed": { "type": "boolean" },
+          "can_delete":    { "type": "boolean" },
+          "install_name":  { "type": "string" },
+          "installed":     { "type": "boolean" },
+          "disabled":      { "type": "boolean" }
+        },
+        "additionalProperties": true
+      },
+      "ProfileLogoPresetsResponse": {
+        "type": "object",
+        "properties": {
+          "categories": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id":    { "type": "string" },
+                "label": { "type": "string" }
+              }
+            }
+          },
+          "presets": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id":       { "type": "string" },
+                "category": { "type": "string" },
+                "label":    { "type": "string" },
+                "url":      { "type": "string" }
+              }
+            }
+          }
+        }
+      },
+      "ProfileInfoUpdateRequest": {
+        "type": "object",
+        "required": ["name"],
+        "properties": {
+          "name":          { "type": "string" },
+          "display_name":  { "type": "string" },
+          "description":   { "type": "string" },
+          "logo_preset":   { "type": "string", "description": "内置 logo id，与 logo_base64 互斥" },
+          "logo_base64":   { "type": "string", "description": "Data URI 或 base64，与 logo_preset 互斥" },
+          "remove_logo":   { "type": "boolean" }
+        }
+      },
+      "ProfileInfoUpdateResponse": {
+        "type": "object",
+        "properties": {
+          "ok":      { "type": "boolean", "enum": [true] },
+          "profile": { "$ref": "#/components/schemas/ProfileListItem" }
+        },
+        "required": ["ok", "profile"]
+      },
+      "ProfilesListResponse": {
+        "type": "object",
+        "properties": {
+          "profiles": { "type": "array", "items": { "$ref": "#/components/schemas/ProfileListItem" } },
+          "active":   { "type": "string" }
+        },
+        "required": ["profiles", "active"]
+      }
+    },
+    "securitySchemes": {
+      "cookieAuth": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "session"
+      }
+    }
+  },
+  "security": [{ "cookieAuth": [] }]
+}

@@ -1,0 +1,6 @@
+{
+    "python.linting.pylintEnabled": true,
+    "python.linting.enabled": true,
+    "http.proxy": "http://127.0.0.1:7890",
+    "cursor.general.disableHttp2": true
+}
