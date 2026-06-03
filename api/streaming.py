@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 from api.config import (
     get_config,
     STREAMS, STREAMS_LOCK, CANCEL_FLAGS, AGENT_INSTANCES, STREAM_PARTIAL_TEXT,
-    STREAM_REASONING_TEXT, STREAM_LIVE_TOOL_CALLS,
+    STREAM_REASONING_TEXT, STREAM_LIVE_TOOL_CALLS, STREAM_LIVE_MANIFEST,
     STREAM_GOAL_RELATED, PENDING_GOAL_CONTINUATION,
     STREAM_LAST_EVENT_ID,
     LOCK, SESSIONS, SESSION_DIR,
@@ -3799,6 +3799,7 @@ def _run_agent_streaming(
         STREAM_PARTIAL_TEXT[stream_id] = ''  # start accumulating partial text (#893)
         STREAM_REASONING_TEXT[stream_id] = ''  # start accumulating reasoning trace (#1361 §A)
         STREAM_LIVE_TOOL_CALLS[stream_id] = []  # start accumulating tool calls (#1361 §B)
+        STREAM_LIVE_MANIFEST[stream_id] = {}
 
     agent = None
     _live_prompt_estimate_tokens = [0]
@@ -4294,6 +4295,55 @@ def _run_agent_streaming(
                         args_snap[k] = s2[:120] + ('...' if len(s2) > 120 else '')
                 return args_snap
 
+            _manifest_delta_sequence = [0]
+
+            def _emit_manifest_delta(name, args, result='', *, tid='', status='completed', source_kind='tool_complete'):
+                try:
+                    from api.session_manifest import (
+                        ToolEvent,
+                        extract_manifest_delta_from_tool_event,
+                        merge_manifest_delta,
+                    )
+                    _manifest_delta_sequence[0] += 1
+                    _event = ToolEvent(
+                        name=str(name or ''),
+                        args=args if isinstance(args, dict) else {},
+                        result=str(result or ''),
+                        tid=str(tid or ''),
+                        status=status,
+                        source='stream',
+                    )
+                    _delta = extract_manifest_delta_from_tool_event(
+                        _event,
+                        Path(str(s.workspace)),
+                        session_id=session_id,
+                        stream_id=stream_id,
+                        turn_key=f'live:{stream_id}',
+                        sequence=_manifest_delta_sequence[0],
+                        source_kind=source_kind,
+                    )
+                    if not (_delta.get('todos') or _delta.get('artifacts') or _delta.get('references')):
+                        return
+                    with STREAMS_LOCK:
+                        _live_manifest = merge_manifest_delta(
+                            STREAM_LIVE_MANIFEST.get(stream_id) or {
+                                'session_id': session_id,
+                                'workspace': str(s.workspace),
+                                'todos': {'items': []},
+                                'artifacts': [],
+                                'references': [],
+                                'turns': [],
+                            },
+                            _delta,
+                            scope='active_stream',
+                        )
+                        STREAM_LIVE_MANIFEST[stream_id] = _live_manifest
+                        if _delta.get('todos') and isinstance(_live_manifest.get('todos'), dict):
+                            _delta['todos'] = _live_manifest['todos']
+                    put('manifest_delta', _delta)
+                except Exception:
+                    logger.debug('Failed to emit manifest_delta for tool %s', name, exc_info=True)
+
             def _record_live_tool_start(tool_call_id, name, args):
                 if not tool_call_id or tool_call_id in _live_prompt_estimate_seen_ids:
                     return False
@@ -4383,6 +4433,13 @@ def _run_agent_streaming(
                             'args': args if isinstance(args, dict) else {},
                             'done': False,
                         })
+                    _emit_manifest_delta(
+                        name,
+                        args,
+                        result='',
+                        status='in_progress',
+                        source_kind='tool_start',
+                    )
                     put('tool', {
                         'event_type': event_type or 'tool.started',
                         'name': name,
@@ -4431,6 +4488,13 @@ def _run_agent_streaming(
                     # Signal the checkpoint thread that new work has completed (Issue #765).
                     # Each completed tool call is a meaningful unit of progress worth persisting.
                     _checkpoint_activity[0] += 1
+                    _emit_manifest_delta(
+                        name,
+                        args,
+                        result=preview or '',
+                        status='error' if bool(cb_kwargs.get('is_error', False)) else 'completed',
+                        source_kind='tool_complete',
+                    )
                     put('tool_complete', {
                         'event_type': event_type,
                         'name': name,
@@ -4463,6 +4527,14 @@ def _run_agent_streaming(
                                 'done': False,
                                 'tid': tool_call_id,
                             })
+                        _emit_manifest_delta(
+                            name,
+                            args,
+                            result='',
+                            tid=tool_call_id,
+                            status='in_progress',
+                            source_kind='tool_start',
+                        )
                         put('tool', {
                             'event_type': 'tool.started',
                             'name': name,
@@ -4499,6 +4571,14 @@ def _run_agent_streaming(
                                     shared_tc['snippet'] = result_snippet
                                     break
                         _checkpoint_activity[0] += 1
+                        _emit_manifest_delta(
+                            name,
+                            args,
+                            result=result_snippet,
+                            tid=tool_call_id,
+                            status='completed',
+                            source_kind='tool_complete',
+                        )
                         put('tool_complete', {
                             'event_type': 'tool.completed',
                             'name': name,
@@ -6281,6 +6361,7 @@ def _run_agent_streaming(
             STREAM_PARTIAL_TEXT.pop(stream_id, None)  # Clean up partial text buffer (#893)
             STREAM_REASONING_TEXT.pop(stream_id, None)  # Clean up reasoning trace (#1361 §A)
             STREAM_LIVE_TOOL_CALLS.pop(stream_id, None)  # Clean up tool calls (#1361 §B)
+            STREAM_LIVE_MANIFEST.pop(stream_id, None)  # Clean up live manifest deltas
             STREAM_GOAL_RELATED.pop(stream_id, None)  # Clean up goal-related flag (#1932)
             STREAM_LAST_EVENT_ID.pop(stream_id, None)  # Clean up event_id pointer (stage-364)
             unregister_active_run(stream_id)

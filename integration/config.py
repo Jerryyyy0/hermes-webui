@@ -25,3 +25,12 @@ def skillhub_enabled() -> bool:
 
 def cron_all_profiles_enabled() -> bool:
     return integration_enabled()
+
+
+def egress_policy_enabled() -> bool:
+    raw = os.getenv("HERMES_EGRESS_POLICY_ENABLED", "").strip().lower()
+    return integration_enabled() and raw in ("1", "true", "yes", "on")
+
+
+def egress_policy_rules_path() -> str:
+    return str(os.getenv("HERMES_EGRESS_POLICY_RULES_PATH", "").strip() or "/etc/iptables/rules.v4")

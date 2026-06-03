@@ -26,7 +26,7 @@
     { "name": "Health",      "description": "健康检查" },
     { "name": "System",      "description": "系统与工具" },
     { "name": "SkillHub",    "description": "SkillHub 远程技能市场代理（需 HERMES_INTEGRATION=1；市场类接口另需 SKILLHUB_URL）。安装/卸载/custom 读写均使用 shared_skills_dir（{HERMES_HOME}/skills，与 WebUI profile 无关）。" },
-    { "name": "IntegrationCrons", "description": "跨 Profile 定时任务（需 HERMES_INTEGRATION=1）。列表/轮询用 GET /api/crons?all_profiles=1；CRUD/运行用 POST /api/integration/crons/*，body 必填 owner_profile（任务所属存储 Profile）。" }
+    { "name": "IntegrationCrons", "description": "跨 Profile 定时任务（需 HERMES_INTEGRATION=1）。列表/轮询用 GET /api/crons?all_profiles=1；创建用一个 profile 同时作为存储与执行 Profile；编辑/运行/删除/读取历史均用 profile 定位任务。" }
   ],
   "paths": {
 
@@ -58,7 +58,38 @@
       "get": {
         "tags": ["Health"],
         "summary": "服务器心跳",
-        "responses": { "200": { "description": "ok" } }
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": { "type": "boolean" },
+                    "job_id": { "type": "string" },
+                    "history_cleanup": {
+                      "type": "object",
+                      "properties": {
+                        "ok": { "type": "boolean" },
+                        "deleted": { "type": "boolean" },
+                        "job_id": { "type": "string" },
+                        "owner_profiles": { "type": "array", "items": { "type": "string" } },
+                        "state_db_profiles": { "type": "array", "items": { "type": "string" } },
+                        "deleted_session_ids": { "type": "array", "items": { "type": "string" } },
+                        "deleted_sidecars": { "type": "array", "items": { "type": "string" } },
+                        "deleted_profiles": { "type": "array", "items": { "type": "string" } },
+                        "deleted_output_dirs": { "type": "array", "items": { "type": "string" } },
+                        "deleted_output_files": { "type": "integer" }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": { "description": "not found" }
+        }
       }
     },
 
@@ -438,7 +469,7 @@
       "get": {
         "tags": ["Crons"],
         "summary": "获取定时任务列表",
-        "description": "默认返回当前活跃 Profile 下 `cron/jobs.json`（`{ jobs: [...] }`）。`all_profiles=1` 且 `HERMES_INTEGRATION=1` 时返回按 Profile 分组：`{ all_profiles: true, profiles: [{ profile, jobs }] }`。job 内 `profile` 为执行 Profile；分组层 `profile` 为所属/存储 Profile。",
+        "description": "默认返回当前活跃 Profile 下 `cron/jobs.json`（`{ jobs: [...] }`）。`all_profiles=1` 且 `HERMES_INTEGRATION=1` 时返回按 Profile 分组：`{ all_profiles: true, profiles: [{ profile, jobs }] }`。Cron Hub 创建/更新的 job 内 `profile` 应与分组层 `profile` 相同。",
         "parameters": [
           { "name": "all_profiles", "in": "query", "required": false, "schema": { "type": "string", "enum": ["0", "1", "true", "false"] }, "description": "为 1/true 时聚合所有 Profile（需 integration cron 开关）" }
         ],
@@ -539,7 +570,7 @@
         "parameters": [
           { "name": "job_id", "in": "query", "required": true, "schema": { "type": "string" }, "description": "任务 ID（字母数字、_-，最长 64）" },
           { "name": "filename", "in": "query", "required": true, "schema": { "type": "string" }, "description": "输出文件名，如 2026-05-29_12-00-00.md" },
-          { "name": "owner_profile", "in": "query", "required": false, "schema": { "type": "string" }, "description": "任务所属 Profile（读取其 cron/output）；兼容别名 profile" }
+          { "name": "profile", "in": "query", "required": false, "schema": { "type": "string" }, "description": "任务所属 Profile（读取其 cron/output）" }
         ],
         "responses": {
           "200": {
@@ -640,7 +671,7 @@
         "parameters": [
           { "name": "job_id", "in": "query", "required": true, "schema": { "type": "string" } },
           { "name": "limit", "in": "query", "required": false, "schema": { "type": "integer", "default": 5, "minimum": 1 }, "description": "返回条数上限" },
-          { "name": "owner_profile", "in": "query", "required": false, "schema": { "type": "string" }, "description": "任务所属 Profile" }
+          { "name": "profile", "in": "query", "required": false, "schema": { "type": "string" }, "description": "任务所属 Profile" }
         ],
         "responses": {
           "200": {
@@ -664,7 +695,7 @@
           { "name": "job_id", "in": "query", "required": true, "schema": { "type": "string" } },
           { "name": "offset", "in": "query", "required": false, "schema": { "type": "integer", "default": 0, "minimum": 0 } },
           { "name": "limit", "in": "query", "required": false, "schema": { "type": "integer", "default": 50, "minimum": 1, "maximum": 500 } },
-          { "name": "owner_profile", "in": "query", "required": false, "schema": { "type": "string" }, "description": "任务所属 Profile（读取其 cron/output）" }
+          { "name": "profile", "in": "query", "required": false, "schema": { "type": "string" }, "description": "任务所属 Profile（读取其 cron/output）" }
         ],
         "responses": {
           "200": {
@@ -683,7 +714,7 @@
       "get": {
         "tags": ["Crons"],
         "summary": "获取自某时刻以来完成的任务",
-        "description": "供前端轮询完成 Toast：比较 `last_run_at` 与 `since`（Unix 秒）。`all_profiles=1` 时跨 Profile 聚合，每项含 `owner_profile`、`profile`（执行 Profile）；并尝试 materialize 会话（返回 `session_id` 若成功）。",
+        "description": "供前端轮询完成 Toast：比较 `last_run_at` 与 `since`（Unix 秒）。`all_profiles=1` 时跨 Profile 聚合，每项含 `profile`；Cron Hub 任务的存储与执行均使用该 Profile。并尝试 materialize 会话（返回 `session_id` 若成功）。",
         "parameters": [
           { "name": "since", "in": "query", "required": false, "schema": { "type": "number", "default": 0 }, "description": "Unix 时间戳（秒）；仅返回 last_run_at 大于该值的完成项" },
           { "name": "all_profiles", "in": "query", "required": false, "schema": { "type": "string" }, "description": "为 1/true 时跨 Profile 聚合" }
@@ -700,46 +731,96 @@
         }
       }
     },
-    "/api/integration/crons/create": {
+    "/api/integration/crons/unread": {
+      "get": {
+        "tags": ["IntegrationCrons"],
+        "summary": "获取 Cron Hub 未读运行统计",
+        "description": "按各 Profile 的 `cron/output/<job_id>/*.md` 输出文件统计未读运行条数；已读游标由 `/api/integration/crons/unread/read` 更新。",
+        "responses": {
+          "200": {
+            "description": "未读统计",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/CronUnreadSummaryResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/integration/crons/unread/read": {
       "post": {
         "tags": ["IntegrationCrons"],
-        "summary": "在指定 owner_profile 下创建定时任务",
+        "summary": "标记一个 Cron Hub 任务为已读",
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["owner_profile", "prompt", "schedule"],
+                "required": ["profile", "job_id"],
                 "properties": {
-                  "owner_profile": { "type": "string" },
-                  "profile": { "type": "string", "description": "执行 Profile，可选" },
+                  "profile": { "type": "string", "description": "任务所在 Profile" },
+                  "job_id": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "已读游标",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/CronUnreadReadResponse" }
+              }
+            }
+          },
+          "400": { "description": "缺少参数或 job_id 非法" },
+          "404": { "description": "任务不存在" }
+        }
+      }
+    },
+    "/api/integration/crons/create": {
+      "post": {
+        "tags": ["IntegrationCrons"],
+        "summary": "在指定 profile 下创建定时任务",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["profile", "prompt", "schedule"],
+                "properties": {
+                  "profile": { "type": "string", "description": "任务 Profile；同时作为存储 Profile 和执行 Profile，不允许为空或使用服务器默认" },
                   "name": { "type": "string" },
                   "schedule": { "type": "string" },
                   "prompt": { "type": "string" },
                   "deliver": { "type": "string" },
+                  "skills": { "type": "array", "items": { "type": "string" }, "description": "创建时附加的技能名列表" },
                   "toast_notifications": { "type": "boolean" }
                 }
               }
             }
           }
         },
-        "responses": { "200": { "description": "{ ok, owner_profile, job }" }, "400": { "description": "校验失败" } }
+        "responses": { "200": { "description": "{ ok, profile, job }" }, "400": { "description": "校验失败" } }
       }
     },
     "/api/integration/crons/update": {
       "post": {
         "tags": ["IntegrationCrons"],
-        "summary": "更新指定 owner_profile 下的任务",
+        "summary": "更新指定 profile 下的任务",
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["owner_profile", "job_id"],
+                "required": ["profile", "job_id"],
                 "properties": {
-                  "owner_profile": { "type": "string" },
+                  "profile": { "type": "string", "description": "任务所在 Profile（存储与执行相同）" },
                   "job_id": { "type": "string" }
                 }
               }
@@ -752,16 +833,16 @@
     "/api/integration/crons/delete": {
       "post": {
         "tags": ["IntegrationCrons"],
-        "summary": "删除指定 owner_profile 下的任务",
+        "summary": "删除指定 profile 下的任务",
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["owner_profile", "job_id"],
+                "required": ["profile", "job_id"],
                 "properties": {
-                  "owner_profile": { "type": "string" },
+                  "profile": { "type": "string" },
                   "job_id": { "type": "string" }
                 }
               }
@@ -774,16 +855,16 @@
     "/api/integration/crons/run": {
       "post": {
         "tags": ["IntegrationCrons"],
-        "summary": "在指定 owner_profile 存储下手动运行任务",
+        "summary": "在指定 profile 下手动运行任务",
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["owner_profile", "job_id"],
+                "required": ["profile", "job_id"],
                 "properties": {
-                  "owner_profile": { "type": "string" },
+                  "profile": { "type": "string" },
                   "job_id": { "type": "string" }
                 }
               }
@@ -791,6 +872,57 @@
           }
         },
         "responses": { "200": { "description": "running 或 already_running" } }
+      }
+    },
+    "/api/integration/egress/policy": {
+      "get": {
+        "tags": ["IntegrationEgress"],
+        "summary": "查看当前 iptables 规则",
+        "description": "调用 `iptables -L -n` 返回当前规则文本。需要 `HERMES_EGRESS_POLICY_ENABLED=1`。",
+        "responses": {
+          "200": {
+            "description": "{ ok, rules }",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["ok", "rules"],
+                  "properties": {
+                    "ok": { "type": "boolean" },
+                    "rules": { "type": "string" }
+                  }
+                }
+              }
+            }
+          },
+          "500": { "description": "iptables 不可用或执行失败" }
+        }
+      },
+      "post": {
+        "tags": ["IntegrationEgress"],
+        "summary": "下发 iptables 策略（open/whitelist）",
+        "description": "生成 iptables-restore 规则并写入规则文件后执行 `iptables-restore`。需要 `HERMES_EGRESS_POLICY_ENABLED=1`。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["policy_type"],
+                "properties": {
+                  "policy_type": { "type": "string", "description": "open 或 whitelist" },
+                  "allowed_ips": { "type": "array", "items": { "type": "string" }, "description": "whitelist 模式必填；每项为 IP 或 CIDR" },
+                  "include_request_ip": { "type": "boolean", "description": "仅 whitelist：是否将请求来源 IP 追加到 allowlist（显式 opt-in）" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "{ ok, policy, rules_path }" },
+          "400": { "description": "参数校验失败（policy_type/allowed_ips 非法）" },
+          "500": { "description": "写入或 iptables-restore 执行失败" }
+        }
       }
     },
     "/api/crons/status": {
@@ -1380,6 +1512,8 @@
           "model":               { "type": "string", "nullable": true },
           "profile":             { "type": "string", "nullable": true, "description": "执行 Profile 名称；null 表示沿用服务器默认" },
           "toast_notifications": { "type": "boolean", "description": "WebUI 完成 Toast；缺省 true" },
+          "execution_bucket":     { "type": "string", "enum": ["running", "waiting", "error"], "description": "前端展示用执行大类：running=执行中，waiting=待执行/已完成/停用归并，error=异常" },
+          "execution_state":      { "type": "string", "enum": ["manual_running", "last_run_error", "schedule_error", "scheduled_waiting", "last_success_waiting", "last_unknown_waiting", "paused_waiting", "disabled_waiting", "not_yet_run_waiting"], "description": "执行小类；暂停任务不覆盖上次状态，只有无上次状态时才返回 paused_waiting" },
           "state":               { "type": "string", "description": "如 paused" },
           "last_run_at":         { "description": "ISO8601 字符串或 Unix 时间戳" },
           "last_status":         { "type": "string", "description": "最近一次运行状态，如 success / error" },
@@ -1547,7 +1681,8 @@
           "name":                { "type": "string" },
           "status":              { "type": "string", "description": "last_status，如 success / error / unknown" },
           "completed_at":      { "type": "number", "description": "Unix 时间戳（秒）" },
-          "toast_notifications": { "type": "boolean" }
+          "toast_notifications": { "type": "boolean" },
+          "profile":             { "type": "string", "description": "all_profiles=1 时返回；表示任务所在 Profile" }
         },
         "required": ["job_id", "name", "status", "completed_at", "toast_notifications"]
       },
@@ -1558,6 +1693,37 @@
           "since":       { "type": "number" }
         },
         "required": ["completions", "since"]
+      },
+      "CronUnreadJob": {
+        "type": "object",
+        "properties": {
+          "profile":             { "type": "string" },
+          "job_id":              { "type": "string" },
+          "name":                { "type": "string" },
+          "unread_count":        { "type": "integer" },
+          "latest_completed_at": { "type": "number", "description": "最新运行输出文件 mtime（Unix 秒）" },
+          "latest_filename":     { "type": "string" }
+        },
+        "required": ["profile", "job_id", "name", "unread_count", "latest_completed_at", "latest_filename"]
+      },
+      "CronUnreadSummaryResponse": {
+        "type": "object",
+        "properties": {
+          "unread_count": { "type": "integer" },
+          "jobs": { "type": "array", "items": { "$ref": "#/components/schemas/CronUnreadJob" } }
+        },
+        "required": ["unread_count", "jobs"]
+      },
+      "CronUnreadReadResponse": {
+        "type": "object",
+        "properties": {
+          "ok":              { "type": "boolean" },
+          "profile":         { "type": "string" },
+          "job_id":          { "type": "string" },
+          "read_until":      { "type": "number", "nullable": true },
+          "latest_filename": { "type": "string", "nullable": true }
+        },
+        "required": ["ok", "profile", "job_id", "read_until", "latest_filename"]
       },
       "CronStatusSingleResponse": {
         "type": "object",

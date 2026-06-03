@@ -6383,6 +6383,7 @@ function renderMessages(options){
   }
   let _prevSepKey=null;
   let currentAssistantTurn=null;
+  let currentAssistantTurnUserRawIdx=null;
   // Only build question→assistant mapping for the visible window, not the
   // full visWithIdx.  The jump-to-question button is only rendered for
   // assistant messages that appear in the current render window anyway.
@@ -6534,6 +6535,7 @@ function renderMessages(options){
 
     if(isUser){
       currentAssistantTurn=null;
+      currentAssistantTurnUserRawIdx=rawIdx;
       const row=document.createElement('div');
       row.className='msg-row';
       row.id=_userMessageDomId(rawIdx);
@@ -6548,6 +6550,12 @@ function renderMessages(options){
 
     if(!currentAssistantTurn){
       currentAssistantTurn=_createAssistantTurn(tsTitle, isTpsDisplayEnabled()?_formatTurnTps(m._turnTps):'');
+      if(currentAssistantTurnUserRawIdx===null||currentAssistantTurnUserRawIdx===undefined||currentAssistantTurnUserRawIdx<0){
+        currentAssistantTurnUserRawIdx=questionRawIdxByAssistantRawIdx.get(rawIdx);
+      }
+      if(currentAssistantTurnUserRawIdx!==undefined&&currentAssistantTurnUserRawIdx!==null&&currentAssistantTurnUserRawIdx>=0){
+        currentAssistantTurn.dataset.turnKey=`turn:${currentAssistantTurnUserRawIdx}`;
+      }
       inner.appendChild(currentAssistantTurn);
     }
     const seg=document.createElement('div');
@@ -6831,6 +6839,20 @@ function renderMessages(options){
         if(anchorRow&&lastInsertedNode) anchorInsertAfter.set(anchorRow, lastInsertedNode);
       }
     }
+  }
+  if(window.HermesSessionInspector&&typeof window.HermesSessionInspector.renderTurnArtifacts==='function'){
+    inner.querySelectorAll('.assistant-turn[data-turn-key]').forEach(turn=>{
+      const key=turn.dataset.turnKey;
+      const blocks=_assistantTurnBlocks(turn);
+      if(!key||!blocks) return;
+      let host=turn.querySelector('.turn-artifacts');
+      if(!host){
+        host=document.createElement('div');
+        host.className='turn-artifacts';
+        blocks.appendChild(host);
+      }
+      window.HermesSessionInspector.renderTurnArtifacts(key, host);
+    });
   }
   // Render per-turn duration and optional token usage on assistant messages.
   // Duration stays visible even when token usage is disabled, because it answers

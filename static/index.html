@@ -228,8 +228,9 @@
         <select id="integrationCronProfileFilter" aria-label="Profile filter"><option value="">All profiles</option></select>
         <select id="integrationCronStatusFilter" aria-label="Status filter">
           <option value="">All statuses</option>
-          <option value="enabled">Enabled</option>
-          <option value="disabled">Disabled</option>
+          <option value="running">Running</option>
+          <option value="waiting">Waiting</option>
+          <option value="error">Error</option>
         </select>
       </div>
       <div class="cron-list integration-cron-list" id="integrationCronList"><div style="padding:12px;color:var(--muted);font-size:12px" data-i18n="loading">Loading...</div></div>
@@ -1420,12 +1421,16 @@
       </div>
     </div>
     <div class="workspace-panel-tabs" role="tablist" aria-label="Workspace panel views">
-      <button class="workspace-panel-tab active" id="workspaceFilesTab" type="button" onclick="switchWorkspacePanelTab('files')" role="tab" aria-selected="true">Files</button>
-      <button class="workspace-panel-tab" id="workspaceArtifactsTab" type="button" onclick="switchWorkspacePanelTab('artifacts')" role="tab" aria-selected="false">Artifacts <span id="workspaceArtifactsCount" class="workspace-artifacts-count">0</span></button>
+      <button class="workspace-panel-tab active" id="workspaceFilesTab" type="button" onclick="switchWorkspacePanelTab('files')" role="tab" aria-selected="true" data-i18n="workspace_tab_files">Files</button>
+      <button class="workspace-panel-tab" id="workspaceTasksTab" type="button" onclick="switchWorkspacePanelTab('tasks')" role="tab" aria-selected="false" data-i18n="workspace_tab_tasks">Tasks <span id="workspaceTasksCount" class="workspace-inspector-count">0</span></button>
+      <button class="workspace-panel-tab" id="workspaceArtifactsTab" type="button" onclick="switchWorkspacePanelTab('artifacts')" role="tab" aria-selected="false" data-i18n="workspace_tab_artifacts">Artifacts <span id="workspaceArtifactsCount" class="workspace-inspector-count">0</span></button>
+      <button class="workspace-panel-tab" id="workspaceReferencesTab" type="button" onclick="switchWorkspacePanelTab('references')" role="tab" aria-selected="false" data-i18n="workspace_tab_references">Refs <span id="workspaceReferencesCount" class="workspace-inspector-count">0</span></button>
     </div>
     <div class="breadcrumb-bar" id="breadcrumbBar" style="display:none"></div>
     <div class="file-tree" id="fileTree"></div>
-    <div class="workspace-artifacts" id="workspaceArtifacts" hidden></div>
+    <div class="workspace-inspector-list workspace-tasks" id="workspaceTasks" hidden></div>
+    <div class="workspace-inspector-list workspace-artifacts" id="workspaceArtifacts" hidden></div>
+    <div class="workspace-inspector-list workspace-references" id="workspaceReferences" hidden></div>
     <div id="wsEmptyState" style="display:none;flex:1;align-items:center;justify-content:center;padding:24px 16px;text-align:center;color:var(--muted);font-size:12px;line-height:1.6"></div>
     <div class="preview-area" id="previewArea">
       <div class="preview-path" id="previewPath">

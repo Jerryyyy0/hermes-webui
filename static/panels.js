@@ -2705,6 +2705,23 @@ async function loadKanbanTask(taskId){
 function loadTodos() {
   const panel = $('todoPanel');
   if (!panel) return;
+  const manifest = window.HermesSessionInspector && typeof window.HermesSessionInspector.manifest === 'function'
+    ? window.HermesSessionInspector.manifest()
+    : null;
+  if (manifest && Array.isArray(manifest.todos && manifest.todos.items) && manifest.todos.items.length) {
+    const todos = manifest.todos.items;
+    const statusIcon = {pending:li('square',14), in_progress:li('loader',14), completed:li('check',14), cancelled:li('x',14), unknown:li('square',14)};
+    const statusColor = {pending:'var(--muted)', in_progress:'var(--blue)', completed:'rgba(100,200,100,.8)', cancelled:'rgba(200,100,100,.5)', unknown:'var(--muted)'};
+    panel.innerHTML = todos.map(t => `
+    <div style="display:flex;align-items:flex-start;gap:10px;padding:6px 0;border-bottom:1px solid var(--border);">
+      <span style="font-size:14px;display:inline-flex;align-items:center;flex-shrink:0;margin-top:1px;color:${statusColor[t.status]||statusColor.unknown}">${statusIcon[t.status]||statusIcon.unknown}</span>
+      <div style="flex:1;min-width:0">
+        <div style="font-size:13px;color:${t.status==='completed'?'var(--muted)':t.status==='in_progress'?'var(--text)':'var(--text)'};${t.status==='completed'?'text-decoration:line-through;opacity:.5':''};line-height:1.4">${esc(t.content)}</div>
+        <div style="font-size:10px;color:var(--muted);margin-top:2px;opacity:.6">${esc(t.id)} · ${esc(t.status)}</div>
+      </div>
+    </div>`).join('');
+    return;
+  }
   const sourceMessages = (S.session && Array.isArray(S.session.messages) && S.session.messages.length) ? S.session.messages : S.messages;
   // Parse the most recent todo state from message history
   let todos = [];
@@ -7628,8 +7645,8 @@ function startCronPolling(){
             showToast(t('cron_completion_status', c.name, c.status==='error' ? t('status_failed') : t('status_completed')),4000);
           }
           _cronPollSince=Math.max(_cronPollSince,c.completed_at);
-          if (_cronAllProfiles && c.owner_profile && c.job_id) {
-            const composite = `${c.owner_profile}:${c.job_id}`;
+          if (_cronAllProfiles && c.profile && c.job_id) {
+            const composite = `${c.profile}:${c.job_id}`;
             _cronNewJobIds.add(composite);
             if (window.HermesIntegrationCrons?.markUnreadFromCompletion) {
               window.HermesIntegrationCrons.markUnreadFromCompletion(c);

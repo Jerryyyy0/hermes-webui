@@ -161,7 +161,7 @@ See Architecture Phase B for the fix.
 Python stdlib ThreadingHTTPServer (from http.server). Each HTTP request runs in its own
 thread. The Handler class subclasses BaseHTTPRequestHandler with two methods:
 
-    do_GET    Routes: /, /health, /api/session, /api/sessions, /api/list,
+    do_GET    Routes: /, /health, /api/session, /api/session/manifest, /api/sessions, /api/list,
                       /api/chat/stream, /api/file, /api/approval/pending,
                       /api/session/worktree/status
     do_POST   Routes: /api/upload, /api/session/new, /api/session/update,

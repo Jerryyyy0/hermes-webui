@@ -58,10 +58,18 @@
 - 编辑前阅读 `docs/CONTRACTS.md` 及所涉及子系统的契约/RFC。
 - 优先使用现有的 Python + 原生 JavaScript 结构。未经充分论证并提供回滚方案，不得引入新依赖、构建工具、框架或长期运行的进程。
 - 修改安装配置、引导流程、运行时行为、架构、测试指南或用户可见工作流时，同步更新文档。
+- 新增或大幅改写 Markdown 文档时，默认尽量使用中文说明；若编辑既有英文上游文档、外部规范、API 字段说明或需要保持原文风格的段落，可沿用原语言并避免中英风格混杂。
 - 用户可见的行为、配置、工作流或文档变更（应出现在发布说明中的）：上游/Core 变更更新根目录 `CHANGELOG.md`；**仅 integration/Fork 侧**变更更新 `integration/CHANGELOG.md`（见上文 Integration 维护约束）。
 - UI 或 UX 变更须提供变更前后的对比截图，并测试桌面、窄屏和移动端状态。
 - 行为变更须在可行时新增或更新自动化测试，并列出已执行的手动验证。
 - 涉及运行时、流式传输、恢复、回放、压缩或侧边栏元数据变更时，需指明被修改的状态层并证明相关不变量成立。
+
+### 会话 Inspector Manifest 约束
+
+涉及会话待办、成果、参考（Session Inspector / manifest）时，请先阅读 [`docs/session-inspector-manifest.md`](docs/session-inspector-manifest.md)。
+
+- Manifest 是会话活动的派生索引，不是 transcript、执行 journal 或 workspace 全量文件列表。
+- References 只表示实际读取/打开的内容来源；搜索命中、目录列表和助手正文里提到的路径不默认算参考。
 
 ## 本地状态与敏感信息
 

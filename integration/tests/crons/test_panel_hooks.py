@@ -40,4 +40,30 @@ def test_cron_hub_run_rows_can_open_materialized_sessions():
     assert "toggleEmbeddedSession" in src
     assert "/api/session?session_id=" in src
     assert "data.session_id" in src
-    assert "openSession(data.session_id)" in src
+    assert "openSession(sessionId)" in src
+
+
+def test_cron_hub_form_uses_single_profile_and_exposes_skills():
+    src = Path("integration/assets/hermes_integration_crons.js").read_text(encoding="utf-8")
+    assert "cronProfileOptions" in src
+    assert "integrationCronFormOwner" not in src
+    assert "Select profile" in src
+    assert 'id="integrationCronFormProfile" required' in src
+    assert "Profile is required." in src
+    assert "integrationCronFormSkillSearch" in src
+    assert "integrationCronFormSkillDropdown" in src
+    assert "skillsForProfile(profile)" in src
+    assert "profile: _selected.ownerProfile" in src
+    assert "owner_profile:" not in src.split("saveForm")[1].split("function ")[0]
+    assert "payload.skills = _selectedSkills" in src
+
+
+def test_cron_hub_status_filter_uses_execution_bucket():
+    html = Path("static/index.html").read_text(encoding="utf-8")
+    src = Path("integration/assets/hermes_integration_crons.js").read_text(encoding="utf-8")
+
+    assert '<option value="running">Running</option>' in html
+    assert '<option value="waiting">Waiting</option>' in html
+    assert '<option value="error">Error</option>' in html
+    assert "job.execution_bucket !== statusFilter" in src
+    assert "statusFilter === 'enabled'" not in src

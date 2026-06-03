@@ -39,7 +39,44 @@ def test_cron_api_serializes_legacy_profile_as_explicit_server_default():
     payload = _cron_job_for_api(legacy)
 
     assert payload["profile"] is None
+    assert payload["execution_bucket"] == "waiting"
+    assert payload["execution_state"] == "not_yet_run_waiting"
     assert "profile" not in legacy, "API serialization must not mutate stored legacy jobs"
+
+
+@pytest.mark.parametrize(
+    ("job", "bucket", "state"),
+    [
+        ({"id": "success", "last_status": "success"}, "waiting", "last_success_waiting"),
+        ({"id": "scheduled", "next_run_at": "2026-06-02T12:00:00Z"}, "waiting", "scheduled_waiting"),
+        ({"id": "disabled", "enabled": False}, "waiting", "disabled_waiting"),
+        ({"id": "paused", "state": "paused", "last_status": "success"}, "waiting", "last_success_waiting"),
+        ({"id": "failed", "state": "paused", "last_status": "error"}, "error", "last_run_error"),
+        ({"id": "schedule-error", "state": "error"}, "error", "schedule_error"),
+    ],
+)
+def test_cron_api_adds_execution_status_fields(job, bucket, state):
+    from api.routes import _cron_job_for_api
+
+    payload = _cron_job_for_api(job)
+
+    assert payload["execution_bucket"] == bucket
+    assert payload["execution_state"] == state
+
+
+def test_cron_api_execution_status_running_takes_precedence():
+    import api.routes as routes
+
+    routes._mark_cron_running("running-job")
+    try:
+        payload = routes._cron_job_for_api(
+            {"id": "running-job", "last_status": "error", "state": "error"}
+        )
+    finally:
+        routes._mark_cron_done("running-job")
+
+    assert payload["execution_bucket"] == "running"
+    assert payload["execution_state"] == "manual_running"
 
 
 def test_cron_profile_value_validates_against_existing_profiles(monkeypatch):

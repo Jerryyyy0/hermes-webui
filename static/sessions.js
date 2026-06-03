@@ -471,6 +471,7 @@ async function newSession(flash, options={}){
   _newSessionInFlight=(async()=>{
     updateQueueBadge();
     S.toolCalls=[];
+    if(typeof clearSessionManifest==='function') clearSessionManifest();
     _messagesTruncated=false;
     _oldestIdx=0;
     clearLiveToolCards();
@@ -603,6 +604,8 @@ async function loadSession(sid){
     _saveComposerDraftNow(currentSid, ($('msg') || {}).value || '', S.pendingFiles ? [...S.pendingFiles] : []);
   }
   if (currentSid !== sid || forceReload) {
+    if (typeof clearSessionManifest === 'function') clearSessionManifest();
+    else if (window.HermesSessionInspector && typeof window.HermesSessionInspector.clear === 'function') window.HermesSessionInspector.clear();
     S.messages = [];
     S.toolCalls = [];
     _messagesTruncated = false;
@@ -869,7 +872,8 @@ async function loadSession(sid){
   // Clear the in-flight session marker now that this load has completed (#1060).
   if (_loadingSessionId === sid) _loadingSessionId = null;
 
-  if(typeof renderSessionArtifacts==='function') renderSessionArtifacts();
+  if(typeof loadSessionManifest==='function') void loadSessionManifest();
+  else if(typeof renderSessionArtifacts==='function') renderSessionArtifacts();
 
   // ── Cross-channel handoff hint ──
   // After session fully loaded, check if this is a messaging session with

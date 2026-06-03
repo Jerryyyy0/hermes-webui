@@ -191,6 +191,36 @@ def test_all_sessions_backfills_last_message_at_for_legacy_index_rows():
     assert persisted[0].get("last_message_at") == 100.0
 
 
+def test_all_sessions_refreshes_stale_cron_index_message_count(monkeypatch):
+    """Cron sidecars can be backfilled after an empty index row was cached."""
+    monkeypatch.setenv("HERMES_INTEGRATION", "1")
+    index_file = models.SESSION_INDEX_FILE
+    s = Session(
+        session_id="cron_job1_20260601_145319",
+        title="Cron output",
+        messages=[
+            {"role": "user", "content": "run news", "timestamp": 100.0},
+            {"role": "assistant", "content": "done", "timestamp": 101.0},
+        ],
+        project_id="cron-project",
+        profile="default",
+        source_tag="cron",
+        is_cli_session=False,
+        created_at=90.0,
+        updated_at=102.0,
+    )
+    s.save(touch_updated_at=False)
+    stale = dict(s.compact())
+    stale["message_count"] = 0
+    stale["user_message_count"] = 0
+    _write_index_file(index_file, [stale])
+
+    rows = models.all_sessions()
+
+    by_id = {row["session_id"]: row for row in rows}
+    assert by_id[s.session_id]["message_count"] == 2
+
+
 def test_all_sessions_prune_batches_persisted_id_snapshot(monkeypatch):
     """Index pruning should not probe each backing file through the helper."""
     index_file = models.SESSION_INDEX_FILE

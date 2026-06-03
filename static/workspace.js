@@ -124,19 +124,86 @@ function _restoreExpandedDirs(){
 }
 
 let _workspacePanelActiveTab = 'files';
-let _renderSessionArtifactsTimer = null;
+let _sessionManifest = null;
+let _sessionManifestSid = null;
+let _sessionManifestTimer = null;
+let _sessionManifestInflight = null;
+let _sessionManifestInflightSid = null;
+
+const WORKSPACE_INSPECTOR_TABS = new Set(['files', 'tasks', 'artifacts', 'references']);
 
 function _setWorkspacePanelTabDataset(){
   const panel = document.querySelector('.rightpanel');
   if(panel) panel.dataset.activeTab = _workspacePanelActiveTab;
 }
 
+function _workspaceInspectorLabel(key, fallback){
+  return (typeof t === 'function' && t(key)) || fallback;
+}
+
+function scheduleRefreshSessionManifest(){
+  if(_sessionManifestTimer) clearTimeout(_sessionManifestTimer);
+  _sessionManifestTimer = setTimeout(()=>{
+    _sessionManifestTimer = null;
+    void loadSessionManifest();
+  }, 120);
+}
+
 function scheduleRenderSessionArtifacts(){
-  if(_renderSessionArtifactsTimer) clearTimeout(_renderSessionArtifactsTimer);
-  _renderSessionArtifactsTimer = setTimeout(()=>{
-    _renderSessionArtifactsTimer = null;
-    renderSessionArtifacts();
-  }, 100);
+  renderSessionInspector();
+}
+
+async function loadSessionManifest(){
+  if(!S.session||!S.session.session_id) return null;
+  const sid = S.session.session_id;
+  if(_sessionManifestInflight && _sessionManifestInflightSid === sid) return _sessionManifestInflight;
+  try{
+    _sessionManifestInflightSid = sid;
+    _sessionManifestInflight = api(`/api/session/manifest?session_id=${encodeURIComponent(sid)}`);
+    const data = await _sessionManifestInflight;
+    if(!S.session||S.session.session_id!==sid) return null;
+    _sessionManifest = data && data.manifest ? data.manifest : null;
+    _sessionManifestSid = sid;
+    renderSessionInspector();
+    return _sessionManifest;
+  }catch(e){
+    console.warn('loadSessionManifest', e);
+    if(S.session&&S.session.session_id===sid){
+      _sessionManifest = null;
+      _sessionManifestSid = sid;
+      renderSessionInspector();
+    }
+    return null;
+  }finally{
+    if(_sessionManifestInflightSid === sid){
+      _sessionManifestInflight = null;
+      _sessionManifestInflightSid = null;
+    }
+  }
+}
+
+function _syncWorkspaceInspectorTabs(){
+  const active = _workspacePanelActiveTab;
+  const map = {
+    files: $('workspaceFilesTab'),
+    tasks: $('workspaceTasksTab'),
+    artifacts: $('workspaceArtifactsTab'),
+    references: $('workspaceReferencesTab'),
+  };
+  Object.entries(map).forEach(([name, el])=>{
+    if(!el) return;
+    const on = active === name;
+    el.classList.toggle('active', on);
+    el.setAttribute('aria-selected', on ? 'true' : 'false');
+  });
+  const lists = {
+    tasks: $('workspaceTasks'),
+    artifacts: $('workspaceArtifacts'),
+    references: $('workspaceReferences'),
+  };
+  Object.entries(lists).forEach(([name, el])=>{
+    if(el) el.hidden = active !== name;
+  });
 }
 
 if(typeof document !== 'undefined'){
@@ -145,22 +212,313 @@ if(typeof document !== 'undefined'){
 }
 
 function switchWorkspacePanelTab(tab){
-  _workspacePanelActiveTab = tab === 'artifacts' ? 'artifacts' : 'files';
+  _workspacePanelActiveTab = WORKSPACE_INSPECTOR_TABS.has(tab) ? tab : 'files';
   _setWorkspacePanelTabDataset();
-  const filesTab = $('workspaceFilesTab');
-  const artifactsTab = $('workspaceArtifactsTab');
-  if(filesTab){
-    filesTab.classList.toggle('active', _workspacePanelActiveTab === 'files');
-    filesTab.setAttribute('aria-selected', _workspacePanelActiveTab === 'files' ? 'true' : 'false');
+  _syncWorkspaceInspectorTabs();
+  if(_workspacePanelActiveTab === 'files'){
+    const tree = $('fileTree');
+    if(tree) tree.style.display = '';
+  }else{
+    const tree = $('fileTree');
+    if(tree) tree.style.display = 'none';
   }
-  if(artifactsTab){
-    artifactsTab.classList.toggle('active', _workspacePanelActiveTab === 'artifacts');
-    artifactsTab.setAttribute('aria-selected', _workspacePanelActiveTab === 'artifacts' ? 'true' : 'false');
-  }
-  const artifacts = $('workspaceArtifacts');
-  if(artifacts) artifacts.hidden = _workspacePanelActiveTab !== 'artifacts';
-  if(_workspacePanelActiveTab === 'artifacts') renderSessionArtifacts();
+  if(_workspacePanelActiveTab !== 'files') renderSessionInspector();
 }
+
+function _manifestForActiveSession(){
+  if(!S.session||!S.session.session_id) return null;
+  if(_sessionManifestSid !== S.session.session_id) return null;
+  return _sessionManifest;
+}
+
+function _cloneManifestValue(value){
+  if(value===undefined||value===null) return value;
+  try{return JSON.parse(JSON.stringify(value));}
+  catch(_){return value;}
+}
+
+function _mergeManifestRows(existing, incoming){
+  const byPath = new Map();
+  const add = (row) => {
+    if(!row||typeof row!=='object') return;
+    const path = String(row.path||'').trim();
+    if(!path) return;
+    const current = byPath.get(path) || {};
+    const merged = {...current, ..._cloneManifestValue(row)};
+    const hits = [];
+    const seen = new Set();
+    [...(current.hits||[]), ...(row.hits||[])].forEach(hit=>{
+      if(!hit||typeof hit!=='object') return;
+      const key = [hit.path||path, hit.source_tool||'', hit.tid||'', hit.assistant_msg_idx??'', hit.tool_msg_idx??''].join('|');
+      if(seen.has(key)) return;
+      seen.add(key);
+      hits.push(_cloneManifestValue(hit));
+    });
+    if(hits.length){
+      merged.hits = hits;
+      merged.hit_count = hits.length;
+    }
+    byPath.set(path, merged);
+  };
+  (existing||[]).forEach(add);
+  (incoming||[]).forEach(add);
+  return [...byPath.values()].sort((a,b)=>String(a.path||'').localeCompare(String(b.path||'')));
+}
+
+function _currentLiveTurnKey(streamId){
+  if(streamId && S._manifestLiveTurnKeys && S._manifestLiveTurnKeys[streamId]) return S._manifestLiveTurnKeys[streamId];
+  let idx = -1;
+  const msgs = S.messages || [];
+  for(let i=msgs.length-1;i>=0;i--){
+    if(msgs[i]&&msgs[i].role==='user'){ idx=i; break; }
+  }
+  const key = idx>=0 ? `turn:${idx}` : (streamId ? `live:${streamId}` : '');
+  if(streamId){
+    S._manifestLiveTurnKeys = S._manifestLiveTurnKeys || {};
+    S._manifestLiveTurnKeys[streamId] = key;
+  }
+  return key;
+}
+
+function _normalizeDeltaTurnKey(delta){
+  const streamId = delta && delta.stream_id;
+  const key = String(delta && delta.turn_key || '');
+  if(key.startsWith('live:')) return _currentLiveTurnKey(streamId);
+  return key || _currentLiveTurnKey(streamId);
+}
+
+function _mergeManifestTurns(existingTurns, incomingTurns){
+  const byKey = new Map();
+  const add = (turn) => {
+    if(!turn||typeof turn!=='object') return;
+    const key = String(turn.turn_key||'').trim();
+    if(!key) return;
+    const current = byKey.get(key) || {turn_key:key, artifacts:[], references:[]};
+    byKey.set(key, {
+      ...current,
+      ..._cloneManifestValue(turn),
+      artifacts: _mergeManifestRows(current.artifacts, turn.artifacts),
+      references: _mergeManifestRows(current.references, turn.references),
+    });
+  };
+  (existingTurns||[]).forEach(add);
+  (incomingTurns||[]).forEach(add);
+  return [...byKey.values()].sort((a,b)=>{
+    const ai = Number.isInteger(a.user_msg_idx) ? a.user_msg_idx : 1000000000;
+    const bi = Number.isInteger(b.user_msg_idx) ? b.user_msg_idx : 1000000000;
+    return ai===bi ? String(a.turn_key||'').localeCompare(String(b.turn_key||'')) : ai-bi;
+  });
+}
+
+function _manifestCounts(manifest){
+  const todos = manifest && manifest.todos && Array.isArray(manifest.todos.items) ? manifest.todos.items : [];
+  return {
+    todos: todos.length,
+    artifacts: Array.isArray(manifest&&manifest.artifacts) ? manifest.artifacts.length : 0,
+    references: Array.isArray(manifest&&manifest.references) ? manifest.references.length : 0,
+    turns: Array.isArray(manifest&&manifest.turns) ? manifest.turns.length : 0,
+  };
+}
+
+function applySessionManifestDelta(delta){
+  if(!delta||typeof delta!=='object'||!S.session||!S.session.session_id) return false;
+  if(delta.session_id && delta.session_id !== S.session.session_id) return false;
+  if(delta.sequence!==undefined){
+    const seqKey = `${delta.stream_id||''}:${delta.sequence}`;
+    S._manifestDeltaSequences = S._manifestDeltaSequences || new Set();
+    if(S._manifestDeltaSequences.has(seqKey)) return false;
+    S._manifestDeltaSequences.add(seqKey);
+  }
+  if(!_sessionManifest || _sessionManifestSid !== S.session.session_id){
+    _sessionManifest = {
+      session_id: S.session.session_id,
+      workspace: S.session.workspace || '',
+      todos: {items:[]},
+      artifacts: [],
+      references: [],
+      turns: [],
+      counts: {todos:0, artifacts:0, references:0, turns:0},
+    };
+    _sessionManifestSid = S.session.session_id;
+  }
+  const turnKey = _normalizeDeltaTurnKey(delta);
+  S._lastManifestDeltaTurnKey = turnKey;
+  const incomingTurns = Array.isArray(delta.turns) ? delta.turns : (turnKey ? [{
+    turn_key: turnKey,
+    artifacts: delta.artifacts || [],
+    references: delta.references || [],
+    ...(delta.todos ? {todo_snapshot: delta.todos} : {}),
+  }] : []);
+  if(delta.todos && Array.isArray(delta.todos.items)){
+    _sessionManifest.todos = _cloneManifestValue(delta.todos);
+  }
+  _sessionManifest.artifacts = _mergeManifestRows(_sessionManifest.artifacts, delta.artifacts);
+  _sessionManifest.references = _mergeManifestRows(_sessionManifest.references, delta.references);
+  _sessionManifest.turns = _mergeManifestTurns(_sessionManifest.turns, incomingTurns);
+  _sessionManifest.live = delta.stream_id ? {stream_id: delta.stream_id, source:'sse'} : _sessionManifest.live;
+  _sessionManifest.counts = _manifestCounts(_sessionManifest);
+  renderSessionInspector();
+  return true;
+}
+
+function getTurnArtifacts(turnKey){
+  const manifest = _manifestForActiveSession();
+  if(!manifest||!Array.isArray(manifest.turns)||!turnKey) return [];
+  const turn = manifest.turns.find(row=>row&&row.turn_key===turnKey);
+  return turn&&Array.isArray(turn.artifacts) ? turn.artifacts : [];
+}
+
+function renderTurnArtifacts(turnKey, root){
+  if(!root) return;
+  const items = getTurnArtifacts(turnKey);
+  if(!items.length){
+    root.remove();
+    return;
+  }
+  root.innerHTML = `<div class="turn-artifacts-label">${esc(_workspaceInspectorLabel('turn_artifacts_label', 'Files changed this turn'))}</div>`+
+    `<div class="turn-artifacts-list">${items.map(item=>{
+      const path = item.path || '';
+      const source = item.source_tool || '';
+      const disabled = item.preview && item.preview.previewable === false;
+      return `<button type="button" class="turn-artifact-chip${disabled?' is-disabled':''}" data-path="${esc(path)}"${disabled?' disabled':''}>${esc(path)}${source?`<span>${esc(source)}</span>`:''}</button>`;
+    }).join('')}</div>`;
+  root.querySelectorAll('.turn-artifact-chip:not(.is-disabled)').forEach(btn=>{
+    btn.onclick=()=>openArtifactPath(btn.dataset.path||'');
+  });
+}
+
+function _inspectorFileMeta(item){
+  const preview = item && item.preview;
+  if(!preview) return '';
+  if(preview.kind === 'dir') return _workspaceInspectorLabel('workspace_ref_dir', 'directory');
+  if(!preview.in_workspace) return _workspaceInspectorLabel('workspace_outside_workspace', 'outside workspace');
+  if(preview.exists === false) return _workspaceInspectorLabel('workspace_file_missing', 'not found');
+  if(preview.previewable) return _workspaceInspectorLabel('workspace_preview_ready', 'preview');
+  return '';
+}
+
+function _renderInspectorFileList(root, items, emptyKey, emptyFallback, onClickAttr){
+  if(!root) return;
+  if(!S.session){
+    root.innerHTML = `<div class="workspace-inspector-empty">${esc(_workspaceInspectorLabel('workspace_inspector_no_session', 'Open a conversation to inspect session files.'))}</div>`;
+    return;
+  }
+  if(!items.length){
+    root.innerHTML = `<div class="workspace-inspector-empty">${esc(_workspaceInspectorLabel(emptyKey, emptyFallback))}</div>`;
+    return;
+  }
+  root.innerHTML = items.map(item=>{
+    const path = item.path || '';
+    const metaBits = [item.source_tool || '', _inspectorFileMeta(item)].filter(Boolean);
+    const previewable = !!(item.preview && item.preview.previewable);
+    const cls = previewable ? 'workspace-inspector-item' : 'workspace-inspector-item is-disabled';
+    const onclick = previewable ? ` ${onClickAttr}="${esc(path)}"` : '';
+    return `<button type="button" class="${cls}" data-path="${esc(path)}"${onclick}><div class="workspace-inspector-path">${esc(path)}</div><div class="workspace-inspector-meta">${esc(metaBits.join(' · '))}</div></button>`;
+  }).join('');
+}
+
+function renderSessionTasks(){
+  const root = $('workspaceTasks');
+  const count = $('workspaceTasksCount');
+  const manifest = _manifestForActiveSession();
+  const items = manifest && manifest.todos && Array.isArray(manifest.todos.items) ? manifest.todos.items : [];
+  if(count) count.textContent = String(items.length);
+  if(!root) return;
+  if(!S.session){
+    root.innerHTML = `<div class="workspace-inspector-empty">${esc(_workspaceInspectorLabel('workspace_inspector_no_session', 'Open a conversation to inspect session files.'))}</div>`;
+    return;
+  }
+  if(!items.length){
+    root.innerHTML = `<div class="workspace-inspector-empty">${esc(_workspaceInspectorLabel('todos_no_active', 'No active task list in this session.'))}</div>`;
+    return;
+  }
+  const statusIcon = {pending:'□', in_progress:'◔', completed:'✓', cancelled:'✕', unknown:'·'};
+  const statusColor = {pending:'var(--muted)', in_progress:'var(--blue)', completed:'rgba(100,200,100,.8)', cancelled:'rgba(200,100,100,.5)', unknown:'var(--muted)'};
+  root.innerHTML = items.map(task=>{
+    const status = String(task.status || '').toLowerCase();
+    const done = status === 'completed';
+    const titleCls = done ? 'workspace-task-title is-done' : 'workspace-task-title';
+    return `<div class="workspace-task-item"><span class="workspace-task-status" style="color:${statusColor[status]||statusColor.unknown}">${statusIcon[status]||statusIcon.unknown}</span><div class="workspace-task-body"><div class="${titleCls}">${esc(task.content || '')}</div><div class="workspace-task-sub">${esc((task.id || '') + (status ? ' · ' + status : ''))}</div></div></div>`;
+  }).join('');
+}
+
+function renderSessionArtifacts(){
+  const root = $('workspaceArtifacts');
+  const count = $('workspaceArtifactsCount');
+  const manifest = _manifestForActiveSession();
+  const items = manifest && Array.isArray(manifest.artifacts) ? manifest.artifacts : collectSessionArtifacts().map(row=>({
+    path: row.path,
+    source_tool: row.source || row.kind || 'session',
+    preview: {previewable: true, in_workspace: true, exists: true, kind: 'file'},
+  }));
+  if(count) count.textContent = String(items.length);
+  _renderInspectorFileList(
+    root,
+    items,
+    'workspace_artifacts_empty',
+    'No artifacts detected yet. Files created or edited during this session will appear here.',
+    'onclick',
+  );
+  if(root){
+    root.querySelectorAll('.workspace-inspector-item:not(.is-disabled)').forEach(btn=>{
+      btn.onclick = ()=> openArtifactPath(btn.dataset.path || btn.getAttribute('data-path'));
+    });
+  }
+}
+
+function renderSessionReferences(){
+  const root = $('workspaceReferences');
+  const count = $('workspaceReferencesCount');
+  const manifest = _manifestForActiveSession();
+  const items = manifest && Array.isArray(manifest.references) ? manifest.references : [];
+  if(count) count.textContent = String(items.length);
+  _renderInspectorFileList(
+    root,
+    items,
+    'workspace_references_empty',
+    'No referenced files yet. Files read or searched during this session will appear here.',
+    'onclick',
+  );
+  if(root){
+    root.querySelectorAll('.workspace-inspector-item:not(.is-disabled)').forEach(btn=>{
+      btn.onclick = ()=> openInspectorReferencePath(btn.dataset.path || btn.getAttribute('data-path'));
+    });
+  }
+}
+
+function renderSessionInspector(){
+  renderSessionTasks();
+  renderSessionArtifacts();
+  renderSessionReferences();
+}
+
+async function openInspectorReferencePath(path){
+  if(!path) return;
+  const manifest = _manifestForActiveSession();
+  const row = (manifest && manifest.references || []).find(item=>item.path === path);
+  const previewable = row && row.preview && row.preview.previewable;
+  if(!previewable){
+    setStatus(_workspaceInspectorLabel('workspace_preview_unavailable', 'Preview unavailable for this path.'));
+    return;
+  }
+  switchWorkspacePanelTab('files');
+  await openArtifactPath(path);
+}
+
+function clearSessionManifest(){
+  _sessionManifest = null;
+  _sessionManifestSid = null;
+  if(typeof renderSessionInspector==='function') renderSessionInspector();
+}
+
+window.HermesSessionInspector = {
+  manifest: () => _manifestForActiveSession(),
+  refresh: () => loadSessionManifest(),
+  clear: () => clearSessionManifest(),
+  applyDelta: (delta) => applySessionManifestDelta(delta),
+  getTurnArtifacts: (turnKey) => getTurnArtifacts(turnKey),
+  renderTurnArtifacts: (turnKey, root) => renderTurnArtifacts(turnKey, root),
+};
 
 const ARTIFACT_IGNORE_RE = /(^|\/)(?:\.git|\.hg|\.svn|node_modules|\.venv|venv|__pycache__|dist|build|\.next|\.cache)(?:\/|$)/;
 // Canonical Hermes mutators plus MCP filesystem aliases that can create/edit files.
@@ -241,23 +599,6 @@ function collectSessionArtifacts(){
   return items.slice(0, 50);
 }
 
-function renderSessionArtifacts(){
-  const root = $('workspaceArtifacts');
-  const count = $('workspaceArtifactsCount');
-  if(!root) return;
-  const items = collectSessionArtifacts();
-  if(count) count.textContent = String(items.length);
-  if(!S.session){
-    root.innerHTML = '<div class="workspace-artifact-empty">Open a conversation to see files changed in this session.</div>';
-    return;
-  }
-  if(!items.length){
-    root.innerHTML = '<div class="workspace-artifact-empty">No artifacts detected yet. Files created or edited during this session will appear here.</div>';
-    return;
-  }
-  root.innerHTML = items.map(item => `<button type="button" class="workspace-artifact-item" data-artifact-path="${esc(item.path)}" onclick="openArtifactPath(this.dataset.artifactPath)"><div class="workspace-artifact-path">${esc(item.path)}</div><div class="workspace-artifact-meta">${esc(item.source || 'session')}</div></button>`).join('');
-}
-
 async function _workspacePathExists(path){
   if(!S.session||!path) return false;
   const parts=String(path).split('/').filter(Boolean);
@@ -296,8 +637,7 @@ async function loadDir(path){
     const data=await api(`/api/list?session_id=${encodeURIComponent(sessionId)}&path=${encodeURIComponent(path)}`);
     if(!S.session||S.session.session_id!==sessionId)return;
     S.entries=data.entries||[];renderBreadcrumb();renderFileTree();
-    // #2673 — refresh Artifacts tab when its source data (the file tree) updates.
-    if(typeof renderSessionArtifacts==='function') renderSessionArtifacts();
+    if(_workspacePanelActiveTab !== 'files' && typeof scheduleRefreshSessionManifest==='function') scheduleRefreshSessionManifest();
     // Pre-fetch contents of restored expanded dirs so they render without a second click
     // (parallelized — avoids serial waterfall when multiple dirs are expanded)
     if(!path||path==='.'){

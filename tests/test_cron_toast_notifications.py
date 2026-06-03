@@ -148,7 +148,8 @@ def test_cron_polling_suppresses_toasts_but_keeps_unread_badges():
 
     assert "c.toast_notifications !== false" in body
     assert "showToast(t('cron_completion_status'" in body
-    assert "if(c.job_id) _cronNewJobIds.add(String(c.job_id));" in body
+    assert "_cronNewJobIds.add(String(c.job_id))" in body
+    assert "_cronNewJobIds.add(composite)" in body
 
 
 def test_cron_toast_i18n_keys_exist():

@@ -60,7 +60,7 @@ def test_list_jobs_all_profiles_grouped(cron_homes):
             assert "storage_profile" not in job
 
 
-def test_recent_all_profiles_includes_owner(cron_homes, monkeypatch):
+def test_recent_all_profiles_includes_profile(cron_homes, monkeypatch):
     import time
 
     from integration.crons.listing import recent_completions_all_profiles
@@ -72,6 +72,6 @@ def test_recent_all_profiles_includes_owner(cron_homes, monkeypatch):
     alice_jobs.write_text(json.dumps(data), encoding="utf-8")
 
     payload = recent_completions_all_profiles(since=time.time() - 60)
-    assert any(c["owner_profile"] == "alice" and c["job_id"] == "a1" for c in payload["completions"])
+    assert any(c["profile"] == "alice" and c["job_id"] == "a1" for c in payload["completions"])
     alice_row = next(c for c in payload["completions"] if c["job_id"] == "a1")
-    assert alice_row.get("profile") == "bob"
+    assert alice_row.get("profile") == "alice"

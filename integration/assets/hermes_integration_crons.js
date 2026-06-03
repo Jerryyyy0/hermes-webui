@@ -6,13 +6,18 @@
 
   const shared = () => window.HermesCronShared || {};
   const T = (key, ...args) => (typeof t === 'function' ? t(key, ...args) : key);
+  const tr = (key, fallback) => {
+    const value = T(key);
+    return value && value !== key ? value : fallback;
+  };
 
   let _flat = [];
   let _selected = null;
   let _mode = 'empty';
   let _profiles = [];
   let _profilesCache = null;
-  const _unread = new Set();
+  let _selectedSkills = [];
+  const _unread = new Map();
 
   function $(id) {
     return document.getElementById(id);
@@ -24,6 +29,47 @@
 
   function jobKey(ownerProfile, jobId) {
     return `${ownerProfile}:${jobId}`;
+  }
+
+  function unreadCountForKey(key) {
+    return Number(_unread.get(key) || 0);
+  }
+
+  function updateUnreadBadge() {
+    const count = Array.from(_unread.values()).reduce((sum, value) => sum + Number(value || 0), 0);
+    ['integrationCronsRailBtn', 'integrationCronsSidebarBtn'].forEach(id => {
+      const tab = $(id);
+      if (!tab) return;
+      let badge = tab.querySelector('.cron-badge');
+      if (count > 0) {
+        if (!badge) {
+          badge = document.createElement('span');
+          badge.className = 'cron-badge';
+          tab.style.position = 'relative';
+          tab.appendChild(badge);
+        }
+        badge.textContent = count > 9 ? '9+' : String(count);
+        badge.style.display = '';
+      } else if (badge) {
+        badge.style.display = 'none';
+      }
+    });
+  }
+
+  async function refreshUnreadState() {
+    try {
+      const data = await api('/api/integration/crons/unread');
+      _unread.clear();
+      for (const row of data.jobs || []) {
+        const owner = row.profile || '';
+        const id = row.job_id || '';
+        const count = Number(row.unread_count || 0);
+        if (owner && id && count > 0) _unread.set(jobKey(owner, id), count);
+      }
+      updateUnreadBadge();
+    } catch (_) {
+      updateUnreadBadge();
+    }
   }
 
   function panelExpandKey(ownerProfile, jobId, suffix) {
@@ -77,10 +123,9 @@
     return _flat.filter(row => {
       const job = row.job || {};
       if (profileFilter && row.ownerProfile !== profileFilter) return false;
-      if (statusFilter === 'enabled' && job.enabled === false) return false;
-      if (statusFilter === 'disabled' && job.enabled !== false) return false;
+      if (statusFilter && job.execution_bucket !== statusFilter) return false;
       if (!q) return true;
-      const hay = [job.name, job.id, row.ownerProfile, job.profile, job.schedule].join(' ').toLowerCase();
+      const hay = [job.name, job.id, row.ownerProfile, job.schedule].join(' ').toLowerCase();
       return hay.includes(q);
     });
   }
@@ -104,17 +149,17 @@
       item.className = 'cron-item';
       item.dataset.key = key;
       const status = statusMeta ? statusMeta(job) : { listClass: '', label: '' };
-      const isNewRun = _unread.has(key);
+      const unreadCount = unreadCountForKey(key);
+      const isNewRun = unreadCount > 0;
       const isAgentMode = !job.no_agent;
-      const execLabel = profileLabel ? profileLabel(job.profile) : (job.profile || T('cron_profile_server_default'));
-      const execTitle = profileTitle ? profileTitle(job.profile) : '';
+      const profileLabelText = profileLabel ? profileLabel(row.ownerProfile) : row.ownerProfile;
+      const profileTitleText = profileTitle ? profileTitle(row.ownerProfile) : '';
       item.innerHTML = `
         <div class="cron-header">
-          ${isNewRun ? '<span class="cron-new-dot" title="New run"></span>' : ''}
+          ${isNewRun ? `<span class="cron-new-dot" title="${esc(unreadCount > 1 ? `${unreadCount} new runs` : 'New run')}"></span>` : ''}
           ${isAgentMode ? '<span class="cron-agent-badge" title="Agent mode">🤖</span>' : ''}
           <span class="cron-name" title="${esc(job.name || job.id)}">${esc(job.name || job.id)}</span>
-          <span class="cron-profile-badge integration-cron-owner-badge" title="${esc(T('integration_cron_owner_profile') || 'Owner profile')}: ${esc(row.ownerProfile)}">${esc(row.ownerProfile)}</span>
-          <span class="cron-profile-badge" title="${esc(execTitle)}">${esc(execLabel)}</span>
+          <span class="cron-profile-badge integration-cron-owner-badge" title="${esc(profileTitleText)}">${esc(profileLabelText)}</span>
           <span class="cron-status ${esc(status.listClass)}">${esc(status.label)}</span>
         </div>`;
       item.onclick = () => openDetail(row);
@@ -154,11 +199,120 @@
     if (current) sel.value = current;
   }
 
-  function ownerProfileOptions(selected) {
+  function cronProfileOptions(selected) {
     const current = (selected || '').toString().trim();
-    return _profiles
-      .map(name => `<option value="${esc(name)}"${current === name ? ' selected' : ''}>${esc(name)}</option>`)
-      .join('');
+    const seen = new Set(['']);
+    const opts = [
+      `<option value="" disabled${current ? '' : ' selected'}>${esc(tr('cron_profile_required_placeholder', 'Select profile'))}</option>`,
+    ];
+    for (const name of _profiles) {
+      if (!name || seen.has(name)) continue;
+      seen.add(name);
+      opts.push(`<option value="${esc(name)}"${current === name ? ' selected' : ''}>${esc(name)}</option>`);
+    }
+    if (current && !seen.has(current)) {
+      opts.push(`<option value="${esc(current)}" selected>${esc(current)} (${esc(T('not_available') || 'not available')})</option>`);
+    }
+    return opts.join('');
+  }
+
+  function profileRecord(name) {
+    const target = String(name || '').trim();
+    return (_profilesCache || []).find(p => String(p?.name || '').trim() === target) || null;
+  }
+
+  function skillName(skill) {
+    if (typeof skill === 'string') return skill.trim();
+    if (!skill || typeof skill !== 'object') return '';
+    return String(skill.name || skill.dir_name || '').trim();
+  }
+
+  function skillsForProfile(profile) {
+    const record = profileRecord(profile);
+    const skills = Array.isArray(record?.skills) ? record.skills : [];
+    return skills
+      .map(skill => ({ raw: skill, name: skillName(skill) }))
+      .filter(skill => skill.name);
+  }
+
+  function renderSkillTags() {
+    const wrap = $('integrationCronFormSkillTags');
+    if (!wrap) return;
+    wrap.innerHTML = '';
+    for (const name of _selectedSkills) {
+      const tag = document.createElement('span');
+      tag.className = 'skill-tag';
+      tag.dataset.skill = name;
+      const rm = document.createElement('span');
+      rm.className = 'remove-tag';
+      rm.textContent = '×';
+      rm.onclick = () => {
+        _selectedSkills = _selectedSkills.filter(s => s !== name);
+        tag.remove();
+      };
+      tag.appendChild(document.createTextNode(name));
+      tag.appendChild(rm);
+      wrap.appendChild(tag);
+    }
+  }
+
+  function bindSkillPicker(isEdit) {
+    renderSkillTags();
+    const search = $('integrationCronFormSkillSearch');
+    const dropdown = $('integrationCronFormSkillDropdown');
+    const profileSelect = $('integrationCronFormProfile');
+    if (!search || !dropdown) return;
+    if (isEdit) return;
+    search.oninput = () => {
+      const profile = (profileSelect?.value || '').trim();
+      const q = search.value.trim().toLowerCase();
+      if (!profile || !q) {
+        dropdown.style.display = 'none';
+        return;
+      }
+      const matches = skillsForProfile(profile)
+        .filter(skill => {
+          const raw = skill.raw || {};
+          const category = typeof raw === 'object' ? String(raw.category || '') : '';
+          return (
+            !_selectedSkills.includes(skill.name) &&
+            (skill.name.toLowerCase().includes(q) || category.toLowerCase().includes(q))
+          );
+        })
+        .slice(0, 8);
+      if (!matches.length) {
+        dropdown.style.display = 'none';
+        return;
+      }
+      dropdown.innerHTML = '';
+      for (const skill of matches) {
+        const raw = skill.raw || {};
+        const category = typeof raw === 'object' ? String(raw.category || '') : '';
+        const opt = document.createElement('div');
+        opt.className = 'skill-opt';
+        opt.textContent = skill.name + (category ? ' (' + category + ')' : '');
+        opt.onclick = () => {
+          _selectedSkills.push(skill.name);
+          renderSkillTags();
+          search.value = '';
+          dropdown.style.display = 'none';
+        };
+        dropdown.appendChild(opt);
+      }
+      dropdown.style.display = '';
+    };
+    search.onblur = () =>
+      setTimeout(() => {
+        dropdown.style.display = 'none';
+      }, 150);
+    if (profileSelect) {
+      profileSelect.onchange = () => {
+        _selectedSkills = [];
+        renderSkillTags();
+        search.value = '';
+        dropdown.style.display = 'none';
+      };
+    }
   }
 
   async function load() {
@@ -167,6 +321,7 @@
     try {
       const data = await api('/api/crons?all_profiles=1');
       _flat = flattenGroups(data);
+      await refreshUnreadState();
       renderList();
       await loadProfilesForFilters();
       if (_selected) {
@@ -295,8 +450,8 @@
               ? ''
               : 'default';
     const script = job.script || '';
-    const execLabel = profileLabel ? profileLabel(job.profile) : job.profile || T('cron_profile_server_default');
-    const execTitle = profileTitle ? profileTitle(job.profile) : '';
+    const profileLabelText = profileLabel ? profileLabel(row.ownerProfile) : row.ownerProfile;
+    const profileTitleText = profileTitle ? profileTitle(row.ownerProfile) : '';
     const lastError = job.last_error
       ? `<div class="detail-row"><div class="detail-row-label">${esc(T('error_prefix').replace(/:\s*$/, ''))}</div><div class="detail-row-value" style="color:var(--accent-text)">${esc(job.last_error)}</div></div>`
       : '';
@@ -311,7 +466,7 @@
       <div class="main-view-content">
         <div class="detail-card">
           <div class="detail-card-title">${esc(T('cron_status_active').replace(/./, c => c.toUpperCase()))}</div>
-          <div class="detail-row"><div class="detail-row-label">${esc(T('integration_cron_owner_profile') || 'Owner profile')}</div><div class="detail-row-value"><span class="detail-badge active">${esc(row.ownerProfile)}</span></div></div>
+          <div class="detail-row"><div class="detail-row-label">${esc(T('cron_profile_label') || 'Profile')}</div><div class="detail-row-value"><span class="detail-badge active" title="${esc(profileTitleText)}">${esc(profileLabelText)}</span></div></div>
           <div class="detail-row"><div class="detail-row-label">Status</div><div class="detail-row-value"><span class="detail-badge ${esc(status.detailClass)}">${esc(status.label)}</span></div></div>
           <div class="detail-row"><div class="detail-row-label">Schedule</div><div class="detail-row-value"><code>${esc(schedule)}</code></div></div>
           <div class="detail-row"><div class="detail-row-label">${esc(T('cron_next'))}</div><div class="detail-row-value">${esc(nextRun)}</div></div>
@@ -319,7 +474,6 @@
           <div class="detail-row"><div class="detail-row-label">Deliver</div><div class="detail-row-value">${esc(deliver)}</div></div>
           <div class="detail-row"><div class="detail-row-label">Mode</div><div class="detail-row-value"><span class="detail-badge" id="integrationCronJobMode">${esc(cronJobMode)}</span>${modelProvider ? ` <code>${modelProvider}</code>` : ''}</div></div>
           ${isNoAgent ? `<div class="detail-row"><div class="detail-row-label">No-agent script</div><div class="detail-row-value"><code>${esc(script || '—')}</code></div></div>` : ''}
-          <div class="detail-row"><div class="detail-row-label">${esc(T('cron_profile_label') || 'Execution profile')}</div><div class="detail-row-value"><span class="detail-badge active" title="${esc(execTitle)}">${esc(execLabel)}</span></div></div>
           <div class="detail-row"><div class="detail-row-label">${esc(T('cron_toast_notifications_label') || 'Completion toasts')}</div><div class="detail-row-value"><span class="detail-badge ${toastNotifications ? 'active' : ''}">${esc(toastNotifications ? T('cron_toast_notifications_enabled') || 'Enabled' : T('cron_toast_notifications_disabled') || 'Disabled')}</span></div></div>
           <div class="detail-row"><div class="detail-row-label">Skills</div><div class="detail-row-value">${esc(skills)}</div></div>
           ${lastError}
@@ -331,7 +485,7 @@
           </div>
           <div class="detail-prompt ${promptExpanded ? 'expanded' : ''}">${esc(job.prompt || '')}</div>
         </div>
-        <div class="detail-card ${_unread.has(row.key) ? 'has-new-run' : ''}" id="integrationCronDetailRuns">
+        <div class="detail-card ${unreadCountForKey(row.key) > 0 ? 'has-new-run' : ''}" id="integrationCronDetailRuns">
           <div class="detail-card-title">${esc(T('cron_last_output'))}</div>
           <div style="color:var(--muted);font-size:12px">${esc(T('loading'))}</div>
         </div>
@@ -346,6 +500,17 @@
     loadDetailRuns(row);
     _unread.delete(row.key);
     renderList();
+    updateUnreadBadge();
+    markRead(row);
+  }
+
+  async function markRead(row) {
+    try {
+      await api('/api/integration/crons/unread/read', {
+        method: 'POST',
+        body: JSON.stringify({ profile: row.ownerProfile, job_id: row.job.id }),
+      });
+    } catch (_) {}
   }
 
   async function loadDetailRuns(row) {
@@ -353,7 +518,7 @@
     const ownerProfile = row.ownerProfile;
     try {
       const data = await api(
-        `/api/crons/history?job_id=${encodeURIComponent(jobId)}&owner_profile=${encodeURIComponent(ownerProfile)}&limit=50`
+        `/api/crons/history?job_id=${encodeURIComponent(jobId)}&profile=${encodeURIComponent(ownerProfile)}&limit=50`
       );
       if (!_selected || _selected.job.id !== jobId || _selected.ownerProfile !== ownerProfile) return;
       const card = $('integrationCronDetailRuns');
@@ -435,7 +600,7 @@
     body.innerHTML = `<span style="opacity:.5">${esc(T('loading'))}</span>`;
     try {
       const data = await api(
-        `/api/crons/run?job_id=${encodeURIComponent(row.job.id)}&filename=${encodeURIComponent(filename)}&owner_profile=${encodeURIComponent(row.ownerProfile)}`
+        `/api/crons/run?job_id=${encodeURIComponent(row.job.id)}&filename=${encodeURIComponent(filename)}&profile=${encodeURIComponent(row.ownerProfile)}`
       );
       if (data.error) {
         body.textContent = data.error;
@@ -584,9 +749,8 @@
     const empty = $('integrationCronDetailEmpty');
     if (!body || !title) return;
     const job = row?.job || {};
-    const profileOpts = shared().profileOptions
-      ? shared().profileOptions(job.profile || '')
-      : '';
+    const formProfile = row?.ownerProfile || job.profile || '';
+    const profileOpts = cronProfileOptions(formProfile);
     const deliver = job.deliver || 'local';
     const deliverOpt = (v, l) => `<option value="${v}"${deliver === v ? ' selected' : ''}>${esc(l)}</option>`;
     const toastNotifications = job.toast_notifications !== false;
@@ -596,11 +760,6 @@
     body.innerHTML = `
       <div class="main-view-content">
         <form class="detail-form" id="integrationCronForm">
-          ${!isEdit ? `<div class="detail-form-row">
-            <label for="integrationCronFormOwner">${esc(T('integration_cron_owner_profile') || 'Owner profile')}</label>
-            <select id="integrationCronFormOwner" required>${ownerProfileOptions(row?.ownerProfile || '')}</select>
-            <div class="detail-form-hint">${esc(T('integration_cron_owner_profile_hint') || 'Jobs are stored in this profile cron/jobs.json')}</div>
-          </div>` : ''}
           <div class="detail-form-row">
             <label for="integrationCronFormName">${esc(T('cron_name_label') || 'Name')}</label>
             <input type="text" id="integrationCronFormName" value="${esc(job.name || '')}" placeholder="${esc(T('cron_name_placeholder') || 'Optional')}" autocomplete="off">
@@ -624,9 +783,18 @@
             </select>
           </div>
           <div class="detail-form-row">
-            <label for="integrationCronFormProfile">${esc(T('cron_profile_label') || 'Execution profile')}</label>
-            <select id="integrationCronFormProfile">${profileOpts}</select>
-            <div class="detail-form-hint">${esc(T('cron_profile_server_default_hint') || 'Uses the WebUI server default profile at run time')}</div>
+            <label for="integrationCronFormProfile">${esc(T('cron_profile_label') || 'Profile')}</label>
+            <select id="integrationCronFormProfile" required ${isEdit ? 'disabled' : ''}>${profileOpts}</select>
+            <div class="detail-form-hint">${esc(tr('integration_cron_profile_required_hint', 'Cron Hub jobs are stored and run under this profile; server default is not available here.'))}</div>
+          </div>
+          <div class="detail-form-row">
+            <label for="integrationCronFormSkillSearch">${esc(T('cron_skills_label') || 'Skills')}</label>
+            <div class="skill-picker-wrap">
+              <input type="text" id="integrationCronFormSkillSearch" placeholder="${esc(T('cron_skills_placeholder') || 'Add skills (optional)...')}" autocomplete="off" ${isEdit ? 'disabled' : ''}>
+              <div id="integrationCronFormSkillDropdown" class="skill-picker-dropdown" style="display:none"></div>
+              <div id="integrationCronFormSkillTags" class="skill-picker-tags"></div>
+            </div>
+            ${isEdit ? `<div class="detail-form-hint">${esc(T('cron_skills_edit_hint') || 'Skill list is not editable after creation.')}</div>` : `<div class="detail-form-hint">${esc(tr('integration_cron_skills_profile_hint', 'Skills are loaded from the selected profile.'))}</div>`}
           </div>
           <div class="detail-form-row">
             <label for="integrationCronFormToast">${esc(T('cron_toast_notifications_label') || 'Completion toasts')}</label>
@@ -642,11 +810,13 @@
     if (empty) empty.style.display = 'none';
     _mode = isEdit ? 'edit' : 'create';
     setHeaderButtons(_mode, job);
+    bindSkillPicker(isEdit);
   }
 
   async function openCreateForm() {
     await ensureProfiles();
     _selected = null;
+    _selectedSkills = [];
     renderForm({ row: null, isEdit: false });
   }
 
@@ -654,6 +824,7 @@
     if (!_selected) return;
     await ensureProfiles();
     if (shared().loadProfiles) await shared().loadProfiles();
+    _selectedSkills = Array.isArray(_selected.job?.skills) ? [..._selected.job.skills] : [];
     renderForm({ row: _selected, isEdit: true });
   }
 
@@ -680,16 +851,14 @@
       showErr(T('cron_form_required') || 'Schedule and prompt are required.');
       return;
     }
-    const payload = { name: name || null, schedule, prompt, deliver, toast_notifications: toastNotifications };
-    if (profile) payload.profile = profile;
+    if (!profile) {
+      showErr(tr('cron_profile_required', 'Profile is required.'));
+      return;
+    }
+    const payload = { name: name || null, schedule, prompt, deliver, profile, toast_notifications: toastNotifications };
     try {
       if (_mode === 'create') {
-        const owner = ($('integrationCronFormOwner')?.value || '').trim();
-        if (!owner) {
-          showErr(T('integration_cron_owner_required') || 'Owner profile is required.');
-          return;
-        }
-        payload.owner_profile = owner;
+        if (_selectedSkills.length) payload.skills = _selectedSkills;
         await api('/api/integration/crons/create', { method: 'POST', body: JSON.stringify(payload) });
         if (typeof showToast === 'function') showToast(T('cron_job_created') || 'Job created');
         await load();
@@ -697,7 +866,7 @@
         return;
       }
       if (!_selected) return;
-      payload.owner_profile = _selected.ownerProfile;
+      payload.profile = _selected.ownerProfile;
       payload.job_id = _selected.job.id;
       await api('/api/integration/crons/update', { method: 'POST', body: JSON.stringify(payload) });
       if (typeof showToast === 'function') showToast(T('cron_job_updated') || 'Job updated');
@@ -716,7 +885,7 @@
     try {
       await api('/api/integration/crons/run', {
         method: 'POST',
-        body: JSON.stringify({ job_id: _selected.job.id, owner_profile: _selected.ownerProfile }),
+        body: JSON.stringify({ job_id: _selected.job.id, profile: _selected.ownerProfile }),
       });
       if (typeof showToast === 'function') showToast(T('cron_run_started') || 'Cron run started', 3000);
     } catch (e) {
@@ -729,7 +898,7 @@
     try {
       await api('/api/integration/crons/pause', {
         method: 'POST',
-        body: JSON.stringify({ job_id: _selected.job.id, owner_profile: _selected.ownerProfile }),
+        body: JSON.stringify({ job_id: _selected.job.id, profile: _selected.ownerProfile }),
       });
       await load();
     } catch (e) {
@@ -742,7 +911,7 @@
     try {
       await api('/api/integration/crons/resume', {
         method: 'POST',
-        body: JSON.stringify({ job_id: _selected.job.id, owner_profile: _selected.ownerProfile }),
+        body: JSON.stringify({ job_id: _selected.job.id, profile: _selected.ownerProfile }),
       });
       await load();
     } catch (e) {
@@ -766,7 +935,7 @@
     try {
       await api('/api/integration/crons/delete', {
         method: 'POST',
-        body: JSON.stringify({ job_id: _selected.job.id, owner_profile: _selected.ownerProfile }),
+        body: JSON.stringify({ job_id: _selected.job.id, profile: _selected.ownerProfile }),
       });
       if (typeof showToast === 'function') showToast(T('cron_job_deleted') || 'Job deleted');
       clearDetail();
@@ -777,11 +946,13 @@
   }
 
   function markUnreadFromCompletion(c) {
-    const owner = c.owner_profile || '';
+    const owner = c.profile || '';
     const id = c.job_id || '';
     if (!owner || !id) return;
-    _unread.add(jobKey(owner, id));
+    const key = jobKey(owner, id);
+    _unread.set(key, unreadCountForKey(key) + 1);
     renderList();
+    updateUnreadBadge();
   }
 
   function wireControls() {
@@ -822,4 +993,5 @@
 
   showNav();
   wireControls();
+  refreshUnreadState();
 })();

@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- Session workspace inspector: `GET /api/session/manifest` returns structured todos, artifacts, and referenced files parsed from tool activity; the right panel adds **Tasks**, **Artifacts**, and **Refs** tabs with file preview via the existing workspace preview path. Artifacts outside the session workspace are listed with absolute paths and file metadata, while previews remain scoped to workspace files.
+- Session manifest realtime updates: active chat streams now emit `manifest_delta` SSE events for explicitly parsed todo, artifact, and reference tool activity. The inspector can update during tool execution, while completed and historical sessions still rebuild from `/api/session/manifest`; manifest data now also includes per-turn artifacts so files changed by a specific user turn can be shown under that turn.
+
 ## [v0.51.171] — 2026-05-30 — Release EQ (stage-batch53 — tool-output card badge + Neon opt-in skin)
 
 ### Added

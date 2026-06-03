@@ -98,8 +98,7 @@ def recent_completions_all_profiles(since: float) -> dict[str, Any]:
                                 "status": job.get("last_status", "unknown"),
                                 "completed_at": ts,
                                 "toast_notifications": job.get("toast_notifications") is not False,
-                                "owner_profile": profile_name,
-                                "profile": job.get("profile"),
+                                "profile": profile_name,
                             }
                         )
         except Exception as exc:

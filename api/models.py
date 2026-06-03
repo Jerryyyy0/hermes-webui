@@ -2590,7 +2590,12 @@ def _row_may_need_sidecar_metadata_refresh(session: dict) -> bool:
             or session.get('last_message_at') is None
         )
     )
-    return is_runtime_row or snapshot_missing_sidebar_metadata
+    source = session.get('source_tag') or session.get('source')
+    stale_cron_index_row = bool(
+        (source == 'cron' or str(session.get('session_id') or '').startswith('cron_'))
+        and _sidebar_message_count(session) <= 0
+    )
+    return is_runtime_row or snapshot_missing_sidebar_metadata or stale_cron_index_row
 
 
 def _refresh_index_rows_from_sidecar_metadata(sessions: list[dict]) -> list[dict]:
@@ -4086,23 +4091,36 @@ def delete_cli_session(sid) -> bool:
     """
     import os
     try:
-        import sqlite3
-    except ImportError:
-        return False
-
-    try:
         from api.profiles import get_active_hermes_home
         hermes_home = Path(get_active_hermes_home()).expanduser().resolve()
     except Exception:
         hermes_home = Path(os.getenv('HERMES_HOME', str(HOME / '.hermes'))).expanduser().resolve()
     db_path = hermes_home / 'state.db'
+    return _delete_state_db_session_rows(db_path, sid)
+
+
+def _delete_state_db_session_rows(db_path: Path, sid: str) -> bool:
+    """Delete one Hermes session from a specific state.db (messages + session row)."""
+    try:
+        import sqlite3
+    except ImportError:
+        return False
+
+    db_path = Path(db_path)
     if not db_path.exists():
+        return False
+
+    sid = str(sid or "").strip()
+    if not sid:
         return False
 
     try:
         with closing(sqlite3.connect(str(db_path))) as conn:
             cur = conn.cursor()
-            cur.execute("DELETE FROM messages WHERE session_id = ?", (sid,))
+            try:
+                cur.execute("DELETE FROM messages WHERE session_id = ?", (sid,))
+            except sqlite3.OperationalError:
+                pass
             cur.execute("DELETE FROM sessions WHERE id = ?", (sid,))
             conn.commit()
             return cur.rowcount > 0

@@ -14,6 +14,7 @@ export SKILLHUB_URL=http://127.0.0.1:8000   # optional; SkillHub market only (se
 - **Profile enrich** — `GET /api/profiles` adds nested `info` (from `info.json`) and full `skills` array per profile. UI via `hermes_profiles.js` (logo picker, edit, create).
 - **Cross-profile cron** — Cron Hub and grouped cron APIs across profiles.
 - **SkillHub** — UI and `/api/skillhub/*` routes are active only when `SKILLHUB_URL` is also set.
+- **Egress policy (iptables)** — gated API to apply iptables open/whitelist policies (see below). **Off by default**; requires `HERMES_EGRESS_POLICY_ENABLED=1`.
 
 If you use a local HTTP proxy (`HTTP_PROXY`, e.g. Clash), add the SkillHub host to `NO_PROXY` (or rely on `ensure_skillhub_no_proxy()` at server startup, which appends the hostname from `SKILLHUB_URL`). Without this, `/api/skillhub/*` may return 502 while `curl` to the same upstream works.
 
@@ -55,11 +56,47 @@ Cron and Kanban profile pickers still show profile `name` only (by design).
 |--------|------|---------|
 | GET | `/api/crons?all_profiles=1` | Grouped jobs: `{ profiles: [{ profile, jobs }] }` |
 | GET | `/api/crons/recent?all_profiles=1&since=` | Cross-profile completions + session materialize |
-| GET | `/api/crons/history`, `/run`, `/output` | Optional `?owner_profile=` (storage profile) |
-| POST | `/api/integration/crons/create` | Create in `owner_profile` store (body: `owner_profile`, optional execution `profile`) |
-| POST | `/api/integration/crons/update\|delete\|run\|pause\|resume` | Same; all require `owner_profile` |
+| GET | `/api/crons/history`, `/run`, `/output` | Optional `?profile=` (storage and execution profile) |
+| GET | `/api/integration/crons/unread` | Cron Hub unread run counts across profiles |
+| POST | `/api/integration/crons/create` | Create in the selected `profile` store and run under that same Profile (body: required `profile`, optional `skills`) |
+| POST | `/api/integration/crons/update\|delete\|run\|pause\|resume` | Same; all require `profile` + `job_id`; delete also clears that job's materialized sessions, state rows, and `cron/output/<job_id>/` history |
+| POST | `/api/integration/crons/unread/read` | Mark one Cron Hub job's current runs as read (`profile` + `job_id`) |
 
-UI: **Cron Hub** rail/sidebar (`integrationCrons`) via `hermes_integration_crons.js`. Upstream **Tasks** panel unchanged (single active profile). Global cron polling uses `all_profiles=1` when the flag is on.
+UI: **Cron Hub** rail/sidebar (`integrationCrons`) via `hermes_integration_crons.js`. Upstream **Tasks** panel unchanged (single active profile). Cron Hub creation requires one explicit Profile, stores the task there, runs it there, and can attach skills from that Profile. Global cron polling uses `all_profiles=1` when the flag is on.
+
+### Egress policy (iptables)
+
+This is an **operator feature** that can modify the host firewall. It is **disabled by default**.
+
+Enable explicitly:
+
+```bash
+export HERMES_INTEGRATION=1
+export HERMES_EGRESS_POLICY_ENABLED=1
+```
+
+Optional overrides:
+
+| Env | Default | Meaning |
+|-----|---------|---------|
+| `HERMES_EGRESS_POLICY_RULES_PATH` | `/etc/iptables/rules.v4` | Where to write the iptables-restore rules file before applying |
+
+API:
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/api/integration/egress/policy` | Return `iptables -L -n` output |
+| POST | `/api/integration/egress/policy` | Apply `open` or `whitelist` policy via `iptables-restore` |
+
+POST body:
+
+- `{"policy_type":"open"}`
+- `{"policy_type":"whitelist","allowed_ips":["1.2.3.4","10.0.0.0/24"],"include_request_ip":true}`
+
+Notes:
+
+- `include_request_ip` is **opt-in**. The server will **not** silently add the request IP to the allowlist.
+- `allowed_ips` accepts IP or CIDR; invalid entries are rejected.
 
 ## 维护约束
 

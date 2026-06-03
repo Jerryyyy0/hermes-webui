@@ -1641,7 +1641,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       S.toolCalls=INFLIGHT[activeSid].toolCalls;
       persistInflightState();
 
-      if(S.session&&S.session.session_id===activeSid&&typeof scheduleRenderSessionArtifacts==='function') scheduleRenderSessionArtifacts();
       if(!S.session||S.session.session_id!==activeSid) return;
       // NOTE: don't removeThinking() here — keep the thinking card visible
       // above the tool card so the turn reads top-to-bottom as:
@@ -1696,11 +1695,40 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(d.duration!==undefined) tc.duration=d.duration;
       S.toolCalls=inflight.toolCalls;
       persistInflightState();
-      if(S.session&&S.session.session_id===activeSid&&typeof scheduleRenderSessionArtifacts==='function') scheduleRenderSessionArtifacts();
       if(!S.session||S.session.session_id!==activeSid) return;
       appendLiveToolCard(tc);
       snapshotLiveTurn();
       scrollIfPinned();
+    });
+
+    source.addEventListener('manifest_delta',e=>{
+      try{
+        const d=JSON.parse(e.data||'{}');
+        if((d.session_id||activeSid)!==activeSid) return;
+        const applied = window.HermesSessionInspector
+          && typeof window.HermesSessionInspector.applyDelta === 'function'
+          && window.HermesSessionInspector.applyDelta(d);
+        if(applied){
+          const turnKey=S._lastManifestDeltaTurnKey;
+          if(turnKey && window.HermesSessionInspector && typeof window.HermesSessionInspector.renderTurnArtifacts==='function'){
+            document.querySelectorAll('.assistant-turn').forEach(turn=>{
+              if(turn.dataset.turnKey!==turnKey) return;
+              const blocks=typeof _assistantTurnBlocks==='function'?_assistantTurnBlocks(turn):turn;
+              let host=turn.querySelector('.turn-artifacts');
+              if(!host){
+                host=document.createElement('div');
+                host.className='turn-artifacts';
+                blocks.appendChild(host);
+              }
+              window.HermesSessionInspector.renderTurnArtifacts(turnKey, host);
+            });
+          }
+          if(!S.busy && typeof renderMessages==='function') renderMessages({preserveScroll:true});
+          else if(typeof renderSessionInspector==='function') renderSessionInspector();
+        }
+      }catch(err){
+        console.warn('manifest_delta', err);
+      }
     });
 
     source.addEventListener('approval',e=>{
@@ -1929,7 +1957,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           } else {
             S.toolCalls=hasMessageToolMetadata?[]:S.toolCalls.map(tc=>({...tc,done:true}));
           }
-          if(typeof renderSessionArtifacts==='function') renderSessionArtifacts();
+          if(typeof scheduleRefreshSessionManifest==='function') scheduleRefreshSessionManifest();
+          else if(typeof renderSessionArtifacts==='function') renderSessionArtifacts();
           if(typeof _copyActivityDisclosureState==='function'&&lastAsst){
             const assistantIdx=S.messages.indexOf(lastAsst);
             if(assistantIdx>=0) _copyActivityDisclosureState('live:'+streamId, 'assistant:'+assistantIdx);

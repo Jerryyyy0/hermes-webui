@@ -8,6 +8,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import Any
 
 from api.config import (
@@ -16,6 +17,7 @@ from api.config import (
     STREAMS_LOCK,
     STREAM_LAST_EVENT_ID,
     STREAM_LIVE_TOOL_CALLS,
+    STREAM_LIVE_MANIFEST,
     STREAM_PARTIAL_TEXT,
     STREAM_REASONING_TEXT,
     _get_session_agent_lock,
@@ -220,6 +222,7 @@ def _run_gateway_chat_streaming(
         STREAM_PARTIAL_TEXT[stream_id] = ""
         STREAM_REASONING_TEXT[stream_id] = ""
         STREAM_LIVE_TOOL_CALLS[stream_id] = []
+        STREAM_LIVE_MANIFEST[stream_id] = {}
 
     def put_gateway_event(event, data):
         if cancel_event.is_set() and event not in ("cancel", "error", "apperror"):
@@ -236,6 +239,56 @@ def _run_gateway_chat_streaming(
             q.put_nowait((event, data))
         except Exception:
             logger.debug("Failed to put gateway event to queue")
+
+    manifest_delta_sequence = [0]
+
+    def emit_gateway_manifest_delta(event_payload: dict, event_name: str) -> None:
+        try:
+            from api.session_manifest import (
+                ToolEvent,
+                extract_manifest_delta_from_tool_event,
+                merge_manifest_delta,
+            )
+            manifest_delta_sequence[0] += 1
+            is_complete = event_name == "tool_complete"
+            tool_event = ToolEvent(
+                name=str(event_payload.get("name") or ""),
+                args=event_payload.get("args") if isinstance(event_payload.get("args"), dict) else {},
+                result=str(event_payload.get("preview") or "") if is_complete else "",
+                tid=str(event_payload.get("tid") or ""),
+                status="error" if event_payload.get("is_error") else ("completed" if is_complete else "in_progress"),
+                source="gateway",
+            )
+            delta = extract_manifest_delta_from_tool_event(
+                tool_event,
+                Path(str(workspace)),
+                session_id=session_id,
+                stream_id=stream_id,
+                turn_key=f"live:{stream_id}",
+                sequence=manifest_delta_sequence[0],
+                source_kind="tool_complete" if is_complete else "tool_start",
+            )
+            if not (delta.get("todos") or delta.get("artifacts") or delta.get("references")):
+                return
+            with STREAMS_LOCK:
+                live_manifest = merge_manifest_delta(
+                    STREAM_LIVE_MANIFEST.get(stream_id) or {
+                        "session_id": session_id,
+                        "workspace": str(workspace),
+                        "todos": {"items": []},
+                        "artifacts": [],
+                        "references": [],
+                        "turns": [],
+                    },
+                    delta,
+                    scope="active_stream",
+                )
+                STREAM_LIVE_MANIFEST[stream_id] = live_manifest
+                if delta.get("todos") and isinstance(live_manifest.get("todos"), dict):
+                    delta["todos"] = live_manifest["todos"]
+            put_gateway_event("manifest_delta", delta)
+        except Exception:
+            logger.debug("Failed to emit gateway manifest_delta for %s", event_payload.get("name"), exc_info=True)
 
     s = None
     final_text = ""
@@ -342,6 +395,7 @@ def _run_gateway_chat_streaming(
                                         shared_tc["done"] = True
                                         shared_tc["is_error"] = bool(event_payload.get("is_error"))
                                         break
+                        emit_gateway_manifest_delta(event_payload, event_name)
                         put_gateway_event(event_name, event_payload)
                         update_active_run(stream_id, phase="gateway-tool", latest_tool=event_payload.get("name"))
                     sse_event = "message"
@@ -430,6 +484,7 @@ def _run_gateway_chat_streaming(
             STREAM_PARTIAL_TEXT.pop(stream_id, None)
             STREAM_REASONING_TEXT.pop(stream_id, None)
             STREAM_LIVE_TOOL_CALLS.pop(stream_id, None)
+            STREAM_LIVE_MANIFEST.pop(stream_id, None)
             STREAM_LAST_EVENT_ID.pop(stream_id, None)
             STREAMS.pop(stream_id, None)
         unregister_active_run(stream_id)

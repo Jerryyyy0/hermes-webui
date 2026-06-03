@@ -619,6 +619,36 @@ def _is_cron_running(job_id: str) -> tuple[bool, float]:
         return True, time.time() - t
 
 
+def _cron_execution_status_for_api(job: dict) -> tuple[str, str]:
+    """Return coarse and detailed cron execution status for API clients."""
+    job = job or {}
+    job_id = str(job.get("id") or "").strip()
+    running = False
+    if job_id:
+        running, _elapsed = _is_cron_running(job_id)
+    if running:
+        return "running", "manual_running"
+
+    raw_state = str(job.get("state") or "").strip().lower()
+    last_status = str(job.get("last_status") or "").strip().lower()
+    if last_status == "error":
+        return "error", "last_run_error"
+    if raw_state == "error":
+        return "error", "schedule_error"
+
+    if job.get("next_run_at"):
+        return "waiting", "scheduled_waiting"
+    if last_status == "success":
+        return "waiting", "last_success_waiting"
+    if last_status:
+        return "waiting", "last_unknown_waiting"
+    if raw_state == "paused":
+        return "waiting", "paused_waiting"
+    if job.get("enabled") is False:
+        return "waiting", "disabled_waiting"
+    return "waiting", "not_yet_run_waiting"
+
+
 def _cron_response_marker_index(text: str) -> int:
     """Return the start index of a markdown Response heading, if present."""
     candidates = []
@@ -669,6 +699,9 @@ def _cron_job_for_api(job: dict) -> dict:
     payload = dict(job or {})
     payload.setdefault("profile", None)
     payload["toast_notifications"] = payload.get("toast_notifications") is not False
+    execution_bucket, execution_state = _cron_execution_status_for_api(payload)
+    payload["execution_bucket"] = execution_bucket
+    payload["execution_state"] = execution_state
     return payload
 
 
@@ -841,15 +874,15 @@ def _run_cron_job_in_profile_subprocess(job, execution_profile_home):
 
 
 def _cron_context_for_query(parsed):
-    """Cron read context: optional owner_profile query pins jobs/output store."""
+    """Cron read context: optional profile query pins jobs/output store."""
     from urllib.parse import parse_qs
 
     from api.profiles import cron_profile_context, cron_profile_context_for_home, get_hermes_home_for_profile
 
     qs = parse_qs(parsed.query)
-    owner_profile = (qs.get("owner_profile") or qs.get("profile") or [""])[0].strip()
-    if owner_profile:
-        return cron_profile_context_for_home(get_hermes_home_for_profile(owner_profile))
+    profile = (qs.get("profile") or [""])[0].strip()
+    if profile:
+        return cron_profile_context_for_home(get_hermes_home_for_profile(profile))
     return cron_profile_context()
 
 
@@ -1026,6 +1059,7 @@ from api.config import (
     STREAMS,
     STREAMS_LOCK,
     CANCEL_FLAGS,
+    STREAM_LIVE_MANIFEST,
     STREAM_LAST_EVENT_ID,
     SERVER_START_TIME,
     _resolve_cli_toolsets,
@@ -4641,6 +4675,28 @@ def handle_get(handler, parsed) -> bool:
                 return j(handler, {"session": redact_session_data(sess)})
             return bad(handler, "Session not found", 404)
 
+    if parsed.path == "/api/session/manifest":
+        sid = parse_qs(parsed.query).get("session_id", [""])[0]
+        if not sid:
+            return bad(handler, "session_id required", 400)
+        try:
+            from api.session_manifest import build_session_manifest, merge_manifest_delta
+            session = get_session(sid)
+            manifest = build_session_manifest(session)
+            stream_id = getattr(session, "active_stream_id", None)
+            live_manifest = None
+            if stream_id:
+                with STREAMS_LOCK:
+                    live_manifest = STREAM_LIVE_MANIFEST.get(stream_id)
+            if isinstance(live_manifest, dict) and live_manifest:
+                manifest = merge_manifest_delta(manifest, live_manifest, scope="active_stream")
+            return j(handler, {"manifest": manifest})
+        except KeyError:
+            return bad(handler, "Session not found", 404)
+        except Exception as exc:
+            logger.exception("failed to build session manifest for %s", sid)
+            return bad(handler, _sanitize_error(exc), status=500)
+
     if parsed.path == "/api/session/lineage/report":
         sid = parse_qs(parsed.query).get("session_id", [""])[0]
         if not sid:
@@ -5072,16 +5128,16 @@ def handle_get(handler, parsed) -> bool:
                     since = float(qs.get("since", ["0"])[0])
                     payload = recent_completions_all_profiles(since)
                     for completion in payload.get("completions") or []:
-                        owner = completion.get("owner_profile") or ""
+                        profile = completion.get("profile") or ""
                         job_id = completion.get("job_id") or ""
-                        if not owner or not job_id:
+                        if not profile or not job_id:
                             continue
                         try:
-                            sid = materialize_cron_session_by_job_id(owner, job_id)
+                            sid = materialize_cron_session_by_job_id(profile, job_id)
                         except Exception:
                             logger.debug(
                                 "Failed to materialize cron completion session for %s/%s",
-                                owner,
+                                profile,
                                 job_id,
                                 exc_info=True,
                             )
@@ -5123,6 +5179,14 @@ def handle_get(handler, parsed) -> bool:
         from integration.crons.handlers import try_handle_get as _crons_try_get
 
         if _crons_try_get(handler, parsed) is True:
+            return True
+    except ImportError:
+        pass
+
+    try:
+        from integration.egress.handlers import try_handle_get as _egress_try_get
+
+        if _egress_try_get(handler, parsed) is True:
             return True
     except ImportError:
         pass
@@ -5911,6 +5975,18 @@ def handle_post(handler, parsed) -> bool:
         if cli_meta_for_delete.get("read_only"):
             return bad(handler, "Read-only imported sessions cannot be deleted from WebUI", 400)
         is_messaging_session = _is_messaging_session_id(sid)
+        cron_profile_hint = None
+        if sid.startswith("cron_"):
+            cron_profile_hint = cli_meta_for_delete.get("profile")
+            if not cron_profile_hint:
+                try:
+                    from api.models import Session
+
+                    cron_meta = Session.load_metadata_only(sid)
+                    if cron_meta is not None:
+                        cron_profile_hint = getattr(cron_meta, "profile", None)
+                except Exception:
+                    pass
         worktree_retained = _worktree_retained_payload_for_session_id(sid)
         # Delete from WebUI session store
         with LOCK:
@@ -5950,12 +6026,35 @@ def handle_post(handler, parsed) -> bool:
         # Also delete from CLI state.db for CLI sessions shown in sidebar,
         # but never erase external messaging channel memory via WebUI delete.
         if not is_messaging_session:
-            try:
-                from api.models import delete_cli_session
+            deleted_from_state_db = False
+            if sid.startswith("cron_"):
+                try:
+                    from integration.config import cron_all_profiles_enabled
+                    from integration.crons.session_bridge import (
+                        delete_materialized_cron_session_source,
+                    )
 
-                delete_cli_session(sid)
-            except Exception:
-                logger.debug("Failed to delete CLI session %s", sid)
+                    if cron_all_profiles_enabled():
+                        cron_delete = delete_materialized_cron_session_source(
+                            sid,
+                            profile_hint=cron_profile_hint,
+                        )
+                        deleted_from_state_db = bool(cron_delete.get("deleted"))
+                except ImportError:
+                    pass
+                except Exception:
+                    logger.debug(
+                        "Failed to delete cron session source for %s",
+                        sid,
+                        exc_info=True,
+                    )
+            if not deleted_from_state_db:
+                try:
+                    from api.models import delete_cli_session
+
+                    delete_cli_session(sid)
+                except Exception:
+                    logger.debug("Failed to delete CLI session %s", sid)
         publish_session_list_changed("session_delete")
         return j(handler, {"ok": True, **worktree_retained})
 
@@ -6369,6 +6468,14 @@ def handle_post(handler, parsed) -> bool:
         from integration.crons.handlers import try_handle_post as _crons_try_post
 
         if _crons_try_post(handler, parsed, body) is True:
+            return True
+    except ImportError:
+        pass
+
+    try:
+        from integration.egress.handlers import try_handle_post as _egress_try_post
+
+        if _egress_try_post(handler, parsed, body) is True:
             return True
     except ImportError:
         pass
@@ -8939,16 +9046,16 @@ def _handle_cron_history(handler, parsed):
     runs = []
     total = 0
     job = None
-    owner_profile = (qs.get("owner_profile") or qs.get("profile") or [""])[0].strip()
+    profile = (qs.get("profile") or [""])[0].strip()
     try:
         from cron.jobs import get_job
         from api.profiles import get_active_profile_name
 
         job = get_job(job_id)
-        owner_profile = owner_profile or get_active_profile_name() or "default"
+        profile = profile or get_active_profile_name() or "default"
     except Exception:
         job = None
-        owner_profile = owner_profile or "default"
+        profile = profile or "default"
     if out_dir.exists():
         all_files = sorted(out_dir.glob("*.md"), key=lambda f: f.stat().st_mtime, reverse=True)
         total = len(all_files)
@@ -8980,7 +9087,7 @@ def _handle_cron_history(handler, parsed):
 
                 session_ids = materialize_cron_sessions_for_runs(
                     job,
-                    owner_profile=owner_profile,
+                    owner_profile=profile,
                     execution_home=_execution_home_for_cron_session_lookup(job),
                     runs=materialize_inputs,
                 )
@@ -9020,7 +9127,7 @@ def _handle_cron_run_detail(handler, parsed):
         snippet = _cron_output_snippet(content)
         usage = _cron_output_usage_metadata(content)
         session_id = None
-        owner_profile = (qs.get("owner_profile") or qs.get("profile") or [""])[0].strip()
+        profile = (qs.get("profile") or [""])[0].strip()
         try:
             from cron.jobs import get_job
             from api.profiles import get_active_profile_name
@@ -9031,7 +9138,7 @@ def _handle_cron_run_detail(handler, parsed):
                 st = fpath.stat()
                 session_id = materialize_cron_session(
                     job,
-                    owner_profile=owner_profile or get_active_profile_name() or "default",
+                    owner_profile=profile or get_active_profile_name() or "default",
                     execution_home=_execution_home_for_cron_session_lookup(job),
                     run_mtime=st.st_mtime,
                     fallback_output=content,
