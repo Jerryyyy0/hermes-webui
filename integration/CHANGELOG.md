@@ -8,6 +8,10 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Added
 
+- **Session workspace inspector** — `GET /api/session/manifest` returns structured todos, artifacts, and referenced files parsed from tool activity; the right panel adds **Tasks**, **Artifacts**, and **Refs** tabs with file preview via the existing workspace preview path. Artifacts outside the session workspace are listed with absolute paths and file metadata, while previews remain scoped to workspace files.
+
+- **Session manifest realtime updates** — Active chat streams emit `manifest_delta` SSE events for explicitly parsed todo, artifact, and reference tool activity. The inspector can update during tool execution, while completed and historical sessions still rebuild from `/api/session/manifest`; live and historical manifest data share canonical `turn:<user_msg_idx>` turn keys, and per-turn artifacts can be shown under the specific user turn that changed them.
+
 - **SkillHub local skill zip download** — `GET /api/skillhub/download?name=&dir_name=` streams a zip of a skill under `shared_skills_dir` (custom or hub-installed). Excludes `.hub_installed`, `.category`, `.install_name`. Requires `HERMES_INTEGRATION=1` only. Detail UI download button in `hermes_skillhub.js`.
 
 - **SkillHub upload overwrite** — `POST /api/skillhub/upload` accepts `overwrite` (multipart field or JSON boolean). When true, replaces existing **custom** skills only; hub-installed targets still return 409.「我的创建」upload sends `overwrite=1` by default.
