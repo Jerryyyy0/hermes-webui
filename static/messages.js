@@ -1705,26 +1705,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       try{
         const d=JSON.parse(e.data||'{}');
         if((d.session_id||activeSid)!==activeSid) return;
-        const applied = window.HermesSessionInspector
-          && typeof window.HermesSessionInspector.applyDelta === 'function'
-          && window.HermesSessionInspector.applyDelta(d);
-        if(applied){
-          const turnKey=S._lastManifestDeltaTurnKey;
-          if(turnKey && window.HermesSessionInspector && typeof window.HermesSessionInspector.renderTurnArtifacts==='function'){
-            document.querySelectorAll('.assistant-turn').forEach(turn=>{
-              if(turn.dataset.turnKey!==turnKey) return;
-              const blocks=typeof _assistantTurnBlocks==='function'?_assistantTurnBlocks(turn):turn;
-              let host=turn.querySelector('.turn-artifacts');
-              if(!host){
-                host=document.createElement('div');
-                host.className='turn-artifacts';
-                blocks.appendChild(host);
-              }
-              window.HermesSessionInspector.renderTurnArtifacts(turnKey, host);
-            });
-          }
-          if(!S.busy && typeof renderMessages==='function') renderMessages({preserveScroll:true});
-          else if(typeof renderSessionInspector==='function') renderSessionInspector();
+        if(window.HermesSessionInspector&&typeof window.HermesSessionInspector.applyDelta==='function'){
+          window.HermesSessionInspector.applyDelta(d);
         }
       }catch(err){
         console.warn('manifest_delta', err);

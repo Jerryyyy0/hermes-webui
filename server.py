@@ -463,7 +463,9 @@ def _log_shutdown_audit(reason: str = "serve_forever_exit") -> None:
 
 def main() -> None:
     from api.config import print_startup_config, verify_hermes_imports, _HERMES_FOUND
+    from integration.config import print_version_txt
 
+    print_version_txt()
     print_startup_config()
 
     fd_limit = _raise_fd_soft_limit()
@@ -591,6 +593,9 @@ def main() -> None:
 if __name__ == '__main__':
     os.environ['SKILLHUB_URL'] = os.getenv('SKILLHUB_URL', 'http://192.168.1.139:18702/')
     os.environ['HERMES_INTEGRATION'] = os.getenv('HERMES_INTEGRATION', '1')
+    os.environ['ZHILING_CONTROL_PLANE_URL'] = os.getenv('ZHILING_CONTROL_PLANE_URL', 'http://192.168.1.139:23001/')
+    os.environ['ZHILING_LOGOUT_API_URL'] = os.getenv('ZHILING_LOGOUT_API_URL', 'http://auth-proxy:8080')
+    os.environ['KNOWLEDGE_BASE_URL'] = os.getenv('KNOWLEDGE_BASE_URL', 'http://192.168.1.139:17861/')
     # from integration.config import ensure_skillhub_no_proxy
     # ensure_skillhub_no_proxy()
     main()

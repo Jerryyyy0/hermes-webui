@@ -26,7 +26,8 @@
     { "name": "Health",      "description": "健康检查" },
     { "name": "System",      "description": "系统与工具" },
     { "name": "SkillHub",    "description": "SkillHub 远程技能市场代理（需 HERMES_INTEGRATION=1；市场类接口另需 SKILLHUB_URL）。安装/卸载/custom 读写均使用 shared_skills_dir（{HERMES_HOME}/skills，与 WebUI profile 无关）。" },
-    { "name": "IntegrationCrons", "description": "跨 Profile 定时任务（需 HERMES_INTEGRATION=1）。列表/轮询用 GET /api/crons?all_profiles=1；创建用一个 profile 同时作为存储与执行 Profile；编辑/运行/删除/读取历史均用 profile 定位任务。" }
+    { "name": "IntegrationCrons", "description": "跨 Profile 定时任务（需 HERMES_INTEGRATION=1）。列表/轮询用 GET /api/crons?all_profiles=1；创建用一个 profile 同时作为存储与执行 Profile；编辑/运行/删除/读取历史均用 profile 定位任务。" },
+    { "name": "IntegrationKnowledgeBase", "description": "知识库下游 BFF 代理（需 HERMES_INTEGRATION=1 且 KNOWLEDGE_BASE_URL）。`account`/`uuid` 由调用方在请求体传入；成功时返回下游 `data` 字段内容。" }
   ],
   "paths": {
 
@@ -874,6 +875,360 @@
         "responses": { "200": { "description": "running 或 already_running" } }
       }
     },
+    "/api/integration/workspace/files": {
+      "get": {
+        "tags": ["IntegrationWorkspace"],
+        "summary": "平铺列出 DEFAULT_WORKSPACE 下所有文件（分页、搜索、过滤、排序）",
+        "description": "根目录为 `HERMES_WEBUI_DEFAULT_WORKSPACE`（`resolve_trusted_workspace(None)`）。不需要 `session_id`。`q` 按文件名 basename 包含匹配（不区分大小写）；`type` 按文件扩展名过滤（如 `.md` 或 `md`）；`sort` 支持 path/size/mtime/ctime；`order` 默认 desc。翻页直到 `has_more` 为 false。",
+        "parameters": [
+          { "name": "path", "in": "query", "schema": { "type": "string", "default": "." }, "description": "子树根（workspace 相对）" },
+          { "name": "page", "in": "query", "schema": { "type": "integer", "minimum": 1, "default": 1 } },
+          { "name": "page_size", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 5000, "default": 500 } },
+          { "name": "q", "in": "query", "schema": { "type": "string" }, "description": "文件名 basename 包含匹配（不区分大小写）" },
+          { "name": "type", "in": "query", "schema": { "type": "string", "example": ".md" }, "description": "按文件扩展名过滤（如 `.md` 或 `md`，不区分大小写）" },
+          { "name": "sort", "in": "query", "schema": { "type": "string", "enum": ["path", "size", "mtime", "ctime"], "default": "path" }, "description": "排序字段" },
+          { "name": "order", "in": "query", "schema": { "type": "string", "enum": ["asc", "desc"], "default": "desc" }, "description": "排序方向" }
+        ],
+        "responses": {
+          "200": {
+            "description": "文件索引页",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/IntegrationWorkspaceFilesResponse" }
+              }
+            }
+          },
+          "400": { "description": "无效 page/page_size/q/type/sort/order" },
+          "404": { "description": "子目录不存在" }
+        }
+      }
+    },
+    "/api/integration/workspace/file": {
+      "get": {
+        "tags": ["IntegrationWorkspace"],
+        "summary": "读取 workspace 内文件（原始字节流）",
+        "description": "根目录为 `HERMES_WEBUI_DEFAULT_WORKSPACE`。`path` 为 workspace 相对路径。响应为原始文件字节，`Content-Type` 按扩展名映射；不设置 `Content-Disposition`。预览与下载由前端按类型处理。",
+        "parameters": [
+          { "name": "path", "in": "query", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "文件流（按扩展名 Content-Type）" },
+          "400": { "description": "缺少 path" },
+          "404": { "description": "文件不存在" }
+        }
+      }
+    },
+    "/api/integration/login": {
+      "get": {
+        "tags": ["IntegrationLogin"],
+        "summary": "查询当前 zhiling 平台身份（Control Plane 代理）",
+        "description": "将请求头 `Authorization: Bearer <access_token>` 转发至 `{ZHILING_CONTROL_PLANE_URL}/api/identity/lookup`。需要 `HERMES_INTEGRATION=1` 且配置 `ZHILING_CONTROL_PLANE_URL`。成功响应原样透传 Control Plane JSON。若 WebUI 启用了密码/Passkey，调用方还需有效 session Cookie。",
+        "security": [{ "bearerAuth": [] }, { "cookieAuth": [] }],
+        "responses": {
+          "200": {
+            "description": "平台身份与 i智库同步信息",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ZhilingIdentityResponse" }
+              }
+            }
+          },
+          "400": {
+            "description": "缺少 Authorization Bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": { "error": { "type": "string", "enum": ["missing_token"] } },
+                  "required": ["error"]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "token 无效或会话超时（透传 Control Plane detail）",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ZhilingIdentityErrorDetail" }
+              }
+            }
+          },
+          "403": {
+            "description": "无权查询（透传 Control Plane detail）",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ZhilingIdentityErrorDetail" }
+              }
+            }
+          },
+          "502": {
+            "description": "Control Plane 不可达",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["error"],
+                  "properties": {
+                    "error": { "type": "string", "enum": ["identity_lookup_failed"] },
+                    "message": { "type": "string" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/integration/knowledge-base/list": {
+      "post": {
+        "tags": ["IntegrationKnowledgeBase"],
+        "summary": "个人/团队知识库列表",
+        "description": "代理 `POST {KNOWLEDGE_BASE_URL}/knowledge_base/list_ps_knowledge_bases`。必填：`account`、`uuid`、`isPersonal`（1=个人，0=团队）。",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseListRequest" } } } },
+        "responses": {
+          "200": { "description": "知识库数组（下游 data）", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/KnowledgeBaseEntry" } } } } },
+          "400": { "description": "缺参或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
+          "502": { "description": "下游不可达", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
+        }
+      }
+    },
+    "/api/integration/knowledge-base/joined": {
+      "post": {
+        "tags": ["IntegrationKnowledgeBase"],
+        "summary": "已加入的团队知识库",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseAccountUuidRequest" } } } },
+        "responses": {
+          "200": { "description": "知识库数组", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/KnowledgeBaseEntry" } } } } },
+          "400": { "description": "缺参或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
+          "502": { "description": "下游不可达", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
+        }
+      }
+    },
+    "/api/integration/knowledge-base/create": {
+      "post": {
+        "tags": ["IntegrationKnowledgeBase"],
+        "summary": "创建知识库",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseCreateRequest" } } } },
+        "responses": {
+          "200": { "description": "创建成功（下游 data 常为 null）" },
+          "400": { "description": "缺参或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
+          "502": { "description": "下游不可达", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
+        }
+      }
+    },
+    "/api/integration/knowledge-base/info": {
+      "post": {
+        "tags": ["IntegrationKnowledgeBase"],
+        "summary": "知识库详情",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseKbNameRequest" } } } },
+        "responses": {
+          "200": { "description": "知识库对象", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseEntry" } } } },
+          "400": { "description": "缺参或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
+          "502": { "description": "下游不可达", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
+        }
+      }
+    },
+    "/api/integration/knowledge-base/edit": {
+      "post": {
+        "tags": ["IntegrationKnowledgeBase"],
+        "summary": "编辑知识库信息",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseEditRequest" } } } },
+        "responses": {
+          "200": { "description": "编辑成功" },
+          "400": { "description": "缺参或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
+          "502": { "description": "下游不可达", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
+        }
+      }
+    },
+    "/api/integration/knowledge-base/delete": {
+      "post": {
+        "tags": ["IntegrationKnowledgeBase"],
+        "summary": "删除知识库",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseDeleteKbRequest" } } } },
+        "responses": {
+          "200": { "description": "删除成功" },
+          "400": { "description": "缺参或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
+          "502": { "description": "下游不可达", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
+        }
+      }
+    },
+    "/api/integration/knowledge-base/available": {
+      "post": {
+        "tags": ["IntegrationKnowledgeBase"],
+        "summary": "可加入的团队知识库（分页）",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseAvailableRequest" } } } },
+        "responses": {
+          "200": { "description": "分页结果", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseAvailableResponse" } } } },
+          "400": { "description": "缺参或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
+          "502": { "description": "下游不可达", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
+        }
+      }
+    },
+    "/api/integration/knowledge-base/apply-join": {
+      "post": {
+        "tags": ["IntegrationKnowledgeBase"],
+        "summary": "申请加入团队知识库",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseApplyJoinRequest" } } } },
+        "responses": {
+          "200": { "description": "申请成功" },
+          "400": { "description": "缺参或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
+          "502": { "description": "下游不可达", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
+        }
+      }
+    },
+    "/api/integration/knowledge-base/members": {
+      "post": {
+        "tags": ["IntegrationKnowledgeBase"],
+        "summary": "知识库成员列表（分页）",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseMembersRequest" } } } },
+        "responses": {
+          "200": { "description": "成员分页", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseMembersResponse" } } } },
+          "400": { "description": "缺参或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
+          "502": { "description": "下游不可达", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
+        }
+      }
+    },
+    "/api/integration/knowledge-base/documents": {
+      "post": {
+        "tags": ["IntegrationKnowledgeBase"],
+        "summary": "知识库文档列表（分页）",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseDocumentsRequest" } } } },
+        "responses": {
+          "200": { "description": "文档分页", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseDocumentsResponse" } } } },
+          "400": { "description": "缺参或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
+          "502": { "description": "下游不可达", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
+        }
+      }
+    },
+    "/api/integration/knowledge-base/upload-docs": {
+      "post": {
+        "tags": ["IntegrationKnowledgeBase"],
+        "summary": "上传文档（multipart）",
+        "description": "代理 `upload_docs`。必填表单字段：`uuid`、`kbName`、`files`、`fileProperties`（JSON 字符串）。成功后需再调用 `/update-docs` 触发解析。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": ["uuid", "kbName", "files", "fileProperties"],
+                "properties": {
+                  "uuid": { "type": "string" },
+                  "kbName": { "type": "string" },
+                  "files": { "type": "string", "format": "binary" },
+                  "fileProperties": { "type": "string", "description": "JSON 数组字符串" },
+                  "chunkSize": { "type": "string" },
+                  "chunkOverlap": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "上传成功（data 为空时返回 `{ok:true}`）" },
+          "400": { "description": "缺参或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
+          "502": { "description": "下游不可达", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
+        }
+      }
+    },
+    "/api/integration/knowledge-base/update-docs": {
+      "post": {
+        "tags": ["IntegrationKnowledgeBase"],
+        "summary": "更新文档属性并触发解析",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpdateDocsRequest" } } } },
+        "responses": {
+          "200": { "description": "更新成功" },
+          "400": { "description": "缺参或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
+          "502": { "description": "下游不可达", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
+        }
+      }
+    },
+    "/api/integration/knowledge-base/delete-docs": {
+      "post": {
+        "tags": ["IntegrationKnowledgeBase"],
+        "summary": "删除文档",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseDeleteDocsRequest" } } } },
+        "responses": {
+          "200": { "description": "删除成功" },
+          "400": { "description": "缺参或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
+          "502": { "description": "下游不可达", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
+        }
+      }
+    },
+    "/api/integration/logout": {
+      "get": {
+        "tags": ["IntegrationLogout"],
+        "summary": "方法不允许（请使用 POST）",
+        "description": "需要 `HERMES_INTEGRATION=1` 且配置 `ZHILING_LOGOUT_API_URL`。",
+        "responses": {
+          "405": {
+            "description": "method_not_allowed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["status", "error"],
+                  "properties": {
+                    "status": { "type": "string", "enum": ["error"] },
+                    "error": { "type": "string", "enum": ["method_not_allowed"] }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": ["IntegrationLogout"],
+        "summary": "用户容器登出（auth-proxy 代理）",
+        "description": "清理 WebUI `hermes_session` Cookie 后，向 `{ZHILING_LOGOUT_API_URL}/api/logout` 发送 `POST` + `{}`（`ZHILING_LOGOUT_API_URL` 仅为 auth-proxy 根地址，路径 `/api/logout` 在代码中固定；不传浏览器 Cookie）。成功时原样透传 auth-proxy JSON，含 `casdoor_logout_url`、`login_url`、`control_plane_logout_url` 等。若 WebUI 启用了密码/Passkey，调用方还需有效 session Cookie（`credentials: include`）。",
+        "security": [{ "cookieAuth": [] }],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "auth-proxy 登出成功",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ZhilingLogoutResponse" }
+              }
+            }
+          },
+          "405": {
+            "description": "auth-proxy 方法错误（透传）",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ZhilingLogoutErrorStatus" }
+              }
+            }
+          },
+          "502": {
+            "description": "auth-proxy 不可达",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["error"],
+                  "properties": {
+                    "error": { "type": "string", "enum": ["zhiling_logout_failed"] },
+                    "message": { "type": "string" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/integration/egress/policy": {
       "get": {
         "tags": ["IntegrationEgress"],
@@ -1316,7 +1671,7 @@
         "summary": "获取技能文档内容（SKILL.md）",
         "parameters": [
           { "name": "name", "in": "query", "required": true, "schema": { "type": "string" }, "description": "技能名称" },
-          { "name": "scope", "in": "query", "schema": { "type": "string", "enum": ["hub", "custom"], "default": "hub" }, "description": "custom=从 {HERMES_HOME}/skills 读取本地自建技能文档" }
+          { "name": "scope", "in": "query", "schema": { "type": "string", "enum": ["auto", "hub", "custom"], "default": "auto" }, "description": "auto（默认）=先在 {HERMES_HOME}/skills 解析本地 SKILL.md，未找到再请求 SkillHub /doc；custom=仅本地；hub=仅上游" }
         ],
         "responses": {
           "200": {
@@ -1339,7 +1694,7 @@
         "summary": "获取技能文件结构",
         "parameters": [
           { "name": "name", "in": "query", "required": true, "schema": { "type": "string" }, "description": "技能名称" },
-          { "name": "scope", "in": "query", "schema": { "type": "string", "enum": ["hub", "custom"], "default": "hub" }, "description": "custom=从 {HERMES_HOME}/skills 读取本地自建技能目录结构" }
+          { "name": "scope", "in": "query", "schema": { "type": "string", "enum": ["auto", "hub", "custom"], "default": "auto" }, "description": "auto（默认）=本地优先，否则 SkillHub structure；custom=仅本地；hub=仅上游" }
         ],
         "responses": {
           "200": {
@@ -1364,7 +1719,7 @@
           { "name": "name", "in": "query", "required": true, "schema": { "type": "string" }, "description": "技能名称" },
           { "name": "path", "in": "query", "schema": { "type": "string" }, "description": "文件相对路径（与 file 二选一）" },
           { "name": "file", "in": "query", "schema": { "type": "string" }, "description": "path 的别名" },
-          { "name": "scope", "in": "query", "schema": { "type": "string", "enum": ["hub", "custom"], "default": "hub" }, "description": "custom=从 {HERMES_HOME}/skills 读取本地自建技能文件" }
+          { "name": "scope", "in": "query", "schema": { "type": "string", "enum": ["auto", "hub", "custom"], "default": "auto" }, "description": "auto（默认）=本地优先，否则 SkillHub file；custom=仅本地；hub=仅上游" }
         ],
         "responses": {
           "200": {
@@ -1438,11 +1793,64 @@
         }
       }
     },
+    "/api/skillhub/download": {
+      "get": {
+        "tags": ["SkillHub"],
+        "summary": "下载本地技能 zip 包",
+        "description": "将 `shared_skills_dir` 中已有技能目录打包为 zip 流式下载（custom 或市场已安装）。排除 `.hub_installed`、`.category`、`.install_name`。仅需 `HERMES_INTEGRATION=1`；不要求 `SKILLHUB_URL`。体积/文件数受 `HERMES_WEBUI_FOLDER_ZIP_MAX_MB` 与 `HERMES_WEBUI_FOLDER_ZIP_MAX_FILES` 约束。",
+        "parameters": [
+          { "name": "name", "in": "query", "required": true, "schema": { "type": "string" }, "description": "列表名（SKILL.md frontmatter name）" },
+          { "name": "dir_name", "in": "query", "schema": { "type": "string" }, "description": "相对 skills/ 的目录路径（可选）" }
+        ],
+        "responses": {
+          "200": {
+            "description": "zip 附件",
+            "content": {
+              "application/zip": {
+                "schema": { "type": "string", "format": "binary" }
+              }
+            }
+          },
+          "400": { "description": "缺少 name" },
+          "403": { "description": "系统技能不可下载" },
+          "404": { "description": "Integration 未启用或技能未找到" },
+          "413": { "description": "技能目录过大或文件过多" }
+        }
+      }
+    },
+    "/api/skillhub/edit": {
+      "post": {
+        "tags": ["SkillHub"],
+        "summary": "编辑本地 custom 技能",
+        "description": "更新 `shared_skills_dir` 中已有自建技能的 `SKILL.md` 正文。不支持重命名或移动目录；`dir_name` 用于区分嵌套分类路径。市场安装（含 `.hub_installed`）不可编辑。需要 `HERMES_INTEGRATION=1`；不要求 `SKILLHUB_URL`。SKILL.md 须含 frontmatter，必填 `name`、`description`。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/SkillHubEditRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "编辑成功",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/SkillHubEditResponse" }
+              }
+            }
+          },
+          "400": { "description": "缺少参数或 SKILL.md 格式无效" },
+          "403": { "description": "系统技能或市场安装技能不可编辑" },
+          "404": { "description": "Integration 未启用或技能未找到" }
+        }
+      }
+    },
     "/api/skillhub/upload": {
       "post": {
         "tags": ["SkillHub"],
         "summary": "上传本地 custom 技能",
-        "description": "仅写入 `{HERMES_HOME}/skills`（shared_skills_dir），不调用 SkillHub 上游。需要 `HERMES_INTEGRATION=1`；不要求 `SKILLHUB_URL`。支持 `.md` / `.zip`（multipart）或 JSON。单文件 `.md` 的目录名由 `name`/文件名决定；`.zip` 可含多个技能目录（每个含 SKILL.md）。若提供 `category` 则落盘为 `skills/<category>/<leaf>/` 并写入 `.category`；无 category 时平铺 `skills/<leaf>/`。响应含 `skill_count`、`file_count` 与 `skills[]`（每项含 `dir_name`、`name`、`category`）。SKILL.md 须含 frontmatter，必填 `name`、`description`。",
+        "description": "仅写入 `{HERMES_HOME}/skills`（shared_skills_dir），不调用 SkillHub 上游。需要 `HERMES_INTEGRATION=1`；不要求 `SKILLHUB_URL`。支持 `.md` / `.zip`（multipart）或 JSON。单文件 `.md` 的目录名由 `name`/文件名决定；`.zip` 可含多个技能目录（每个含 SKILL.md）。若提供 `category` 则落盘为 `skills/<category>/<leaf>/` 并写入 `.category`；无 category 时平铺 `skills/<leaf>/`。`overwrite=true` 时仅可覆盖 custom 技能；市场安装（`.hub_installed`）仍 409。响应含 `skill_count`、`file_count` 与 `skills[]`（每项含 `dir_name`、`name`、`category`）。SKILL.md 须含 frontmatter，必填 `name`、`description`。",
         "requestBody": {
           "required": true,
           "content": {
@@ -1463,6 +1871,10 @@
                   "category": {
                     "type": "string",
                     "description": "分类（可选）；与 UI 分类 chip 一致，落盘路径前缀并写入 .category"
+                  },
+                  "overwrite": {
+                    "type": "string",
+                    "description": "设为 1/true/yes 时覆盖已有 custom 技能；市场安装不可覆盖"
                   }
                 }
               }
@@ -1483,7 +1895,7 @@
           },
           "400": { "description": "参数或文件无效" },
           "404": { "description": "Integration 未启用" },
-          "409": { "description": "dir_name 已存在" },
+          "409": { "description": "dir_name 已存在或市场安装技能不可覆盖" },
           "413": { "description": "请求体过大" },
           "500": { "description": "写入失败" }
         }
@@ -1862,12 +2274,33 @@
         },
         "required": ["ok", "name", "dir_name"]
       },
+      "SkillHubEditRequest": {
+        "type": "object",
+        "properties": {
+          "name":     { "type": "string", "description": "列表名（SKILL.md frontmatter name，必填）" },
+          "content":  { "type": "string", "description": "SKILL.md 全文" },
+          "dir_name": { "type": "string", "description": "相对 skills/ 的目录路径（可选，如 apple/apple-notes）" }
+        },
+        "required": ["name", "content"]
+      },
+      "SkillHubEditResponse": {
+        "type": "object",
+        "properties": {
+          "ok":       { "type": "boolean", "enum": [true] },
+          "name":     { "type": "string", "description": "列表 list_name（frontmatter name）" },
+          "dir_name": { "type": "string", "description": "相对 skills/ 的路径" },
+          "category": { "type": "string", "description": "分类；空表示平铺" },
+          "custom":   { "type": "boolean", "enum": [true] }
+        },
+        "required": ["ok", "name", "dir_name", "custom"]
+      },
       "SkillHubUploadJsonRequest": {
         "type": "object",
         "properties": {
-          "name":     { "type": "string", "description": "dir_name（必填）" },
-          "content":  { "type": "string", "description": "SKILL.md 全文" },
-          "category": { "type": "string", "description": "可选分类" }
+          "name":      { "type": "string", "description": "dir_name（必填）" },
+          "content":   { "type": "string", "description": "SKILL.md 全文" },
+          "category":  { "type": "string", "description": "可选分类" },
+          "overwrite": { "type": "boolean", "description": "为 true 时覆盖已有 custom 技能" }
         },
         "required": ["name", "content"]
       },
@@ -2019,6 +2452,302 @@
           "active":   { "type": "string" }
         },
         "required": ["profiles", "active"]
+      },
+      "KnowledgeBaseError": {
+        "type": "object",
+        "required": ["error"],
+        "properties": {
+          "error": { "type": "string" },
+          "message": { "type": "string" },
+          "code": {}
+        }
+      },
+      "KnowledgeBaseUpstreamFailed": {
+        "type": "object",
+        "required": ["error"],
+        "properties": {
+          "error": { "type": "string", "enum": ["knowledge_base_upstream_failed"] },
+          "message": { "type": "string" }
+        }
+      },
+      "KnowledgeBaseAccountUuidRequest": {
+        "type": "object",
+        "required": ["account", "uuid"],
+        "properties": {
+          "account": { "type": "string" },
+          "uuid": { "type": "string" }
+        }
+      },
+      "KnowledgeBaseListRequest": {
+        "allOf": [
+          { "$ref": "#/components/schemas/KnowledgeBaseAccountUuidRequest" },
+          {
+            "type": "object",
+            "required": ["isPersonal"],
+            "properties": { "isPersonal": { "type": "integer", "enum": [0, 1] } }
+          }
+        ]
+      },
+      "KnowledgeBaseCreateRequest": {
+        "allOf": [
+          { "$ref": "#/components/schemas/KnowledgeBaseAccountUuidRequest" },
+          {
+            "type": "object",
+            "required": ["showName", "isPersonal"],
+            "properties": {
+              "showName": { "type": "string" },
+              "kbIntro": { "type": "string" },
+              "isPersonal": { "type": "integer", "enum": [0, 1] },
+              "location": { "type": "string" },
+              "iconType": { "type": "integer" }
+            }
+          }
+        ]
+      },
+      "KnowledgeBaseKbNameRequest": {
+        "type": "object",
+        "required": ["kbName"],
+        "properties": { "kbName": { "type": "string" } }
+      },
+      "KnowledgeBaseEditRequest": {
+        "type": "object",
+        "required": ["kbName", "showName"],
+        "properties": {
+          "kbName": { "type": "string" },
+          "showName": { "type": "string" },
+          "kbIntro": { "type": "string" },
+          "location": { "type": "integer" },
+          "iconType": { "type": "integer" }
+        }
+      },
+      "KnowledgeBaseDeleteKbRequest": {
+        "type": "object",
+        "required": ["account", "kbName"],
+        "properties": {
+          "account": { "type": "string" },
+          "kbName": { "type": "string" }
+        }
+      },
+      "KnowledgeBaseAvailableRequest": {
+        "allOf": [
+          { "$ref": "#/components/schemas/KnowledgeBaseAccountUuidRequest" },
+          {
+            "type": "object",
+            "required": ["page", "size"],
+            "properties": {
+              "showName": { "type": "string" },
+              "kbIntro": { "type": "string" },
+              "page": { "type": "integer", "minimum": 1 },
+              "size": { "type": "integer", "minimum": 1 }
+            }
+          }
+        ]
+      },
+      "KnowledgeBaseApplyJoinRequest": {
+        "allOf": [
+          { "$ref": "#/components/schemas/KnowledgeBaseAccountUuidRequest" },
+          {
+            "type": "object",
+            "required": ["kbName"],
+            "properties": { "kbName": { "type": "string" } }
+          }
+        ]
+      },
+      "KnowledgeBaseMembersRequest": {
+        "type": "object",
+        "required": ["uuid", "kbName", "page", "size"],
+        "properties": {
+          "uuid": { "type": "string" },
+          "kbName": { "type": "string" },
+          "username": { "type": "string" },
+          "account": { "type": "string" },
+          "page": { "type": "integer", "minimum": 1 },
+          "size": { "type": "integer", "minimum": 1 }
+        }
+      },
+      "KnowledgeBaseDocumentsRequest": {
+        "type": "object",
+        "required": ["kbName", "page", "size"],
+        "properties": {
+          "kbName": { "type": "string" },
+          "fileLevel": { "type": "string" },
+          "fileName": { "type": "string" },
+          "fileNumber": { "type": "string" },
+          "fileClass": { "type": "string" },
+          "fileOrg": { "type": "string" },
+          "fileExt": { "type": "string" },
+          "status": { "type": "array", "items": { "type": "string" } },
+          "page": { "type": "integer", "minimum": 1 },
+          "size": { "type": "integer", "minimum": 1 },
+          "sortName": { "type": "string" },
+          "sortOrder": { "type": "string" }
+        }
+      },
+      "KnowledgeBaseUpdateDocsRequest": {
+        "type": "object",
+        "required": ["kbName", "fileNames", "fileProperties"],
+        "properties": {
+          "kbName": { "type": "string" },
+          "fileNames": { "type": "array", "items": { "type": "string" } },
+          "fileProperties": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/KnowledgeBaseFileProperty" }
+          }
+        }
+      },
+      "KnowledgeBaseDeleteDocsRequest": {
+        "type": "object",
+        "required": ["kbName", "fileNames"],
+        "properties": {
+          "kbName": { "type": "string" },
+          "fileNames": { "type": "array", "items": { "type": "string" } },
+          "deleteContent": { "type": "boolean" },
+          "notRefreshVsCache": { "type": "boolean" }
+        }
+      },
+      "KnowledgeBaseFileProperty": {
+        "type": "object",
+        "properties": {
+          "fileName": { "type": "string" },
+          "fileClass": { "type": "string" },
+          "fileUploader": { "type": "string" },
+          "publicationDate": { "type": "string" }
+        }
+      },
+      "KnowledgeBaseEntry": {
+        "type": "object",
+        "properties": {
+          "kbName": { "type": "string" },
+          "showName": { "type": "string" },
+          "kbIntro": { "type": "string" },
+          "createdTime": { "type": "string" },
+          "iconType": { "type": "integer" },
+          "vsType": { "type": "string" },
+          "embedModel": { "type": "string" },
+          "fileCount": { "type": "integer" },
+          "edition": { "type": "string" },
+          "location": {}
+        }
+      },
+      "KnowledgeBaseAvailableResponse": {
+        "type": "object",
+        "properties": {
+          "total": { "type": "integer" },
+          "items": { "type": "array", "items": { "type": "object" } }
+        }
+      },
+      "KnowledgeBaseMembersResponse": {
+        "type": "object",
+        "properties": {
+          "total": { "type": "integer" },
+          "members": { "type": "array", "items": { "type": "object" } }
+        }
+      },
+      "KnowledgeBaseDocumentsResponse": {
+        "type": "object",
+        "properties": {
+          "total": { "type": "integer" },
+          "documents": { "type": "array", "items": { "type": "object" } }
+        }
+      },
+      "IntegrationWorkspaceFileEntry": {
+        "type": "object",
+        "required": ["path"],
+        "properties": {
+          "path": { "type": "string" },
+          "size": { "type": "integer", "nullable": true },
+          "mtime_ns": { "type": "integer", "nullable": true },
+          "ctime_ns": { "type": "integer", "nullable": true, "description": "时间纳秒：优先 birthtime，否则 st_ctime（元数据变更时间）；stat 失败时为 null" },
+          "ext": { "type": "string", "description": "小写扩展名，无扩展名为空字符串" },
+          "mime": { "type": "string" }
+        }
+      },
+      "IntegrationWorkspaceFilesResponse": {
+        "type": "object",
+        "required": ["workspace", "path", "page", "page_size", "q", "type", "sort", "order", "total", "has_more", "files"],
+        "properties": {
+          "workspace": { "type": "string" },
+          "path": { "type": "string" },
+          "page": { "type": "integer" },
+          "page_size": { "type": "integer" },
+          "q": { "type": "string" },
+          "type": { "type": "string" },
+          "sort": { "type": "string", "enum": ["path", "size", "mtime", "ctime"] },
+          "order": { "type": "string", "enum": ["asc", "desc"] },
+          "total": { "type": "integer" },
+          "has_more": { "type": "boolean" },
+          "files": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/IntegrationWorkspaceFileEntry" }
+          }
+        }
+      },
+      "ZhilingIdentityErrorDetail": {
+        "type": "object",
+        "properties": {
+          "detail": { "type": "string" }
+        },
+        "required": ["detail"]
+      },
+      "ZhilingIthinktankIdentity": {
+        "type": "object",
+        "properties": {
+          "account": { "type": "string" },
+          "userId": { "type": "string" }
+        },
+        "additionalProperties": true
+      },
+      "ZhilingLogoutErrorStatus": {
+        "type": "object",
+        "properties": {
+          "status": { "type": "string" },
+          "error": { "type": "string" }
+        },
+        "additionalProperties": true
+      },
+      "ZhilingLogoutResponse": {
+        "type": "object",
+        "properties": {
+          "status": { "type": "string" },
+          "username": { "type": "string" },
+          "login_url": { "type": "string" },
+          "control_plane_logout_url": { "type": "string" },
+          "casdoor_logout_url": { "type": "string" },
+          "cleared_cookie_names": { "type": "array", "items": { "type": "string" } }
+        },
+        "additionalProperties": true
+      },
+      "ZhilingIdentityResponse": {
+        "type": "object",
+        "properties": {
+          "username": { "type": "string" },
+          "display_name": { "type": "string" },
+          "organization": {
+            "type": "object",
+            "properties": {
+              "id": { "type": "string" },
+              "name": { "type": "string" }
+            },
+            "additionalProperties": true
+          },
+          "positions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": { "type": "string" },
+                "name": { "type": "string" }
+              },
+              "additionalProperties": true
+            }
+          },
+          "roles": { "type": "array", "items": { "type": "object" } },
+          "is_admin": { "type": "boolean" },
+          "ithinktank": { "$ref": "#/components/schemas/ZhilingIthinktankIdentity" },
+          "ithinktank_account": { "type": "string" },
+          "ithinktank_user_id": { "type": "string" }
+        },
+        "additionalProperties": true
       }
     },
     "securitySchemes": {
@@ -2026,6 +2755,11 @@
         "type": "apiKey",
         "in": "cookie",
         "name": "session"
+      },
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "zhiling access_token from login callback (#token=)"
       }
     }
   },

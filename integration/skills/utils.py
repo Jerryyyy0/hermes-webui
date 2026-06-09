@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import io
+import logging
 import zipfile
 from pathlib import Path
+
+_log = logging.getLogger(__name__)
 
 _SYSTEM_SKILL_NAMES = frozenset({"hermes", "default"})
 
@@ -63,3 +66,30 @@ def extract_zip_and_flatten(zip_bytes: bytes, target_dir: Path) -> None:
                 continue
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_bytes(zf.read(member))
+
+
+def stream_zip_to_handler(handler, zip_name: str, files: list[tuple[Path, str]]) -> None:
+    """Stream a zip archive to the HTTP handler response body."""
+    from api.routes import _content_disposition_value
+
+    handler.send_response(200)
+    handler.send_header("Content-Type", "application/zip")
+    handler.send_header(
+        "Content-Disposition",
+        _content_disposition_value("attachment", zip_name),
+    )
+    handler.send_header("Cache-Control", "no-store")
+    handler.send_header("Connection", "close")
+    handler.end_headers()
+
+    written = 0
+    with zipfile.ZipFile(
+        handler.wfile, mode="w", compression=zipfile.ZIP_DEFLATED, allowZip64=True
+    ) as zf:
+        for fp, arcname in files:
+            try:
+                zf.write(fp, arcname=arcname)
+                written += 1
+            except (OSError, PermissionError) as exc:
+                _log.warning("skill-download: skipping %s: %s", fp, exc)
+    _log.debug("skill-download: streamed %d/%d files as %s", written, len(files), zip_name)

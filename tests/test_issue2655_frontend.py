@@ -18,14 +18,21 @@ def test_workspace_artifacts_tab_collects_session_files_and_previews_them():
     assert "function renderSessionArtifacts()" in WORKSPACE_JS
     assert "function scheduleRenderSessionArtifacts()" in WORKSPACE_JS
     assert "function openArtifactPath(path)" in WORKSPACE_JS
+    assert "function openManifestPreview(item)" in WORKSPACE_JS
+    assert "function openIntegrationFilePreview(path)" in WORKSPACE_JS
+    assert "function openSkillContentPreview(skillName)" in WORKSPACE_JS
+    assert "ensureWorkspacePreviewVisible()" in WORKSPACE_JS
+    assert "INTEGRATION_WORKSPACE_API" in WORKSPACE_JS
+    assert "${INTEGRATION_WORKSPACE_API}/file" in WORKSPACE_JS
+    assert "/api/skillhub/content" in WORKSPACE_JS
     assert "openFile(rel);" in WORKSPACE_JS
     assert "Prose mentions" in WORKSPACE_JS
     assert "/(?:created|wrote|updated|edited|saved|modified)" not in WORKSPACE_JS
     assert "panel.dataset.activeTab = _workspacePanelActiveTab" in WORKSPACE_JS
     assert "renderSessionArtifacts();" in SESSIONS_JS
-    assert "typeof scheduleRenderSessionArtifacts==='function'" in MESSAGES_JS
+    assert "source.addEventListener('manifest_delta'" in MESSAGES_JS
     assert "S.toolCalls=d.session.tool_calls.map" in MESSAGES_JS
-    assert ".workspace-artifact-item" in STYLE_CSS
+    assert ".turn-artifact-chip" in STYLE_CSS
 
 
 def test_workspace_artifacts_structured_args_are_mutation_gated():

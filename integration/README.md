@@ -15,6 +15,7 @@ export SKILLHUB_URL=http://127.0.0.1:8000   # optional; SkillHub market only (se
 - **Cross-profile cron** — Cron Hub and grouped cron APIs across profiles.
 - **SkillHub** — UI and `/api/skillhub/*` routes are active only when `SKILLHUB_URL` is also set.
 - **Egress policy (iptables)** — gated API to apply iptables open/whitelist policies (see below). **Off by default**; requires `HERMES_EGRESS_POLICY_ENABLED=1`.
+- **Knowledge base BFF** — `POST /api/integration/knowledge-base/*` routes are active only when `KNOWLEDGE_BASE_URL` is also set.
 
 If you use a local HTTP proxy (`HTTP_PROXY`, e.g. Clash), add the SkillHub host to `NO_PROXY` (or rely on `ensure_skillhub_no_proxy()` at server startup, which appends the hostname from `SKILLHUB_URL`). Without this, `/api/skillhub/*` may return 502 while `curl` to the same upstream works.
 
@@ -98,6 +99,129 @@ Notes:
 - `include_request_ip` is **opt-in**. The server will **not** silently add the request IP to the allowlist.
 - `allowed_ips` accepts IP or CIDR; invalid entries are rejected.
 
+### Zhiling 身份（Control Plane 代理）
+
+在用户容器内，调用方从 zhiling 登录回调取得 `access_token`（`#/auth/callback#token=...`）后，可经 WebUI 转发查询当前用户平台身份与 i智库同步信息。
+
+启用：
+
+```bash
+export HERMES_INTEGRATION=1
+export ZHILING_CONTROL_PLANE_URL=http://zhiling-control-plane:13001
+```
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/api/integration/login` | 代理 `GET {ZHILING_CONTROL_PLANE_URL}/api/identity/lookup` |
+
+请求头：
+
+| Header | 必填 | 说明 |
+|--------|------|------|
+| `Authorization` | 是 | `Bearer <access_token>` |
+
+若 WebUI 启用了密码/Passkey 鉴权，调用方还需携带有效的 `hermes_session` Cookie（`credentials: include`）；`Authorization` 仅用于 zhiling token，不与 WebUI Cookie 混用。
+
+示例（经 WebUI 代理）：
+
+```bash
+TOKEN='前端拿到的 access_token'
+
+curl -sS \
+  -H "Authorization: Bearer ${TOKEN}" \
+  http://127.0.0.1:8787/api/integration/login
+```
+
+成功时响应体与 Control Plane 一致（原样透传，含 `username`、`organization`、`ithinktank` 等字段）。无效 token 通常为 HTTP `401` 且 body 含 `detail`；Control Plane 不可达时 WebUI 返回 `502` 且 `error` 为 `identity_lookup_failed`。
+
+### Zhiling 用户容器登出（auth-proxy 代理）
+
+在用户容器 compose 网络内，WebUI 后端通过 `ZHILING_LOGOUT_API_URL`（auth-proxy 根地址，不含路径）调用固定接口 `POST /api/logout`，识别当前用户实例（`EXPECTED_USERNAME`），不要求转发浏览器 Cookie。
+
+启用：
+
+```bash
+export HERMES_INTEGRATION=1
+export ZHILING_LOGOUT_API_URL=http://auth-proxy:8080
+```
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| POST | `/api/integration/logout` | 清理 WebUI `hermes_session`，POST `{}` 至 auth-proxy，原样返回 JSON（含 `casdoor_logout_url`、`login_url` 等） |
+| GET | `/api/integration/logout` | 返回 `405` + `method_not_allowed` |
+
+示例（容器内或经 WebUI 代理）：
+
+```bash
+curl -sS -X POST \
+  -H "Content-Type: application/json" \
+  -d '{}' \
+  http://127.0.0.1:8787/api/integration/logout
+```
+
+推荐流程：调用方收到 JSON 后由前端或门户跳转 `casdoor_logout_url`；WebUI 内置 Sign Out（`POST /api/auth/logout`）不修改，Zhiling 部署可单独调用本接口或浏览器同源 `POST /api/logout`（auth-proxy）。
+
+auth-proxy 不可达时 WebUI 返回 `502` 且 `error` 为 `zhiling_logout_failed`。
+
+### Workspace 无会话文件（`HERMES_INTEGRATION=1`）
+
+根目录固定为 **`HERMES_WEBUI_DEFAULT_WORKSPACE`**（`api.config.DEFAULT_WORKSPACE`），**不需要 `session_id`**。相对路径均相对该根目录。
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/api/integration/workspace/files` | 平铺文件索引；`page`（默认 1）、`page_size`（默认 500，上限 5000）；可选子树 `path`（默认 `.`）；`q`（basename 包含搜索）、`type`（扩展名过滤，如 `.md`）、`sort`（`path`/`size`/`mtime`/`ctime`，默认 `path`）、`order`（`asc`/`desc`，默认 `desc`） |
+| GET | `/api/integration/workspace/file` | 原始文件字节流（`path` 必填）；`Content-Type` 按扩展名；不设 `Content-Disposition` |
+
+翻页：递增 `page` 直到响应 `has_more` 为 `false`。条目含 `ext`、`mime`、`mtime_ns`、`ctime_ns`（优先 birthtime，否则为 `st_ctime` 纳秒；`stat` 失败时为 `null`）。`sort=ctime` 优先按 `ctime_ns` 排序，`ctime_ns` 为空时回退 `mtime_ns`。
+
+索引与读取默认排除系统/缓存垃圾文件（如 `.DS_Store`、`Thumbs.db`、`._*`），且不进入 `.git`、`node_modules`、`__pycache__` 等目录（与右侧 Workspace 文件树 #1793 规则一致）。
+
+```bash
+curl -sS 'http://127.0.0.1:8787/api/integration/workspace/files?page=1&page_size=100'
+curl -sS 'http://127.0.0.1:8787/api/integration/workspace/files?q=report&type=.md&sort=mtime&order=desc'
+curl -sS 'http://127.0.0.1:8787/api/integration/workspace/file?path=README.md'
+curl -sS 'http://127.0.0.1:8787/api/integration/workspace/file?path=assets/logo.png' -o logo.png
+```
+
+UI（`HERMES_INTEGRATION=1`）：左侧 Rail / 移动顶栏 **Workspace 文件**（`integrationWorkspace`），`hermes_integration_workspace.js` + `hermes_integration_workspace.css`。左栏为平铺列表（服务端搜索/类型过滤/排序、分页「加载更多」、刷新），中间主区只读预览（文本 / Markdown / 图片 / PDF / HTML / 媒体）。与会话绑定的右侧 Workspace 面板（`/api/list` + `session_id`）并存。
+
+### 知识库 BFF 代理（`KNOWLEDGE_BASE_URL`）
+
+在用户容器或门户内，前端将 `account` / `uuid` 放入请求体，经 WebUI 转发至下游知识库服务（`POST {KNOWLEDGE_BASE_URL}/knowledge_base/*`）。后端不调用 Zhiling identity lookup。
+
+启用：
+
+```bash
+export HERMES_INTEGRATION=1
+export KNOWLEDGE_BASE_URL=http://192.168.1.132:17861
+```
+
+| Method | Path | 下游 | 调用方必填 |
+|--------|------|------|-----------|
+| POST | `/api/integration/knowledge-base/list` | `list_ps_knowledge_bases` | `account`, `uuid`, `isPersonal` |
+| POST | `/api/integration/knowledge-base/joined` | `user_joined_shkbs` | `account`, `uuid` |
+| POST | `/api/integration/knowledge-base/create` | `create_ps_kb` | `account`, `uuid`, `showName`, `isPersonal` |
+| POST | `/api/integration/knowledge-base/info` | `show_ps_kb_info` | `kbName` |
+| POST | `/api/integration/knowledge-base/edit` | `edit_kb_information` | `kbName`, `showName` |
+| POST | `/api/integration/knowledge-base/delete` | `delete_ps_kb` | `account`, `kbName` |
+| POST | `/api/integration/knowledge-base/available` | `available_shkbs` | `account`, `uuid`, `page`, `size` |
+| POST | `/api/integration/knowledge-base/apply-join` | `apply_join_shkb` | `account`, `uuid`, `kbName` |
+| POST | `/api/integration/knowledge-base/members` | `get_user_inshkb` | `uuid`, `kbName`, `page`, `size` |
+| POST | `/api/integration/knowledge-base/documents` | `list_knowledge_bases_details` | `kbName`, `page`, `size` |
+| POST | `/api/integration/knowledge-base/upload-docs` | `upload_docs` | multipart：`uuid`, `kbName`, `files`, `fileProperties` |
+| POST | `/api/integration/knowledge-base/update-docs` | `update_docs` | `kbName`, `fileNames`, `fileProperties` |
+| POST | `/api/integration/knowledge-base/delete-docs` | `delete_docs` | `kbName`, `fileNames` |
+
+成功时 HTTP 200 响应体为下游 `data` 字段（无 envelope）。业务失败 HTTP 400：`{ error, message, code }`；下游不可达 HTTP 502。
+
+文档上传须两步串联：`upload-docs` 成功后再 `update-docs`。
+
+```bash
+curl -sS -X POST http://127.0.0.1:8787/api/integration/knowledge-base/list \
+  -H "Content-Type: application/json" \
+  -d '{"account":"admin","uuid":"aaaaaaaa0000aaaa0000aaaaaaaaaaaa","isPersonal":1}'
+```
+
 ## 维护约束
 
 1. **不要改根目录 `CHANGELOG.md`** — 集成外部接口、接缝文件或本目录代码时，发布说明写在 [`CHANGELOG.md`](CHANGELOG.md)（本文件）。根目录 `CHANGELOG.md` 留给上游同步，除非 Maintainer 明确要求。
@@ -120,12 +244,14 @@ Notes:
 | `GET /api/skillhub/skills` | `GET /api/skills` (`scope`, `q`, `category`, `page`, `page_size` — no `profile` upstream) |
 | `GET /api/skillhub/categories` | `GET /api/skills/categories` |
 | `GET /api/skillhub/detail?name=` | `GET /api/skills/{name}` |
-| `GET /api/skillhub/content?name=` | `GET /api/skills/{name}/doc` |
-| `GET /api/skillhub/structure?name=` | `GET /api/skills/{name}/structure` |
-| `GET /api/skillhub/file?name=&path=` | `GET /api/skills/{name}/file?path=` |
+| `GET /api/skillhub/content?name=` | 默认 `scope=auto`：本地 `{HERMES_HOME}/skills` 优先，否则 `GET /api/skills/{name}/doc` |
+| `GET /api/skillhub/structure?name=` | 同上（`structure`） |
+| `GET /api/skillhub/file?name=&path=` | 同上（`file`） |
 | `POST /api/skillhub/install` | download/doc → `shared_skills_dir`；有 `category` 时 `skills/<category>/<name>/`，否则平铺 `skills/<name>/` |
 | `POST /api/skillhub/delete` | remove local skill from `shared_skills_dir`（市场安装与 custom；仅需 `HERMES_INTEGRATION=1`） |
-| `POST /api/skillhub/upload` | **仅本地** custom：`.md` / 多技能 `.zip` 或 JSON → `shared_skills_dir`；可选 `category` 分层；响应 `{ skill_count, file_count, skills[] }` |
+| `GET /api/skillhub/download` | **仅本地**：将 custom 或已安装技能目录打包为 zip 下载（排除 `.hub_installed` 等元数据）；`name` + 可选 `dir_name`；仅需 `HERMES_INTEGRATION=1` |
+| `POST /api/skillhub/edit` | **仅本地** custom：更新已有技能的 `SKILL.md`（`name` + `content`，可选 `dir_name`）；市场安装不可编辑；仅需 `HERMES_INTEGRATION=1` |
+| `POST /api/skillhub/upload` | **仅本地** custom：`.md` / 多技能 `.zip` 或 JSON → `shared_skills_dir`；可选 `category`、`overwrite`（仅覆盖 custom）；响应 `{ skill_count, file_count, skills[] }` |
 
 `GET /api/skillhub/skills` annotates `installed` from `shared_skills_dir`. SkillHub routes do not use WebUI profile cookies or `profile` query/body parameters.
 
@@ -144,7 +270,10 @@ Response includes global `stats`: `{ hub, installed, not_installed, custom }` ac
 
 | Path | Role |
 |------|------|
-| `config.py` | `HERMES_INTEGRATION`, `SKILLHUB_URL`, `skillhub_enabled()` |
+| `config.py` | `HERMES_INTEGRATION`, `SKILLHUB_URL`, `KNOWLEDGE_BASE_URL`, `ZHILING_CONTROL_PLANE_URL`, `ZHILING_LOGOUT_API_URL`, `skillhub_enabled()`, `knowledge_base_enabled()`, `identity_lookup_enabled()`, `zhiling_logout_enabled()` |
+| `knowledge_base/` | `/api/integration/knowledge-base/*` → `{KNOWLEDGE_BASE_URL}/knowledge_base/*` |
+| `identity/` | `GET /api/integration/login` → Control Plane `/api/identity/lookup` |
+| `logout/` | `POST /api/integration/logout` → `{ZHILING_LOGOUT_API_URL}/api/logout` |
 | `skills/skillhub.py` | Upstream httpx client |
 | `skills/handlers.py` | `/api/skillhub/*` HTTP handlers |
 | `profiles/` | `GET /api/profiles` enrich; `POST /api/profile/info`; `GET /api/profile/logo-presets` |

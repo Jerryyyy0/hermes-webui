@@ -189,6 +189,7 @@ def _run_gateway_chat_streaming(
     attachments=None,
     *,
     model_provider=None,
+    stream_turn_key="",
 ):
     """Bridge a WebUI chat turn through Hermes Gateway's API server.
 
@@ -241,11 +242,27 @@ def _run_gateway_chat_streaming(
             logger.debug("Failed to put gateway event to queue")
 
     manifest_delta_sequence = [0]
+    manifest_turn_key = str(stream_turn_key or "").strip()
+    if not manifest_turn_key:
+        try:
+            current_session = get_session(session_id)
+            manifest_turn_key = f"turn:{len(getattr(current_session, 'messages', []) or [])}"
+        except Exception:
+            manifest_turn_key = ""
+
+    def _gateway_manifest_skills_dir():
+        try:
+            from api.session_manifest import _skills_dir_for_session
+
+            return _skills_dir_for_session(get_session(session_id))
+        except Exception:
+            return None
 
     def emit_gateway_manifest_delta(event_payload: dict, event_name: str) -> None:
         try:
             from api.session_manifest import (
                 ToolEvent,
+                _apply_public_todos_to_manifest_delta,
                 extract_manifest_delta_from_tool_event,
                 merge_manifest_delta,
             )
@@ -264,17 +281,16 @@ def _run_gateway_chat_streaming(
                 Path(str(workspace)),
                 session_id=session_id,
                 stream_id=stream_id,
-                turn_key=f"live:{stream_id}",
+                turn_key=manifest_turn_key,
                 sequence=manifest_delta_sequence[0],
                 source_kind="tool_complete" if is_complete else "tool_start",
+                skills_dir=_gateway_manifest_skills_dir(),
             )
             if not (delta.get("todos") or delta.get("artifacts") or delta.get("references")):
                 return
             with STREAMS_LOCK:
                 live_manifest = merge_manifest_delta(
                     STREAM_LIVE_MANIFEST.get(stream_id) or {
-                        "session_id": session_id,
-                        "workspace": str(workspace),
                         "todos": {"items": []},
                         "artifacts": [],
                         "references": [],
@@ -284,8 +300,9 @@ def _run_gateway_chat_streaming(
                     scope="active_stream",
                 )
                 STREAM_LIVE_MANIFEST[stream_id] = live_manifest
-                if delta.get("todos") and isinstance(live_manifest.get("todos"), dict):
-                    delta["todos"] = live_manifest["todos"]
+                _apply_public_todos_to_manifest_delta(delta, live_manifest)
+            if not (delta.get("todos") or delta.get("artifacts") or delta.get("references")):
+                return
             put_gateway_event("manifest_delta", delta)
         except Exception:
             logger.debug("Failed to emit gateway manifest_delta for %s", event_payload.get("name"), exc_info=True)
@@ -453,6 +470,36 @@ def _run_gateway_chat_streaming(
             s.model_provider = model_provider
             s.save()
         gateway_session_payload = s.compact() | {"messages": s.messages, "tool_calls": []}
+        try:
+            from api.session_manifest import (
+                extract_manifest_delta_from_assistant_media,
+                merge_manifest_delta,
+            )
+            manifest_delta_sequence[0] += 1
+            media_delta = extract_manifest_delta_from_assistant_media(
+                list(getattr(s, "messages", None) or []),
+                Path(str(workspace)),
+                session_id=session_id,
+                stream_id=stream_id,
+                turn_key=manifest_turn_key,
+                sequence=manifest_delta_sequence[0],
+            )
+            if media_delta.get("artifacts") or media_delta.get("turns"):
+                with STREAMS_LOCK:
+                    live_manifest = merge_manifest_delta(
+                        STREAM_LIVE_MANIFEST.get(stream_id) or {
+                            "todos": {"items": []},
+                            "artifacts": [],
+                            "references": [],
+                            "turns": [],
+                        },
+                        media_delta,
+                        scope="active_stream",
+                    )
+                    STREAM_LIVE_MANIFEST[stream_id] = live_manifest
+                put_gateway_event("manifest_delta", media_delta)
+        except Exception:
+            logger.debug("Failed to emit gateway turn_complete MEDIA manifest_delta", exc_info=True)
         put_gateway_event("done", {"session": redact_session_data(gateway_session_payload), "usage": usage})
         put_gateway_event("stream_end", {"session_id": session_id})
     except urllib.error.HTTPError as exc:

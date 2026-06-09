@@ -6845,6 +6845,10 @@ function renderMessages(options){
       const key=turn.dataset.turnKey;
       const blocks=_assistantTurnBlocks(turn);
       if(!key||!blocks) return;
+      if(turn.id==='liveAssistantTurn'||turn.querySelector('[data-live-assistant="1"]')){
+        turn.querySelector('.turn-artifacts')?.remove();
+        return;
+      }
       let host=turn.querySelector('.turn-artifacts');
       if(!host){
         host=document.createElement('div');

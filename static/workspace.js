@@ -165,6 +165,7 @@ async function loadSessionManifest(){
     _sessionManifest = data && data.manifest ? data.manifest : null;
     _sessionManifestSid = sid;
     renderSessionInspector();
+    refreshTurnArtifactsInChat();
     return _sessionManifest;
   }catch(e){
     console.warn('loadSessionManifest', e);
@@ -242,49 +243,26 @@ function _mergeManifestRows(existing, incoming){
   const add = (row) => {
     if(!row||typeof row!=='object') return;
     const path = String(row.path||'').trim();
-    if(!path) return;
-    const current = byPath.get(path) || {};
-    const merged = {...current, ..._cloneManifestValue(row)};
-    const hits = [];
-    const seen = new Set();
-    [...(current.hits||[]), ...(row.hits||[])].forEach(hit=>{
-      if(!hit||typeof hit!=='object') return;
-      const key = [hit.path||path, hit.source_tool||'', hit.tid||'', hit.assistant_msg_idx??'', hit.tool_msg_idx??''].join('|');
-      if(seen.has(key)) return;
-      seen.add(key);
-      hits.push(_cloneManifestValue(hit));
-    });
-    if(hits.length){
-      merged.hits = hits;
-      merged.hit_count = hits.length;
-    }
-    byPath.set(path, merged);
+    const preview = String(row.preview||'').trim();
+    const source_tool = String(row.source_tool||'').trim();
+    if(!path || (preview !== 'file' && preview !== 'skill') || !source_tool) return;
+    byPath.set(path, {path, preview, source_tool});
   };
   (existing||[]).forEach(add);
   (incoming||[]).forEach(add);
   return [...byPath.values()].sort((a,b)=>String(a.path||'').localeCompare(String(b.path||'')));
 }
 
-function _currentLiveTurnKey(streamId){
-  if(streamId && S._manifestLiveTurnKeys && S._manifestLiveTurnKeys[streamId]) return S._manifestLiveTurnKeys[streamId];
-  let idx = -1;
-  const msgs = S.messages || [];
-  for(let i=msgs.length-1;i>=0;i--){
-    if(msgs[i]&&msgs[i].role==='user'){ idx=i; break; }
-  }
-  const key = idx>=0 ? `turn:${idx}` : (streamId ? `live:${streamId}` : '');
-  if(streamId){
-    S._manifestLiveTurnKeys = S._manifestLiveTurnKeys || {};
-    S._manifestLiveTurnKeys[streamId] = key;
-  }
-  return key;
+function _normalizeDeltaTurnKey(delta){
+  const key = String(delta && delta.turn_key || '').trim();
+  return key.startsWith('turn:') ? key : '';
 }
 
-function _normalizeDeltaTurnKey(delta){
-  const streamId = delta && delta.stream_id;
-  const key = String(delta && delta.turn_key || '');
-  if(key.startsWith('live:')) return _currentLiveTurnKey(streamId);
-  return key || _currentLiveTurnKey(streamId);
+function _turnKeySortValue(turnKey){
+  const key = String(turnKey || '');
+  if(!key.startsWith('turn:')) return 1000000000;
+  const idx = Number(key.slice(5));
+  return Number.isInteger(idx) ? idx : 1000000000;
 }
 
 function _mergeManifestTurns(existingTurns, incomingTurns){
@@ -295,8 +273,7 @@ function _mergeManifestTurns(existingTurns, incomingTurns){
     if(!key) return;
     const current = byKey.get(key) || {turn_key:key, artifacts:[], references:[]};
     byKey.set(key, {
-      ...current,
-      ..._cloneManifestValue(turn),
+      turn_key: key,
       artifacts: _mergeManifestRows(current.artifacts, turn.artifacts),
       references: _mergeManifestRows(current.references, turn.references),
     });
@@ -304,20 +281,10 @@ function _mergeManifestTurns(existingTurns, incomingTurns){
   (existingTurns||[]).forEach(add);
   (incomingTurns||[]).forEach(add);
   return [...byKey.values()].sort((a,b)=>{
-    const ai = Number.isInteger(a.user_msg_idx) ? a.user_msg_idx : 1000000000;
-    const bi = Number.isInteger(b.user_msg_idx) ? b.user_msg_idx : 1000000000;
+    const ai = _turnKeySortValue(a.turn_key);
+    const bi = _turnKeySortValue(b.turn_key);
     return ai===bi ? String(a.turn_key||'').localeCompare(String(b.turn_key||'')) : ai-bi;
   });
-}
-
-function _manifestCounts(manifest){
-  const todos = manifest && manifest.todos && Array.isArray(manifest.todos.items) ? manifest.todos.items : [];
-  return {
-    todos: todos.length,
-    artifacts: Array.isArray(manifest&&manifest.artifacts) ? manifest.artifacts.length : 0,
-    references: Array.isArray(manifest&&manifest.references) ? manifest.references.length : 0,
-    turns: Array.isArray(manifest&&manifest.turns) ? manifest.turns.length : 0,
-  };
 }
 
 function applySessionManifestDelta(delta){
@@ -331,13 +298,10 @@ function applySessionManifestDelta(delta){
   }
   if(!_sessionManifest || _sessionManifestSid !== S.session.session_id){
     _sessionManifest = {
-      session_id: S.session.session_id,
-      workspace: S.session.workspace || '',
       todos: {items:[]},
       artifacts: [],
       references: [],
       turns: [],
-      counts: {todos:0, artifacts:0, references:0, turns:0},
     };
     _sessionManifestSid = S.session.session_id;
   }
@@ -347,16 +311,14 @@ function applySessionManifestDelta(delta){
     turn_key: turnKey,
     artifacts: delta.artifacts || [],
     references: delta.references || [],
-    ...(delta.todos ? {todo_snapshot: delta.todos} : {}),
   }] : []);
   if(delta.todos && Array.isArray(delta.todos.items)){
-    _sessionManifest.todos = _cloneManifestValue(delta.todos);
+    _sessionManifest.todos = {items: _cloneManifestValue(delta.todos.items)};
   }
   _sessionManifest.artifacts = _mergeManifestRows(_sessionManifest.artifacts, delta.artifacts);
   _sessionManifest.references = _mergeManifestRows(_sessionManifest.references, delta.references);
   _sessionManifest.turns = _mergeManifestTurns(_sessionManifest.turns, incomingTurns);
   _sessionManifest.live = delta.stream_id ? {stream_id: delta.stream_id, source:'sse'} : _sessionManifest.live;
-  _sessionManifest.counts = _manifestCounts(_sessionManifest);
   renderSessionInspector();
   return true;
 }
@@ -376,28 +338,54 @@ function renderTurnArtifacts(turnKey, root){
     return;
   }
   root.innerHTML = `<div class="turn-artifacts-label">${esc(_workspaceInspectorLabel('turn_artifacts_label', 'Files changed this turn'))}</div>`+
-    `<div class="turn-artifacts-list">${items.map(item=>{
+    `<div class="turn-artifacts-list">${items.map((item, idx)=>{
       const path = item.path || '';
       const source = item.source_tool || '';
-      const disabled = item.preview && item.preview.previewable === false;
-      return `<button type="button" class="turn-artifact-chip${disabled?' is-disabled':''}" data-path="${esc(path)}"${disabled?' disabled':''}>${esc(path)}${source?`<span>${esc(source)}</span>`:''}</button>`;
+      return `<button type="button" class="turn-artifact-chip" data-turn-artifact-idx="${idx}" data-path="${esc(path)}">${esc(path)}${source?`<span>${esc(source)}</span>`:''}</button>`;
     }).join('')}</div>`;
-  root.querySelectorAll('.turn-artifact-chip:not(.is-disabled)').forEach(btn=>{
-    btn.onclick=()=>openArtifactPath(btn.dataset.path||'');
+  root.querySelectorAll('.turn-artifact-chip').forEach(btn=>{
+    const idx = Number(btn.dataset.turnArtifactIdx);
+    const item = Number.isInteger(idx) ? items[idx] : null;
+    btn.onclick=()=>openManifestPreview(item || {path: btn.dataset.path||''});
   });
 }
 
+function refreshTurnArtifactsInChat(){
+  if(typeof renderTurnArtifacts!=='function') return;
+  const inner=document.querySelector('.messages-inner');
+  if(!inner) return;
+  inner.querySelectorAll('.assistant-turn[data-turn-key]').forEach(turn=>{
+    if(turn.id==='liveAssistantTurn'||turn.querySelector('[data-live-assistant="1"]')) return;
+    const key=turn.dataset.turnKey;
+    const blocks=typeof _assistantTurnBlocks==='function'?_assistantTurnBlocks(turn):turn.querySelector('.assistant-turn-blocks');
+    if(!key||!blocks) return;
+    let host=turn.querySelector('.turn-artifacts');
+    if(!host){
+      host=document.createElement('div');
+      host.className='turn-artifacts';
+      blocks.appendChild(host);
+    }
+    renderTurnArtifacts(key, host);
+  });
+}
+
+function _manifestRowByPath(path, collection){
+  const manifest = _manifestForActiveSession();
+  if(!manifest || !path) return null;
+  const rows = Array.isArray(manifest[collection]) ? manifest[collection] : [];
+  return rows.find(item=>item && item.path === path) || null;
+}
+
+function isManifestPreviewable(item){
+  return item?.preview === 'file' || item?.preview === 'skill';
+}
+
 function _inspectorFileMeta(item){
-  const preview = item && item.preview;
-  if(!preview) return '';
-  if(preview.kind === 'dir') return _workspaceInspectorLabel('workspace_ref_dir', 'directory');
-  if(!preview.in_workspace) return _workspaceInspectorLabel('workspace_outside_workspace', 'outside workspace');
-  if(preview.exists === false) return _workspaceInspectorLabel('workspace_file_missing', 'not found');
-  if(preview.previewable) return _workspaceInspectorLabel('workspace_preview_ready', 'preview');
+  if(item && item.preview === 'skill') return _workspaceInspectorLabel('workspace_preview_skill', 'skill');
   return '';
 }
 
-function _renderInspectorFileList(root, items, emptyKey, emptyFallback, onClickAttr){
+function _renderInspectorFileList(root, items, emptyKey, emptyFallback){
   if(!root) return;
   if(!S.session){
     root.innerHTML = `<div class="workspace-inspector-empty">${esc(_workspaceInspectorLabel('workspace_inspector_no_session', 'Open a conversation to inspect session files.'))}</div>`;
@@ -407,14 +395,20 @@ function _renderInspectorFileList(root, items, emptyKey, emptyFallback, onClickA
     root.innerHTML = `<div class="workspace-inspector-empty">${esc(_workspaceInspectorLabel(emptyKey, emptyFallback))}</div>`;
     return;
   }
-  root.innerHTML = items.map(item=>{
+  root.innerHTML = items.map((item, idx)=>{
     const path = item.path || '';
     const metaBits = [item.source_tool || '', _inspectorFileMeta(item)].filter(Boolean);
-    const previewable = !!(item.preview && item.preview.previewable);
-    const cls = previewable ? 'workspace-inspector-item' : 'workspace-inspector-item is-disabled';
-    const onclick = previewable ? ` ${onClickAttr}="${esc(path)}"` : '';
-    return `<button type="button" class="${cls}" data-path="${esc(path)}"${onclick}><div class="workspace-inspector-path">${esc(path)}</div><div class="workspace-inspector-meta">${esc(metaBits.join(' · '))}</div></button>`;
+    return `<button type="button" class="workspace-inspector-item" data-manifest-idx="${idx}" data-path="${esc(path)}"><div class="workspace-inspector-path">${esc(path)}</div><div class="workspace-inspector-meta">${esc(metaBits.join(' · '))}</div></button>`;
   }).join('');
+}
+
+function _bindInspectorFileList(root, items){
+  if(!root) return;
+  root.querySelectorAll('.workspace-inspector-item').forEach(btn=>{
+    const idx = Number(btn.dataset.manifestIdx);
+    const item = Number.isInteger(idx) ? items[idx] : _manifestRowByPath(btn.dataset.path || '', 'artifacts');
+    btn.onclick = ()=> openManifestPreview(item || {path: btn.dataset.path || ''});
+  });
 }
 
 function renderSessionTasks(){
@@ -449,7 +443,7 @@ function renderSessionArtifacts(){
   const items = manifest && Array.isArray(manifest.artifacts) ? manifest.artifacts : collectSessionArtifacts().map(row=>({
     path: row.path,
     source_tool: row.source || row.kind || 'session',
-    preview: {previewable: true, in_workspace: true, exists: true, kind: 'file'},
+    preview: 'file',
   }));
   if(count) count.textContent = String(items.length);
   _renderInspectorFileList(
@@ -457,13 +451,8 @@ function renderSessionArtifacts(){
     items,
     'workspace_artifacts_empty',
     'No artifacts detected yet. Files created or edited during this session will appear here.',
-    'onclick',
   );
-  if(root){
-    root.querySelectorAll('.workspace-inspector-item:not(.is-disabled)').forEach(btn=>{
-      btn.onclick = ()=> openArtifactPath(btn.dataset.path || btn.getAttribute('data-path'));
-    });
-  }
+  _bindInspectorFileList(root, items);
 }
 
 function renderSessionReferences(){
@@ -477,13 +466,8 @@ function renderSessionReferences(){
     items,
     'workspace_references_empty',
     'No referenced files yet. Files read or searched during this session will appear here.',
-    'onclick',
   );
-  if(root){
-    root.querySelectorAll('.workspace-inspector-item:not(.is-disabled)').forEach(btn=>{
-      btn.onclick = ()=> openInspectorReferencePath(btn.dataset.path || btn.getAttribute('data-path'));
-    });
-  }
+  _bindInspectorFileList(root, items);
 }
 
 function renderSessionInspector(){
@@ -493,16 +477,44 @@ function renderSessionInspector(){
 }
 
 async function openInspectorReferencePath(path){
-  if(!path) return;
-  const manifest = _manifestForActiveSession();
-  const row = (manifest && manifest.references || []).find(item=>item.path === path);
-  const previewable = row && row.preview && row.preview.previewable;
-  if(!previewable){
-    setStatus(_workspaceInspectorLabel('workspace_preview_unavailable', 'Preview unavailable for this path.'));
-    return;
-  }
+  const row = _manifestRowByPath(path, 'references');
+  await openManifestPreview(row || {path});
+}
+
+async function openManifestPreview(item){
+  if(!item || !item.path || !item.preview) return;
+  if(item.preview === 'skill') return openSkillContentPreview(item.path);
+  if(item.preview === 'file') return openIntegrationFilePreview(item.path);
+}
+
+async function openSkillContentPreview(skillName){
+  if(!S.session || !skillName) return;
+  if(typeof ensureWorkspacePreviewVisible==='function') ensureWorkspacePreviewVisible();
+  else if(typeof openWorkspacePanel==='function') openWorkspacePanel('preview');
   switchWorkspacePanelTab('files');
-  await openArtifactPath(path);
+  const url = `/api/skillhub/content?name=${encodeURIComponent(skillName)}`;
+  try{
+    const data = await api(url);
+    const content = data.content || data.body || '';
+    const title = data.name || skillName;
+    $('previewPathText').textContent = title;
+    $('previewArea').classList.add('visible');
+    $('fileTree').style.display = 'none';
+    _previewCurrentPath = title;
+    _previewRawContent = content;
+    renderFileBreadcrumb(title);
+    if(shouldRenderMarkdownPreviewAsPlainText(content)){
+      showPreview('code');
+      $('previewCode').textContent = content;
+      setStatus(largeMarkdownPlainTextStatus(content));
+      return;
+    }
+    showPreview('md');
+    $('previewMd').innerHTML = renderMd(content);
+    requestAnimationFrame(()=>{if(typeof renderKatexBlocks==='function')renderKatexBlocks();});
+  }catch(e){
+    setStatus(t('file_open_failed'));
+  }
 }
 
 function clearSessionManifest(){
@@ -518,6 +530,9 @@ window.HermesSessionInspector = {
   applyDelta: (delta) => applySessionManifestDelta(delta),
   getTurnArtifacts: (turnKey) => getTurnArtifacts(turnKey),
   renderTurnArtifacts: (turnKey, root) => renderTurnArtifacts(turnKey, root),
+  refreshTurnArtifactsInChat: () => refreshTurnArtifactsInChat(),
+  isManifestPreviewable: (item) => isManifestPreviewable(item),
+  openManifestPreview: (item) => openManifestPreview(item),
 };
 
 const ARTIFACT_IGNORE_RE = /(^|\/)(?:\.git|\.hg|\.svn|node_modules|\.venv|venv|__pycache__|dist|build|\.next|\.cache)(?:\/|$)/;
@@ -611,6 +626,8 @@ async function _workspacePathExists(path){
 
 async function openArtifactPath(path){
   if(!path) return;
+  if(typeof ensureWorkspacePreviewVisible==='function') ensureWorkspacePreviewVisible();
+  else if(typeof openWorkspacePanel==='function') openWorkspacePanel('preview');
   switchWorkspacePanelTab('files');
   const rel = path.replace(/^~\//,'').replace(/^\.\//,'');
   try{
@@ -716,6 +733,178 @@ const DOWNLOAD_EXTS = new Set([
   '.woff','.woff2','.ttf','.otf','.eot',
   '.bin','.dat','.db','.sqlite','.pyc','.class','.so','.dylib','.dll',
 ]);
+
+const INTEGRATION_WORKSPACE_API = '/api/integration/workspace';
+const INTEGRATION_HTML_PREVIEW_SANDBOX = 'sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox';
+
+function _isManifestAbsolutePath(path){
+  const p = String(path || '');
+  return p.startsWith('/') || /^[A-Za-z]:[\\/]/.test(p);
+}
+
+function _manifestFilePreviewUrl(path, opts){
+  opts = opts || {};
+  if(_isManifestAbsolutePath(path)){
+    const sid = (S.session && S.session.session_id) ? String(S.session.session_id) : '';
+    let url = 'api/media?path=' + encodeURIComponent(path);
+    if(sid) url += '&session_id=' + encodeURIComponent(sid);
+    if(opts.inline) url += '&inline=1';
+    if(opts.download) url += '&download=1';
+    return url;
+  }
+  return _integrationFileUrl(path);
+}
+
+function _integrationFileUrl(path){
+  return `${INTEGRATION_WORKSPACE_API}/file?path=${encodeURIComponent(path)}`;
+}
+
+async function _fetchIntegrationFileBlob(path){
+  const res = await fetch(_integrationFileUrl(path), {credentials: 'same-origin'});
+  if(!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.blob();
+}
+
+async function _fetchManifestFileBlob(path){
+  const res = await fetch(_manifestFilePreviewUrl(path), {credentials: 'same-origin'});
+  if(!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.blob();
+}
+
+async function _fetchIntegrationFileText(path){
+  const blob = await _fetchIntegrationFileBlob(path);
+  return blob.text();
+}
+
+async function _fetchManifestFileText(path){
+  const blob = await _fetchManifestFileBlob(path);
+  return blob.text();
+}
+
+async function _downloadManifestFile(path){
+  if(_isManifestAbsolutePath(path)){
+    const url = _manifestFilePreviewUrl(path, {download: true});
+    const filename = path.split('/').pop() || path;
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    if(typeof showToast==='function') showToast(t('downloading', filename), 2000);
+    return;
+  }
+  return _downloadIntegrationFile(path);
+}
+
+async function _downloadIntegrationFile(path){
+  const blob = await _fetchIntegrationFileBlob(path);
+  const filename = path.split('/').pop() || path;
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(()=>{
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }, 100);
+  if(typeof showToast==='function') showToast(t('downloading', filename), 2000);
+}
+
+function _showIntegrationHtmlPreview(iframe, html){
+  if(!iframe) return;
+  iframe.removeAttribute('src');
+  iframe.srcdoc = html || '';
+  iframe.setAttribute('sandbox', INTEGRATION_HTML_PREVIEW_SANDBOX);
+}
+
+async function openIntegrationFilePreview(path){
+  if(!path) return;
+  if(typeof ensureWorkspacePreviewVisible==='function') ensureWorkspacePreviewVisible();
+  else if(typeof openWorkspacePanel==='function') openWorkspacePanel('preview');
+  switchWorkspacePanelTab('files');
+  const ext = fileExt(path);
+  if(DOWNLOAD_EXTS.has(ext)){
+    try{
+      await _downloadManifestFile(path);
+    }catch(e){
+      setStatus(t('file_open_failed'));
+    }
+    return;
+  }
+  $('previewPathText').textContent = path;
+  $('previewArea').classList.add('visible');
+  $('fileTree').style.display = 'none';
+  _previewCurrentPath = path;
+  renderFileBreadcrumb(path);
+  const fileUrl = _manifestFilePreviewUrl(path, {
+    inline: AUDIO_EXTS.has(ext) || VIDEO_EXTS.has(ext),
+  });
+  if(IMAGE_EXTS.has(ext)){
+    showPreview('image');
+    $('previewImg').alt = path;
+    $('previewImg').src = fileUrl;
+    $('previewImg').onerror = ()=>setStatus(t('image_load_failed'));
+  } else if(AUDIO_EXTS.has(ext) || VIDEO_EXTS.has(ext)){
+    const mode = VIDEO_EXTS.has(ext) ? 'video' : 'audio';
+    showPreview(mode);
+    const wrap = $('previewMediaWrap');
+    if(wrap){
+      wrap.innerHTML = (typeof _mediaPlayerHtml==='function')
+        ? _mediaPlayerHtml(mode, fileUrl, path.split('/').pop()||path)
+        : `<${mode} src="${fileUrl.replace(/"/g,'%22')}" controls preload="metadata"></${mode}>`;
+      if(typeof _applyMediaPlaybackPreferences==='function') _applyMediaPlaybackPreferences(wrap);
+    }
+  } else if(PDF_EXTS.has(ext)){
+    showPreview('pdf');
+    const frame = $('previewPdfFrame');
+    if(frame){
+      frame.src = '';
+      frame.src = fileUrl;
+      frame.title = `PDF preview: ${path.split('/').pop()||path}`;
+    }
+  } else if(MD_EXTS.has(ext)){
+    try{
+      const content = await _fetchManifestFileText(path);
+      _previewRawContent = content;
+      if(shouldRenderMarkdownPreviewAsPlainText(content)){
+        showPreview('code');
+        $('previewCode').textContent = content;
+        setStatus(largeMarkdownPlainTextStatus(content));
+        return;
+      }
+      showPreview('md');
+      $('previewMd').innerHTML = renderMd(content);
+      requestAnimationFrame(()=>{if(typeof renderKatexBlocks==='function')renderKatexBlocks();});
+    }catch(e){
+      setStatus(t('file_open_failed'));
+    }
+  } else if(HTML_EXTS.has(ext)){
+    try{
+      const content = await _fetchManifestFileText(path);
+      _previewRawContent = content;
+      showPreview('html');
+      _showIntegrationHtmlPreview($('previewHtmlIframe'), content);
+    }catch(e){
+      setStatus(t('file_open_failed'));
+    }
+  } else {
+    try{
+      const content = await _fetchManifestFileText(path);
+      _previewRawContent = content;
+      showPreview('code');
+      $('previewCode').textContent = content;
+    }catch(e){
+      try{
+        await _downloadManifestFile(path);
+      }catch(_){
+        setStatus(t('file_open_failed'));
+      }
+    }
+  }
+}
 
 function fileExt(p){ const i=p.lastIndexOf('.'); return i>=0?p.slice(i).toLowerCase():''; }
 

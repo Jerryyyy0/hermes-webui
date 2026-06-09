@@ -28,7 +28,7 @@
 <script>(function(){try{if(localStorage.getItem('hermes-webui-sidebar-collapsed')==='1')document.documentElement.dataset.sidebarCollapsed='1';}catch(e){}})()</script>
 <link rel="preload" href="static/pwa-startup.js?v=__WEBUI_VERSION__" as="script">
 <script src="static/pwa-startup.js?v=__WEBUI_VERSION__"></script>
-<script>window.__HERMES_CONFIG__={maxUploadBytes:__MAX_UPLOAD_BYTES__,csrfToken:__CSRF_TOKEN_JSON__,integrationSkills:__INTEGRATION_SKILLS__,skillhubEnabled:__SKILLHUB_ENABLED__,integrationCronAllProfiles:__INTEGRATION_CRON_ALL_PROFILES__};</script>
+<script>window.__HERMES_CONFIG__={maxUploadBytes:__MAX_UPLOAD_BYTES__,csrfToken:__CSRF_TOKEN_JSON__,integrationSkills:__INTEGRATION_SKILLS__,skillhubEnabled:__SKILLHUB_ENABLED__,integrationCronAllProfiles:__INTEGRATION_CRON_ALL_PROFILES__,integrationWorkspaceFiles:__INTEGRATION_WORKSPACE_FILES__};</script>
 <script>(function(){
   var cfg=window.__HERMES_CONFIG__||{},token=cfg.csrfToken||'';
   if(!token||!window.fetch)return;
@@ -152,6 +152,7 @@
     <button class="rail-btn nav-tab active has-tooltip" data-panel="chat" onclick="switchPanel('chat',{fromRailClick:true})" data-tooltip="Chat" data-i18n-title="tab_chat" aria-label="Chat"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></button>
     <button class="rail-btn nav-tab has-tooltip" data-panel="tasks" onclick="switchPanel('tasks',{fromRailClick:true})" data-tooltip="Tasks" data-i18n-title="tab_tasks" aria-label="Tasks"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg></button>
     <button class="rail-btn nav-tab nav-tab-hidden has-tooltip" id="integrationCronsRailBtn" data-panel="integrationCrons" onclick="switchPanel('integrationCrons',{fromRailClick:true})" data-tooltip="Cron Hub" data-i18n-title="tab_integration_crons" aria-label="Cron Hub" hidden><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></button>
+    <button class="rail-btn nav-tab nav-tab-hidden has-tooltip" id="integrationWorkspaceRailBtn" data-panel="integrationWorkspace" onclick="switchPanel('integrationWorkspace',{fromRailClick:true})" data-tooltip="Workspace files" data-i18n-title="tab_integration_workspace_files" aria-label="Workspace files" hidden><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M16 13H8"/><path d="M16 17H8"/><path d="M10 9H8"/></svg></button>
     <button class="rail-btn nav-tab has-tooltip" data-panel="kanban" onclick="switchPanel('kanban',{fromRailClick:true})" data-tooltip="Kanban" data-i18n-title="tab_kanban" aria-label="Kanban"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M8 4v16"/><path d="M16 4v16"/><path d="M3 10h18"/></svg></button>
     <button class="rail-btn nav-tab has-tooltip" data-panel="skills" onclick="switchPanel('skills',{fromRailClick:true})" data-tooltip="Skills" data-i18n-title="tab_skills" aria-label="Skills"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg></button>
     <button class="rail-btn nav-tab nav-tab-hidden has-tooltip" id="skillhubRailBtn" data-panel="skillhub" onclick="switchPanel('skillhub',{fromRailClick:true})" data-tooltip="SkillHub" data-i18n-title="tab_skillhub" aria-label="SkillHub" hidden><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="9" cy="21" r="1"/><circle cx="20" cy="21" r="1"/><path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6"/></svg></button>
@@ -171,6 +172,7 @@
       <button class="nav-tab active has-tooltip has-tooltip--bottom" data-panel="chat" data-label="Chat" onclick="switchPanel('chat',{fromRailClick:true})" data-tooltip="Chat" data-i18n-title="tab_chat"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></button>
       <button class="nav-tab has-tooltip has-tooltip--bottom" data-panel="tasks" data-label="Tasks" onclick="switchPanel('tasks',{fromRailClick:true})" data-tooltip="Tasks" data-i18n-title="tab_tasks"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg></button>
       <button class="nav-tab nav-tab-hidden has-tooltip has-tooltip--bottom" id="integrationCronsSidebarBtn" data-panel="integrationCrons" data-label="Cron Hub" onclick="switchPanel('integrationCrons',{fromRailClick:true})" data-tooltip="Cron Hub" data-i18n-title="tab_integration_crons" hidden><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></button>
+      <button class="nav-tab nav-tab-hidden has-tooltip has-tooltip--bottom" id="integrationWorkspaceSidebarBtn" data-panel="integrationWorkspace" data-label="Workspace files" onclick="switchPanel('integrationWorkspace',{fromRailClick:true})" data-tooltip="Workspace files" data-i18n-title="tab_integration_workspace_files" hidden><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M16 13H8"/><path d="M16 17H8"/><path d="M10 9H8"/></svg></button>
       <button class="nav-tab has-tooltip has-tooltip--bottom" data-panel="kanban" data-label="Kanban" onclick="switchPanel('kanban',{fromRailClick:true})" data-tooltip="Kanban" data-i18n-title="tab_kanban"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M8 4v16"/><path d="M16 4v16"/><path d="M3 10h18"/></svg></button>
       <button class="nav-tab has-tooltip has-tooltip--bottom" data-panel="skills" data-label="Skills" onclick="switchPanel('skills',{fromRailClick:true})" data-tooltip="Skills" data-i18n-title="tab_skills"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg></button>
       <button class="nav-tab nav-tab-hidden has-tooltip has-tooltip--bottom" id="skillhubSidebarBtn" data-panel="skillhub" data-label="SkillHub" onclick="switchPanel('skillhub',{fromRailClick:true})" data-tooltip="SkillHub" data-i18n-title="tab_skillhub" hidden><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="9" cy="21" r="1"/><circle cx="20" cy="21" r="1"/><path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6"/></svg></button>
@@ -234,6 +236,46 @@
         </select>
       </div>
       <div class="cron-list integration-cron-list" id="integrationCronList"><div style="padding:12px;color:var(--muted);font-size:12px" data-i18n="loading">Loading...</div></div>
+    </div>
+    <!-- Integration workspace files (global DEFAULT_WORKSPACE, no session) -->
+    <div class="panel-view" id="panelIntegrationWorkspace" hidden>
+      <div class="panel-head">
+        <span data-i18n="tab_integration_workspace_files">Workspace files</span>
+        <div class="panel-head-actions">
+          <button class="panel-head-btn has-tooltip has-tooltip--bottom" id="integrationWorkspaceRefreshBtn" type="button" data-tooltip="Refresh" aria-label="Refresh"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg></button>
+        </div>
+      </div>
+      <div class="panel-head-sub integration-ws-root-hint" id="integrationWorkspaceRootHint"></div>
+      <div class="integration-ws-filter-stack">
+        <div class="sidebar-search"><svg class="sidebar-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg><input id="integrationWorkspaceSearch" type="search" placeholder="Search filenames…" data-i18n-placeholder="integration_workspace_search_placeholder" autocomplete="off"></div>
+        <select id="integrationWorkspaceTypeFilter" aria-label="File extension filter" data-i18n-aria-label="integration_workspace_type_filter">
+          <option value="" data-i18n="integration_workspace_type_all">All extensions</option>
+          <option value=".md">.md</option>
+          <option value=".py">.py</option>
+          <option value=".js">.js</option>
+          <option value=".ts">.ts</option>
+          <option value=".json">.json</option>
+          <option value=".html">.html</option>
+          <option value=".pdf">.pdf</option>
+          <option value=".png">.png</option>
+          <option value=".jpg">.jpg</option>
+          <option value=".txt">.txt</option>
+        </select>
+        <div class="integration-ws-sort-row">
+          <select id="integrationWorkspaceSort" aria-label="Sort by" data-i18n-aria-label="integration_workspace_sort_by">
+            <option value="path" data-i18n="integration_workspace_sort_path">Path</option>
+            <option value="size" data-i18n="integration_workspace_sort_size">Size</option>
+            <option value="mtime" data-i18n="integration_workspace_sort_mtime">Modified</option>
+            <option value="ctime" data-i18n="integration_workspace_sort_ctime">Created</option>
+          </select>
+          <select id="integrationWorkspaceOrder" aria-label="Sort order" data-i18n-aria-label="integration_workspace_sort_order">
+            <option value="desc" data-i18n="integration_workspace_order_desc">Descending</option>
+            <option value="asc" data-i18n="integration_workspace_order_asc">Ascending</option>
+          </select>
+        </div>
+      </div>
+      <div class="integration-ws-file-list" id="integrationWorkspaceFileList"><div style="padding:12px;color:var(--muted);font-size:12px" data-i18n="loading">Loading...</div></div>
+      <button type="button" class="integration-ws-load-more" id="integrationWorkspaceLoadMore" hidden>Load more</button>
     </div>
     <!-- Kanban panel -->
     <div class="panel-view" id="panelKanban">
@@ -808,8 +850,12 @@
       <div class="main-view-header">
         <div class="main-view-title" id="skillhubDetailTitle"></div>
         <div class="main-view-actions">
+          <button id="btnSkillhubDownload" type="button" class="panel-head-btn has-tooltip has-tooltip--bottom" data-tooltip="Download" data-i18n-title="skillhub_download" onclick="window.HermesSkillHub&&HermesSkillHub.downloadCurrent()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></button>
+          <button id="btnSkillhubEdit" type="button" class="panel-head-btn has-tooltip has-tooltip--bottom" data-tooltip="Edit" data-i18n-title="skills_edit" onclick="window.HermesSkillHub&&HermesSkillHub.editCurrent()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg></button>
           <button id="btnSkillhubInstall" type="button" class="panel-head-btn primary has-tooltip has-tooltip--bottom" data-tooltip="Install" data-i18n-title="skillhub_install" onclick="window.HermesSkillHub&&HermesSkillHub.installCurrent()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></button>
           <button id="btnSkillhubUninstall" type="button" class="panel-head-btn has-tooltip has-tooltip--bottom" data-tooltip="Delete" data-i18n-title="delete_title" onclick="window.HermesSkillHub&&HermesSkillHub.deleteCurrent()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg></button>
+          <button id="btnSkillhubCancelEdit" type="button" class="panel-head-btn has-tooltip has-tooltip--bottom" data-tooltip="Cancel" data-i18n-title="cancel" onclick="window.HermesSkillHub&&HermesSkillHub.cancelEditForm()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+          <button id="btnSkillhubSaveEdit" type="button" class="panel-head-btn primary has-tooltip has-tooltip--bottom" data-tooltip="Save" data-i18n-title="save" onclick="window.HermesSkillHub&&HermesSkillHub.saveEditForm()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg></button>
         </div>
       </div>
       <div class="main-view-body" id="skillhubDetailBody" style="display:none"></div>
@@ -853,6 +899,31 @@
         <svg class="main-view-empty-icon" width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
         <div class="main-view-empty-title">Select a cron job</div>
         <div class="main-view-empty-sub">Pick a job from Cron Hub to view runs across profiles.</div>
+      </div>
+    </div>
+    <div id="mainIntegrationWorkspace" class="main-view integration-ws-main">
+      <div class="main-view-empty" id="integrationWorkspacePreviewEmpty">
+        <svg class="main-view-empty-icon" width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M16 13H8"/><path d="M16 17H8"/><path d="M10 9H8"/></svg>
+        <div class="main-view-empty-title" data-i18n="integration_ws_select_file">Select a file</div>
+        <div class="main-view-empty-sub" data-i18n="integration_ws_select_file_sub">Choose a file from the list to preview it here.</div>
+      </div>
+      <div class="preview-area integration-ws-preview-area" id="iwsPreviewArea">
+        <div class="preview-path" id="iwsPreviewPath">
+          <span id="iwsPreviewPathText"></span>
+          <span class="preview-badge" id="iwsPreviewBadge"></span>
+          <button id="iwsBtnOpenInBrowser" class="panel-icon-btn" type="button" style="margin-left:auto;font-size:12px;width:auto;padding:2px 8px;display:none;align-items:center;gap:4px" title="Open in new browser tab"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg> <span data-i18n="open_in_browser">Open in browser</span></button>
+          <button id="iwsBtnDownloadFile" class="panel-icon-btn" type="button" style="margin-left:auto;font-size:12px;width:auto;padding:2px 8px;display:inline-flex;align-items:center;gap:4px" title="Download"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Download</button>
+        </div>
+        <pre class="preview-code" id="iwsPreviewCode"></pre>
+        <div class="preview-img-wrap" id="iwsPreviewImgWrap" style="display:none"><img class="preview-img" id="iwsPreviewImg" src="" alt=""></div>
+        <div class="preview-media-wrap" id="iwsPreviewMediaWrap" style="display:none"></div>
+        <div class="preview-pdf-wrap" id="iwsPreviewPdfWrap" style="display:none">
+          <iframe class="preview-pdf-frame" id="iwsPreviewPdfFrame" src="" title="PDF preview"></iframe>
+        </div>
+        <div class="preview-md" id="iwsPreviewMd" style="display:none"></div>
+        <div class="preview-html-wrap" id="iwsPreviewHtmlWrap" style="display:none;flex:1;border-radius:8px;overflow:hidden;border:1px solid var(--border2)">
+          <iframe id="iwsPreviewHtmlIframe" style="width:100%;height:100%;border:none;background:#fff" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox" title="HTML preview"></iframe>
+        </div>
       </div>
     </div>
     <div id="mainTasks" class="main-view">
@@ -1503,10 +1574,12 @@
 <script src="static/messages.js?v=__WEBUI_VERSION__" defer></script>
 <link rel="stylesheet" href="static/integration/hermes_integration.css?v=__WEBUI_VERSION__">
 <link rel="stylesheet" href="static/integration/hermes_integration_crons.css?v=__WEBUI_VERSION__">
+<link rel="stylesheet" href="static/integration/hermes_integration_workspace.css?v=__WEBUI_VERSION__">
 <script src="static/integration/hermes_skillhub.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/integration/hermes_profiles.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/panels.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/integration/hermes_integration_crons.js?v=__WEBUI_VERSION__" defer></script>
+<script src="static/integration/hermes_integration_workspace.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/onboarding.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/boot.js?v=__WEBUI_VERSION__" defer></script>
 

@@ -6,14 +6,50 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ## [Unreleased]
 
+### Added
+
+- **SkillHub local skill zip download** — `GET /api/skillhub/download?name=&dir_name=` streams a zip of a skill under `shared_skills_dir` (custom or hub-installed). Excludes `.hub_installed`, `.category`, `.install_name`. Requires `HERMES_INTEGRATION=1` only. Detail UI download button in `hermes_skillhub.js`.
+
+- **SkillHub upload overwrite** — `POST /api/skillhub/upload` accepts `overwrite` (multipart field or JSON boolean). When true, replaces existing **custom** skills only; hub-installed targets still return 409.「我的创建」upload sends `overwrite=1` by default.
+
+- **SkillHub custom skill edit** — `POST /api/skillhub/edit` updates `SKILL.md` for existing custom skills in `shared_skills_dir` (`name`, `content`, optional `dir_name`). Hub-installed skills (`.hub_installed`) are rejected with 403. Requires `HERMES_INTEGRATION=1` only. SkillHub「我的创建」详情页提供编辑/保存/取消按钮（`hermes_skillhub.js`）。
+
+- **Knowledge base BFF proxy** — When `HERMES_INTEGRATION=1` and `KNOWLEDGE_BASE_URL` are set, `POST /api/integration/knowledge-base/*` proxies 13 downstream `POST /knowledge_base/*` endpoints. Caller passes `account` and `uuid` in the JSON body (or multipart form for `upload-docs`); WebUI does not call Zhiling identity lookup. Success returns upstream `data` only; upload requires `upload-docs` then `update-docs`. See `integration/knowledge_base/` and Swagger tag `IntegrationKnowledgeBase`.
+
+- **Session manifest skill artifacts** — `GET /api/session/manifest` and SSE `manifest_delta` list conversation-created/updated skills in `artifacts[]` with `preview: "skill"`: from Hermes Agent `skill_manage` (`action`: `create`, `edit`, `patch`, `write_file`) and from generic write tools (`write_file`, `edit_file`, etc.) when the target path is `{HERMES_HOME}/skills/.../SKILL.md` under the session profile. Completed `skill_manage` results may supply nested `path` (e.g. `github/github-trending`). Requires integration enabled and `SKILL.md` on disk. Preview via `GET /api/skillhub/content`. `skill_view` remains in `references[]` only.
+
+- **Session manifest MEDIA artifacts** — `GET /api/session/manifest` and SSE `manifest_delta` (`source.kind=turn_complete`) now include assistant-delivered local files from `MEDIA:<path>` tokens in `role=assistant` messages (`source_tool: media`). Workspace-relative paths preview via integration workspace file API; workspace-external absolute paths preview via `/api/media?path=&session_id=`. Per-turn chips still refresh from authoritative GET after turn `done`. Write-tool `source_tool` wins over `media` on the same path.
+
+### Changed
+
+- **Integration workspace files panel** — Opening the Workspace files rail no longer auto-previews the last selected file; the list may still restore selection highlight, and preview loads only after an explicit file click.
+
+- **Integration workspace `ctime_ns` fallback** — `GET /api/integration/workspace/files` entries now populate `ctime_ns` from `st_ctime_ns` when `st_birthtime` is unavailable (e.g. Linux/Docker `/workspace`). No new response fields.
+
+- **Integration workspace files search/filter/sort** — `GET /api/integration/workspace/files` supports `q` (basename contains), `type` (file extension filter, e.g. `.md`), `sort` (`path`/`size`/`mtime`/`ctime`), and `order` (default `desc`). Response entries include `ext`, `mime`, `mtime_ns`, `ctime_ns`; response adds `total`, `has_more`, and query echo. Left-rail UI uses server-side filtering/sorting (`hermes_integration_workspace.js`).
+
+- **Knowledge base defaults in code** — `location`（create/edit 默认 `101`）与分页默认 `size`（`15`）改为 `integration/knowledge_base/constants.py` 常量，不再通过 `KNOWLEDGE_BASE_LOCATION` / `KNOWLEDGE_BASE_DEFAULT_PAGE_SIZE` 环境变量配置。调用方仍可在请求体中显式传入覆盖。
+
+- **Integration workspace file API unified stream** — `GET /api/integration/workspace/file` now always returns raw file bytes with MIME by extension; no JSON text response, no `inline`/`download` query params, no `Content-Disposition`. Removed `GET /api/integration/workspace/file/raw`. Manifest and integration workspace rail preview use `fetch` + client-side rendering (HTML via sandboxed `srcdoc`).
+
+- **SkillHub preview `scope=auto` (default)** — `GET /api/skillhub/content|structure|file` without `scope` (or `scope=auto`) resolves `{HERMES_HOME}/skills` first via `has_local_skill`, then falls back to SkillHub upstream. `scope=custom` / `scope=hub` remain local-only / hub-only. Manifest and workspace skill preview benefit without passing `scope=custom`.
+
+- **Session manifest wire format** — `GET /api/session/manifest` and SSE `manifest_delta` rows now use slim `{path, preview, source_tool}` entries only (`preview`: `"file"` | `"skill"`). Non-previewable paths are omitted. File preview from manifest uses `/api/integration/workspace/file`; skills still use `/api/skillhub/content`. Removed `/api/file/allowlisted`.
+
 ### Fixed
 
+- **Integration workspace cruft filter** — Flat file index and read/raw endpoints skip `.DS_Store`, `Thumbs.db`, `._*` AppleDouble files, and do not descend into `.git` / `node_modules` / `__pycache__` etc. (aligned with session workspace tree filter in `ui.js` #1793).
+- **Cron session model metadata** — Materialized cron run sidecars now preserve the model recorded in the Agent `state.db` session row, and existing cron sidecars stuck on `model: "unknown"` are repaired during materialization instead of relying on the frontend's later model fallback write.
 - **Cron session sidebar visibility** — `/api/sessions` now refreshes stale zero-count `cron_*` index rows from their WebUI sidecar JSON before returning the sidebar payload, so materialized cron runs with persisted fallback messages are no longer hidden by the frontend's empty-session filter.
 - **Cron session delete** — `POST /api/session/delete` on materialized `cron_*` sessions now removes the run from the correct profile `state.db` (not only the active profile), deletes the matching `cron/output/<job_id>/*.md` run artifact from the job **owner** profile store (including conservative orphan cleanup when the `state.db` row is already gone but the output `.md` remains), and prevents Cron Hub `/api/crons/recent` and history materialize from resurrecting deleted cron runs.
 - **Cron job delete cleanup** — `POST /api/integration/crons/delete` now removes the deleted job's materialized `cron_<job_id>_*` WebUI sessions, matching `state.db` rows across profiles, and the owner profile `cron/output/<job_id>/` history directory so deleting a task does not leave stale history behind.
 
 ### Added
 
+- **Workspace files UI (left rail)** — When `HERMES_INTEGRATION=1`, rail/sidebar panel `integrationWorkspace` lists the global workspace index (`/api/integration/workspace/files`) with client-side path filter, paginated load-more, and read-only preview in the main area (`hermes_integration_workspace.js`). Coexists with session-scoped right-side Workspace.
+- **Workspace session-less file APIs** — When `HERMES_INTEGRATION=1`, `GET /api/integration/workspace/files` (flat paginated index under `HERMES_WEBUI_DEFAULT_WORKSPACE`), `GET /api/integration/workspace/file` (text JSON), and `GET /api/integration/workspace/file/raw` (binary/inline/download). No `session_id`; root via `resolve_trusted_workspace(None)`.
+- **Zhiling user-container logout** — When `HERMES_INTEGRATION=1` and `ZHILING_LOGOUT_API_URL` (auth-proxy origin only, e.g. `http://auth-proxy:8080`) are set, `POST /api/integration/logout` clears the WebUI `hermes_session` cookie, POSTs `{}` to `{ZHILING_LOGOUT_API_URL}/api/logout` (path fixed in code; no browser Cookie forwarded), and returns the upstream JSON unchanged (`casdoor_logout_url`, `login_url`, etc.; 502 on unreachable auth-proxy). `GET` on the same path returns `405 method_not_allowed`. Frontend Sign Out is unchanged; callers use this API or auth-proxy `/api/logout` directly.
+- **Zhiling identity lookup** — When `HERMES_INTEGRATION=1` and `ZHILING_CONTROL_PLANE_URL` are set, `GET /api/integration/login` proxies `Authorization: Bearer <access_token>` to Control Plane `/api/identity/lookup` and returns the upstream JSON unchanged (401/403 passthrough; 502 on unreachable upstream).
 - **Cron Hub unread counts** — Cron Hub now persists per-job read cursors, exposes `GET /api/integration/crons/unread` and `POST /api/integration/crons/unread/read`, and shows unread run counts on the Cron Hub rail/sidebar badge.
 - **Egress policy (iptables)** — Add operator-only `/api/integration/egress/policy` API to apply `open` or `whitelist` iptables-restore rules when `HERMES_INTEGRATION=1` and `HERMES_EGRESS_POLICY_ENABLED=1` are set. Supports strict IP/CIDR validation and opt-in `include_request_ip` safeguard.
 - **Cron execution status fields** — Cron job payloads now include `execution_bucket` (`running` / `waiting` / `error`) and `execution_state` (细分原因，如 `manual_running`、`scheduled_waiting`、`last_run_error`), and Cron Hub's status filter now uses the bucket field.

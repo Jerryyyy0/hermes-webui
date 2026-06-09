@@ -9,6 +9,7 @@ from api.helpers import MAX_BODY_BYTES, bad, j, read_body
 
 from integration.config import integration_enabled, skillhub_enabled
 from integration.skills import listing, local_skills, skillhub
+from integration.skills.utils import stream_zip_to_handler
 
 
 def _respond(handler, payload, status: int = 200) -> bool:
@@ -22,9 +23,13 @@ def _respond_bad(handler, msg, status: int = 400) -> bool:
 
 
 def try_handle_get(handler, parsed) -> bool:
+    path = parsed.path
+    if path == "/api/skillhub/download":
+        if not integration_enabled():
+            return False
+        return _get_skillhub_download(handler, parsed)
     if not skillhub_enabled():
         return False
-    path = parsed.path
     if path == "/api/skillhub/skills":
         return _get_skillhub_skills(handler, parsed)
     if path == "/api/skillhub/categories":
@@ -45,6 +50,15 @@ def try_handle_post_early(handler, parsed) -> bool:
     path = parsed.path
     if path == "/api/skillhub/upload":
         return handle_skillhub_upload(handler)
+    return False
+
+
+def _parse_upload_overwrite(fields_or_body: dict) -> bool:
+    raw = fields_or_body.get("overwrite")
+    if raw is True:
+        return True
+    if isinstance(raw, str):
+        return raw.strip().lower() in ("1", "true", "yes")
     return False
 
 
@@ -87,6 +101,7 @@ def handle_skillhub_upload(handler) -> bool:
 
         request_name = str(fields.get("name", "") or "").strip()
         category = str(fields.get("category", "") or "").strip()
+        overwrite = _parse_upload_overwrite(fields)
 
         if suffix == ".zip":
             result = local_skills.upload_custom_skill(
@@ -94,6 +109,7 @@ def handle_skillhub_upload(handler) -> bool:
                 category=category,
                 zip_bytes=file_bytes,
                 filename=upload_name,
+                overwrite=overwrite,
             )
         else:
             text = file_bytes.decode("utf-8", errors="replace")
@@ -102,6 +118,7 @@ def handle_skillhub_upload(handler) -> bool:
                 category=category,
                 content=text,
                 filename=upload_name,
+                overwrite=overwrite,
             )
     else:
         try:
@@ -118,6 +135,7 @@ def handle_skillhub_upload(handler) -> bool:
             category=str(body.get("category", "") or "").strip(),
             content=str(content),
             filename=None,
+            overwrite=_parse_upload_overwrite(body),
         )
 
     return _upload_result(handler, result)
@@ -137,6 +155,10 @@ def try_handle_post(handler, parsed, body: dict | None) -> bool:
         if not integration_enabled():
             return False
         return _post_skillhub_delete(handler, body)
+    if path == "/api/skillhub/edit":
+        if not integration_enabled():
+            return False
+        return _post_skillhub_edit(handler, body)
     if not skillhub_enabled():
         return False
     if path == "/api/skillhub/install":
@@ -161,15 +183,45 @@ def _normalize_category(raw: str | None) -> str:
     return value
 
 
-def _is_custom_scope(qs: dict) -> bool:
+_PREVIEW_SCOPES = frozenset({"custom", "hub", "auto"})
+
+
+def _skillhub_preview_scope(qs: dict) -> str:
+    """Preview routes: default auto (local first, then SkillHub upstream)."""
     scope = str((qs.get("scope") or [""])[0]).strip().lower()
-    return scope == "custom"
+    if scope in _PREVIEW_SCOPES:
+        return scope
+    return "auto"
+
+
+def _is_custom_scope(qs: dict) -> bool:
+    return _skillhub_preview_scope(qs) == "custom"
 
 
 def _local_custom_result(handler, payload: dict) -> bool:
     if payload.get("error"):
         return _respond_bad(handler, str(payload["error"]), int(payload.get("status") or 404))
     return _respond(handler, payload)
+
+
+def _get_skillhub_download(handler, parsed) -> bool:
+    qs = _qs(parsed)
+    name = (qs.get("name") or [""])[0]
+    if not name:
+        return _respond_bad(handler, "name required", 400)
+    dir_name = (qs.get("dir_name") or [""])[0]
+    result = local_skills.prepare_skill_download(name, dir_name)
+    if result.get("error"):
+        status = int(result.get("status") or 400)
+        if status == 413:
+            return _respond(handler, result, status=413)
+        return _respond_bad(handler, str(result["error"]), status)
+    stream_zip_to_handler(
+        handler,
+        str(result["zip_basename"]),
+        result["files"],
+    )
+    return True
 
 
 def _get_skillhub_skills(handler, parsed) -> bool:
@@ -215,8 +267,11 @@ def _get_skillhub_content(handler, parsed) -> bool:
     name = (qs.get("name") or [""])[0]
     if not name:
         return _respond_bad(handler, "name required", 400)
-    if _is_custom_scope(qs):
+    scope = _skillhub_preview_scope(qs)
+    if scope == "custom" or (scope == "auto" and local_skills.has_local_skill(name)):
         return _local_custom_result(handler, local_skills.get_custom_doc(name))
+    if scope == "auto" and not skillhub_enabled():
+        return _local_custom_result(handler, {"error": "Skill not found", "status": 404})
     try:
         return _respond(handler, skillhub.fetch_doc(name))
     except Exception as exc:
@@ -228,8 +283,11 @@ def _get_skillhub_structure(handler, parsed) -> bool:
     name = (qs.get("name") or [""])[0]
     if not name:
         return _respond_bad(handler, "name required", 400)
-    if _is_custom_scope(qs):
+    scope = _skillhub_preview_scope(qs)
+    if scope == "custom" or (scope == "auto" and local_skills.has_local_skill(name)):
         return _local_custom_result(handler, local_skills.get_custom_structure(name))
+    if scope == "auto" and not skillhub_enabled():
+        return _local_custom_result(handler, {"error": "Skill not found", "status": 404})
     try:
         return _respond(handler, skillhub.fetch_structure(name))
     except Exception as exc:
@@ -244,8 +302,11 @@ def _get_skillhub_file(handler, parsed) -> bool:
         return _respond_bad(handler, "name required", 400)
     if not file_path:
         return _respond_bad(handler, "path required", 400)
-    if _is_custom_scope(qs):
+    scope = _skillhub_preview_scope(qs)
+    if scope == "custom" or (scope == "auto" and local_skills.has_local_skill(name)):
         return _local_custom_result(handler, local_skills.get_custom_file(name, file_path))
+    if scope == "auto" and not skillhub_enabled():
+        return _local_custom_result(handler, {"error": "Skill not found", "status": 404})
     try:
         return _respond(handler, skillhub.fetch_file(name, file_path))
     except Exception as exc:
@@ -273,6 +334,25 @@ def _post_skillhub_install(handler, parsed, body: dict) -> bool:
         return _respond_bad(handler, str(exc), 503)
     except Exception as exc:
         return _respond_bad(handler, str(exc), 502)
+
+
+def _post_skillhub_edit(handler, body: dict) -> bool:
+    name = str(body.get("name", "")).strip()
+    if not name:
+        return _respond_bad(handler, "name required", 400)
+    content = body.get("content")
+    if content is None or (isinstance(content, str) and not content.strip()):
+        return _respond_bad(handler, "缺少 content", 400)
+    dir_name = str(body.get("dir_name", "") or "").strip()
+    result = local_skills.edit_custom_skill(
+        name=name,
+        content=str(content),
+        dir_name=dir_name,
+    )
+    status = int(result.get("status") or 0)
+    if result.get("error"):
+        return _respond_bad(handler, result.get("error", "error"), status or 400)
+    return _respond(handler, result)
 
 
 def _post_skillhub_delete(handler, body: dict) -> bool:

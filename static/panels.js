@@ -40,6 +40,7 @@ const APP_TITLEBAR_KEYS = {
   chat: 'tab_chat', tasks: 'tab_tasks', skills: 'tab_skills', skillhub: 'tab_skillhub',
   memory: 'tab_memory', workspaces: 'tab_workspaces',
   profiles: 'tab_profiles', todos: 'tab_todos', insights: 'tab_insights', logs: 'tab_logs', settings: 'tab_settings',
+  integrationCrons: 'tab_integration_crons', integrationWorkspace: 'tab_integration_workspace_files',
 };
 
 /**
@@ -251,11 +252,19 @@ async function switchPanel(name, opts = {}) {
     if (cronPanel) cronPanel.hidden = false;
     if (cronMain) cronMain.hidden = false;
   }
+  if (nextPanel === 'integrationWorkspace') {
+    const wsPanel = $('panelIntegrationWorkspace');
+    if (wsPanel) wsPanel.hidden = false;
+  }
+  if (nextPanel !== 'integrationWorkspace') {
+    const wsPanel = $('panelIntegrationWorkspace');
+    if (wsPanel) wsPanel.hidden = true;
+  }
   // Update main content view. Each entry in MAIN_VIEW_PANELS gets a matching
   // showing-<name> class on <main>; no class means chat (the default).
   const mainEl = document.querySelector('main.main');
   if (mainEl) {
-    ['settings','skills','skillhub','memory','tasks','integrationCrons','kanban','workspaces','profiles','insights','logs'].forEach(p => {
+    ['settings','skills','skillhub','memory','tasks','integrationCrons','integrationWorkspace','kanban','workspaces','profiles','insights','logs'].forEach(p => {
       mainEl.classList.toggle('showing-' + p, nextPanel === p);
     });
   }
@@ -265,6 +274,7 @@ async function switchPanel(name, opts = {}) {
   if (nextPanel === 'skills') await loadSkills();
   if (nextPanel === 'skillhub' && window.HermesSkillHub?.loadSkillHub) await window.HermesSkillHub.loadSkillHub();
   if (nextPanel === 'integrationCrons' && window.HermesIntegrationCrons?.load) await window.HermesIntegrationCrons.load();
+  if (nextPanel === 'integrationWorkspace' && window.HermesIntegrationWorkspace?.load) await window.HermesIntegrationWorkspace.load();
   if (nextPanel === 'memory') await loadMemory();
   if (nextPanel === 'workspaces') await loadWorkspacesPanel();
   if (nextPanel === 'profiles') await loadProfilesPanel();

@@ -22,8 +22,12 @@ from api.config import (
     WORKSPACES_FILE as _GLOBAL_WS_FILE,
     LAST_WORKSPACE_FILE as _GLOBAL_LW_FILE,
     DEFAULT_WORKSPACE as _BOOT_DEFAULT_WORKSPACE,
-    MAX_FILE_BYTES, IMAGE_EXTS, MD_EXTS
+    MAX_FILE_BYTES,
+    MIME_MAP,
 )
+
+WORKSPACE_FILE_SORT_FIELDS = frozenset({"path", "size", "mtime", "ctime"})
+WORKSPACE_FILE_SORT_ORDERS = frozenset({"asc", "desc"})
 
 
 # ── Profile-aware path resolution ───────────────────────────────────────────
@@ -783,7 +787,41 @@ def dir_signature(workspace: Path, rel: str = '.', entries: list[dict] | None = 
     return hashlib.sha256(raw.encode('utf-8')).hexdigest()
 
 
+# Aligned with static/ui.js WORKSPACE_HIDDEN_FILE_NAMES / PREFIXES (#1793).
+WORKSPACE_CRUFT_FILE_NAMES = frozenset({
+    '.DS_Store', '._.DS_Store', '.AppleDouble', '.Spotlight-V100', '.Trashes', '.fseventsd',
+    'Thumbs.db', 'Desktop.ini', 'ehthumbs.db', '$RECYCLE.BIN',
+    '.directory',
+})
+WORKSPACE_CRUFT_DIR_NAMES = frozenset({
+    '.git', '.svn', '.hg', 'node_modules', '__pycache__',
+    '.pytest_cache', '.mypy_cache', '.ruff_cache', '.tox', '.venv', 'venv',
+    '.Spotlight-V100', '.Trashes', '.fseventsd', '$RECYCLE.BIN',
+})
+WORKSPACE_CRUFT_FILE_PREFIXES = ('._', '.Trash-')
+
+
+def is_workspace_cruft_basename(name: str) -> bool:
+    """True for OS/VCS/cache junk files that should not be listed or read."""
+    if not name:
+        return False
+    if name in WORKSPACE_CRUFT_FILE_NAMES:
+        return True
+    return any(name.startswith(prefix) for prefix in WORKSPACE_CRUFT_FILE_PREFIXES)
+
+
+def should_prune_workspace_walk_dir(name: str) -> bool:
+    """True if a directory should not be descended during workspace walks."""
+    if not name:
+        return True
+    if name in WORKSPACE_CRUFT_DIR_NAMES:
+        return True
+    return is_workspace_cruft_basename(name)
+
+
 def read_file_content(workspace: Path, rel: str) -> dict:
+    if is_workspace_cruft_basename(Path(rel).name):
+        raise FileNotFoundError(f"Not a file: {rel}")
     target = safe_resolve_ws(workspace, rel)
     if not target.is_file():
         raise FileNotFoundError(f"Not a file: {rel}")
@@ -792,6 +830,215 @@ def read_file_content(workspace: Path, rel: str) -> dict:
         raise ValueError(f"File too large ({size} bytes, max {MAX_FILE_BYTES})")
     content = target.read_text(encoding='utf-8', errors='replace')
     return {'path': rel, 'content': content, 'size': size, 'lines': content.count('\n') + 1}
+
+
+def _workspace_file_times(st: os.stat_result) -> tuple[int | None, int | None]:
+    """Return (mtime_ns, ctime_ns).
+
+    *ctime_ns* prefers birth time (``st_birthtime``); when unavailable or zero
+    (common on Linux/Docker), falls back to ``st_ctime_ns`` (metadata change time).
+    """
+    mtime_ns = None
+    ctime_ns = None
+    try:
+        mtime_ns = st.st_mtime_ns
+    except (AttributeError, OSError, ValueError):
+        pass
+    birthtime = getattr(st, "st_birthtime", None)
+    if birthtime:
+        try:
+            ctime_ns = int(birthtime * 1_000_000_000)
+        except (TypeError, ValueError, OverflowError):
+            ctime_ns = None
+    if ctime_ns is None:
+        try:
+            ctime_ns = st.st_ctime_ns
+        except (AttributeError, OSError, ValueError):
+            pass
+    return mtime_ns, ctime_ns
+
+
+def normalize_workspace_file_ext(raw: str | None) -> str | None:
+    """Normalize a file-extension filter value (e.g. ``md`` → ``.md``)."""
+    if raw is None:
+        return None
+    s = raw.strip().lower()
+    if not s:
+        return None
+    if not s.startswith("."):
+        s = "." + s
+    body = s[1:]
+    if not body or not body[0].isalnum():
+        return None
+    for ch in body:
+        if not (ch.isalnum() or ch in "._-"):
+            return None
+    return s
+
+
+def workspace_file_entry_fields(rel_path: str) -> dict:
+    """Derive ext and mime from a workspace-relative path."""
+    ext = Path(rel_path).suffix.lower()
+    mime = MIME_MAP.get(ext, "application/octet-stream")
+    return {"ext": ext, "mime": mime}
+
+
+def _collect_workspace_file_entries(workspace: Path, rel: str) -> list[dict]:
+    """Walk workspace under *rel* and collect file metadata entries."""
+    workspace_root = workspace.expanduser().resolve()
+    target = safe_resolve_ws(workspace, rel)
+    if not target.is_dir():
+        raise FileNotFoundError(f"Not a directory: {rel}")
+
+    entries: list[dict] = []
+    for root, dirs, names in os.walk(target, followlinks=False):
+        root_path = Path(root)
+        try:
+            if not root_path.resolve().is_relative_to(workspace_root):
+                dirs[:] = []
+                continue
+        except (ValueError, OSError):
+            dirs[:] = []
+            continue
+        dirs.sort()
+        dirs[:] = [d for d in dirs if not should_prune_workspace_walk_dir(d)]
+        for name in sorted(names):
+            if is_workspace_cruft_basename(name):
+                continue
+            fp = root_path / name
+            if fp.is_symlink():
+                try:
+                    if not fp.resolve().is_relative_to(workspace_root):
+                        continue
+                except (ValueError, OSError):
+                    continue
+                try:
+                    if not fp.resolve().is_file():
+                        continue
+                except OSError:
+                    continue
+            elif not fp.is_file():
+                continue
+            try:
+                resolved = fp.resolve()
+                rel_path = resolved.relative_to(workspace_root).as_posix()
+            except (ValueError, OSError):
+                continue
+
+            size = None
+            mtime_ns = None
+            ctime_ns = None
+            try:
+                st = resolved.stat()
+                size = st.st_size
+                mtime_ns, ctime_ns = _workspace_file_times(st)
+            except OSError:
+                pass
+
+            entry = {
+                "path": rel_path,
+                "size": size,
+                "mtime_ns": mtime_ns,
+                "ctime_ns": ctime_ns,
+            }
+            entry.update(workspace_file_entry_fields(rel_path))
+            entries.append(entry)
+    return entries
+
+
+def _matches_workspace_file_filters(
+    entry: dict,
+    q: str | None,
+    type_ext: str | None,
+) -> bool:
+    if q:
+        basename = Path(entry.get("path") or "").name.lower()
+        if q.lower() not in basename:
+            return False
+    if type_ext and entry.get("ext") != type_ext:
+        return False
+    return True
+
+
+def _ctime_sort_key(entry: dict) -> int:
+    ctime_ns = entry.get("ctime_ns")
+    if ctime_ns is not None:
+        return ctime_ns
+    return entry.get("mtime_ns") or 0
+
+
+def _sort_workspace_file_entries(
+    entries: list[dict],
+    sort: str,
+    order: str,
+) -> list[dict]:
+    reverse = order == "desc"
+    if sort == "path":
+        return sorted(entries, key=lambda e: e.get("path") or "", reverse=reverse)
+    if sort == "size":
+        return sorted(
+            entries,
+            key=lambda e: (e.get("size") or 0, e.get("path") or ""),
+            reverse=reverse,
+        )
+    if sort == "mtime":
+        return sorted(
+            entries,
+            key=lambda e: (e.get("mtime_ns") or 0, e.get("path") or ""),
+            reverse=reverse,
+        )
+    if sort == "ctime":
+        return sorted(
+            entries,
+            key=lambda e: (_ctime_sort_key(e), e.get("path") or ""),
+            reverse=reverse,
+        )
+    return entries
+
+
+def walk_workspace_files_page(
+    workspace: Path,
+    rel: str = ".",
+    *,
+    page: int,
+    page_size: int,
+    q: str | None = None,
+    type_ext: str | None = None,
+    sort: str = "path",
+    order: str = "desc",
+) -> dict:
+    """Walk workspace under *rel*, filter/sort, and return one page of files.
+
+    Paths are relative to *workspace* root (POSIX). Pagination uses
+    ``offset = (page - 1) * page_size`` over the filtered sorted file order.
+    """
+    if sort not in WORKSPACE_FILE_SORT_FIELDS:
+        raise ValueError(f"Invalid sort: {sort}")
+    if order not in WORKSPACE_FILE_SORT_ORDERS:
+        raise ValueError(f"Invalid order: {order}")
+
+    q_norm = (q or "").strip() or None
+    type_ext_norm = normalize_workspace_file_ext(type_ext)
+    if type_ext and type_ext_norm is None:
+        raise ValueError(f"Invalid type: {type_ext}")
+
+    entries = _collect_workspace_file_entries(workspace, rel)
+    filtered = [
+        entry for entry in entries
+        if _matches_workspace_file_filters(entry, q_norm, type_ext_norm)
+    ]
+    sorted_entries = _sort_workspace_file_entries(filtered, sort, order)
+
+    total = len(sorted_entries)
+    offset = max(0, (page - 1) * page_size)
+    page_entries = sorted_entries[offset:offset + page_size]
+    has_more = offset + len(page_entries) < total
+
+    return {
+        "files": page_entries,
+        "total": total,
+        "has_more": has_more,
+    }
 
 
 # ── Git detection ──────────────────────────────────────────────────────────

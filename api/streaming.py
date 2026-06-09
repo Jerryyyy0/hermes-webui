@@ -3744,6 +3744,7 @@ def _run_agent_streaming(
     ephemeral=False,
     model_provider=None,
     goal_related=False,
+    stream_turn_key='',
 ):
     """Run agent in background thread, writing SSE events to STREAMS[stream_id].
 
@@ -4286,6 +4287,11 @@ def _run_agent_streaming(
             _checkpoint_activity = [0]
             _live_tool_event_start_ids = set()
             _live_tool_event_complete_ids = set()
+            _manifest_turn_key = str(stream_turn_key or '').strip()
+            if not _manifest_turn_key:
+                _manifest_turn_key = f"turn:{len(getattr(s, 'messages', []) or [])}"
+            from api.session_manifest import _skills_dir_for_session as _manifest_skills_dir_for_session
+            _manifest_skills_dir = _manifest_skills_dir_for_session(s)
 
             def _tool_args_snapshot(args):
                 args_snap = {}
@@ -4301,6 +4307,7 @@ def _run_agent_streaming(
                 try:
                     from api.session_manifest import (
                         ToolEvent,
+                        _apply_public_todos_to_manifest_delta,
                         extract_manifest_delta_from_tool_event,
                         merge_manifest_delta,
                     )
@@ -4318,17 +4325,16 @@ def _run_agent_streaming(
                         Path(str(s.workspace)),
                         session_id=session_id,
                         stream_id=stream_id,
-                        turn_key=f'live:{stream_id}',
+                        turn_key=_manifest_turn_key,
                         sequence=_manifest_delta_sequence[0],
                         source_kind=source_kind,
+                        skills_dir=_manifest_skills_dir,
                     )
                     if not (_delta.get('todos') or _delta.get('artifacts') or _delta.get('references')):
                         return
                     with STREAMS_LOCK:
                         _live_manifest = merge_manifest_delta(
                             STREAM_LIVE_MANIFEST.get(stream_id) or {
-                                'session_id': session_id,
-                                'workspace': str(s.workspace),
                                 'todos': {'items': []},
                                 'artifacts': [],
                                 'references': [],
@@ -4338,11 +4344,45 @@ def _run_agent_streaming(
                             scope='active_stream',
                         )
                         STREAM_LIVE_MANIFEST[stream_id] = _live_manifest
-                        if _delta.get('todos') and isinstance(_live_manifest.get('todos'), dict):
-                            _delta['todos'] = _live_manifest['todos']
+                        _apply_public_todos_to_manifest_delta(_delta, _live_manifest)
+                    if not (_delta.get('todos') or _delta.get('artifacts') or _delta.get('references')):
+                        return
                     put('manifest_delta', _delta)
                 except Exception:
                     logger.debug('Failed to emit manifest_delta for tool %s', name, exc_info=True)
+
+            def _emit_turn_complete_media_delta():
+                try:
+                    from api.session_manifest import (
+                        extract_manifest_delta_from_assistant_media,
+                        merge_manifest_delta,
+                    )
+                    _manifest_delta_sequence[0] += 1
+                    _delta = extract_manifest_delta_from_assistant_media(
+                        list(getattr(s, 'messages', None) or []),
+                        Path(str(s.workspace)),
+                        session_id=session_id,
+                        stream_id=stream_id,
+                        turn_key=_manifest_turn_key,
+                        sequence=_manifest_delta_sequence[0],
+                    )
+                    if not (_delta.get('artifacts') or _delta.get('turns')):
+                        return
+                    with STREAMS_LOCK:
+                        _live_manifest = merge_manifest_delta(
+                            STREAM_LIVE_MANIFEST.get(stream_id) or {
+                                'todos': {'items': []},
+                                'artifacts': [],
+                                'references': [],
+                                'turns': [],
+                            },
+                            _delta,
+                            scope='active_stream',
+                        )
+                        STREAM_LIVE_MANIFEST[stream_id] = _live_manifest
+                    put('manifest_delta', _delta)
+                except Exception:
+                    logger.debug('Failed to emit turn_complete MEDIA manifest_delta', exc_info=True)
 
             def _record_live_tool_start(tool_call_id, name, args):
                 if not tool_call_id or tool_call_id in _live_prompt_estimate_seen_ids:
@@ -6079,6 +6119,7 @@ def _run_agent_streaming(
             except Exception as _goal_exc:
                 logger.debug("Goal continuation hook failed for session %s: %s", session_id, _goal_exc)
             raw_session = s.compact() | {'messages': s.messages, 'tool_calls': tool_calls}
+            _emit_turn_complete_media_delta()
             put('done', {'session': redact_session_data(raw_session), 'usage': usage})
             # Emit one last metering packet for the live message-header TPS label.
             meter_stats = meter().get_stats()

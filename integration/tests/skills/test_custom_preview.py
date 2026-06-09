@@ -5,7 +5,17 @@ from unittest.mock import MagicMock, patch
 from urllib.parse import urlparse
 
 from integration.skills.handlers import try_handle_get
-from integration.skills.local_skills import get_custom_doc, get_custom_file, get_custom_structure
+from integration.skills.local_skills import get_custom_doc, get_custom_file, get_custom_structure, has_local_skill
+
+
+def test_has_local_skill_resolves_frontmatter_name(tmp_path, monkeypatch):
+    skills_dir = tmp_path / "skills"
+    skill_dir = skills_dir / "hermes-agent"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("---\nname: hermes-agent\n---\n", encoding="utf-8")
+    monkeypatch.setattr("integration.skills.local_skills.shared_skills_dir", lambda: skills_dir)
+    assert has_local_skill("hermes-agent") is True
+    assert has_local_skill("missing") is False
 
 
 def test_get_custom_doc_reads_shared_skills_dir(tmp_path, monkeypatch):

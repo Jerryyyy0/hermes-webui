@@ -50,7 +50,7 @@ def test_upload_zip_flattens_prefix(tmp_path, monkeypatch):
     monkeypatch.setattr("integration.skills.local_skills.shared_skills_dir", lambda: skills_dir)
     z = _zip_bytes(
         {
-            "bundle/SKILL.md": "---\nname: bundled\n---\n",
+            "bundle/SKILL.md": "---\nname: bundled\ndescription: bundled skill\n---\n",
             "bundle/scripts/run.py": "print(1)\n",
         }
     )
@@ -97,6 +97,60 @@ def test_upload_conflict_409(tmp_path, monkeypatch):
         content="---\nname: exists\ndescription: x\n---\n",
     )
     assert result["status"] == 409
+
+
+def test_upload_overwrite_custom_md(tmp_path, monkeypatch):
+    skills_dir = tmp_path / "skills"
+    skill_dir = skills_dir / "exists"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("---\nname: exists\ndescription: old\n---\n", encoding="utf-8")
+    monkeypatch.setattr("integration.skills.local_skills.shared_skills_dir", lambda: skills_dir)
+    result = local_skills.upload_custom_skill(
+        request_name="exists",
+        content="---\nname: exists\ndescription: new\n---\n# Updated",
+        overwrite=True,
+    )
+    assert result.get("ok") is True
+    assert "# Updated" in (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+
+
+def test_upload_overwrite_rejects_hub_installed(tmp_path, monkeypatch):
+    skills_dir = tmp_path / "skills"
+    skill_dir = skills_dir / "hub-one"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("---\nname: hub-one\ndescription: x\n---\n", encoding="utf-8")
+    (skill_dir / ".hub_installed").write_text("1", encoding="utf-8")
+    monkeypatch.setattr("integration.skills.local_skills.shared_skills_dir", lambda: skills_dir)
+    result = local_skills.upload_custom_skill(
+        request_name="hub-one",
+        content="---\nname: hub-one\ndescription: y\n---\n",
+        overwrite=True,
+    )
+    assert result["status"] == 409
+
+
+def test_upload_zip_overwrite_custom(tmp_path, monkeypatch):
+    skills_dir = tmp_path / "skills"
+    existing = skills_dir / "tools" / "alpha"
+    existing.mkdir(parents=True)
+    (existing / "SKILL.md").write_text("---\nname: alpha\ndescription: old\n---\n", encoding="utf-8")
+    monkeypatch.setattr("integration.skills.local_skills.shared_skills_dir", lambda: skills_dir)
+    z = _zip_bytes(
+        {
+            "alpha/SKILL.md": "---\nname: alpha\ndescription: new\n---\n# New",
+            "beta/SKILL.md": "---\nname: beta\ndescription: b\n---\n",
+        }
+    )
+    result = local_skills.upload_custom_skill(
+        category="tools",
+        zip_bytes=z,
+        filename="bundle.zip",
+        overwrite=True,
+    )
+    assert result.get("ok") is True
+    assert result["skill_count"] == 2
+    assert "# New" in (existing / "SKILL.md").read_text(encoding="utf-8")
+    assert (skills_dir / "tools" / "beta" / "SKILL.md").is_file()
 
 
 def test_upload_rejects_invalid_frontmatter(tmp_path, monkeypatch):

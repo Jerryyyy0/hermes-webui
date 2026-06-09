@@ -4119,10 +4119,14 @@ def handle_get(handler, parsed) -> bool:
                 _integration_skills_flag = "true" if _integration_enabled() else "false"
                 _skillhub_enabled_flag = "true" if _skillhub_enabled() else "false"
                 _integration_cron_flag = "true" if _cron_all_profiles_enabled() else "false"
+                _integration_workspace_files_flag = (
+                    "true" if _integration_enabled() else "false"
+                )
             except ImportError:
                 _integration_skills_flag = "false"
                 _skillhub_enabled_flag = "false"
                 _integration_cron_flag = "false"
+                _integration_workspace_files_flag = "false"
 
             html = (
                 _INDEX_HTML_PATH.read_text(encoding="utf-8")
@@ -4132,6 +4136,10 @@ def handle_get(handler, parsed) -> bool:
                 .replace("__INTEGRATION_SKILLS__", _integration_skills_flag)
                 .replace("__SKILLHUB_ENABLED__", _skillhub_enabled_flag)
                 .replace("__INTEGRATION_CRON_ALL_PROFILES__", _integration_cron_flag)
+                .replace(
+                    "__INTEGRATION_WORKSPACE_FILES__",
+                    _integration_workspace_files_flag,
+                )
             )
             return t(
                 handler,
@@ -4680,7 +4688,7 @@ def handle_get(handler, parsed) -> bool:
         if not sid:
             return bad(handler, "session_id required", 400)
         try:
-            from api.session_manifest import build_session_manifest, merge_manifest_delta
+            from api.session_manifest import build_session_manifest, merge_manifest_delta, _wire_todos
             session = get_session(sid)
             manifest = build_session_manifest(session)
             stream_id = getattr(session, "active_stream_id", None)
@@ -4690,6 +4698,8 @@ def handle_get(handler, parsed) -> bool:
                     live_manifest = STREAM_LIVE_MANIFEST.get(stream_id)
             if isinstance(live_manifest, dict) and live_manifest:
                 manifest = merge_manifest_delta(manifest, live_manifest, scope="active_stream")
+                if isinstance(manifest.get("todos"), dict):
+                    manifest["todos"] = _wire_todos(manifest["todos"])
             return j(handler, {"manifest": manifest})
         except KeyError:
             return bad(handler, "Session not found", 404)
@@ -5191,6 +5201,30 @@ def handle_get(handler, parsed) -> bool:
     except ImportError:
         pass
 
+    try:
+        from integration.identity.handlers import try_handle_get as _identity_try_get
+
+        if _identity_try_get(handler, parsed) is True:
+            return True
+    except ImportError:
+        pass
+
+    try:
+        from integration.logout.handlers import try_handle_get as _logout_try_get
+
+        if _logout_try_get(handler, parsed) is True:
+            return True
+    except ImportError:
+        pass
+
+    try:
+        from integration.workspace.handlers import try_handle_get as _workspace_try_get
+
+        if _workspace_try_get(handler, parsed) is True:
+            return True
+    except ImportError:
+        pass
+
     # ── Skills API (GET) ──
     if parsed.path == "/api/skills":
         qs = parse_qs(parsed.query)
@@ -5458,6 +5492,14 @@ def handle_post(handler, parsed) -> bool:
         from integration.skills.handlers import try_handle_post_early as _integration_try_post_early
 
         if _integration_try_post_early(handler, parsed) is True:
+            return True
+    except ImportError:
+        pass
+
+    try:
+        from integration.knowledge_base.handlers import try_handle_post_early as _kb_try_post_early
+
+        if _kb_try_post_early(handler, parsed) is True:
             return True
     except ImportError:
         pass
@@ -6476,6 +6518,22 @@ def handle_post(handler, parsed) -> bool:
         from integration.egress.handlers import try_handle_post as _egress_try_post
 
         if _egress_try_post(handler, parsed, body) is True:
+            return True
+    except ImportError:
+        pass
+
+    try:
+        from integration.logout.handlers import try_handle_post as _logout_try_post
+
+        if _logout_try_post(handler, parsed, body) is True:
+            return True
+    except ImportError:
+        pass
+
+    try:
+        from integration.knowledge_base.handlers import try_handle_post as _kb_try_post
+
+        if _kb_try_post(handler, parsed, body) is True:
             return True
     except ImportError:
         pass
@@ -8029,8 +8087,8 @@ def _parse_range_header(range_header: str, file_size: int) -> tuple[int, int] | 
         return None
 
 
-def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_control: str, *, csp: str | None = None):
-    """Serve a file with correct MIME/disposition and optional byte-range support."""
+def _serve_file_bytes(handler, target: Path, mime: str, disposition: str | None, cache_control: str, *, csp: str | None = None):
+    """Serve a file with correct MIME, optional disposition, and optional byte-range support."""
     try:
         file_size = target.stat().st_size
     except PermissionError:
@@ -8057,7 +8115,8 @@ def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_
     if byte_range:
         handler.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
     handler.send_header("Cache-Control", cache_control)
-    handler.send_header("Content-Disposition", _content_disposition_value(disposition, target.name))
+    if disposition is not None:
+        handler.send_header("Content-Disposition", _content_disposition_value(disposition, target.name))
     if csp:
         # Sandboxed inline HTML must remain frameable for workspace previews;
         # X-Frame-Options: DENY would block the iframe before CSP sandbox applies.
@@ -9546,6 +9605,19 @@ def _checkpoint_user_message_for_eager_session_save(s, msg: str, attachments, st
     s.messages.append(user_msg)
 
 
+def _turn_key_for_pending_user_message(s, msg: str) -> str:
+    """Return the canonical manifest turn key for the submitted user turn."""
+    messages = list(getattr(s, "messages", None) or [])
+    if get_webui_session_save_mode() == "eager" and messages:
+        latest = messages[-1]
+        if isinstance(latest, dict) and latest.get("role") == "user":
+            row_text = " ".join(str(latest.get("content") or "").split())
+            msg_text = " ".join(str(msg or "").split())
+            if row_text == msg_text:
+                return f"turn:{len(messages) - 1}"
+    return f"turn:{len(messages)}"
+
+
 def _is_default_or_empty_session_title(title) -> bool:
     return str(title or "").strip() in ("", "Untitled", "New Chat")
 
@@ -9652,6 +9724,7 @@ def _start_chat_stream_for_session(
 
     stream_id = uuid.uuid4().hex
     session_lock = _get_session_agent_lock(s.session_id)
+    stream_turn_key = ""
     diag.stage("session_lock_wait") if diag else None
     with session_lock:
         diag.stage("save_pending_state") if diag else None
@@ -9665,6 +9738,7 @@ def _start_chat_stream_for_session(
             model_provider=model_provider,
             stream_id=stream_id,
         )
+        stream_turn_key = _turn_key_for_pending_user_message(s, msg)
     if was_hidden_empty_session:
         publish_session_list_changed("session_new")
     diag.stage("turn_journal_submitted") if diag else None
@@ -9699,7 +9773,7 @@ def _start_chat_stream_for_session(
     diag.stage("worker_thread_start") if diag else None
     backend_is_gateway = webui_gateway_chat_enabled(get_config())
     worker_target = _run_gateway_chat_streaming if backend_is_gateway else _run_agent_streaming
-    worker_kwargs = {"model_provider": model_provider}
+    worker_kwargs = {"model_provider": model_provider, "stream_turn_key": stream_turn_key}
     if not backend_is_gateway:
         worker_kwargs["goal_related"] = goal_related
     thr = threading.Thread(

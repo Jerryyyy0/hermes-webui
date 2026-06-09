@@ -20,6 +20,8 @@
   let _skillhubPageSize = 20;
   let _skillhubTotal = 0;
   let _currentSkillhubItem = null;
+  let _skillhubMode = 'empty'; // 'empty' | 'read' | 'edit'
+  let _skillhubPreFormDetail = null;
   let _searchTimer = null;
 
   function showSkillHubNav() {
@@ -249,78 +251,279 @@
     }
   }
 
+  function _skillhubReadActions(skill) {
+    const isCustom = _skillhubScope === 'custom' || (skill && skill.custom === true);
+    const installed = skill && skill.installed === true;
+    const dirName = skill && String(skill.dir_name || '').trim();
+    return {
+      canDownload: integrationReady && !!dirName,
+      canEdit: isCustom && _skillhubScope === 'custom' && integrationReady,
+      canInstall: !isCustom && (_skillhubScope === 'hub' || _skillhubScope === 'not_installed') && !installed,
+      canDelete:
+        (isCustom && _skillhubScope === 'custom') ||
+        (!isCustom && (_skillhubScope === 'hub' || _skillhubScope === 'installed') && installed),
+    };
+  }
+
+  function _setSkillhubHeaderButtons(mode, options) {
+    const opts = options || {};
+    const downloadBtn = $('btnSkillhubDownload');
+    const editBtn = $('btnSkillhubEdit');
+    const installBtn = $('btnSkillhubInstall');
+    const uninstallBtn = $('btnSkillhubUninstall');
+    const cancelBtn = $('btnSkillhubCancelEdit');
+    const saveBtn = $('btnSkillhubSaveEdit');
+    const show = b => b && (b.style.display = '');
+    const hide = b => b && (b.style.display = 'none');
+    if (mode === 'read') {
+      if (opts.canDownload) show(downloadBtn);
+      else hide(downloadBtn);
+      if (opts.canEdit) show(editBtn);
+      else hide(editBtn);
+      if (opts.canInstall) show(installBtn);
+      else hide(installBtn);
+      if (opts.canDelete) show(uninstallBtn);
+      else hide(uninstallBtn);
+      hide(cancelBtn);
+      hide(saveBtn);
+    } else if (mode === 'edit') {
+      hide(downloadBtn);
+      hide(editBtn);
+      hide(installBtn);
+      hide(uninstallBtn);
+      show(cancelBtn);
+      show(saveBtn);
+    } else {
+      hide(downloadBtn);
+      hide(editBtn);
+      hide(installBtn);
+      hide(uninstallBtn);
+      hide(cancelBtn);
+      hide(saveBtn);
+    }
+  }
+
+  function _renderSkillhubDetailRead(name, doc, structure, isCustom) {
+    const title = $('skillhubDetailTitle');
+    const body = $('skillhubDetailBody');
+    const empty = $('skillhubDetailEmpty');
+    if (title && _currentSkillhubItem) {
+      title.textContent = _currentSkillhubItem.display_name || _currentSkillhubItem.name;
+    }
+    let html = '';
+    if (isCustom) {
+      const hint = typeof t === 'function' ? t('skillhub_custom_hint') : 'Local custom skill.';
+      html += `<p class="skillhub-custom-hint" style="color:var(--muted);font-size:12px;margin:0 0 12px">${esc(hint)}</p>`;
+    }
+    if (typeof renderMd === 'function') {
+      html += renderMd(doc.content || '(no content)');
+    } else {
+      html += `<pre>${esc(doc.content || '')}</pre>`;
+    }
+    if (structure && (structure.scripts?.length || structure.references?.length)) {
+      html += '<div class="skillhub-structure"><div class="skillhub-structure-title">Files</div>';
+      const addLinks = (items, label) => {
+        if (!items || !items.length) return;
+        html += `<div class="skillhub-structure-section"><strong>${esc(label)}</strong>`;
+        for (const f of items) {
+          const p = f.path || f.name;
+          html += `<a href="#" class="skillhub-file-link" data-name="${esc(name)}" data-path="${esc(p)}">${esc(p)}</a>`;
+        }
+        html += '</div>';
+      };
+      addLinks(structure.scripts, 'Scripts');
+      addLinks(structure.references, 'References');
+      html += '</div>';
+    }
+    if (body) {
+      body.innerHTML = `<div class="main-view-content skill-detail-content">${html}</div>`;
+      body.style.display = '';
+      body.querySelectorAll('.skillhub-file-link').forEach(a => {
+        a.addEventListener('click', ev => {
+          ev.preventDefault();
+          openSkillHubFile(a.dataset.name, a.dataset.path);
+        });
+      });
+    }
+    if (empty) empty.style.display = 'none';
+    _skillhubMode = 'read';
+  }
+
+  function _renderSkillhubEditForm(name, content) {
+    const title = $('skillhubDetailTitle');
+    const body = $('skillhubDetailBody');
+    const empty = $('skillhubDetailEmpty');
+    if (!body || !title) return;
+    const editLabel = typeof t === 'function' ? t('skills_edit') : 'Edit';
+    title.textContent = `${editLabel} · ${name}`;
+    const nameLabel = typeof t === 'function' ? t('skill_name') : 'Name';
+    const contentLabel = typeof t === 'function' ? t('skill_content') : 'SKILL.md content';
+    const contentPlaceholder =
+      typeof t === 'function' ? t('skill_content_placeholder') : 'YAML frontmatter + markdown body';
+    const renameHint =
+      typeof t === 'function'
+        ? t('skill_rename_not_supported')
+        : 'Renaming a skill is not supported. Create a new skill and delete the old one to rename.';
+    body.innerHTML = `
+      <div class="main-view-content">
+        <form class="detail-form" onsubmit="event.preventDefault();window.HermesSkillHub&&HermesSkillHub.saveEditForm();">
+          <div class="detail-form-row">
+            <label for="skillhubFormName">${esc(nameLabel)}</label>
+            <input type="text" id="skillhubFormName" value="${esc(name)}" disabled>
+            <div class="detail-form-hint">${esc(renameHint)}</div>
+          </div>
+          <div class="detail-form-row">
+            <label for="skillhubFormContent">${esc(contentLabel)}</label>
+            <textarea id="skillhubFormContent" rows="18" placeholder="${esc(contentPlaceholder)}">${esc(content || '')}</textarea>
+          </div>
+          <div id="skillhubFormError" class="detail-form-error" style="display:none"></div>
+        </form>
+      </div>`;
+    body.style.display = '';
+    if (empty) empty.style.display = 'none';
+    _skillhubMode = 'edit';
+    _setSkillhubHeaderButtons('edit');
+    const focusEl = $('skillhubFormContent');
+    if (focusEl) focusEl.focus();
+  }
+
   async function openSkillHubItem(skill, el) {
     document.querySelectorAll('#skillhubList .skill-item').forEach(e => e.classList.remove('active'));
     if (el) el.classList.add('active');
     _currentSkillhubItem = skill;
+    _skillhubPreFormDetail = null;
     const name = skill.name;
     const title = $('skillhubDetailTitle');
     const body = $('skillhubDetailBody');
     const empty = $('skillhubDetailEmpty');
-    const installBtn = $('btnSkillhubInstall');
-    const uninstallBtn = $('btnSkillhubUninstall');
     if (title) title.textContent = skill.display_name || skill.name;
     const isCustom = _skillhubScope === 'custom' || skill.custom === true;
-    const installed = skill.installed === true;
-    const canInstall = !isCustom && (_skillhubScope === 'hub' || _skillhubScope === 'not_installed') && !installed;
-    const canDelete =
-      (isCustom && _skillhubScope === 'custom') ||
-      (!isCustom && (_skillhubScope === 'hub' || _skillhubScope === 'installed') && installed);
-    if (installBtn) installBtn.style.display = canInstall ? '' : 'none';
-    if (uninstallBtn) {
-      uninstallBtn.style.display = canDelete ? '' : 'none';
-      const tip = typeof t === 'function' ? t('delete_title') : 'Delete';
-      uninstallBtn.setAttribute('data-tooltip', tip);
-      uninstallBtn.setAttribute('data-i18n-title', 'delete_title');
-    }
+    const actions = _skillhubReadActions(skill);
     const scopeParam = isCustom ? '&scope=custom' : '';
     try {
       const [doc, structure] = await Promise.all([
         api(`/api/skillhub/content?name=${encodeURIComponent(name)}${scopeParam}`),
         api(`/api/skillhub/structure?name=${encodeURIComponent(name)}${scopeParam}`).catch(() => null),
       ]);
-      let html = '';
-      if (isCustom) {
-        const hint = typeof t === 'function' ? t('skillhub_custom_hint') : 'Local custom skill.';
-        html += `<p class="skillhub-custom-hint" style="color:var(--muted);font-size:12px;margin:0 0 12px">${esc(hint)}</p>`;
+      _skillhubPreFormDetail = {
+        name,
+        content: doc.content || '',
+        structure: structure || null,
+        isCustom,
+      };
+      _renderSkillhubDetailRead(name, doc, structure, isCustom);
+      _setSkillhubHeaderButtons('read', actions);
+      if ($('btnSkillhubUninstall') && actions.canDelete) {
+        const tip = typeof t === 'function' ? t('delete_title') : 'Delete';
+        $('btnSkillhubUninstall').setAttribute('data-tooltip', tip);
+        $('btnSkillhubUninstall').setAttribute('data-i18n-title', 'delete_title');
       }
-      if (typeof renderMd === 'function') {
-        html += renderMd(doc.content || '(no content)');
-      } else {
-        html += `<pre>${esc(doc.content || '')}</pre>`;
-      }
-      if (structure && (structure.scripts?.length || structure.references?.length)) {
-        html += '<div class="skillhub-structure"><div class="skillhub-structure-title">Files</div>';
-        const addLinks = (items, label) => {
-          if (!items || !items.length) return;
-          html += `<div class="skillhub-structure-section"><strong>${esc(label)}</strong>`;
-          for (const f of items) {
-            const p = f.path || f.name;
-            html += `<a href="#" class="skillhub-file-link" data-name="${esc(name)}" data-path="${esc(p)}">${esc(p)}</a>`;
-          }
-          html += '</div>';
-        };
-        addLinks(structure.scripts, 'Scripts');
-        addLinks(structure.references, 'References');
-        html += '</div>';
-      }
-      if (body) {
-        body.innerHTML = `<div class="main-view-content skill-detail-content">${html}</div>`;
-        body.style.display = '';
-        body.querySelectorAll('.skillhub-file-link').forEach(a => {
-          a.addEventListener('click', ev => {
-            ev.preventDefault();
-            openSkillHubFile(a.dataset.name, a.dataset.path);
-          });
-        });
-      }
-      if (empty) empty.style.display = 'none';
     } catch (e) {
+      _skillhubMode = 'empty';
+      _setSkillhubHeaderButtons('empty');
       if (body) {
         body.innerHTML = `<div class="main-view-content"><div class="detail-form-error" style="display:block">${esc(e.message)}</div></div>`;
         body.style.display = '';
       }
       if (empty) empty.style.display = 'none';
+    }
+  }
+
+  function editCurrent() {
+    if (!_currentSkillhubItem || !_skillhubPreFormDetail) return;
+    const snap = _skillhubPreFormDetail;
+    _renderSkillhubEditForm(snap.name, snap.content || '');
+  }
+
+  function cancelEditForm() {
+    if (_skillhubPreFormDetail) {
+      const snap = _skillhubPreFormDetail;
+      _renderSkillhubDetailRead(snap.name, { content: snap.content }, snap.structure, snap.isCustom);
+      _setSkillhubHeaderButtons('read', _skillhubReadActions(_currentSkillhubItem));
+      return;
+    }
+    clearDetail();
+  }
+
+  async function downloadCurrent() {
+    if (!_currentSkillhubItem) return;
+    const name = _currentSkillhubItem.name;
+    const dirName = String(_currentSkillhubItem.dir_name || '').trim();
+    const params = new URLSearchParams({ name });
+    if (dirName) params.set('dir_name', dirName);
+    const url = new URL(`/api/skillhub/download?${params}`, document.baseURI || location.href).href;
+    try {
+      const res = await fetch(url, { method: 'GET', credentials: 'include' });
+      if (res.status === 401) {
+        window.location.href = 'login?next=' + encodeURIComponent(window.location.pathname + window.location.search);
+        return;
+      }
+      if (!res.ok) {
+        const text = await res.text();
+        let data = {};
+        try {
+          data = JSON.parse(text);
+        } catch (_) {}
+        throw new Error(data.error || data.message || text || res.statusText);
+      }
+      const blob = await res.blob();
+      let filename = `${name}.zip`;
+      const disp = res.headers.get('Content-Disposition') || '';
+      const star = /filename\*=UTF-8''([^;\s]+)/i.exec(disp);
+      const plain = /filename="([^"]+)"/i.exec(disp);
+      if (star && star[1]) filename = decodeURIComponent(star[1]);
+      else if (plain && plain[1]) filename = plain[1];
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = filename;
+      link.click();
+      URL.revokeObjectURL(link.href);
+    } catch (e) {
+      const base = typeof t === 'function' ? t('skillhub_download_failed') : 'Download failed';
+      if (typeof showToast === 'function') showToast(base + (e.message ? ': ' + e.message : ''));
+    }
+  }
+
+  async function saveEditForm() {
+    if (!_currentSkillhubItem) return;
+    const contentInput = $('skillhubFormContent');
+    const errEl = $('skillhubFormError');
+    if (!contentInput || !errEl) return;
+    const content = contentInput.value;
+    errEl.style.display = 'none';
+    if (!content.trim()) {
+      errEl.textContent =
+        typeof t === 'function' ? t('content_required') || 'Content is required' : 'Content is required';
+      errEl.style.display = '';
+      return;
+    }
+    const name = _currentSkillhubItem.name;
+    try {
+      await api('/api/skillhub/edit', {
+        method: 'POST',
+        body: JSON.stringify({
+          name,
+          dir_name: _currentSkillhubItem.dir_name || '',
+          content,
+        }),
+      });
+      _skillhubData = null;
+      if (typeof _skillsData !== 'undefined') _skillsData = null;
+      await loadSkillHub(true);
+      if (typeof loadSkills === 'function') await loadSkills();
+      const item =
+        (_skillhubData || []).find(s => s.name === name) ||
+        (_skillhubData || []).find(s => s.dir_name === (_currentSkillhubItem.dir_name || ''));
+      if (item) {
+        await openSkillHubItem(item, null);
+      }
+      if (typeof showToast === 'function') {
+        showToast(typeof t === 'function' ? t('skill_updated') || 'Skill updated' : 'Skill updated');
+      }
+    } catch (e) {
+      errEl.textContent =
+        (typeof t === 'function' ? t('error_prefix') || 'Error: ' : 'Error: ') + (e.message || String(e));
+      errEl.style.display = '';
     }
   }
 
@@ -447,6 +650,9 @@
     if (_skillhubCategory && _skillhubCategory !== CATEGORY_ALL) {
       fd.append('category', _skillhubCategory);
     }
+    if (_skillhubScope === 'custom') {
+      fd.append('overwrite', '1');
+    }
     const url = new URL('api/skillhub/upload', document.baseURI || location.href).href;
     const res = await fetch(url, { method: 'POST', credentials: 'include', body: fd });
     if (res.status === 401) {
@@ -509,14 +715,15 @@
     const body = $('skillhubDetailBody');
     const empty = $('skillhubDetailEmpty');
     const title = $('skillhubDetailTitle');
+    _skillhubMode = 'empty';
+    _skillhubPreFormDetail = null;
     if (title) title.textContent = '';
     if (body) {
       body.innerHTML = '';
       body.style.display = 'none';
     }
     if (empty) empty.style.display = '';
-    $('btnSkillhubInstall')?.style && ($('btnSkillhubInstall').style.display = 'none');
-    $('btnSkillhubUninstall')?.style && ($('btnSkillhubUninstall').style.display = 'none');
+    _setSkillhubHeaderButtons('empty');
   }
 
   function filterSkillHub() {
@@ -586,6 +793,10 @@
     openSkillHubItem,
     installCurrent,
     deleteCurrent,
+    editCurrent,
+    cancelEditForm,
+    saveEditForm,
+    downloadCurrent,
     filterSkillHub,
     setScope,
     setCategory,

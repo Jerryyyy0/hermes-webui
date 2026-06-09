@@ -438,8 +438,8 @@ def _cron_state_db_profiles_for_delete(
 def _cron_session_candidates_for_profiles(
     profile_names: list[str],
     job_id: str,
-) -> list[tuple[str, str, float | None]]:
-    candidates_by_id: dict[str, tuple[str, str, float | None]] = {}
+) -> list[tuple[str, str, float | None, str]]:
+    candidates_by_id: dict[str, tuple[str, str, float | None, str]] = {}
     for profile_name in profile_names:
         try:
             db_path = Path(_profile_home_for_name(profile_name)) / "state.db"
@@ -460,7 +460,7 @@ def _cron_session_candidates_for_profiles(
 
 
 def _target_sid_in_candidates(
-    candidates: list[tuple[str, str, float | None]],
+    candidates: list[tuple[str, str, float | None, str]],
     sid: str,
 ) -> bool:
     return any(str(row[0]) == sid for row in candidates)
@@ -509,7 +509,7 @@ def _find_cron_output_file_for_run(
     job_id: str,
     *,
     sid: str,
-    candidates: list[tuple[str, str, float | None]],
+    candidates: list[tuple[str, str, float | None, str]],
 ) -> Path | None:
     """Locate one cron output markdown file using the same mtime heuristic as import."""
     output_dir = Path(owner_home) / "cron" / "output" / job_id
@@ -554,7 +554,7 @@ def _delete_cron_output_file_for_run(
     job_id: str,
     sid: str,
     *,
-    candidates: list[tuple[str, str, float | None]] | None = None,
+    candidates: list[tuple[str, str, float | None, str]] | None = None,
 ) -> Path | None:
     """Delete the single cron output file owned by the job storage profile."""
     output_dir = Path(owner_home) / "cron" / "output" / job_id
@@ -598,7 +598,7 @@ def _execution_profile_name(job: dict) -> str | None:
     return raw or None
 
 
-def _cron_session_candidates(conn, job_id: str) -> list[tuple[str, str, float | None]]:
+def _cron_session_candidates(conn, job_id: str) -> list[tuple[str, str, float | None, str]]:
     pattern = f"cron_{job_id}_%"
     cur = conn.cursor()
     cur.execute("PRAGMA table_info(sessions)")
@@ -606,9 +606,10 @@ def _cron_session_candidates(conn, job_id: str) -> list[tuple[str, str, float | 
     if "source" not in cols:
         return []
     order = "started_at DESC" if "started_at" in cols else "id DESC"
+    model_expr = "model" if "model" in cols else "NULL AS model"
     cur.execute(
         f"""
-        SELECT id, title, started_at FROM sessions
+        SELECT id, title, started_at, {model_expr} FROM sessions
         WHERE source = 'cron' AND id LIKE ?
         ORDER BY {order}
         """,
@@ -619,20 +620,21 @@ def _cron_session_candidates(conn, job_id: str) -> list[tuple[str, str, float | 
         sid = str(row[0])
         title = str(row[1] or "")
         started = row[2] if len(row) > 2 else None
-        rows.append((sid, title, started))
+        model = str(row[3] or "").strip() if len(row) > 3 else ""
+        rows.append((sid, title, started, model))
     return rows
 
 
-def _latest_cron_session_id(conn, job_id: str) -> tuple[str, str, float | None] | None:
+def _latest_cron_session_id(conn, job_id: str) -> tuple[str, str, float | None, str] | None:
     candidates = _cron_session_candidates(conn, job_id)
     return candidates[0] if candidates else None
 
 
 def _select_cron_session_candidate(
-    candidates: list[tuple[str, str, float | None]],
+    candidates: list[tuple[str, str, float | None, str]],
     *,
     run_mtime: float | None = None,
-) -> tuple[str, str, float | None] | None:
+) -> tuple[str, str, float | None, str] | None:
     if not candidates:
         return None
     if run_mtime is None:
@@ -657,7 +659,7 @@ def _select_cron_session_for_run(
     job_id: str,
     *,
     run_mtime: float | None = None,
-) -> tuple[str, str, float | None] | None:
+) -> tuple[str, str, float | None, str] | None:
     candidates = _cron_session_candidates(conn, job_id)
     return _select_cron_session_candidate(candidates, run_mtime=run_mtime)
 
@@ -757,14 +759,15 @@ def read_cron_output_for_run(
 
 def _materialize_cron_session_found(
     job: dict,
-    found: tuple[str, str, float | None],
+    found: tuple[str, str, float | None, str],
     *,
     target_profile: str,
     execution_profile: str | None,
     fallback_output: str | None = None,
     run_mtime: float | None = None,
 ) -> str:
-    sid, cli_title, started_at = found
+    sid, cli_title, started_at, model = found
+    model = str(model or "").strip()
 
     from api.models import Session, ensure_cron_project, import_cli_session
     from api.models import get_state_db_session_messages
@@ -779,8 +782,11 @@ def _materialize_cron_session_found(
                 or getattr(existing, "is_cli_session", None) is not False
                 or getattr(existing, "source_tag", None) != "cron"
             )
+            needs_model_update = bool(
+                model and (not getattr(existing, "model", None) or getattr(existing, "model", None) == "unknown")
+            )
             metadata_count = getattr(existing, "_metadata_message_count", None)
-            if not needs_update and (not fallback_output or (metadata_count or 0) > 0):
+            if not needs_update and not needs_model_update and (not fallback_output or (metadata_count or 0) > 0):
                 return sid
 
             # load_metadata_only() returns messages=[] by design and Session.save()
@@ -803,6 +809,9 @@ def _materialize_cron_session_found(
                     run_mtime=run_mtime,
                 )
                 changed = True
+            if needs_model_update:
+                full.model = model
+                changed = True
             if changed:
                 full.save()
                 publish_session_list_changed("cron_session_imported")
@@ -824,6 +833,7 @@ def _materialize_cron_session_found(
         sid,
         title,
         msgs,
+        model=model or "unknown",
         profile=target_profile,
         created_at=started_at,
         updated_at=started_at,
