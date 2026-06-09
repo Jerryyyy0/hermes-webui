@@ -821,6 +821,16 @@ def _profile_home_for_cron_job(job: dict):
     return get_hermes_home_for_profile(raw)
 
 
+def _event_profile_for_cron_job(job: dict) -> str | None:
+    """Return the profile identity browsers should refresh for a manual cron run."""
+    raw = str((job or {}).get("profile") or "").strip()
+    if not raw:
+        return None
+    if raw not in _available_cron_profile_names():
+        return None
+    return raw
+
+
 def _execution_home_for_cron_session_lookup(job: dict):
     """Resolve cron execution home for history/session lookup without TLS drift."""
     raw = str((job or {}).get("profile") or "").strip()
@@ -1033,7 +1043,7 @@ def _run_cron_tracked(job, profile_home=None, execution_profile_home=None, owner
             logger.debug("Failed to mark manual cron run failure for %s", job_id)
     finally:
         _mark_cron_done(job_id)
-        publish_session_list_changed("cron_complete")
+        _publish_session_list_changed("cron_complete", profile=owner_profile)
         try:
             from integration.crons.hooks import materialize_after_cron_run
 
@@ -6384,6 +6394,10 @@ def handle_get(handler, parsed) -> bool:
         with cron_profile_context():
             return _handle_cron_status(handler, parsed)
 
+    if parsed.path == "/api/crons/delivery-options":
+        with _cron_context_for_query(parsed):
+            return _handle_cron_delivery_options(handler)
+
     # ── Integration skills (GET) ──
     try:
         from integration.skills.handlers import try_handle_get as _integration_try_get
@@ -7578,7 +7592,7 @@ def handle_post(handler, parsed) -> bool:
                     delete_cli_session(sid)
                 except Exception:
                     logger.debug("Failed to delete CLI session %s", sid)
-        publish_session_list_changed("session_delete")
+        _publish_session_list_changed("session_delete", profile=event_profile)
         return j(handler, {"ok": True, **worktree_retained})
 
     if parsed.path == "/api/session/clear":
@@ -9856,7 +9870,7 @@ def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_
         if byte_range:
             handler.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
         handler.send_header("Cache-Control", cache_control)
-    if disposition is not None:
+        if disposition is not None:
             handler.send_header("Content-Disposition", _content_disposition_value(disposition, target.name))
         if csp:
             # Sandboxed inline HTML must remain frameable for workspace previews;
@@ -12747,13 +12761,10 @@ def _handle_cron_run(handler, body):
 
     _profile_home = get_active_hermes_home()
     _execution_profile_home = _profile_home_for_cron_job(job)
-    _event_profile = _event_profile_for_cron_job(job)
     _owner_profile = get_active_profile_name()
-    threading.Thread(
-        target=_run_cron_tracked,
-        args=(job, _profile_home, _execution_profile_home, _event_profile, _owner_profile),
-        daemon=True,
-    ).start()
+    threading.Thread(target=_run_cron_tracked,
+                     args=(job, _profile_home, _execution_profile_home, _owner_profile),
+                     daemon=True).start()
     return j(handler, {"ok": True, "job_id": job_id, "status": "running"})
 
 
