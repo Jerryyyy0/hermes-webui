@@ -1216,6 +1216,7 @@ function clearPreview(opts={}){
   const pi=$('previewImg');if(pi){pi.onerror=null;pi.src='';}
   const pdf=$('previewPdfFrame');if(pdf)pdf.src='';
   const html=$('previewHtmlIframe');if(html)html.src='';
+  if(typeof clearBrowserPreviewEmbed==='function') clearBrowserPreviewEmbed();
   const pm=$('previewMd');if(pm)pm.innerHTML='';
   const pc=$('previewCode');if(pc)pc.textContent='';
   const pp=$('previewPathText');if(pp)pp.textContent='';

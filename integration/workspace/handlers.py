@@ -2,25 +2,31 @@
 
 from __future__ import annotations
 
+import os
+import time
 from urllib.parse import parse_qs
 
 from api.helpers import _sanitize_error, bad, j
 from api.workspace import (
     WORKSPACE_FILE_SORT_FIELDS,
     WORKSPACE_FILE_SORT_ORDERS,
+    collect_workspace_file_entries_for_paths,
     is_workspace_cruft_basename,
     normalize_workspace_file_ext,
-    walk_workspace_files_page,
+    paginate_workspace_file_entries,
 )
 
 from integration.config import integration_enabled
 from integration.workspace._root import integration_workspace_root, resolve_integration_rel
+from integration.workspace.artifact_profiles import get_workspace_artifact_profile_index
+from integration.workspace.file_index_cache import get_workspace_file_entries, invalidate_workspace_file_index
 
 _DEFAULT_PAGE = 1
 _DEFAULT_PAGE_SIZE = 500
 _MAX_PAGE_SIZE = 5000
 _DEFAULT_SORT = "path"
 _DEFAULT_ORDER = "desc"
+_DEBUG_TIMING = os.environ.get("HERMES_DEBUG_TIMING") == "1"
 
 
 def _parse_positive_int(raw: str | None, default: int) -> int | None:
@@ -42,6 +48,10 @@ def _workspace_str() -> str:
 def _query_str(qs: dict, key: str, default: str = "") -> str:
     raw = qs.get(key, [default])[0]
     return raw if raw is not None else default
+
+
+def _truthy_query(raw: str) -> bool:
+    return raw.strip().lower() in {"1", "true", "yes"}
 
 
 def _handle_files_list(handler, parsed) -> bool:
@@ -81,11 +91,33 @@ def _handle_files_list(handler, parsed) -> bool:
         bad(handler, "order must be asc or desc", status=400)
         return True
 
+    force_refresh = _truthy_query(_query_str(qs, "refresh", ""))
     root = integration_workspace_root()
+    if force_refresh:
+        invalidate_workspace_file_index(root, rel)
+
+    t0 = time.perf_counter()
+    artifact_index = get_workspace_artifact_profile_index(root)
+    artifact_ms = (time.perf_counter() - t0) * 1000.0
+
+    profile_filter = _query_str(qs, "profile", "").strip() or None
+    allowed_paths = None
+    if profile_filter:
+        allowed_paths = frozenset(
+            path for path, prof in artifact_index.items() if prof == profile_filter
+        )
+
     try:
-        result = walk_workspace_files_page(
-            root,
-            rel,
+        t1 = time.perf_counter()
+        if profile_filter and allowed_paths is not None:
+            entries = collect_workspace_file_entries_for_paths(root, allowed_paths)
+        else:
+            entries = get_workspace_file_entries(root, rel, force_refresh=force_refresh)
+        collect_ms = (time.perf_counter() - t1) * 1000.0
+
+        t2 = time.perf_counter()
+        result = paginate_workspace_file_entries(
+            entries,
             page=page,
             page_size=page_size,
             q=q,
@@ -93,12 +125,33 @@ def _handle_files_list(handler, parsed) -> bool:
             sort=sort,
             order=order,
         )
+        sort_ms = (time.perf_counter() - t2) * 1000.0
     except FileNotFoundError as e:
         bad(handler, _sanitize_error(e), status=404)
         return True
     except ValueError as e:
         bad(handler, _sanitize_error(e), status=400)
         return True
+
+    files = result.get("files") or []
+    for entry in files:
+        if not isinstance(entry, dict):
+            continue
+        path = str(entry.get("path") or "").strip()
+        if profile_filter:
+            entry["profile"] = profile_filter
+            continue
+        prof = artifact_index.get(path)
+        if prof:
+            entry["profile"] = prof
+
+    extra_headers = None
+    if _DEBUG_TIMING:
+        extra_headers = {
+            "X-Hermes-Timing-Artifact-Ms": f"{artifact_ms:.2f}",
+            "X-Hermes-Timing-Collect-Ms": f"{collect_ms:.2f}",
+            "X-Hermes-Timing-Sort-Ms": f"{sort_ms:.2f}",
+        }
 
     j(
         handler,
@@ -111,10 +164,12 @@ def _handle_files_list(handler, parsed) -> bool:
             "type": type_ext or "",
             "sort": sort,
             "order": order,
+            "profile": profile_filter or "",
             "total": result.get("total", 0),
             "has_more": bool(result.get("has_more")),
-            "files": result.get("files") or [],
+            "files": files,
         },
+        extra_headers=extra_headers,
     )
     return True
 

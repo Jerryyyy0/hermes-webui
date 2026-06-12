@@ -12,6 +12,8 @@ from api.session_manifest import (
     MANIFEST_PREVIEW_FILE,
     MANIFEST_PREVIEW_SKILL,
     MEDIA_ARTIFACT_SOURCE,
+    ASSISTANT_PROSE_ARTIFACT_SOURCE,
+    TURN_RECONCILE_SOURCE,
     ToolEvent,
     _apply_public_todos_to_manifest_delta,
     _collect_media_artifact_events,
@@ -21,6 +23,8 @@ from api.session_manifest import (
     _extract_manifest_records,
     _normalize_manifest_path,
     _paths_from_assistant_media,
+    _paths_from_assistant_prose,
+    _paths_from_delivery_prose,
     _public_todo_items,
     _resolve_manifest_path,
     _rows_to_wire,
@@ -28,6 +32,7 @@ from api.session_manifest import (
     _wire_todos,
     build_session_manifest,
     extract_manifest_delta_from_assistant_media,
+    extract_manifest_delta_from_turn_reconcile,
     extract_manifest_delta_from_tool_event,
     merge_manifest_delta,
 )
@@ -114,9 +119,7 @@ def test_extract_artifacts_and_references(tmp_path):
     ]
     artifacts, references = _extract_artifacts_and_references(events, workspace)
     assert [row['path'] for row in artifacts] == ['src/new.py']
-    ref_paths = {row['path']: row['kind'] for row in references}
-    assert ref_paths['README.md'] == 'file'
-    assert ref_paths['src'] == 'dir'
+    assert references == []
 
 
 def test_serialize_manifest_row_shape():
@@ -126,6 +129,103 @@ def test_serialize_manifest_row_shape():
         'preview': 'file',
         'source_tool': 'read_file',
     }
+
+
+def test_serialize_manifest_row_includes_profile_when_set():
+    row = _serialize_manifest_row(
+        'docs/a.md', MANIFEST_PREVIEW_FILE, 'write_file', profile='ops',
+    )
+    assert row == {
+        'path': 'docs/a.md',
+        'preview': 'file',
+        'source_tool': 'write_file',
+        'profile': 'ops',
+    }
+
+
+def test_build_session_manifest_artifacts_include_session_profile(tmp_path, monkeypatch):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    target = workspace / 'notes.txt'
+    target.write_text('hello', encoding='utf-8')
+    session = Session(
+        session_id='manifestprof01',
+        workspace=str(workspace),
+        profile='ops',
+        messages=[
+            {'role': 'user', 'content': 'write notes'},
+            {
+                'role': 'assistant',
+                'tool_calls': [{
+                    'id': 'c1',
+                    'function': {'name': 'write_file', 'arguments': '{"path":"notes.txt"}'},
+                }],
+            },
+            {'role': 'tool', 'tool_call_id': 'c1', 'content': 'ok'},
+        ],
+        tool_calls=[],
+    )
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    manifest = build_session_manifest(session)
+    assert manifest['artifacts'][0]['profile'] == 'ops'
+    assert manifest['turns'][0]['artifacts'][0]['profile'] == 'ops'
+    assert all('profile' not in row for row in manifest['references'])
+
+
+def test_build_session_manifest_omits_profile_when_session_has_none(tmp_path, monkeypatch):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    (workspace / 'notes.txt').write_text('hello', encoding='utf-8')
+    session = Session(
+        session_id='manifestprof02',
+        workspace=str(workspace),
+        messages=[
+            {
+                'role': 'assistant',
+                'tool_calls': [{
+                    'id': 'c1',
+                    'function': {'name': 'write_file', 'arguments': '{"path":"notes.txt"}'},
+                }],
+            },
+            {'role': 'tool', 'tool_call_id': 'c1', 'content': 'ok'},
+        ],
+        tool_calls=[],
+    )
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    manifest = build_session_manifest(session)
+    assert 'profile' not in manifest['artifacts'][0]
+
+
+def test_merge_manifest_delta_preserves_profile():
+    base = {'todos': {'items': []}, 'artifacts': [], 'references': [], 'turns': []}
+    delta = {
+        'artifacts': [{
+            'path': 'notes.txt',
+            'preview': 'file',
+            'source_tool': 'write_file',
+            'profile': 'ops',
+        }],
+    }
+    merged = merge_manifest_delta(base, delta)
+    assert merged['artifacts'][0]['profile'] == 'ops'
+
+
+def test_extract_manifest_delta_from_tool_event_includes_profile(tmp_path):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    (workspace / 'notes.txt').write_text('hello', encoding='utf-8')
+    write_event = ToolEvent(
+        name='write_file',
+        args={'path': 'notes.txt'},
+        assistant_msg_idx=1,
+    )
+    delta = extract_manifest_delta_from_tool_event(
+        write_event,
+        workspace,
+        turn_key='turn:0',
+        default_profile='ops',
+    )
+    assert delta['artifacts'][0]['profile'] == 'ops'
 
 
 def test_build_session_manifest_persists_workspace_files(tmp_path, monkeypatch):
@@ -171,7 +271,7 @@ def test_build_session_manifest_persists_workspace_files(tmp_path, monkeypatch):
     assert 'session_id' not in manifest
     assert 'counts' not in manifest
     assert len(manifest['artifacts']) == 1
-    assert len(manifest['references']) == 1
+    assert len(manifest['references']) == 0
     artifact = manifest['artifacts'][0]
     assert artifact == {
         'path': 'notes.txt',
@@ -650,6 +750,7 @@ def test_build_session_manifest_skill_manage_in_turn_artifacts(tmp_path, monkeyp
         'path': 'turn-skill',
         'preview': MANIFEST_PREVIEW_SKILL,
         'source_tool': 'skill_manage',
+        'profile': 'test-profile',
     }]
     assert manifest['references'] == []
     assert manifest['turns'][0]['artifacts'] == manifest['artifacts']
@@ -1094,7 +1195,7 @@ def test_extract_manifest_delta_from_assistant_media_turn_scope(tmp_path):
         sequence=3,
     )
     assert delta['source']['kind'] == 'turn_complete'
-    assert delta['source']['tool'] == MEDIA_ARTIFACT_SOURCE
+    assert delta['source']['tool'] == TURN_RECONCILE_SOURCE
     assert delta['artifacts'] == [{
         'path': 'turn0.md',
         'preview': MANIFEST_PREVIEW_FILE,
@@ -1125,3 +1226,1007 @@ def test_merge_manifest_delta_write_overrides_media_source(tmp_path, monkeypatch
     )
     merged = merge_manifest_delta(persisted, live_delta)
     assert merged['artifacts'][0]['source_tool'] == 'write_file'
+
+
+def test_build_session_manifest_reconcile_str_replace_path(tmp_path, monkeypatch):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    target = workspace / 'src' / 'app.py'
+    target.parent.mkdir()
+    target.write_text('print("hi")', encoding='utf-8')
+    sid = 'reconcile_str01'
+    session = Session(
+        session_id=sid,
+        workspace=str(workspace),
+        messages=[
+            {'role': 'user', 'content': 'fix'},
+            {
+                'role': 'assistant',
+                'tool_calls': [{
+                    'id': 'c1',
+                    'function': {
+                        'name': 'str_replace',
+                        'arguments': json.dumps({'path': 'src/app.py', 'old_string': 'hi', 'new_string': 'bye'}),
+                    },
+                }],
+            },
+            {'role': 'tool', 'tool_call_id': 'c1', 'content': 'ok'},
+        ],
+        tool_calls=[],
+    )
+    session.save()
+    monkeypatch.setattr('api.models.SESSION_DIR', tmp_path)
+    monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    manifest = build_session_manifest(session)
+    assert any(row['path'] == 'src/app.py' and row['source_tool'] == 'str_replace' for row in manifest['artifacts'])
+
+
+def test_build_session_manifest_reconcile_result_path_requires_existing_file(tmp_path, monkeypatch):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    existing = workspace / 'api' / 'foo.py'
+    existing.parent.mkdir()
+    existing.write_text('# foo', encoding='utf-8')
+    sid = 'reconcile_res01'
+    session = Session(
+        session_id=sid,
+        workspace=str(workspace),
+        messages=[
+            {'role': 'user', 'content': 'run'},
+            {
+                'role': 'assistant',
+                'tool_calls': [{
+                    'id': 'c1',
+                    'function': {'name': 'terminal', 'arguments': '{}'},
+                }],
+            },
+            {'role': 'tool', 'tool_call_id': 'c1', 'content': 'Wrote api/foo.py successfully'},
+        ],
+        tool_calls=[],
+    )
+    session.save()
+    monkeypatch.setattr('api.models.SESSION_DIR', tmp_path)
+    monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    manifest = build_session_manifest(session)
+    assert manifest['artifacts'] == [{
+        'path': 'api/foo.py',
+        'preview': MANIFEST_PREVIEW_FILE,
+        'source_tool': 'terminal',
+    }]
+
+
+def test_build_session_manifest_reconcile_skips_missing_file(tmp_path, monkeypatch):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    sid = 'reconcile_miss01'
+    session = Session(
+        session_id=sid,
+        workspace=str(workspace),
+        messages=[
+            {'role': 'user', 'content': 'run'},
+            {
+                'role': 'assistant',
+                'tool_calls': [{
+                    'id': 'c1',
+                    'function': {'name': 'terminal', 'arguments': '{}'},
+                }],
+            },
+            {'role': 'tool', 'tool_call_id': 'c1', 'content': 'Wrote missing.md successfully'},
+        ],
+        tool_calls=[],
+    )
+    session.save()
+    monkeypatch.setattr('api.models.SESSION_DIR', tmp_path)
+    monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    manifest = build_session_manifest(session)
+    assert manifest['artifacts'] == []
+
+
+def test_build_session_manifest_reconcile_skips_args_path_without_file(tmp_path, monkeypatch):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    sid = 'reconcile_nofile01'
+    session = Session(
+        session_id=sid,
+        workspace=str(workspace),
+        messages=[
+            {'role': 'user', 'content': 'write'},
+            {
+                'role': 'assistant',
+                'tool_calls': [{
+                    'id': 'c1',
+                    'function': {
+                        'name': 'str_replace',
+                        'arguments': json.dumps({'path': 'draft.txt'}),
+                    },
+                }],
+            },
+            {'role': 'tool', 'tool_call_id': 'c1', 'content': 'ok'},
+        ],
+        tool_calls=[],
+    )
+    session.save()
+    monkeypatch.setattr('api.models.SESSION_DIR', tmp_path)
+    monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    manifest = build_session_manifest(session)
+    assert manifest['artifacts'] == []
+
+
+def test_build_session_manifest_reconcile_dedupes_with_write_file(tmp_path, monkeypatch):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    (workspace / 'notes.txt').write_text('hello', encoding='utf-8')
+    sid = 'reconcile_dedupe01'
+    session = Session(
+        session_id=sid,
+        workspace=str(workspace),
+        messages=[
+            {'role': 'user', 'content': 'edit'},
+            {
+                'role': 'assistant',
+                'tool_calls': [{
+                    'id': 'c1',
+                    'function': {
+                        'name': 'write_file',
+                        'arguments': json.dumps({'path': 'notes.txt'}),
+                    },
+                }],
+            },
+            {'role': 'tool', 'tool_call_id': 'c1', 'content': '```diff\n+++ b/notes.txt\n```'},
+        ],
+        tool_calls=[],
+    )
+    session.save()
+    monkeypatch.setattr('api.models.SESSION_DIR', tmp_path)
+    monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    manifest = build_session_manifest(session)
+    assert len(manifest['artifacts']) == 1
+    assert manifest['artifacts'][0]['source_tool'] == 'write_file'
+
+
+def test_build_session_manifest_reconcile_excludes_read_file_path(tmp_path, monkeypatch):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    (workspace / 'readme.md').write_text('# hi', encoding='utf-8')
+    sid = 'reconcile_read01'
+    session = Session(
+        session_id=sid,
+        workspace=str(workspace),
+        messages=[
+            {'role': 'user', 'content': 'read'},
+            {
+                'role': 'assistant',
+                'tool_calls': [{
+                    'id': 'c1',
+                    'function': {
+                        'name': 'read_file',
+                        'arguments': json.dumps({'path': 'readme.md'}),
+                    },
+                }],
+            },
+            {'role': 'tool', 'tool_call_id': 'c1', 'content': '# hi'},
+        ],
+        tool_calls=[],
+    )
+    session.save()
+    monkeypatch.setattr('api.models.SESSION_DIR', tmp_path)
+    monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    manifest = build_session_manifest(session)
+    assert manifest['artifacts'] == []
+    assert len(manifest['references']) == 0
+
+
+def test_extract_manifest_delta_from_turn_reconcile_turn_scope(tmp_path):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    turn0 = workspace / 'turn0.md'
+    turn0.write_text('# one', encoding='utf-8')
+    turn1 = workspace / 'turn1.md'
+    turn1.write_text('# two', encoding='utf-8')
+    messages = [
+        {'role': 'user', 'content': 'first'},
+        {
+            'role': 'assistant',
+            'tool_calls': [{
+                'id': 'c1',
+                'function': {
+                    'name': 'str_replace',
+                    'arguments': json.dumps({'path': 'turn0.md'}),
+                },
+            }],
+        },
+        {'role': 'tool', 'tool_call_id': 'c1', 'content': 'ok'},
+        {'role': 'user', 'content': 'second'},
+        {
+            'role': 'assistant',
+            'tool_calls': [{
+                'id': 'c2',
+                'function': {
+                    'name': 'str_replace',
+                    'arguments': json.dumps({'path': 'turn1.md'}),
+                },
+            }],
+        },
+        {'role': 'tool', 'tool_call_id': 'c2', 'content': 'ok'},
+    ]
+    delta = extract_manifest_delta_from_turn_reconcile(
+        messages,
+        workspace,
+        session_id='sid',
+        stream_id='stream-1',
+        turn_key='turn:0',
+        sequence=4,
+    )
+    assert delta['source']['tool'] == TURN_RECONCILE_SOURCE
+    assert delta['artifacts'] == [{
+        'path': 'turn0.md',
+        'preview': MANIFEST_PREVIEW_FILE,
+        'source_tool': 'str_replace',
+    }]
+    assert delta['turns'][0]['artifacts'] == delta['artifacts']
+
+
+def test_merge_manifest_delta_turn_reconcile_idempotent(tmp_path):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    (workspace / 'notes.txt').write_text('hello', encoding='utf-8')
+    messages = [
+        {'role': 'user', 'content': 'go'},
+        {
+            'role': 'assistant',
+            'tool_calls': [{
+                'id': 'c1',
+                'function': {
+                    'name': 'str_replace',
+                    'arguments': json.dumps({'path': 'notes.txt'}),
+                },
+            }],
+        },
+        {'role': 'tool', 'tool_call_id': 'c1', 'content': 'ok'},
+    ]
+    delta = extract_manifest_delta_from_turn_reconcile(
+        messages,
+        workspace,
+        turn_key='turn:0',
+        sequence=1,
+    )
+    merged = merge_manifest_delta(merge_manifest_delta({'artifacts': [], 'references': [], 'turns': []}, delta), delta)
+    assert merged['artifacts'] == delta['artifacts']
+
+
+def test_paths_from_assistant_prose_labeled_unicode_path(tmp_path):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    docx = workspace / 'AI热点top10-2026-06.docx'
+    docx.write_bytes(b'fake-docx')
+    labeled = f'📄 文件位置：{docx}'
+    paths = _paths_from_assistant_prose(labeled, workspace)
+    assert paths == ['AI热点top10-2026-06.docx']
+
+
+def test_build_session_manifest_reconcile_assistant_prose_delivery(tmp_path, monkeypatch):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    docx = workspace / 'AI热点top10-2026-06.docx'
+    docx.write_bytes(b'fake-docx')
+    sid = 'reconcile_prose01'
+    session = Session(
+        session_id=sid,
+        workspace=str(workspace),
+        messages=[
+            {'role': 'user', 'content': '生成文档'},
+            {
+                'role': 'assistant',
+                'content': (
+                    '文件已生成 ✅\n\n'
+                    f'📄 文件位置：{docx}\n'
+                    '📦 文件大小：38,570 字节'
+                ),
+            },
+        ],
+        tool_calls=[],
+    )
+    session.save()
+    monkeypatch.setattr('api.models.SESSION_DIR', tmp_path)
+    monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    manifest = build_session_manifest(session)
+    assert manifest['artifacts'] == [{
+        'path': 'AI热点top10-2026-06.docx',
+        'preview': MANIFEST_PREVIEW_FILE,
+        'source_tool': ASSISTANT_PROSE_ARTIFACT_SOURCE,
+    }]
+
+
+def test_build_session_manifest_reconcile_assistant_prose_skips_missing_file(tmp_path, monkeypatch):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    sid = 'reconcile_prose_miss01'
+    session = Session(
+        session_id=sid,
+        workspace=str(workspace),
+        messages=[
+            {'role': 'user', 'content': '生成文档'},
+            {
+                'role': 'assistant',
+                'content': '📄 文件位置：/Users/wzq/workspace/missing-热点.docx',
+            },
+        ],
+        tool_calls=[],
+    )
+    session.save()
+    monkeypatch.setattr('api.models.SESSION_DIR', tmp_path)
+    monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    manifest = build_session_manifest(session)
+    assert manifest['artifacts'] == []
+
+
+def test_extract_manifest_delta_from_turn_reconcile_assistant_prose(tmp_path):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    docx = workspace / 'report.docx'
+    docx.write_bytes(b'x')
+    messages = [
+        {'role': 'user', 'content': 'go'},
+        {'role': 'assistant', 'content': f'文件位置：{docx}'},
+    ]
+    delta = extract_manifest_delta_from_turn_reconcile(
+        messages,
+        workspace,
+        turn_key='turn:0',
+        sequence=2,
+    )
+    assert delta['source']['tool'] == TURN_RECONCILE_SOURCE
+    assert delta['artifacts'] == [{
+        'path': 'report.docx',
+        'preview': MANIFEST_PREVIEW_FILE,
+        'source_tool': ASSISTANT_PROSE_ARTIFACT_SOURCE,
+    }]
+
+
+def test_paths_from_delivery_prose_markdown_bold_and_backtick(tmp_path):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    docx = workspace / '微博热搜榜_20260612.docx'
+    docx.write_bytes(b'fake-docx')
+    labeled = f'📄 **文件路径**：`{docx}`'
+    paths = _paths_from_delivery_prose(labeled, workspace)
+    assert paths == ['微博热搜榜_20260612.docx']
+
+
+def test_paths_from_delivery_prose_saved_to_and_output_file(tmp_path):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    report = workspace / 'report.docx'
+    report.write_bytes(b'x')
+    out = workspace / 'output.xlsx'
+    out.write_bytes(b'y')
+    assert _paths_from_delivery_prose(f'已保存到 {report}', workspace) == ['report.docx']
+    assert _paths_from_delivery_prose(f'输出文件：{out}', workspace) == ['output.xlsx']
+
+
+def test_paths_from_delivery_prose_skips_casual_mention_and_bare_link(tmp_path):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    casual = '你可以参考 /tmp/a.docx 或日志 /var/log/error.log'
+    bare_link = '[下载文件](/tmp/report.docx)'
+    assert _paths_from_delivery_prose(casual, workspace) == []
+    assert _paths_from_delivery_prose(bare_link, workspace) == []
+
+
+def test_build_session_manifest_multi_turn_assistant_prose_delivery(tmp_path, monkeypatch):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    docx = workspace / '微博热搜榜_20260612.docx'
+    docx.write_bytes(b'fake-docx')
+    messages = []
+    for i in range(10):
+        messages.extend([
+            {'role': 'user', 'content': f'q{i}'},
+            {'role': 'assistant', 'content': f'a{i}'},
+        ])
+    messages.extend([
+        {'role': 'user', 'content': '给我一个word'},
+        {
+            'role': 'assistant',
+            'tool_calls': [{
+                'id': 'c1',
+                'function': {'name': 'execute_code', 'arguments': json.dumps({'code': '...'})},
+            }],
+        },
+        {
+            'role': 'tool',
+            'tool_call_id': 'c1',
+            'name': 'execute_code',
+            'content': json.dumps({
+                'status': 'success',
+                'output': f'✅ 已保存: {docx}\n   文件大小: 38.8 KB\n',
+            }),
+        },
+        {
+            'role': 'assistant',
+            'content': f'✅ Word 文档已生成。\n\n📄 **文件路径**：`{docx}`\n',
+        },
+    ])
+    sid = 'multi_turn_prose01'
+    session = Session(
+        session_id=sid,
+        workspace=str(workspace),
+        messages=messages,
+        tool_calls=[],
+    )
+    session.save()
+    monkeypatch.setattr('api.models.SESSION_DIR', tmp_path)
+    monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    manifest = build_session_manifest(session)
+    artifact_paths = {row['path'] for row in manifest['artifacts']}
+    assert '微博热搜榜_20260612.docx' in artifact_paths
+    sources = {row['source_tool'] for row in manifest['artifacts'] if row['path'] == '微博热搜榜_20260612.docx'}
+    assert sources & {ASSISTANT_PROSE_ARTIFACT_SOURCE, 'execute_code'}
+
+
+def test_build_session_manifest_turn_reconcile_scopes_session_tool_calls(tmp_path, monkeypatch):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    docx = workspace / '微博热搜榜_20260612.docx'
+    docx.write_bytes(b'fake-docx')
+    png = workspace / '微博热搜榜_20260612.png'
+    png.write_bytes(b'fake-png')
+    messages = []
+    for i in range(10):
+        messages.extend([
+            {'role': 'user', 'content': f'q{i}'},
+            {'role': 'assistant', 'content': f'a{i}'},
+        ])
+    messages.extend([
+        {'role': 'user', 'content': '给我一个word'},
+        {
+            'role': 'assistant',
+            'tool_calls': [{
+                'id': 'c-docx',
+                'function': {'name': 'execute_code', 'arguments': json.dumps({'code': '...'})},
+            }],
+        },
+        {
+            'role': 'tool',
+            'tool_call_id': 'c-docx',
+            'name': 'execute_code',
+            'content': json.dumps({
+                'status': 'success',
+                'output': f'✅ 已保存: {docx}\n',
+            }),
+        },
+        {'role': 'assistant', 'content': f'📄 **文件路径**：`{docx}`'},
+        {'role': 'user', 'content': '中间轮'},
+        {'role': 'assistant', 'content': '不生成文件'},
+        {'role': 'user', 'content': '能给我一个图片摘要版本吗'},
+        {
+            'role': 'assistant',
+            'tool_calls': [{
+                'id': 'c-png',
+                'function': {'name': 'execute_code', 'arguments': json.dumps({'code': '...'})},
+            }],
+        },
+        {
+            'role': 'tool',
+            'tool_call_id': 'c-png',
+            'name': 'execute_code',
+            'content': json.dumps({
+                'status': 'success',
+                'output': f'✅ 已保存: {png}\n',
+            }),
+        },
+        {'role': 'assistant', 'content': f'MEDIA:{png}'},
+    ])
+    tool_calls = [
+        {
+            'name': 'browser_navigate',
+            'snippet': '{"success": true}',
+            'assistant_msg_idx': 1,
+            'tid': 'c-browser',
+        },
+        {
+            'name': 'execute_code',
+            'snippet': json.dumps({'output': f'✅ 已保存: {docx}\n'}),
+            'assistant_msg_idx': 21,
+            'tid': 'c-docx',
+        },
+        {
+            'name': 'execute_code',
+            'snippet': json.dumps({'output': f'✅ 已保存: {png}\n'}),
+            'assistant_msg_idx': 27,
+            'tid': 'c-png',
+        },
+    ]
+    session = Session(
+        session_id='turn_reconcile_scoped_tool_calls01',
+        workspace=str(workspace),
+        messages=messages,
+        tool_calls=tool_calls,
+    )
+    session.save()
+    monkeypatch.setattr('api.models.SESSION_DIR', tmp_path)
+    monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    manifest = build_session_manifest(session)
+
+    assert {row['path'] for row in manifest['artifacts']} == {
+        '微博热搜榜_20260612.docx',
+        '微博热搜榜_20260612.png',
+    }
+    artifacts_by_turn = {
+        turn['turn_key']: [row['path'] for row in turn['artifacts']]
+        for turn in manifest['turns']
+    }
+    assert artifacts_by_turn['turn:0'] == []
+    assert artifacts_by_turn['turn:4'] == []
+    assert artifacts_by_turn['turn:20'] == ['微博热搜榜_20260612.docx']
+    assert artifacts_by_turn['turn:24'] == []
+    assert artifacts_by_turn['turn:26'] == ['微博热搜榜_20260612.png']
+
+    delta = extract_manifest_delta_from_turn_reconcile(
+        messages,
+        workspace,
+        turn_key='turn:0',
+        sequence=1,
+        tool_calls=tool_calls,
+    )
+    assert delta == {}
+
+
+def test_extract_manifest_delta_from_turn_reconcile_multi_turn_key(tmp_path):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    docx = workspace / '微博热搜榜_20260612.docx'
+    docx.write_bytes(b'fake-docx')
+    filler = []
+    for i in range(10):
+        filler.extend([
+            {'role': 'user', 'content': f'q{i}'},
+            {'role': 'assistant', 'content': f'a{i}'},
+        ])
+    messages = filler + [
+        {'role': 'user', 'content': '给我一个word'},
+        {'role': 'assistant', 'content': f'📄 文件路径：{docx}'},
+    ]
+    delta = extract_manifest_delta_from_turn_reconcile(
+        messages,
+        workspace,
+        turn_key='turn:20',
+        sequence=3,
+    )
+    assert delta['source']['tool'] == TURN_RECONCILE_SOURCE
+    assert delta['artifacts'] == [{
+        'path': '微博热搜榜_20260612.docx',
+        'preview': MANIFEST_PREVIEW_FILE,
+        'source_tool': ASSISTANT_PROSE_ARTIFACT_SOURCE,
+    }]
+
+
+def test_build_session_manifest_assistant_delivery_context_backtick_path(tmp_path, monkeypatch):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    docx = workspace / 'notes' / 'report.docx'
+    docx.parent.mkdir()
+    docx.write_bytes(b'fake-docx')
+    session = Session(
+        session_id='assistant_delivery_context01',
+        workspace=str(workspace),
+        messages=[
+            {'role': 'user', 'content': '给我一个word版本吧'},
+            {
+                'role': 'assistant',
+                'content': f'Word 版已生成，结构完整。\n\n📄 **`{docx}`**（18.5 KB）',
+            },
+        ],
+        tool_calls=[],
+    )
+    session.save()
+    monkeypatch.setattr('api.models.SESSION_DIR', tmp_path)
+    monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    manifest = build_session_manifest(session)
+    assert manifest['artifacts'] == [{
+        'path': 'notes/report.docx',
+        'preview': MANIFEST_PREVIEW_FILE,
+        'source_tool': ASSISTANT_PROSE_ARTIFACT_SOURCE,
+    }]
+    assert manifest['turns'][0]['artifacts'] == manifest['artifacts']
+
+
+def test_build_session_manifest_terminal_pandoc_output_arg_artifact(tmp_path, monkeypatch):
+    workspace = tmp_path / 'ws'
+    notes = workspace / 'notes'
+    notes.mkdir(parents=True)
+    (notes / 'report.md').write_text('# Report', encoding='utf-8')
+    docx = notes / 'report.docx'
+    docx.write_bytes(b'fake-docx')
+    command = f'cd {notes} && pandoc report.md -o report.docx --toc'
+    session = Session(
+        session_id='terminal_pandoc_output01',
+        workspace=str(workspace),
+        messages=[
+            {'role': 'user', 'content': '转成 word'},
+            {
+                'role': 'assistant',
+                'tool_calls': [{
+                    'id': 'c1',
+                    'function': {'name': 'terminal', 'arguments': json.dumps({'command': command})},
+                }],
+            },
+            {
+                'role': 'tool',
+                'tool_call_id': 'c1',
+                'name': 'terminal',
+                'content': 'report.docx: Microsoft Word 2007+',
+            },
+            {'role': 'assistant', 'content': '文件生成成功。'},
+        ],
+        tool_calls=[],
+    )
+    session.save()
+    monkeypatch.setattr('api.models.SESSION_DIR', tmp_path)
+    monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    manifest = build_session_manifest(session)
+    assert manifest['artifacts'] == [{
+        'path': 'notes/report.docx',
+        'preview': MANIFEST_PREVIEW_FILE,
+        'source_tool': 'terminal',
+    }]
+    assert manifest['turns'][0]['artifacts'] == manifest['artifacts']
+
+
+def test_build_session_manifest_terminal_ls_path_candidate_not_artifact(tmp_path, monkeypatch):
+    workspace = tmp_path / 'ws'
+    notes = workspace / 'notes'
+    notes.mkdir(parents=True)
+    docx = notes / 'report.docx'
+    docx.write_bytes(b'fake-docx')
+    session = Session(
+        session_id='terminal_ls_negative01',
+        workspace=str(workspace),
+        messages=[
+            {'role': 'user', 'content': '看看目录'},
+            {
+                'role': 'assistant',
+                'tool_calls': [{
+                    'id': 'c1',
+                    'function': {'name': 'terminal', 'arguments': json.dumps({'command': f'cd {notes} && ls -la'})},
+                }],
+            },
+            {
+                'role': 'tool',
+                'tool_call_id': 'c1',
+                'name': 'terminal',
+                'content': '-rw-r--r--  1 user  staff  18578 Jun 12 10:22 report.docx',
+            },
+            {'role': 'assistant', 'content': f'你可以参考 {docx} 或日志 /var/log/error.log'},
+        ],
+        tool_calls=[],
+    )
+    session.save()
+    monkeypatch.setattr('api.models.SESSION_DIR', tmp_path)
+    monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    manifest = build_session_manifest(session)
+    # ls 输出行本身不产生 artifact，但 assistant 正文提到的路径会匹配
+    assert any(
+        row['path'] == 'notes/report.docx' and row['source_tool'] == ASSISTANT_PROSE_ARTIFACT_SOURCE
+        for row in manifest['artifacts']
+    )
+    assert manifest['turns'][0]['artifacts']
+
+
+def test_build_session_manifest_execute_code_delivery_output(tmp_path, monkeypatch):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    report = workspace / 'report.docx'
+    report.write_bytes(b'x')
+    sid = 'execute_code_delivery01'
+    session = Session(
+        session_id=sid,
+        workspace=str(workspace),
+        messages=[
+            {'role': 'user', 'content': '生成文档'},
+            {
+                'role': 'assistant',
+                'tool_calls': [{
+                    'id': 'c1',
+                    'function': {'name': 'execute_code', 'arguments': json.dumps({'code': '...'})},
+                }],
+            },
+            {
+                'role': 'tool',
+                'tool_call_id': 'c1',
+                'name': 'execute_code',
+                'content': json.dumps({
+                    'status': 'success',
+                    'output': f'✅ 已保存: {report}\n',
+                }),
+            },
+            {'role': 'assistant', 'content': '文档已生成。'},
+        ],
+        tool_calls=[],
+    )
+    session.save()
+    monkeypatch.setattr('api.models.SESSION_DIR', tmp_path)
+    monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    manifest = build_session_manifest(session)
+    assert manifest['artifacts'] == [{
+        'path': 'report.docx',
+        'preview': MANIFEST_PREVIEW_FILE,
+        'source_tool': 'execute_code',
+    }]
+    assert manifest['references'] == []
+
+
+def test_build_session_manifest_execute_code_delivery_skips_missing_and_external(tmp_path, monkeypatch):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    sid = 'execute_code_delivery_neg01'
+    session = Session(
+        session_id=sid,
+        workspace=str(workspace),
+        messages=[
+            {'role': 'user', 'content': '生成文档'},
+            {
+                'role': 'assistant',
+                'tool_calls': [{
+                    'id': 'c1',
+                    'function': {'name': 'execute_code', 'arguments': json.dumps({'code': '...'})},
+                }],
+            },
+            {
+                'role': 'tool',
+                'tool_call_id': 'c1',
+                'name': 'execute_code',
+                'content': json.dumps({
+                    'status': 'success',
+                    'output': (
+                        '已保存: /tmp/missing.docx\n'
+                        '输出文件：/etc/hosts\n'
+                        'grep hit: src/main.py\n'
+                    ),
+                }),
+            },
+            {'role': 'assistant', 'content': '可以参考 /tmp/a.docx'},
+        ],
+        tool_calls=[],
+    )
+    session.save()
+    monkeypatch.setattr('api.models.SESSION_DIR', tmp_path)
+    monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    manifest = build_session_manifest(session)
+    assert manifest['artifacts'] == []
+    assert manifest['references'] == []
+
+
+# ── 改动一：assistant 正文宽泛正则路径直接提升为成果 ──
+
+
+def test_build_session_manifest_absolute_path_without_delivery_context(tmp_path, monkeypatch):
+    """绝对路径在 assistant 正文中（无交付关键词），文件存在 → artifacts"""
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    output_pdf = workspace / 'analysis_report.pdf'
+    output_pdf.write_bytes(b'pdf-content')
+    sid = 'abs_path_no_ctx01'
+    session = Session(
+        session_id=sid,
+        workspace=str(workspace),
+        messages=[
+            {'role': 'user', 'content': '帮我生成报告'},
+            {
+                'role': 'assistant',
+                'content': f'报告已生成，可以查看 {output_pdf}',
+            },
+        ],
+        tool_calls=[],
+    )
+    session.save()
+    monkeypatch.setattr('api.models.SESSION_DIR', tmp_path)
+    monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    manifest = build_session_manifest(session)
+    assert any(
+        row['path'] == 'analysis_report.pdf' and row['source_tool'] == ASSISTANT_PROSE_ARTIFACT_SOURCE
+        for row in manifest['artifacts']
+    )
+
+
+def test_build_session_manifest_relative_path_without_delivery_context(tmp_path, monkeypatch):
+    """相对路径在 assistant 正文中（无交付关键词），文件存在 → artifacts"""
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    src_dir = workspace / 'src'
+    src_dir.mkdir()
+    main_py = src_dir / 'main.py'
+    main_py.write_text('print(1)', encoding='utf-8')
+    sid = 'rel_path_no_ctx01'
+    session = Session(
+        session_id=sid,
+        workspace=str(workspace),
+        messages=[
+            {'role': 'user', 'content': '写代码'},
+            {
+                'role': 'assistant',
+                'content': '入口文件在 ./src/main.py，你可以看下',
+            },
+        ],
+        tool_calls=[],
+    )
+    session.save()
+    monkeypatch.setattr('api.models.SESSION_DIR', tmp_path)
+    monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    manifest = build_session_manifest(session)
+    assert any(
+        row['path'] == 'src/main.py' and row['source_tool'] == ASSISTANT_PROSE_ARTIFACT_SOURCE
+        for row in manifest['artifacts']
+    )
+
+
+def test_build_session_manifest_code_span_path_without_delivery_context(tmp_path, monkeypatch):
+    """代码块路径（反引号）在 assistant 正文中（无交付关键词），文件存在 → artifacts"""
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    result_json = workspace / 'result.json'
+    result_json.write_text('{}', encoding='utf-8')
+    sid = 'code_span_no_ctx01'
+    session = Session(
+        session_id=sid,
+        workspace=str(workspace),
+        messages=[
+            {'role': 'user', 'content': '生成json'},
+            {
+                'role': 'assistant',
+                'content': '输出已经写入 `result.json`，可以看看',
+            },
+        ],
+        tool_calls=[],
+    )
+    session.save()
+    monkeypatch.setattr('api.models.SESSION_DIR', tmp_path)
+    monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    manifest = build_session_manifest(session)
+    assert any(
+        row['path'] == 'result.json' and row['source_tool'] == ASSISTANT_PROSE_ARTIFACT_SOURCE
+        for row in manifest['artifacts']
+    )
+
+
+def test_build_session_manifest_basename_no_delivery_context_not_artifact(tmp_path, monkeypatch):
+    """裸基名（无路径分隔符）在 assistant 正文中，无交付关键词，文件存在 → 不出 artifacts"""
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    data_csv = workspace / 'data.csv'
+    data_csv.write_text('a,b,c', encoding='utf-8')
+    sid = 'basename_no_ctx01'
+    session = Session(
+        session_id=sid,
+        workspace=str(workspace),
+        messages=[
+            {'role': 'user', 'content': '处理数据'},
+            {
+                'role': 'assistant',
+                'content': '你可以用 data.csv 来测试',
+            },
+        ],
+        tool_calls=[],
+    )
+    session.save()
+    monkeypatch.setattr('api.models.SESSION_DIR', tmp_path)
+    monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    manifest = build_session_manifest(session)
+    assert manifest['artifacts'] == []
+
+
+def test_build_session_manifest_path_missing_file_not_artifact(tmp_path, monkeypatch):
+    """正则匹配到的路径文件不存在 → 不出 artifacts"""
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    sid = 'missing_file_no_ctx01'
+    session = Session(
+        session_id=sid,
+        workspace=str(workspace),
+        messages=[
+            {'role': 'user', 'content': '生成报告'},
+            {
+                'role': 'assistant',
+                'content': '报告在 /tmp/nonexistent/report.docx',
+            },
+        ],
+        tool_calls=[],
+    )
+    session.save()
+    monkeypatch.setattr('api.models.SESSION_DIR', tmp_path)
+    monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    manifest = build_session_manifest(session)
+    assert manifest['artifacts'] == []
+
+
+# ── 改动二：read_file 等读取类工具不再产出 references ──
+
+
+def test_build_session_manifest_read_file_no_reference_nor_artifact(tmp_path, monkeypatch):
+    """read_file 读取存在的文件 → 不出现 references 和 artifacts"""
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    (workspace / 'config.yaml').write_text('key: val', encoding='utf-8')
+    sid = 'read_file_no_ref01'
+    session = Session(
+        session_id=sid,
+        workspace=str(workspace),
+        messages=[
+            {'role': 'user', 'content': '读取配置'},
+            {
+                'role': 'assistant',
+                'tool_calls': [{
+                    'id': 'c1',
+                    'function': {
+                        'name': 'read_file',
+                        'arguments': json.dumps({'path': 'config.yaml'}),
+                    },
+                }],
+            },
+            {'role': 'tool', 'tool_call_id': 'c1', 'content': 'key: val'},
+        ],
+        tool_calls=[],
+    )
+    session.save()
+    monkeypatch.setattr('api.models.SESSION_DIR', tmp_path)
+    monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    manifest = build_session_manifest(session)
+    assert manifest['artifacts'] == []
+    assert manifest['references'] == []
+    assert manifest['turns'][0]['artifacts'] == []
+    assert manifest['turns'][0]['references'] == []
+
+
+def test_build_session_manifest_list_dir_no_reference(tmp_path, monkeypatch):
+    """list_dir 列出目录 → 不出现 references"""
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    (workspace / 'sub').mkdir()
+    sid = 'list_dir_no_ref01'
+    session = Session(
+        session_id=sid,
+        workspace=str(workspace),
+        messages=[
+            {'role': 'user', 'content': '列出目录'},
+            {
+                'role': 'assistant',
+                'tool_calls': [{
+                    'id': 'c1',
+                    'function': {
+                        'name': 'list_dir',
+                        'arguments': json.dumps({'path': 'sub'}),
+                    },
+                }],
+            },
+            {'role': 'tool', 'tool_call_id': 'c1', 'content': 'file1.txt'},
+        ],
+        tool_calls=[],
+    )
+    session.save()
+    monkeypatch.setattr('api.models.SESSION_DIR', tmp_path)
+    monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    manifest = build_session_manifest(session)
+    assert manifest['references'] == []
+    assert manifest['turns'][0]['references'] == []

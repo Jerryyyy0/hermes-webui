@@ -53,7 +53,8 @@
     return ext || '—';
   }
 
-  function listQueryParams(page, pageSize) {
+  function listQueryParams(page, pageSize, options) {
+    const opts = options || {};
     const params = new URLSearchParams();
     params.set('page', String(page));
     params.set('page_size', String(pageSize));
@@ -61,14 +62,15 @@
     if (_typeFilter) params.set('type', _typeFilter);
     params.set('sort', _sort || 'path');
     params.set('order', _order || 'desc');
+    if (opts.refresh) params.set('refresh', '1');
     return params.toString();
   }
 
   const HTML_PREVIEW_SANDBOX = 'sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox';
 
   const API = {
-    list(page, pageSize) {
-      return api(`${API_PREFIX}/files?${listQueryParams(page, pageSize)}`);
+    list(page, pageSize, options) {
+      return api(`${API_PREFIX}/files?${listQueryParams(page, pageSize, options)}`);
     },
     fileUrl(path) {
       return `${API_PREFIX}/file?path=${encodeURIComponent(path)}`;
@@ -122,12 +124,14 @@
         const selected = path === _selectedPath ? ' selected' : '';
         const size = formatSize(row.size);
         const typeText = typeLabel(row);
+        const profileText = String(row.profile || '').trim();
         return `<div class="integration-ws-file-item${selected}" role="button" tabindex="0" data-path="${esc(path)}">`
           + `<div class="integration-ws-file-row">`
           + `<span class="integration-ws-file-name">${esc(name)}</span>`
           + `<span class="integration-ws-file-type">${esc(typeText)}</span>`
           + `</div>`
           + `<span class="integration-ws-file-path">${esc(path)}</span>`
+          + (profileText ? `<span class="integration-ws-file-meta">${esc(profileText)}</span>` : '')
           + (size ? `<span class="integration-ws-file-meta">${esc(size)}</span>` : '')
           + '</div>';
       }).join('');
@@ -158,9 +162,10 @@
     if (hint) hint.textContent = _workspace || '';
   }
 
-  async function loadIndex(reset) {
+  async function loadIndex(reset, options) {
     if (_loading) return;
     _loading = true;
+    const opts = options || {};
     if (reset) {
       _index = [];
       _page = 0;
@@ -171,7 +176,7 @@
 
     try {
       const nextPage = _page + 1;
-      const data = await API.list(nextPage, PAGE_SIZE);
+      const data = await API.list(nextPage, PAGE_SIZE, opts);
       if (data.workspace) _workspace = data.workspace;
       const files = Array.isArray(data.files) ? data.files : [];
       _index = reset ? files : _index.concat(files);
@@ -396,9 +401,15 @@
     if (preview) openIntegrationFile(path);
   }
 
+  function onManifestDelta(delta) {
+    if (!delta || !Array.isArray(delta.artifacts)) return;
+    if (!delta.artifacts.some(row => row && row.preview === 'file')) return;
+    loadIndex(true);
+  }
+
   function bindUi() {
     const refresh = $('integrationWorkspaceRefreshBtn');
-    if (refresh) refresh.addEventListener('click', () => loadIndex(true));
+    if (refresh) refresh.addEventListener('click', () => loadIndex(true, { refresh: true }));
 
     const search = $('integrationWorkspaceSearch');
     if (search) {
@@ -458,7 +469,7 @@
     } catch (_) {}
   }
 
-  window.HermesIntegrationWorkspace = { load, loadIndex, openIntegrationFile, showNav };
+  window.HermesIntegrationWorkspace = { load, loadIndex, openIntegrationFile, showNav, onManifestDelta };
   bindUi();
   showNav();
 })();

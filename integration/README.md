@@ -26,9 +26,13 @@ When integration is enabled, `GET /api/profiles` enriches each entry:
 | Response field | Source |
 |----------------|--------|
 | `info` | `{profile.path}/info.json` (missing file → `{}`) |
-| `info.logo` | Data URI base64 in info.json; invalid/over 100KB omitted from response |
+| `info.logo` | Data URI base64 in info.json; invalid/over 4MB omitted from response |
 | `skills` | Installed skills for that profile (`local_skills.list_installed`) |
 | `memory_snapshot` | `{path}/memories/MEMORY.md`, `USER.md`, and `{path}/SOUL.md` (same fields as `GET /api/memory`, redacted) |
+| `info.pinned` | `info.json` → `pinned: true`（仅置顶时返回） |
+| `info.pin_order` | `info.json` → 置顶组内排序（越小越靠前；仅置顶时返回） |
+
+`GET /api/profiles` 列表顺序：置顶 profiles（按 `pin_order`，含 `default`）→ 未置顶 `default` → 其余字母序。
 
 Write / update via UI or API:
 
@@ -36,6 +40,7 @@ Write / update via UI or API:
 |--------|------|---------|
 | GET | `/api/profile/logo-presets` | Built-in logo library (`?category=` optional) |
 | POST | `/api/profile/info` | Update `info.json` (`display_name`, `description`, `logo_preset`, `logo_base64`, `remove_logo`) |
+| POST | `/api/profile/pin` | Pin/unpin profile (`name`, `pinned`); writes `pinned` + `pin_order` to `info.json` (max 5, includes `default`) |
 
 Example `info.json` — copy [`profiles/info.json.example`](profiles/info.json.example):
 
@@ -46,6 +51,8 @@ Example `info.json` — copy [`profiles/info.json.example`](profiles/info.json.e
   "logo": "data:image/png;base64,..."
 }
 ```
+
+Optional pin fields (usually set via `POST /api/profile/pin`, not hand-edited): `pinned` (`true`), `pin_order` (integer; `1` = topmost among pinned; each new pin becomes `1` and shifts older pins down).
 
 Regenerate built-in logo PNGs (network required): `python3 integration/scripts/fetch_profile_logos.py` (writes `assets/profile-logos/` from DiceBear + Noto Emoji; see `assets/profile-logos/LICENSES.md`).
 
@@ -64,6 +71,8 @@ Cron and Kanban profile pickers still show profile `name` only (by design).
 | POST | `/api/integration/crons/unread/read` | Mark one Cron Hub job's current runs as read (`profile` + `job_id`) |
 
 UI: **Cron Hub** rail/sidebar (`integrationCrons`) via `hermes_integration_crons.js`. Upstream **Tasks** panel unchanged (single active profile). Cron Hub creation requires one explicit Profile, stores the task there, runs it there, and can attach skills from that Profile. Global cron polling uses `all_profiles=1` when the flag is on.
+
+When integration is enabled, one-shot schedules (`30m`, absolute datetimes, etc.) are kept in `jobs.json` after they finish (`enabled=false`, `state=completed`) instead of being auto-removed by Hermes Agent. Output history and Cron Hub listing remain available until you explicitly delete the job via `POST /api/integration/crons/delete` or upstream `POST /api/crons/delete`.
 
 ### Egress policy (iptables)
 
@@ -101,7 +110,7 @@ Notes:
 
 ### Zhiling 身份（Control Plane 代理）
 
-在用户容器内，调用方从 zhiling 登录回调取得 `access_token`（`#/auth/callback#token=...`）后，可经 WebUI 转发查询当前用户平台身份与 i智库同步信息。
+在用户容器内，调用方从 zhiling 登录回调取得 `access_token`（`#/auth/callback#token=...`）后，可经 WebUI 转发查询当前用户平台身份与 i智库同步信息。完整 HTTP 契约见 [`docs/integration-login-api.md`](../docs/integration-login-api.md)。
 
 启用：
 
@@ -169,15 +178,17 @@ auth-proxy 不可达时 WebUI 返回 `502` 且 `error` 为 `zhiling_logout_faile
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| GET | `/api/integration/workspace/files` | 平铺文件索引；`page`（默认 1）、`page_size`（默认 500，上限 5000）；可选子树 `path`（默认 `.`）；`q`（basename 包含搜索）、`type`（扩展名过滤，如 `.md`）、`sort`（`path`/`size`/`mtime`/`ctime`，默认 `path`）、`order`（`asc`/`desc`，默认 `desc`） |
+| GET | `/api/integration/workspace/files` | 平铺文件索引；`page`（默认 1）、`page_size`（默认 500，上限 5000）；可选子树 `path`（默认 `.`）；`q`（basename 包含搜索）、`type`（扩展名过滤，如 `.md`）、`sort`（`path`/`size`/`mtime`/`ctime`，默认 `path`）、`order`（`asc`/`desc`，默认 `desc`）；可选 `profile`（传入时仅返回该 profile 的 manifest 成果文件；不传则返回全部文件并对成果附加 `profile`）；可选 `refresh=1`（跳过服务端内存索引，强制重扫磁盘） |
 | GET | `/api/integration/workspace/file` | 原始文件字节流（`path` 必填）；`Content-Type` 按扩展名；不设 `Content-Disposition` |
 
-翻页：递增 `page` 直到响应 `has_more` 为 `false`。条目含 `ext`、`mime`、`mtime_ns`、`ctime_ns`（优先 birthtime，否则为 `st_ctime` 纳秒；`stat` 失败时为 `null`）。`sort=ctime` 优先按 `ctime_ns` 排序，`ctime_ns` 为空时回退 `mtime_ns`。
+翻页：递增 `page` 直到响应 `has_more` 为 `false`。条目含 `ext`、`mime`、`mtime_ns`、`ctime_ns`（优先 birthtime，否则为 `st_ctime` 纳秒；`stat` 失败时为 `null`）。manifest 成果文件（会话 write 工具产出）附加可选 `profile`（`session.profile`）；非成果文件无该字段。
 
 索引与读取默认排除系统/缓存垃圾文件（如 `.DS_Store`、`Thumbs.db`、`._*`），且不进入 `.git`、`node_modules`、`__pycache__` 等目录（与右侧 Workspace 文件树 #1793 规则一致）。
 
 ```bash
 curl -sS 'http://127.0.0.1:8787/api/integration/workspace/files?page=1&page_size=100'
+curl -sS 'http://127.0.0.1:8787/api/integration/workspace/files?refresh=1'
+curl -sS 'http://127.0.0.1:8787/api/integration/workspace/files?profile=ops'
 curl -sS 'http://127.0.0.1:8787/api/integration/workspace/files?q=report&type=.md&sort=mtime&order=desc'
 curl -sS 'http://127.0.0.1:8787/api/integration/workspace/file?path=README.md'
 curl -sS 'http://127.0.0.1:8787/api/integration/workspace/file?path=assets/logo.png' -o logo.png
@@ -249,9 +260,9 @@ curl -sS -X POST http://127.0.0.1:8787/api/integration/knowledge-base/list \
 | `GET /api/skillhub/file?name=&path=` | 同上（`file`） |
 | `POST /api/skillhub/install` | download/doc → `shared_skills_dir`；有 `category` 时 `skills/<category>/<name>/`，否则平铺 `skills/<name>/` |
 | `POST /api/skillhub/delete` | remove local skill from `shared_skills_dir`（市场安装与 custom；仅需 `HERMES_INTEGRATION=1`） |
-| `GET /api/skillhub/download` | **仅本地**：将 custom 或已安装技能目录打包为 zip 下载（排除 `.hub_installed` 等元数据）；`name` + 可选 `dir_name`；仅需 `HERMES_INTEGRATION=1` |
+| `GET /api/skillhub/download` | **仅本地**：zip 内 `{leaf}/` 目录 + `.skill-origin.json` sidecar；排除 `.hub_installed` 等元数据；`name` + 可选 `dir_name`；仅需 `HERMES_INTEGRATION=1` |
 | `POST /api/skillhub/edit` | **仅本地** custom：更新已有技能的 `SKILL.md`（`name` + `content`，可选 `dir_name`）；市场安装不可编辑；仅需 `HERMES_INTEGRATION=1` |
-| `POST /api/skillhub/upload` | **仅本地** custom：`.md` / 多技能 `.zip` 或 JSON → `shared_skills_dir`；可选 `category`、`overwrite`（仅覆盖 custom）；响应 `{ skill_count, file_count, skills[] }` |
+| `POST /api/skillhub/upload` | **仅本地** custom：`.md` / 多技能 `.zip` 或 JSON → `shared_skills_dir`；可选 `category`、`dir_name`、`overwrite`（按 frontmatter `name` 覆盖全部 custom 副本）；响应 `{ skill_count, file_count, skills[] }` |
 
 `GET /api/skillhub/skills` annotates `installed` from `shared_skills_dir`. SkillHub routes do not use WebUI profile cookies or `profile` query/body parameters.
 

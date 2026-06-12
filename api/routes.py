@@ -3474,6 +3474,7 @@ from api.streaming import (
     cancel_stream,
     _materialize_pending_user_turn_before_error,
     generate_session_title_for_session,
+    _sanitize_cron_messages_for_display,
 )
 from api.gateway_chat import _run_gateway_chat_streaming, webui_gateway_chat_enabled
 from api.run_journal import (
@@ -5617,6 +5618,8 @@ def handle_get(handler, parsed) -> bool:
             else:
                 _truncated_msgs = []
                 _messages_offset = 0
+            if load_messages and is_cron_session(sid, getattr(s, "source_tag", None)):
+                _truncated_msgs = _sanitize_cron_messages_for_display(_truncated_msgs)
             # Index of the first returned message in the full message array.
             # Frontend uses this as cursor for scroll-to-top paging.
             _windowed_messages = (
@@ -5814,6 +5817,8 @@ def handle_get(handler, parsed) -> bool:
             cli_meta = _lookup_cli_session_metadata(sid)
             msgs = get_cli_session_messages(sid)
             if msgs:
+                if is_cron_session(sid, (cli_meta or {}).get("source_tag")):
+                    msgs = _sanitize_cron_messages_for_display(msgs)
                 sess = {
                     "session_id": sid,
                     "title": (cli_meta or {}).get("title", "CLI Session"),
@@ -11310,6 +11315,19 @@ def _handle_cron_history(handler, parsed):
                         run["session_id"] = session_ids[filename]
             except Exception:
                 logger.debug("Failed to resolve cron sessions for history %s", job_id, exc_info=True)
+        if runs:
+            try:
+                from integration.crons.session_bridge import materialized_cron_session_ids_for_runs
+
+                existing_session_ids = materialized_cron_session_ids_for_runs(job_id, runs)
+                for run in runs:
+                    if run.get("session_id"):
+                        continue
+                    filename = run.get("filename")
+                    if filename in existing_session_ids:
+                        run["session_id"] = existing_session_ids[filename]
+            except Exception:
+                logger.debug("Failed to map existing cron sessions for history %s", job_id, exc_info=True)
     return j(handler, {"job_id": job_id, "runs": runs, "total": total, "offset": offset})
 
 

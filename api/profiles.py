@@ -859,6 +859,11 @@ def init_profile_state() -> None:
         install_cron_integration_hooks()
     except ImportError:
         pass
+    try:
+        from integration.workspace.hooks import install_workspace_integration_hooks
+        install_workspace_integration_hooks()
+    except ImportError:
+        pass
     _reload_dotenv(home)
 
 

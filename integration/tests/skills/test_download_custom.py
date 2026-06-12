@@ -51,6 +51,8 @@ def test_prepare_skill_download_success(skills_root):
     result = local_skills.prepare_skill_download("apple-notes", "apple/apple-notes")
     assert result.get("ok") is True
     assert result["zip_basename"] == "apple-notes.zip"
+    arcnames = {arc for _fp, arc in result["files"]}
+    assert "apple-notes/SKILL.md" in arcnames
     assert len(result["files"]) >= 1
 
 
@@ -82,4 +84,4 @@ def test_try_handle_get_download_route(skills_root):
     assert zip_bytes[:2] == b"PK"
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
         names = zf.namelist()
-        assert "SKILL.md" in names
+        assert "my-skill/SKILL.md" in names

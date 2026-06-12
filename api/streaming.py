@@ -1796,6 +1796,39 @@ _WORKSPACE_PREFIX_RE = re.compile(r'^\s*\[Workspace::v1:\s*(?:\\.|[^\]\\])+\]\s*
 _LEGACY_WORKSPACE_PREFIX_RE = re.compile(r'^\s*\[Workspace:[^\]]+\]\s*')
 _WORKSPACE_PREFIX_ANY_RE = re.compile(r'\[Workspace::v1:\s*(?:\\.|[^\]\\])+\]\s*')
 _LEGACY_WORKSPACE_PREFIX_ANY_RE = re.compile(r'\[Workspace:[^\]]+\]\s*')
+_CRON_EXECUTION_HINT_RE = re.compile(
+    r'^\s*\[IMPORTANT: You are running as a scheduled cron job\.'
+    r'[\s\S]*?'
+    r'or say \[SILENT\] and nothing more\.\]\s*',
+    re.IGNORECASE,
+)
+
+
+def _strip_cron_execution_hint(text: str) -> str:
+    """Remove Hermes cron scheduler execution guidance from display text."""
+    return _CRON_EXECUTION_HINT_RE.sub('', str(text or ''), count=1).strip()
+
+
+def _sanitize_cron_messages_for_display(messages) -> list:
+    """Return messages with cron execution hints stripped from user rows."""
+    out = []
+    for msg in messages or []:
+        if not isinstance(msg, dict):
+            out.append(msg)
+            continue
+        if str(msg.get("role") or "").strip().lower() != "user":
+            out.append(msg)
+            continue
+        content = msg.get("content")
+        if not isinstance(content, str):
+            out.append(msg)
+            continue
+        stripped = _strip_cron_execution_hint(content)
+        if stripped == content:
+            out.append(msg)
+        else:
+            out.append({**msg, "content": stripped})
+    return out
 
 
 def _escape_workspace_prefix_path(path: str) -> str:
@@ -5235,6 +5268,7 @@ def _run_agent_streaming(
                 _manifest_turn_key = f"turn:{len(getattr(s, 'messages', []) or [])}"
             from api.session_manifest import _skills_dir_for_session as _manifest_skills_dir_for_session
             _manifest_skills_dir = _manifest_skills_dir_for_session(s)
+            _manifest_default_profile = str(getattr(s, 'profile', None) or '').strip()
 
             def _tool_args_snapshot(args):
                 args_snap = {}
@@ -5245,6 +5279,12 @@ def _run_agent_streaming(
                 return args_snap
 
             _manifest_delta_sequence = [0]
+            from api.browser_preview import BrowserPreviewEmitter
+
+            _browser_preview = BrowserPreviewEmitter()
+
+            def _maybe_emit_browser_preview(tool_name):
+                _browser_preview.maybe_emit(put, session_id, stream_id, tool_name)
 
             def _emit_manifest_delta(name, args, result='', *, tid='', status='completed', source_kind='tool_complete'):
                 try:
@@ -5272,6 +5312,7 @@ def _run_agent_streaming(
                         sequence=_manifest_delta_sequence[0],
                         source_kind=source_kind,
                         skills_dir=_manifest_skills_dir,
+                        default_profile=_manifest_default_profile,
                     )
                     if not (_delta.get('todos') or _delta.get('artifacts') or _delta.get('references')):
                         return
@@ -5294,20 +5335,23 @@ def _run_agent_streaming(
                 except Exception:
                     logger.debug('Failed to emit manifest_delta for tool %s', name, exc_info=True)
 
-            def _emit_turn_complete_media_delta():
+            def _emit_turn_complete_reconcile_delta():
                 try:
                     from api.session_manifest import (
-                        extract_manifest_delta_from_assistant_media,
+                        extract_manifest_delta_from_turn_reconcile,
                         merge_manifest_delta,
                     )
                     _manifest_delta_sequence[0] += 1
-                    _delta = extract_manifest_delta_from_assistant_media(
+                    _delta = extract_manifest_delta_from_turn_reconcile(
                         list(getattr(s, 'messages', None) or []),
                         Path(str(s.workspace)),
                         session_id=session_id,
                         stream_id=stream_id,
                         turn_key=_manifest_turn_key,
                         sequence=_manifest_delta_sequence[0],
+                        default_profile=_manifest_default_profile,
+                        skills_dir=_manifest_skills_dir,
+                        tool_calls=list(getattr(s, 'tool_calls', None) or []),
                     )
                     if not (_delta.get('artifacts') or _delta.get('turns')):
                         return
@@ -5325,7 +5369,7 @@ def _run_agent_streaming(
                         STREAM_LIVE_MANIFEST[stream_id] = _live_manifest
                     put('manifest_delta', _delta)
                 except Exception:
-                    logger.debug('Failed to emit turn_complete MEDIA manifest_delta', exc_info=True)
+                    logger.debug('Failed to emit turn_complete reconcile manifest_delta', exc_info=True)
 
             def _record_live_tool_start(tool_call_id, name, args):
                 if not tool_call_id or tool_call_id in _live_prompt_estimate_seen_ids:
@@ -5435,6 +5479,7 @@ def _run_agent_streaming(
                         status='in_progress',
                         source_kind='tool_start',
                     )
+                    _maybe_emit_browser_preview(name)
                     put('tool', {
                         'event_type': event_type or 'tool.started',
                         'name': name,
@@ -5559,6 +5604,7 @@ def _run_agent_streaming(
                             status='in_progress',
                             source_kind='tool_start',
                         )
+                        _maybe_emit_browser_preview(name)
                         put('tool', {
                             'event_type': 'tool.started',
                             'name': name,
@@ -7363,7 +7409,7 @@ def _run_agent_streaming(
             except Exception as _goal_exc:
                 logger.debug("Goal continuation hook failed for session %s: %s", session_id, _goal_exc)
             raw_session = s.compact() | {'messages': s.messages, 'tool_calls': tool_calls}
-            _emit_turn_complete_media_delta()
+            _emit_turn_complete_reconcile_delta()
             put('done', {'session': redact_session_data(raw_session), 'usage': usage})
             # Emit one last metering packet for the live message-header TPS label.
             meter_stats = meter().get_stats()

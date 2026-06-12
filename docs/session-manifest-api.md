@@ -13,11 +13,11 @@
 | 字段 | 含义 | 唯一数据来源 |
 | --- | --- | --- |
 | `todos` | 待办最新快照 | `todo` 工具结果 JSON 顶层 `todos[]` |
-| `artifacts` | 写入类工具创建/修改过的路径 | 写入工具白名单 + diff/patch 解析 |
+| `artifacts` | 写入类工具创建/修改过的路径，及明确交付的文件 | 写入工具白名单 + diff/patch + `MEDIA:` + turn reconcile（assistant 交付 prose / 工具交付输出） |
 | `references` | 实际读取/打开的内容来源 | 读取/列目录工具白名单 |
 | `turns[]` | 按 user 消息划分的轮次视图 | 同上，归属 `turn:<user_msg_idx>` |
 
-**明确不算入**：助手正文提到的路径、搜索命中但未读取的文件、目录列表中的子文件名、跨字段推断补全。
+**明确不算入**：助手正文**普通提及**的路径（无明确交付关键词）、搜索命中但未读取的文件、目录列表中的子文件名、跨字段推断补全。助手**明确交付语句**（如 `文件路径：...`、`已保存: ...`）且 workspace 内文件真实存在时，进入 `artifacts[]`，不进入 `references[]`。
 
 ---
 
@@ -165,6 +165,7 @@ SSE 行级形状与 GET manifest **相同**（三字段）。`todos.mode` 仅出
 | --- | --- | --- | --- |
 | `tool_start` | 不发射 | 写入工具参数路径 → `status: in_progress` | 读取工具参数路径 → `status: in_progress` |
 | `tool_complete` | 解析结果顶层 `todos[]` | 参数 + 结果 + diff/patch → `completed` / `error` | 参数确认 → `completed` |
+| `turn_complete`（`done` 前） | 不发射 | 本轮 transcript reconcile（见 §4.2）→ `source.tool: reconcile` | 不发射 |
 
 ### 3.4 与 HTTP 的关系
 
@@ -231,7 +232,8 @@ Skill 成果示例：
 - 参数：`path`, `file_path`, `target`, `destination`, `filename`, `paths[]`, `edits[].path` 等；
 - Unified diff：`+++ b/path` / `--- a/path`；
 - ApplyPatch：`*** Add File:` / `*** Update File:`；
-- assistant 正文：`MEDIA:<local-path>`（`source_tool: "media"`；仅 `role=assistant`；跳过 `MEDIA:https://...`）。
+- assistant 正文：`MEDIA:<local-path>`（`source_tool: "media"`；仅 `role=assistant`；跳过 `MEDIA:https://...`）；
+- **turn_complete reconcile**（`done` 前 SSE + `GET` 重建）：从本轮 tool args/result/diff、`MEDIA:` 与 **assistant 交付 prose**（如 `文件位置：` 后的路径）保守正则提取候选路径；**须通过 `_file_preview_path`（workspace 内真实存在、可预览）** 才可 wire；`source.kind: turn_complete`、`source.tool: reconcile`；prose 行 `source_tool: assistant_prose`；各行 `source_tool` 仍为实际工具名或 `media`/`assistant_prose`。
 
 #### 单条结构（与 references 共用）
 
@@ -239,9 +241,12 @@ Skill 成果示例：
 {
   "path": "api/session_manifest.py",
   "preview": "file",
-  "source_tool": "write_file"
+  "source_tool": "write_file",
+  "profile": "ops"
 }
 ```
+
+`profile`（可选）：成果所属 WebUI profile，来自 `session.profile`；无明确值时省略。仅 `artifacts[]` 携带，不在 `references[]` 中。
 
 **只返回可预览项**。不可预览路径（目录、缺失、过大、cruft 等）不出现在列表中。预览接口与路由见 [§4.5 预览逻辑](#45-预览逻辑file--skill)。
 
@@ -249,9 +254,9 @@ Skill 成果示例：
 
 只读工具、无 `MEDIA:` 标记的助手 prose、`role=user` 中的 `MEDIA:`、远程 `MEDIA:` URL、工具 JSON 的 `file_path`/`media_tag`、全 workspace 扫描、workspace 外写入类工具路径（workspace 外仅 `source_tool=media` 可列出）。
 
-#### SSE `turn_complete`（MEDIA）
+#### SSE `turn_complete`（reconcile）
 
-assistant 消息持久化后、`done` 前可发送 `manifest_delta`：`source.kind = "turn_complete"`，`source.tool = "media"`。仅更新侧栏 Inspector；per-turn chips 仍以 turn `done` 后的 `GET /api/session/manifest` 为准。
+assistant 消息持久化后、`done` 前可发送 `manifest_delta`：`source.kind = "turn_complete"`，`source.tool = "reconcile"`。载荷含本轮 transcript 补全成果（含 `MEDIA:`、assistant 交付 prose、非白名单写入工具的 args/result/diff 路径）；**候选路径须 workspace 内真实存在且可预览**，文本命中但文件不存在一律丢弃。prose 路径使用 `source_tool: assistant_prose`。仅更新侧栏 Inspector；per-turn chips 仍以 turn `done` 后的 `GET /api/session/manifest` 为准。
 
 #### 展示
 

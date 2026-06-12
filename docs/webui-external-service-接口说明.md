@@ -116,7 +116,7 @@ panels.js
 | 调用方式 | 前端 `api('/api/profiles')` → WebUI 本地 | 前端 `apiExternal()` → 外部服务 |
 | 响应字段 | `name/path/model/provider/skill_count/...` | 同上 + **`display_name`**、**`description`**、**`logo_base64`** |
 | logo 来源 | 无 | 读各 profile 目录下 `info.json` 的 `logo` 字段（本地绝对路径），转 Data URI |
-| 缓存 | 无 | logo Base64 TTL 缓存 5 分钟，单图上限 100KB |
+| 缓存 | 无 | logo Base64 TTL 缓存 5 分钟，单图上限 4MB |
 | CSP | 无额外 connect-src | `api/helpers.py` 动态追加外部服务 URL 到 `connect-src` |
 
 #### 外部服务实现逻辑

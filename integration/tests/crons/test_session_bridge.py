@@ -73,6 +73,28 @@ def test_cron_sessions_visible_only_materialized(monkeypatch):
     assert cron_sessions_visible_in_sidebar({"source_tag": "cron", "is_cli_session": True}) is False
 
 
+def test_materialized_cron_session_ids_for_runs_maps_existing_sidecar(cron_env):
+    from api.config import SESSION_DIR
+    from integration.crons.session_bridge import materialized_cron_session_ids_for_runs
+
+    sid = "cron_job9_20260609_190107"
+    (Path(SESSION_DIR) / f"{sid}.json").write_text(
+        json.dumps({"session_id": sid, "source_tag": "cron"}),
+        encoding="utf-8",
+    )
+
+    runs = [
+        {
+            "filename": "2026-06-09_19-01-15.md",
+            "modified": dt.datetime(2026, 6, 9, 19, 1, 15).timestamp(),
+        }
+    ]
+
+    assert materialized_cron_session_ids_for_runs("job9", runs) == {
+        "2026-06-09_19-01-15.md": sid
+    }
+
+
 def test_hide_sidebar_integration_visible(monkeypatch):
     monkeypatch.setenv("HERMES_INTEGRATION", "1")
     from api.models import _hide_from_default_sidebar

@@ -12,7 +12,7 @@ from integration.profiles.memory_snapshot import load_memory_snapshot
 
 _log = logging.getLogger(__name__)
 
-LOGO_MAX_BYTES = 100 * 1024
+LOGO_MAX_BYTES = 4 * 1024 * 1024
 _ALLOWED_MIMES = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
 _DATA_URI_RE = re.compile(
     r"^data:(image/(?:png|jpeg|gif|webp));base64,([A-Za-z0-9+/=\s]+)$",
@@ -63,6 +63,39 @@ def normalize_logo_data_uri(value: str) -> str | None:
     return f"data:{mime};base64,{encoded}"
 
 
+def read_pin_meta(profile_path: str | Path) -> tuple[bool, int | None]:
+    info = _read_info_json(str(profile_path))
+    pinned = info.get("pinned") is True
+    if not pinned:
+        return False, None
+    pin_order = info.get("pin_order")
+    return True, pin_order if isinstance(pin_order, int) else None
+
+
+def _entry_pin_meta(entry: dict) -> tuple[bool, int | None]:
+    info = entry.get("info")
+    if not isinstance(info, dict):
+        return False, None
+    pinned = info.get("pinned") is True
+    if not pinned:
+        return False, None
+    pin_order = info.get("pin_order")
+    return True, pin_order if isinstance(pin_order, int) else None
+
+
+def sort_profiles_by_pin(profiles: list) -> list:
+    def sort_key(entry: dict) -> tuple:
+        pinned, order = _entry_pin_meta(entry)
+        if pinned:
+            pin_key = order if isinstance(order, int) else 999999
+            return (0, pin_key, "")
+        if entry.get("is_default"):
+            return (1, 0, "")
+        return (2, 0, str(entry.get("name") or ""))
+
+    return sorted(profiles, key=sort_key)
+
+
 def _load_info_for_response(profile_path: str) -> dict:
     info = _read_info_json(profile_path)
     if not info:
@@ -71,6 +104,14 @@ def _load_info_for_response(profile_path: str) -> dict:
     out: dict = {}
     for key, val in info.items():
         if key == "logo":
+            continue
+        if key == "pinned":
+            if val is True:
+                out["pinned"] = True
+            continue
+        if key == "pin_order":
+            if info.get("pinned") is True and isinstance(val, int):
+                out["pin_order"] = val
             continue
         out[key] = val
 
@@ -107,4 +148,5 @@ def enrich_profiles_response(payload: dict) -> dict:
         entry["info"] = _load_info_for_response(path)
         entry["skills"] = _list_skills_for_profile(name) if name else []
         entry["memory_snapshot"] = load_memory_snapshot(path)
+    payload["profiles"] = sort_profiles_by_pin(profiles)
     return payload

@@ -8,6 +8,24 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Added
 
+- **Profile pin** — `POST /api/profile/pin` (`name`, `pinned`) stores pin state in each profile's `info.json` (`pinned`, `pin_order`), including `default`. New pins get `pin_order: 1` (topmost) and bump existing pinned orders. `GET /api/profiles` returns `info.pinned` / `info.pin_order` and sorts pinned (by `pin_order`) → unpinned `default` → alphabetical (max 5 pins). Profiles panel and compose dropdown UI in `hermes_profiles.js`.
+
+- **Zhiling identity lookup API doc** — [`docs/integration-login-api.md`](../docs/integration-login-api.md) documents `GET /api/integration/login` request/response contract, auth, and error semantics.
+
+### Changed
+
+- **Integration workspace files performance** — `GET /api/integration/workspace/files` keeps an in-memory workspace file index (invalidated on session save and optional `refresh=1`); pagination/filter/sort reuse the cached index instead of re-walking the tree on every request. Collection uses `os.scandir`; `?profile=` stat-only fast path skips full walk. Artifact profile index skips unrelated sessions by workspace, merges incrementally on session save, and left-rail UI reloads on SSE `manifest_delta` file artifacts. Set `HERMES_DEBUG_TIMING=1` for `X-Hermes-Timing-*` response headers.
+
+- **SkillHub download sidecar filename** — Zip sidecar renamed from `.hermes-skill-origin.json` to `.skill-origin.json` (`GET /api/skillhub/download` / upload round-trip).
+
+- **SkillHub upload dedup / round-trip** — `POST /api/skillhub/upload` resolves target path via optional `dir_name`, zip sidecar `.skill-origin.json`, existing custom dirs with the same frontmatter `name`, then `category`+leaf. `overwrite=true` removes all custom copies with that `name` before write (hub-installed still 409). Single `.md` uploads use frontmatter `name` instead of the `SKILL.md` filename stem. `GET /api/skillhub/download` emits `{leaf}/…` zip paths plus sidecar metadata. Custom list dedupes by `dir_name`; upload UI opens the imported row by `dir_name`.
+
+- **Session manifest turn reconcile** — At SSE `turn_complete` (`source.tool: reconcile`, before `done`) and in `GET /api/session/manifest`, supplement whitelist artifact extraction with per-turn transcript mining (tool args/result/diff, `MEDIA:`, and assistant delivery prose such as `文件位置:` paths). Candidate paths must pass workspace `_file_preview_path` (real file exists); regex hits without a file on disk are dropped. Prose paths use `source_tool: assistant_prose`. Dedupes by path; write-tool `source_tool` wins over `media` / `assistant_prose` on the same path.
+
+### Added
+
+- **Manifest artifact profile** — `GET /api/session/manifest` and SSE `manifest_delta` include optional `profile` on `artifacts[]` rows (from `session.profile`). `GET /api/integration/workspace/files` annotates manifest file artifacts with `profile`; optional `?profile=` returns only that profile's artifacts (default still lists all workspace files). Cross-session index cached in `integration/workspace/artifact_profiles.py`.
+
 - **Session workspace inspector** — `GET /api/session/manifest` returns structured todos, artifacts, and referenced files parsed from tool activity; the right panel adds **Tasks**, **Artifacts**, and **Refs** tabs with file preview via the existing workspace preview path. Artifacts outside the session workspace are listed with absolute paths and file metadata, while previews remain scoped to workspace files.
 
 - **Session manifest realtime updates** — Active chat streams emit `manifest_delta` SSE events for explicitly parsed todo, artifact, and reference tool activity. The inspector can update during tool execution, while completed and historical sessions still rebuild from `/api/session/manifest`; live and historical manifest data share canonical `turn:<user_msg_idx>` turn keys, and per-turn artifacts can be shown under the specific user turn that changed them.
@@ -26,6 +44,10 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Changed
 
+- **One-shot cron jobs retained after completion** — When `HERMES_INTEGRATION=1`, integration hooks preserve repeat-limited cron jobs in `jobs.json` as `enabled=false` / `state=completed` instead of letting Hermes Agent auto-delete them after the final run. Output history and Cron Hub listing stay available until explicit delete. Tasks panel one-shot warning copy updated accordingly.
+
+- **One-shot cron scheduler retention and history linking** — The retention hook now also patches `cron.scheduler.mark_job_run`, not only `cron.jobs.mark_job_run`, so scheduled ticks that cached the function at import time do not bypass WebUI's preserve-once behavior. Cron history also maps output `.md` files to already materialized `cron_*` WebUI sessions when the original one-shot job row has already disappeared.
+
 - **Integration workspace files panel** — Opening the Workspace files rail no longer auto-previews the last selected file; the list may still restore selection highlight, and preview loads only after an explicit file click.
 
 - **Integration workspace `ctime_ns` fallback** — `GET /api/integration/workspace/files` entries now populate `ctime_ns` from `st_ctime_ns` when `st_birthtime` is unavailable (e.g. Linux/Docker `/workspace`). No new response fields.
@@ -41,6 +63,8 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 - **Session manifest wire format** — `GET /api/session/manifest` and SSE `manifest_delta` rows now use slim `{path, preview, source_tool}` entries only (`preview`: `"file"` | `"skill"`). Non-previewable paths are omitted. File preview from manifest uses `/api/integration/workspace/file`; skills still use `/api/skillhub/content`. Removed `/api/file/allowlisted`.
 
 ### Fixed
+
+- **Session manifest skill preview** — Removed duplicate `renderSessionArtifacts` so the Artifacts inspector tab uses manifest rows with `preview: "skill"` and routes to `/api/skillhub/content` instead of legacy `openArtifactPath` → `/api/list`. `#workspace=` links and absolute `~/.hermes/skills/...` paths now resolve via SkillHub (`content` / `file`); workspace `/api/list` is no longer used for out-of-workspace skill paths.
 
 - **Integration workspace cruft filter** — Flat file index and read/raw endpoints skip `.DS_Store`, `Thumbs.db`, `._*` AppleDouble files, and do not descend into `.git` / `node_modules` / `__pycache__` etc. (aligned with session workspace tree filter in `ui.js` #1793).
 - **Cron session model metadata** — Materialized cron run sidecars now preserve the model recorded in the Agent `state.db` session row, and existing cron sidecars stuck on `model: "unknown"` are repaired during materialization instead of relying on the frontend's later model fallback write.

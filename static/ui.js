@@ -223,6 +223,19 @@ function _stripWorkspaceDisplayPrefix(text){
   if(stripped !== value) return stripped.trim();
   return value.replace(/^\s*\[Workspace:[^\]]+\]\s*/,'').trim();
 }
+function _stripCronExecutionHint(text){
+  // Hermes cron scheduler prepends execution guidance before the user prompt.
+  // Mirrors api/streaming.py:_strip_cron_execution_hint().
+  return String(text||'').replace(
+    /^\s*\[IMPORTANT: You are running as a scheduled cron job\.[\s\S]*?or say \[SILENT\] and nothing more\.\]\s*/i,
+    ''
+  ).trim();
+}
+function _isCronDisplaySession(session){
+  if(!session) return false;
+  if(String(session.source_tag||'').toLowerCase()==='cron') return true;
+  return String(session.session_id||'').startsWith('cron_');
+}
 function _renderUserFencedBlocks(text){
   const stash=[];
   const mathStash=[];
@@ -8119,7 +8132,11 @@ function renderMessages(options){
     if(!isUser&&_isMarkerOnlyAssistantCompressionMessage(m)){
       content='**Error:** No response received after context compression. Please retry.';
     }
-    const displayContent=isUser?_stripAttachedFilesMarkerForDisplay(_stripWorkspaceDisplayPrefix(content)):content;
+    let userDisplayText=_stripWorkspaceDisplayPrefix(content);
+    if(isUser&&_isCronDisplaySession(S.session)){
+      userDisplayText=_stripCronExecutionHint(userDisplayText);
+    }
+    const displayContent=isUser?_stripAttachedFilesMarkerForDisplay(userDisplayText):content;
     if(!isUser&&_isAssistantEmptyPlaceholderContent(m, displayContent)){
       content='';
     }
@@ -10628,6 +10645,12 @@ if(!S._dirCache) S._dirCache={};
 
 function renderFileTree(){
   const box=$('fileTree');box.innerHTML='';
+  if(typeof _previewCurrentMode!=='undefined'&&typeof _previewBrowserUrl!=='undefined'&&_previewCurrentMode==='browser'&&_previewBrowserUrl){
+    const emptyEl=$('wsEmptyState');
+    box.style.display='none';
+    if(emptyEl) emptyEl.style.display='none';
+    return;
+  }
   // Cache current dir entries
   S._dirCache[S.currentDir||'.']=S.entries;
   // Show empty-state when no workspace is set or the directory is empty (#703)

@@ -246,7 +246,10 @@ function _mergeManifestRows(existing, incoming){
     const preview = String(row.preview||'').trim();
     const source_tool = String(row.source_tool||'').trim();
     if(!path || (preview !== 'file' && preview !== 'skill') || !source_tool) return;
-    byPath.set(path, {path, preview, source_tool});
+    const merged = {path, preview, source_tool};
+    const profile = String(row.profile||'').trim();
+    if(profile) merged.profile = profile;
+    byPath.set(path, merged);
   };
   (existing||[]).forEach(add);
   (incoming||[]).forEach(add);
@@ -341,7 +344,9 @@ function renderTurnArtifacts(turnKey, root){
     `<div class="turn-artifacts-list">${items.map((item, idx)=>{
       const path = item.path || '';
       const source = item.source_tool || '';
-      return `<button type="button" class="turn-artifact-chip" data-turn-artifact-idx="${idx}" data-path="${esc(path)}">${esc(path)}${source?`<span>${esc(source)}</span>`:''}</button>`;
+      const profile = item.profile || '';
+      const meta = [source, profile].filter(Boolean).join(' · ');
+      return `<button type="button" class="turn-artifact-chip" data-turn-artifact-idx="${idx}" data-path="${esc(path)}">${esc(path)}${meta?`<span>${esc(meta)}</span>`:''}</button>`;
     }).join('')}</div>`;
   root.querySelectorAll('.turn-artifact-chip').forEach(btn=>{
     const idx = Number(btn.dataset.turnArtifactIdx);
@@ -397,7 +402,7 @@ function _renderInspectorFileList(root, items, emptyKey, emptyFallback){
   }
   root.innerHTML = items.map((item, idx)=>{
     const path = item.path || '';
-    const metaBits = [item.source_tool || '', _inspectorFileMeta(item)].filter(Boolean);
+    const metaBits = [item.source_tool || '', item.profile || '', _inspectorFileMeta(item)].filter(Boolean);
     return `<button type="button" class="workspace-inspector-item" data-manifest-idx="${idx}" data-path="${esc(path)}"><div class="workspace-inspector-path">${esc(path)}</div><div class="workspace-inspector-meta">${esc(metaBits.join(' · '))}</div></button>`;
   }).join('');
 }
@@ -477,22 +482,32 @@ function renderSessionInspector(){
 }
 
 async function openInspectorReferencePath(path){
-  const row = _manifestRowByPath(path, 'references');
+  const row = _manifestRowForPath(path);
+  if(row && row.preview) return openManifestPreview(row);
+  const skillParts = _hermesSkillsPathParts(path);
+  if(skillParts){
+    if(skillParts.filePath) return openSkillFilePreview(skillParts.skillName, skillParts.filePath);
+    return openSkillContentPreview(skillParts.skillName);
+  }
   await openManifestPreview(row || {path});
 }
 
 async function openManifestPreview(item){
   if(!item || !item.path || !item.preview) return;
-  if(item.preview === 'skill') return openSkillContentPreview(item.path);
+  if(item.preview === 'skill') return openSkillContentPreview(item.path, item.profile);
   if(item.preview === 'file') return openIntegrationFilePreview(item.path);
 }
 
-async function openSkillContentPreview(skillName){
+let _previewSource = 'workspace';
+
+async function openSkillContentPreview(skillName, profile){
   if(!S.session || !skillName) return;
   if(typeof ensureWorkspacePreviewVisible==='function') ensureWorkspacePreviewVisible();
   else if(typeof openWorkspacePanel==='function') openWorkspacePanel('preview');
   switchWorkspacePanelTab('files');
-  const url = `/api/skillhub/content?name=${encodeURIComponent(skillName)}`;
+  let url = `/api/skillhub/content?name=${encodeURIComponent(skillName)}`;
+  const profileName = String(profile || '').trim();
+  if(profileName) url += `&profile=${encodeURIComponent(profileName)}`;
   try{
     const data = await api(url);
     const content = data.content || data.body || '';
@@ -502,7 +517,8 @@ async function openSkillContentPreview(skillName){
     $('fileTree').style.display = 'none';
     _previewCurrentPath = title;
     _previewRawContent = content;
-    renderFileBreadcrumb(title);
+    _previewSource = 'skill';
+    renderFileBreadcrumb(title, {skill: true});
     if(shouldRenderMarkdownPreviewAsPlainText(content)){
       showPreview('code');
       $('previewCode').textContent = content;
@@ -512,6 +528,43 @@ async function openSkillContentPreview(skillName){
     showPreview('md');
     $('previewMd').innerHTML = renderMd(content);
     requestAnimationFrame(()=>{if(typeof renderKatexBlocks==='function')renderKatexBlocks();});
+  }catch(e){
+    setStatus(t('file_open_failed'));
+  }
+}
+
+async function openSkillFilePreview(skillName, filePath){
+  if(!S.session || !skillName || !filePath) return;
+  if(typeof ensureWorkspacePreviewVisible==='function') ensureWorkspacePreviewVisible();
+  else if(typeof openWorkspacePanel==='function') openWorkspacePanel('preview');
+  switchWorkspacePanelTab('files');
+  const url = `/api/skillhub/file?name=${encodeURIComponent(skillName)}&path=${encodeURIComponent(filePath)}`;
+  try{
+    const data = await api(url);
+    const content = data.content || data.body || '';
+    const title = `${skillName}/${filePath}`;
+    $('previewPathText').textContent = title;
+    $('previewArea').classList.add('visible');
+    $('fileTree').style.display = 'none';
+    _previewCurrentPath = title;
+    _previewRawContent = content;
+    _previewSource = 'skill';
+    renderFileBreadcrumb(title, {skill: true});
+    const ext = fileExt(filePath);
+    if(MD_EXTS.has(ext)){
+      if(shouldRenderMarkdownPreviewAsPlainText(content)){
+        showPreview('code');
+        $('previewCode').textContent = content;
+        setStatus(largeMarkdownPlainTextStatus(content));
+        return;
+      }
+      showPreview('md');
+      $('previewMd').innerHTML = renderMd(content);
+      requestAnimationFrame(()=>{if(typeof renderKatexBlocks==='function')renderKatexBlocks();});
+      return;
+    }
+    showPreview('code');
+    $('previewCode').textContent = content;
   }catch(e){
     setStatus(t('file_open_failed'));
   }
@@ -681,54 +734,85 @@ function collectSessionArtifacts(){
   return items.slice(0, 50);
 }
 
-function renderSessionArtifacts(){
-  const root = $('workspaceArtifacts');
-  const count = $('workspaceArtifactsCount');
-  if(!root) return;
-  const items = collectSessionArtifacts();
-  if(count) count.textContent = String(items.length);
-  if(!S.session){
-    root.innerHTML = '<div class="workspace-artifact-empty">Open a conversation to see files changed in this session.</div>';
-    return;
+function _normalizeOsPath(path){
+  return String(path || '').trim().replace(/\\/g, '/').replace(/^~\//, '');
+}
+
+function _isHermesSkillsPath(path){
+  return /(?:^|\/)\.hermes\/skills\//.test(_normalizeOsPath(path));
+}
+
+function _hermesSkillsPathParts(path){
+  const p = _normalizeOsPath(path);
+  const m = p.match(/(?:^|\/)\.hermes\/skills\/(.+)$/);
+  if(!m) return null;
+  const rest = m[1].replace(/\/+$/, '');
+  if(!rest) return null;
+  if(rest.endsWith('/SKILL.md') || rest === 'SKILL.md'){
+    const skillName = rest.slice(0, -'/SKILL.md'.length).replace(/\/+$/, '');
+    return skillName ? {skillName, filePath: null} : null;
   }
-  if(!items.length){
-    root.innerHTML = '<div class="workspace-artifact-empty">No artifacts detected yet. Files created or edited during this session will appear here.</div>';
-    return;
+  const subMatch = rest.match(/^(.+?)\/(scripts|references)(?:\/(.*))?$/);
+  if(subMatch){
+    return {
+      skillName: subMatch[1],
+      filePath: subMatch[3] ? `${subMatch[2]}/${subMatch[3]}` : null,
+    };
   }
-  // Strip workspace prefix for display so long absolute paths don't clutter the list.
+  return {skillName: rest, filePath: null};
+}
+
+function _manifestRowForPath(path){
+  return _manifestRowByPath(path, 'artifacts')
+    || _manifestRowByPath(path, 'references');
+}
+
+function _toWorkspaceRelativePath(path){
+  if(!path) return null;
+  if(_isHermesSkillsPath(path)) return null;
+  let rel = _normalizeOsPath(path).replace(/^(?:\.\/)+/, '');
   const ws = S.session && S.session.workspace;
-  const normWs = ws ? ws.replace(/\/+$/,'') + '/' : '';
-  const displayPath = (p) => {
-    if(normWs && p.startsWith(normWs)) return p.slice(normWs.length);
-    return p;
-  };
-  root.innerHTML = items.map(item => `<button type="button" class="workspace-artifact-item" data-artifact-path="${esc(item.path)}" onclick="openArtifactPath(this.dataset.artifactPath)"><div class="workspace-artifact-path">${esc(displayPath(item.path))}</div><div class="workspace-artifact-meta">${esc(item.source || 'session')}</div></button>`).join('');
+  if(!ws) return rel || '.';
+  const normWs = ws.replace(/\/+$/,'');
+  const normWsSlash = normWs + '/';
+  if(rel.startsWith('/') || /^[A-Za-z]:/.test(rel)){
+    if(rel.startsWith(normWsSlash) || rel === normWs) return rel === normWs ? '.' : rel.slice(normWsSlash.length) || '.';
+    return null;
+  }
+  if(rel.startsWith(normWsSlash)) rel = rel.slice(normWsSlash.length);
+  else if(rel === normWs) rel = '.';
+  return rel || '.';
 }
 
 async function _workspacePathExists(path){
-  if(!S.session||!path) return false;
-  const parts=String(path).split('/').filter(Boolean);
-  const name=parts.pop();
+  const rel = _toWorkspaceRelativePath(path);
+  if(rel === null || !S.session) return false;
+  const parts = rel.split('/').filter(Boolean);
+  const name = parts.pop();
   if(!name) return false;
-  const dir=parts.length?parts.join('/'):'.';
-  const data=await api(`/api/list?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(dir)}`);
-  return (data.entries||[]).some(entry=>entry&&((entry.path===path)||entry.name===name));
+  const dir = parts.length ? parts.join('/') : '.';
+  const data = await api(`/api/list?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(dir)}`);
+  return (data.entries || []).some(entry => entry && ((entry.path === rel) || entry.name === name));
 }
 
 async function openArtifactPath(path){
   if(!path) return;
+  const manifestRow = _manifestRowForPath(path);
+  if(manifestRow && manifestRow.preview) return openManifestPreview(manifestRow);
+  const skillParts = _hermesSkillsPathParts(path);
+  if(skillParts){
+    if(skillParts.filePath) return openSkillFilePreview(skillParts.skillName, skillParts.filePath);
+    return openSkillContentPreview(skillParts.skillName);
+  }
+  const rel = _toWorkspaceRelativePath(path);
+  if(rel === null){
+    if(_isManifestAbsolutePath(path)) return openIntegrationFilePreview(path);
+    setStatus(t('file_open_failed'));
+    return;
+  }
   if(typeof ensureWorkspacePreviewVisible==='function') ensureWorkspacePreviewVisible();
   else if(typeof openWorkspacePanel==='function') openWorkspacePanel('preview');
   switchWorkspacePanelTab('files');
-  let rel = path.replace(/^~\//,'').replace(/^\.\/+/,'');
-  // Strip workspace prefix so /api/list receives a workspace-relative path.
-  const ws = S.session && S.session.workspace;
-  if(ws){
-    const normWs = ws.replace(/\/+$/,'') + '/';
-    if(rel.startsWith(normWs)) rel = rel.slice(normWs.length);
-    else if(rel === ws.replace(/\/+$/,'')) rel = '.';
-  }
-  if(!rel) rel = '.';
   try{
     if(!(await _workspacePathExists(rel))){
       setStatus(t('file_open_failed'));
@@ -741,8 +825,12 @@ async function openArtifactPath(path){
   openFile(rel);
 }
 
+function _isBrowserPreviewOpen(){
+  return _previewCurrentMode==='browser'&&!!_previewBrowserUrl;
+}
+
 async function loadDir(path, opts={}){
-  const preservePreview=!!(opts&&opts.preservePreview);
+  const preservePreview=!!(opts&&opts.preservePreview)||_isBrowserPreviewOpen();
   if(!S.session)return;
   const sessionId=S.session.session_id;
   try{
@@ -940,6 +1028,7 @@ async function openIntegrationFilePreview(path){
   $('previewArea').classList.add('visible');
   $('fileTree').style.display = 'none';
   _previewCurrentPath = path;
+  _previewSource = 'workspace';
   renderFileBreadcrumb(path);
   const fileUrl = _manifestFilePreviewUrl(path, {
     inline: AUDIO_EXTS.has(ext) || VIDEO_EXTS.has(ext),
@@ -1057,28 +1146,75 @@ function forceRenderMarkdownPreview(){
 }
 
 let _previewCurrentPath = '';  // relative path of currently previewed file
-let _previewCurrentMode = '';  // 'code' | 'md' | 'image' | 'html' | 'pdf' | 'audio' | 'video'
+let _previewCurrentMode = '';  // 'code' | 'md' | 'image' | 'html' | 'pdf' | 'audio' | 'video' | 'browser'
 let _previewDirty = false;     // true when edits are unsaved
+let _previewBrowserUrl = '';   // remote Camofox/VNC URL when mode === 'browser'
+
+function _rightpanelEl(){
+  return document.querySelector('.rightpanel');
+}
+
+function _setBrowserPreviewWorkspaceChrome(active){
+  const panel=_rightpanelEl();
+  if(panel) panel.classList.toggle('browser-preview-active', !!active);
+}
 
 function showPreview(mode){
-  // mode: 'code' | 'image' | 'md' | 'html' | 'pdf' | 'audio' | 'video'
+  // mode: 'code' | 'image' | 'md' | 'html' | 'pdf' | 'audio' | 'video' | 'browser'
   $('previewCode').style.display     = mode==='code'  ? '' : 'none';
   $('previewImgWrap').style.display  = mode==='image' ? '' : 'none';
   const mediaWrap=$('previewMediaWrap'); if(mediaWrap) mediaWrap.style.display = (mode==='audio'||mode==='video') ? '' : 'none';
   const pdfWrap=$('previewPdfWrap'); if(pdfWrap) pdfWrap.style.display = mode==='pdf' ? '' : 'none';
   $('previewMd').style.display       = mode==='md'    ? '' : 'none';
   $('previewHtmlWrap').style.display = mode==='html'  ? '' : 'none';
+  const browserWrap=$('previewBrowserWrap'); if(browserWrap) browserWrap.style.display = mode==='browser' ? '' : 'none';
   $('previewEditArea').style.display = 'none';  // start in read-only
   const badge=$('previewBadge');
   badge.className='preview-badge '+mode;
-  badge.textContent = mode==='image'?'image':mode==='audio'?'audio':mode==='video'?'video':mode==='pdf'?'pdf':mode==='md'?'md':mode==='html'?'html':fileExt($('previewPathText').textContent)||'text';
+  badge.textContent = mode==='image'?'image':mode==='audio'?'audio':mode==='video'?'video':mode==='pdf'?'pdf':mode==='md'?'md':mode==='html'?'html':mode==='browser'?'browser':fileExt($('previewPathText').textContent)||'text';
   _previewCurrentMode = mode;
   _previewDirty = false;
   updateEditBtn();
   // Show "Open in browser" button for iframe-backed document previews
   const openBtn=$('btnOpenInBrowser');
-  if(openBtn) openBtn.style.display = (mode==='html'||mode==='pdf')?'inline-flex':'none';
+  if(openBtn) openBtn.style.display = (mode==='html'||mode==='pdf'||mode==='browser')?'inline-flex':'none';
+  const downloadBtn=$('btnDownloadFile');
+  if(downloadBtn) downloadBtn.style.display = mode==='browser' ? 'none' : 'inline-flex';
   setLargeMarkdownForceRenderVisible(false);
+  _setBrowserPreviewWorkspaceChrome(mode==='browser');
+}
+
+function openBrowserPreview(url, opts={}){
+  url=String(url||'').trim();
+  if(!/^https?:\/\//i.test(url)) return false;
+  if(typeof ensureWorkspacePreviewVisible==='function') ensureWorkspacePreviewVisible();
+  else if(typeof openWorkspacePanel==='function') openWorkspacePanel('preview');
+  let host=url;
+  try{ host=new URL(url).host; }catch(_){}
+  const tool=String(opts.tool||'').trim();
+  $('previewPathText').textContent=tool?`Browser (${tool}) — ${host}`:`Browser — ${host}`;
+  $('previewArea').classList.add('visible');
+  const ft=$('fileTree'); if(ft) ft.style.display='none';
+  _previewCurrentPath='';
+  _previewRawContent='';
+  _previewRawContentPath='';
+  _previewSource='browser';
+  _previewBrowserUrl=url;
+  showPreview('browser');
+  const iframe=$('previewBrowserIframe');
+  if(iframe){
+    iframe.src='';
+    iframe.src=url;
+  }
+  if(typeof syncWorkspacePanelUI==='function') syncWorkspacePanelUI();
+  return true;
+}
+
+function clearBrowserPreviewEmbed(){
+  _previewBrowserUrl='';
+  const iframe=$('previewBrowserIframe');
+  if(iframe) iframe.src='';
+  _setBrowserPreviewWorkspaceChrome(false);
 }
 
 function updateEditBtn(){
@@ -1198,6 +1334,7 @@ async function openFile(path, opts={}){
   $('fileTree').style.display='none';
 
   _previewCurrentPath = path;
+  _previewSource = 'workspace';
   renderFileBreadcrumb(path);
   if(IMAGE_EXTS.has(ext)){
     // Image: load via raw endpoint, show as <img>
@@ -1315,14 +1452,32 @@ function downloadFile(path){
 
 
 // ── Render breadcrumb for file preview mode ──────────────────────────────────
-function renderFileBreadcrumb(filePath) {
+function renderFileBreadcrumb(filePath, opts) {
+  opts = opts || {};
+  const isSkill = opts.skill || _previewSource === 'skill';
   const bar = $('breadcrumbBar');
   if (!bar) return;
   bar.style.display = 'flex';
   const upBtn = $('btnUpDir');
-  if (upBtn) upBtn.style.display = '';
+  if (upBtn) upBtn.style.display = isSkill ? 'none' : '';
 
   bar.innerHTML = '';
+  if(isSkill){
+    const parts = filePath.split('/');
+    for (let i = 0; i < parts.length; i++) {
+      if(i > 0){
+        const sep = document.createElement('span');
+        sep.className = 'breadcrumb-sep';
+        sep.textContent = '/';
+        bar.appendChild(sep);
+      }
+      const seg = document.createElement('span');
+      seg.textContent = parts[i];
+      seg.className = i < parts.length - 1 ? 'breadcrumb-seg' : 'breadcrumb-seg breadcrumb-current';
+      bar.appendChild(seg);
+    }
+    return;
+  }
   // Root
   const root = document.createElement('span');
   root.className = 'breadcrumb-seg breadcrumb-link';
@@ -1353,6 +1508,10 @@ function renderFileBreadcrumb(filePath) {
 }
 
 function openInBrowser(){
+  if(_previewCurrentMode==='browser'&&_previewBrowserUrl){
+    window.open(_previewBrowserUrl,'_blank','noopener,noreferrer');
+    return;
+  }
   if(!_previewCurrentPath||!S.session) return;
   const url=`api/file/raw?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(_previewCurrentPath)}&inline=1`;
   window.open(url,'_blank','noopener');

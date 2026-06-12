@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shutil
@@ -21,6 +22,8 @@ from integration.skills.zip_import import discover_skill_roots
 _log = logging.getLogger(__name__)
 
 _SKILL_META_EXCLUDE = frozenset({".hub_installed", ".category", ".install_name"})
+_SKILL_ORIGIN_SIDECAR = ".skill-origin.json"
+_UPLOAD_COPY_EXCLUDE = _SKILL_META_EXCLUDE | {_SKILL_ORIGIN_SIDECAR}
 
 
 def _skill_zip_max_bytes() -> int:
@@ -42,11 +45,14 @@ def collect_skill_zip_files(
     skill_dir: Path,
     max_bytes: int,
     max_files: int,
+    *,
+    arc_prefix: str = "",
 ) -> tuple[list[tuple[Path, str]], int, str | None]:
     """Walk skill_dir; return (files, total_bytes, limit_hit). Excludes integration metadata."""
     files: list[tuple[Path, str]] = []
     total_bytes = 0
     skill_root = skill_dir.resolve()
+    prefix = str(arc_prefix or "").strip().strip("/")
     for root, _dirs, names in os.walk(skill_root, followlinks=False):
         root_path = Path(root)
         try:
@@ -76,6 +82,8 @@ def collect_skill_zip_files(
                 arcname = fp.relative_to(skill_root).as_posix()
             except ValueError:
                 continue
+            if prefix:
+                arcname = f"{prefix}/{arcname}"
             files.append((fp, arcname))
             total_bytes += size
     return files, total_bytes, None
@@ -96,7 +104,19 @@ def prepare_skill_download(name: str, dir_name: str = "") -> dict:
 
     max_bytes = _skill_zip_max_bytes()
     max_files = _skill_zip_max_files()
-    files, total_bytes, limit_hit = collect_skill_zip_files(skill_dir, max_bytes, max_files)
+    skill_md = find_skill_main_file(skill_dir)
+    list_name = _list_name_from_skill_md(skill_md, skill_dir.name) if skill_md else skill_dir.name
+    leaf = normalize_dir_name(list_name)
+    if validate_dir_name(leaf) is not None:
+        leaf = skill_dir.name
+    dir_name = _skill_dir_rel_path(skill_dir, skills_dir)
+    stored_category = _stored_category_for_dir(skill_dir, skills_dir, "")
+    files, total_bytes, limit_hit = collect_skill_zip_files(
+        skill_dir,
+        max_bytes,
+        max_files,
+        arc_prefix=leaf,
+    )
     if limit_hit == "max_files":
         return {
             "error": "too many files",
@@ -112,12 +132,23 @@ def prepare_skill_download(name: str, dir_name: str = "") -> dict:
             "configure": "HERMES_WEBUI_FOLDER_ZIP_MAX_MB",
         }
 
-    zip_basename = f"{skill_dir.name}.zip"
+    zip_basename = f"{leaf}.zip"
+    sidecar_payload = {
+        "version": 1,
+        "dir_name": dir_name,
+        "category": stored_category,
+        "name": list_name,
+    }
+    sidecar_arcname = f"{leaf}/{_SKILL_ORIGIN_SIDECAR}"
+    sidecar_bytes = (json.dumps(sidecar_payload, ensure_ascii=False, indent=2) + "\n").encode(
+        "utf-8"
+    )
     return {
         "ok": True,
         "skill_dir": skill_dir,
         "zip_basename": zip_basename,
         "files": files,
+        "extra_zip_entries": [(sidecar_bytes, sidecar_arcname)],
         "total_bytes": total_bytes,
     }
 
@@ -264,7 +295,8 @@ def _scan_custom_skill_dicts(
             if not skill_matches_platform(frontmatter):
                 continue
             name = str(frontmatter.get("name", skill_dir.name))[:64]
-            if name in seen:
+            dir_key = _skill_dir_rel_path(skill_dir, skills_dir)
+            if dir_key in seen:
                 continue
             if name in hub_names:
                 continue
@@ -287,11 +319,11 @@ def _scan_custom_skill_dicts(
                 ).lower()
                 if query not in haystack:
                     continue
-            seen.add(name)
+            seen.add(dir_key)
             all_skills.append(
                 {
                     "name": name,
-                    "dir_name": _skill_dir_rel_path(skill_dir, skills_dir),
+                    "dir_name": dir_key,
                     "display_name": str(frontmatter.get("display_name", "") or ""),
                     "description": description,
                     "category": str(cat or ""),
@@ -487,6 +519,191 @@ def validate_dir_name(dir_name: str) -> dict | None:
     return None
 
 
+def parse_logical_name_from_content(content: str) -> str | None:
+    """Parse frontmatter ``name`` from SKILL.md content."""
+    try:
+        from tools.skills_tool import _parse_frontmatter
+
+        frontmatter, _ = _parse_frontmatter(str(content or "")[:4000])
+        raw = frontmatter.get("name")
+        if raw is not None and str(raw).strip():
+            return str(raw).strip()[:64]
+    except Exception:
+        pass
+    return None
+
+
+def parse_logical_name_from_skill_md(skill_md: Path) -> str | None:
+    try:
+        return parse_logical_name_from_content(skill_md.read_text(encoding="utf-8"))
+    except Exception as exc:
+        _log.debug("parse_logical_name_from_skill_md failed for %s: %s", skill_md, exc)
+        return None
+
+
+def find_custom_skill_dirs_by_name(skills_dir: Path, logical_name: str) -> list[Path]:
+    """Return custom skill directories whose frontmatter name matches logical_name."""
+    from agent.skill_utils import iter_skill_index_files
+    from tools.skills_tool import _EXCLUDED_SKILL_DIRS, _parse_frontmatter
+
+    key = str(logical_name or "").strip()
+    if not key:
+        return []
+    matches: list[Path] = []
+    seen_paths: set[str] = set()
+    for skill_md in iter_skill_index_files(skills_dir, "SKILL.md"):
+        if any(part in _EXCLUDED_SKILL_DIRS for part in skill_md.parts):
+            continue
+        skill_dir = skill_md.parent
+        if (skill_dir / ".hub_installed").is_file():
+            continue
+        try:
+            frontmatter, _ = _parse_frontmatter(skill_md.read_text(encoding="utf-8")[:4000])
+            name = str(frontmatter.get("name", skill_dir.name)).strip()[:64]
+        except Exception:
+            name = skill_dir.name
+        if name != key:
+            continue
+        path_key = skill_dir.resolve().as_posix()
+        if path_key in seen_paths:
+            continue
+        seen_paths.add(path_key)
+        matches.append(skill_dir)
+    return matches
+
+
+def read_skill_origin_sidecar(skill_root: Path) -> dict | None:
+    path = skill_root / _SKILL_ORIGIN_SIDECAR
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else None
+    except Exception as exc:
+        _log.debug("read_skill_origin_sidecar failed for %s: %s", skill_root, exc)
+        return None
+
+
+def _resolve_dir_from_explicit(skills_dir: Path, explicit_dir_name: str) -> tuple[Path | None, dict | None]:
+    dir_key = str(explicit_dir_name or "").strip().strip("/")
+    if not dir_key or ".." in dir_key:
+        return None, {"error": "无效的技能路径", "status": 400}
+    candidate = (skills_dir / dir_key).resolve()
+    if not skill_path_within(skills_dir, candidate):
+        return None, {"error": "无效的技能路径", "status": 400}
+    return candidate, None
+
+
+def _stored_category_for_dir(skill_dir: Path, skills_dir: Path, request_category: str) -> str:
+    category_file = skill_dir / ".category"
+    if category_file.is_file():
+        cat = category_file.read_text(encoding="utf-8").strip()
+        if cat:
+            return cat
+    rel = _skill_dir_rel_path(skill_dir, skills_dir)
+    parts = rel.split("/")
+    if len(parts) >= 2:
+        return parts[0]
+    cat_seg, _ = _normalize_category_segment(request_category)
+    return cat_seg or ""
+
+
+def resolve_upload_target(
+    skills_dir: Path,
+    *,
+    category: str,
+    leaf: str,
+    logical_name: str,
+    explicit_dir_name: str = "",
+    sidecar: dict | None = None,
+    overwrite: bool = False,
+) -> dict | tuple[Path, str, list[Path]]:
+    """Resolve upload destination and directories to remove before write."""
+    matches = find_custom_skill_dirs_by_name(skills_dir, logical_name)
+    if any((path / ".hub_installed").is_file() for path in matches):
+        return {"error": "市场安装的技能不可覆盖", "status": 409}
+
+    target: Path | None = None
+    stored_category = ""
+
+    explicit = str(explicit_dir_name or "").strip()
+    if explicit:
+        target, path_err = _resolve_dir_from_explicit(skills_dir, explicit)
+        if path_err:
+            return path_err
+        assert target is not None
+        stored_category = _stored_category_for_dir(target, skills_dir, category)
+    else:
+        sidecar_dir = str((sidecar or {}).get("dir_name") or "").strip()
+        if sidecar_dir:
+            target, path_err = _resolve_dir_from_explicit(skills_dir, sidecar_dir)
+            if path_err:
+                return path_err
+            assert target is not None
+            sidecar_cat = str((sidecar or {}).get("category") or "").strip()
+            stored_category = sidecar_cat or _stored_category_for_dir(target, skills_dir, category)
+        elif len(matches) == 1:
+            target = matches[0]
+            stored_category = _stored_category_for_dir(target, skills_dir, category)
+        elif len(matches) > 1:
+            default_dest, cat_seg, path_err = skill_target_dir(skills_dir, category, leaf)
+            if path_err:
+                return path_err
+            assert default_dest is not None
+            match_resolved = {path.resolve() for path in matches}
+            if default_dest.resolve() in match_resolved:
+                target = default_dest
+            else:
+                target = sorted(matches, key=lambda p: _skill_dir_rel_path(p, skills_dir))[0]
+            stored_category = _stored_category_for_dir(target, skills_dir, category)
+        else:
+            target, cat_seg, path_err = skill_target_dir(skills_dir, category, leaf)
+            if path_err:
+                return path_err
+            assert target is not None and cat_seg is not None
+            stored_category = cat_seg or ""
+
+    assert target is not None
+    dirs_to_remove: list[Path] = []
+    if overwrite:
+        dirs_to_remove = list(matches)
+        if _target_conflict(target):
+            if _hub_installed_target(target):
+                return {"error": "市场安装的技能不可覆盖", "status": 409}
+            if target.resolve() not in {path.resolve() for path in matches}:
+                dirs_to_remove.append(target)
+    else:
+        if matches:
+            return {"error": "技能已存在", "status": 409}
+        if _target_conflict(target):
+            if _hub_installed_target(target):
+                return {"error": "市场安装的技能不可覆盖", "status": 409}
+            return {"error": "技能已存在", "status": 409}
+
+    return target, stored_category, dirs_to_remove
+
+
+def _remove_upload_dirs(paths: list[Path]) -> None:
+    seen: set[str] = set()
+    for path in paths:
+        key = path.resolve().as_posix()
+        if key in seen or not path.exists():
+            continue
+        seen.add(key)
+        shutil.rmtree(path, ignore_errors=True)
+
+
+def _copy_skill_tree(src: Path, dest: Path) -> None:
+    if dest.exists():
+        shutil.rmtree(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+
+    def _ignore(_dir: str, names: list[str]) -> set[str]:
+        return {name for name in names if name in _UPLOAD_COPY_EXCLUDE}
+
+    shutil.copytree(src, dest, ignore=_ignore)
+
+
 def resolve_dir_name(request_name: str, filename: str | None) -> tuple[str | None, dict | None]:
     """Return (dir_name, error_payload)."""
     explicit = str(request_name or "").strip()
@@ -642,15 +859,14 @@ def _plan_zip_import(
     roots: list[Path],
     *,
     overwrite: bool = False,
-) -> tuple[list[tuple[Path, Path, str, str, bool]], list[str], int]:
-    """Return (planned copies with replace flag, error messages, http_status_if_errors)."""
+    explicit_dir_name: str = "",
+) -> tuple[list[tuple[Path, Path, str, str, list[Path]]], list[str], int]:
+    """Return (planned copies, error messages, http_status_if_errors)."""
     cat_seg, cat_err = _normalize_category_segment(category)
     if cat_err:
         return [], [str(cat_err["error"])], int(cat_err.get("status") or 400)
 
-    assert cat_seg is not None
-    stored_category = cat_seg or ""
-    planned: list[tuple[Path, Path, str, str, bool]] = []
+    planned: list[tuple[Path, Path, str, str, list[Path]]] = []
     errors: list[str] = []
     status = 409
     seen_dests: set[str] = set()
@@ -661,7 +877,8 @@ def _plan_zip_import(
             errors.append(f"{skill_root.name}: 缺少 SKILL.md")
             status = 400
             continue
-        fmt_err = validate_skill_md_content(skill_md.read_text(encoding="utf-8"))
+        content = skill_md.read_text(encoding="utf-8")
+        fmt_err = validate_skill_md_content(content)
         if fmt_err:
             errors.append(f"{skill_root.name}: {fmt_err.get('error', 'SKILL.md 格式无效')}")
             status = 400
@@ -672,30 +889,31 @@ def _plan_zip_import(
             errors.append(f"{skill_root.name}: {leaf_err.get('error', '名称无效')}")
             status = 400
             continue
-        dest, _, path_err = skill_target_dir(skills_dir, category, leaf)
-        if path_err:
-            errors.append(f"{leaf}: {path_err.get('error', '路径无效')}")
-            status = 400
+        logical_name = parse_logical_name_from_content(content) or leaf
+        sidecar = read_skill_origin_sidecar(skill_root)
+        resolved = resolve_upload_target(
+            skills_dir,
+            category=category,
+            leaf=leaf,
+            logical_name=logical_name,
+            explicit_dir_name=explicit_dir_name,
+            sidecar=sidecar,
+            overwrite=overwrite,
+        )
+        if isinstance(resolved, dict):
+            errors.append(f"{leaf}: {resolved.get('error', '上传失败')}")
+            if int(resolved.get("status") or 0) == 400:
+                status = 400
             continue
-        assert dest is not None
+        dest, stored_category, dirs_to_remove = resolved
         dest_key = dest.resolve().as_posix()
         if dest_key in seen_dests:
             errors.append(f"{leaf}: 压缩包内重复")
             status = 409
             continue
         seen_dests.add(dest_key)
-        replace = False
-        if _target_conflict(dest):
-            if _hub_installed_target(dest):
-                errors.append(f"{leaf}: 市场安装的技能不可覆盖")
-                continue
-            if overwrite:
-                replace = True
-            else:
-                errors.append(f"{leaf}: 技能已存在")
-                continue
         list_name = _list_name_from_skill_md(skill_md, leaf)
-        planned.append((skill_root, dest, list_name, stored_category, replace))
+        planned.append((skill_root, dest, list_name, stored_category, dirs_to_remove))
 
     return planned, errors, status
 
@@ -706,6 +924,7 @@ def _upload_zip_skills(
     zip_bytes: bytes,
     *,
     overwrite: bool = False,
+    explicit_dir_name: str = "",
 ) -> dict:
     temp_dir = Path(tempfile.mkdtemp(prefix="hermes-skill-upload-"))
     created: list[Path] = []
@@ -717,18 +936,20 @@ def _upload_zip_skills(
             return {"error": "压缩包内需包含 SKILL.md", "status": 400}
 
         planned, errors, err_status = _plan_zip_import(
-            skills_dir, category, roots, overwrite=overwrite
+            skills_dir,
+            category,
+            roots,
+            overwrite=overwrite,
+            explicit_dir_name=explicit_dir_name,
         )
         if errors:
             return {"error": "; ".join(errors), "status": err_status}
 
         entries: list[dict] = []
-        for skill_root, dest, list_name, stored_category, replace in planned:
-            if replace:
-                shutil.rmtree(dest)
-            shutil.copytree(skill_root, dest)
-            if not replace:
-                created.append(dest)
+        for skill_root, dest, list_name, stored_category, dirs_to_remove in planned:
+            _remove_upload_dirs(dirs_to_remove)
+            _copy_skill_tree(skill_root, dest)
+            created.append(dest)
             _write_category_marker(dest, stored_category)
             entries.append(_skill_upload_entry(dest, skills_dir, list_name, stored_category))
 
@@ -751,27 +972,32 @@ def _upload_single_md(
     skills_dir: Path,
     category: str,
     content: str,
-    dir_name: str,
+    leaf: str,
     *,
     overwrite: bool = False,
+    explicit_dir_name: str = "",
 ) -> dict:
-    target, cat_seg, path_err = skill_target_dir(skills_dir, category, dir_name)
-    if path_err:
-        return path_err
-    assert target is not None and cat_seg is not None
-
-    if _target_conflict(target):
-        if _hub_installed_target(target):
-            return {"error": "市场安装的技能不可覆盖", "status": 409}
-        if overwrite:
-            shutil.rmtree(target)
-        else:
-            return {"error": "技能已存在", "status": 409}
+    fmt_err = validate_skill_md_content(content)
+    if fmt_err:
+        return fmt_err
+    logical_name = parse_logical_name_from_content(content) or leaf
+    resolved = resolve_upload_target(
+        skills_dir,
+        category=category,
+        leaf=leaf,
+        logical_name=logical_name,
+        explicit_dir_name=explicit_dir_name,
+        sidecar=None,
+        overwrite=overwrite,
+    )
+    if isinstance(resolved, dict):
+        return resolved
+    target, stored_category, dirs_to_remove = resolved
 
     created = False
     ok = False
-    stored_category = cat_seg or ""
     try:
+        _remove_upload_dirs(dirs_to_remove)
         target.mkdir(parents=True, exist_ok=True)
         created = True
         (target / "SKILL.md").write_text(content, encoding="utf-8")
@@ -782,7 +1008,7 @@ def _upload_single_md(
         if fmt_err:
             return fmt_err
         _write_category_marker(target, stored_category)
-        list_name = _list_name_from_skill_md(skill_md, dir_name)
+        list_name = _list_name_from_skill_md(skill_md, leaf)
         ok = True
         return _upload_batch_response(
             [_skill_upload_entry(target, skills_dir, list_name, stored_category)],
@@ -804,6 +1030,7 @@ def upload_custom_skill(
     zip_bytes: bytes | None = None,
     filename: str | None = None,
     overwrite: bool = False,
+    explicit_dir_name: str = "",
 ) -> dict:
     """Write custom skill(s) to shared_skills_dir(); no upstream SkillHub calls."""
     category = str(category or "").strip()
@@ -818,15 +1045,41 @@ def upload_custom_skill(
 
     skills_dir = shared_skills_dir()
     skills_dir.mkdir(parents=True, exist_ok=True)
+    explicit = str(explicit_dir_name or "").strip()
 
     if zip_bytes is not None:
-        return _upload_zip_skills(skills_dir, category, zip_bytes, overwrite=overwrite)
+        return _upload_zip_skills(
+            skills_dir,
+            category,
+            zip_bytes,
+            overwrite=overwrite,
+            explicit_dir_name=explicit,
+        )
 
-    dir_name, name_err = resolve_dir_name(request_name, filename)
-    if name_err:
-        return name_err
-    assert dir_name is not None and content is not None
-    return _upload_single_md(skills_dir, category, content, dir_name, overwrite=overwrite)
+    assert content is not None
+    fmt_err = validate_skill_md_content(content)
+    if fmt_err:
+        return fmt_err
+    logical_name = parse_logical_name_from_content(content)
+    if logical_name:
+        leaf = normalize_dir_name(logical_name)
+        leaf_err = validate_dir_name(leaf)
+        if leaf_err:
+            return leaf_err
+    else:
+        leaf, name_err = resolve_dir_name(request_name, filename)
+        if name_err:
+            return name_err
+        assert leaf is not None
+
+    return _upload_single_md(
+        skills_dir,
+        category,
+        content,
+        leaf,
+        overwrite=overwrite,
+        explicit_dir_name=explicit,
+    )
 
 
 def _skill_dir_rel_path(skill_dir: Path, skills_dir: Path) -> str:

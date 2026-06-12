@@ -2655,9 +2655,31 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         if(window.HermesSessionInspector&&typeof window.HermesSessionInspector.applyDelta==='function'){
           window.HermesSessionInspector.applyDelta(d);
         }
+        if(window.HermesIntegrationWorkspace&&typeof window.HermesIntegrationWorkspace.onManifestDelta==='function'){
+          window.HermesIntegrationWorkspace.onManifestDelta(d);
+        }
       }catch(err){
         console.warn('manifest_delta', err);
       }
+    });
+
+    let _browserPreviewOpenedForStream=false;
+    source.addEventListener('browser_preview',e=>{
+      try{
+        const d=JSON.parse(e.data||'{}');
+        if(!d||typeof d!=='object') return;
+        if((d.session_id||activeSid)!==activeSid) return;
+        if(d.stream_id&&d.stream_id!==streamId) return;
+        if(_browserPreviewOpenedForStream) return;
+        const url=String(d.url||'').trim();
+        if(!/^https?:\/\//i.test(url)) return;
+        _browserPreviewOpenedForStream=true;
+        if(typeof openBrowserPreview==='function'){
+          openBrowserPreview(url,{tool:d.tool||''});
+        }else if(typeof showToast==='function'){
+          showToast('Browser preview ready. Open: '+url, 8000);
+        }
+      }catch(_){}
     });
 
     // Phase 2: dedicated `todo_state` event carries a full snapshot of
@@ -3356,7 +3378,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _setActivePaneIdleIfOwner();
     });
 
-    for(const _runJournalEventName of ['token','interim_assistant','reasoning','tool','tool_complete','todo_state','approval','clarify','state_saved','title','title_status','context_status','goal','goal_continue','done','stream_end','pending_steer_leftover','compressing','compressed','metering','apperror','warning','error','cancel']){
+    for(const _runJournalEventName of ['token','interim_assistant','reasoning','tool','tool_complete','todo_state','approval','clarify','state_saved','title','title_status','context_status','goal','goal_continue','done','stream_end','pending_steer_leftover','compressing','compressed','metering','browser_preview','apperror','warning','error','cancel']){
       source.addEventListener(_runJournalEventName,_rememberRunJournalCursor);
     }
   }

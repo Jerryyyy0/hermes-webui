@@ -1,6 +1,7 @@
 # Integration test scratch dirs
 .integration-test-workspace/
 .integration-test-state/
+hermes-webui.zip
 
 # Python cache
 __pycache__/

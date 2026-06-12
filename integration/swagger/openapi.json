@@ -879,7 +879,7 @@
       "get": {
         "tags": ["IntegrationWorkspace"],
         "summary": "平铺列出 DEFAULT_WORKSPACE 下所有文件（分页、搜索、过滤、排序）",
-        "description": "根目录为 `HERMES_WEBUI_DEFAULT_WORKSPACE`（`resolve_trusted_workspace(None)`）。不需要 `session_id`。`q` 按文件名 basename 包含匹配（不区分大小写）；`type` 按文件扩展名过滤（如 `.md` 或 `md`）；`sort` 支持 path/size/mtime/ctime；`order` 默认 desc。翻页直到 `has_more` 为 false。",
+        "description": "根目录为 `HERMES_WEBUI_DEFAULT_WORKSPACE`（`resolve_trusted_workspace(None)`）。不需要 `session_id`。默认返回全部 workspace 文件；manifest 成果文件附加可选 `profile`。传 `profile` 时仅返回该 profile 的成果文件。`q` 按文件名 basename 包含匹配（不区分大小写）；`type` 按文件扩展名过滤（如 `.md` 或 `md`）；`sort` 支持 path/size/mtime/ctime；`order` 默认 desc。翻页直到 `has_more` 为 false。",
         "parameters": [
           { "name": "path", "in": "query", "schema": { "type": "string", "default": "." }, "description": "子树根（workspace 相对）" },
           { "name": "page", "in": "query", "schema": { "type": "integer", "minimum": 1, "default": 1 } },
@@ -887,7 +887,9 @@
           { "name": "q", "in": "query", "schema": { "type": "string" }, "description": "文件名 basename 包含匹配（不区分大小写）" },
           { "name": "type", "in": "query", "schema": { "type": "string", "example": ".md" }, "description": "按文件扩展名过滤（如 `.md` 或 `md`，不区分大小写）" },
           { "name": "sort", "in": "query", "schema": { "type": "string", "enum": ["path", "size", "mtime", "ctime"], "default": "path" }, "description": "排序字段" },
-          { "name": "order", "in": "query", "schema": { "type": "string", "enum": ["asc", "desc"], "default": "desc" }, "description": "排序方向" }
+          { "name": "order", "in": "query", "schema": { "type": "string", "enum": ["asc", "desc"], "default": "desc" }, "description": "排序方向" },
+          { "name": "profile", "in": "query", "schema": { "type": "string" }, "description": "可选。传入时仅返回该 profile 的 manifest 成果文件；不传则返回全部文件并对成果附加 profile" },
+          { "name": "refresh", "in": "query", "schema": { "type": "string", "enum": ["1", "true", "yes"] }, "description": "可选。传入时跳过服务端内存文件索引并强制重扫 workspace" }
         ],
         "responses": {
           "200": {
@@ -1424,6 +1426,33 @@
         }
       }
     },
+    "/api/profile/pin": {
+      "post": {
+        "tags": ["Profiles"],
+        "summary": "置顶 / 取消置顶 Profile",
+        "description": "需 `HERMES_INTEGRATION=1`。状态写入 `{profile.path}/info.json` 的 `pinned` 与 `pin_order`（含 `default` profile）；最多 5 个。`GET /api/profiles` 按置顶序 → 未置顶 default → 其余字母序返回。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/ProfilePinRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "更新成功",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ProfileInfoUpdateResponse" }
+              }
+            }
+          },
+          "400": { "description": "无效请求或超出置顶上限" },
+          "404": { "description": "Profile 不存在" }
+        }
+      }
+    },
     "/api/personalities": {
       "get": {
         "tags": ["Profiles"],
@@ -1797,7 +1826,7 @@
       "get": {
         "tags": ["SkillHub"],
         "summary": "下载本地技能 zip 包",
-        "description": "将 `shared_skills_dir` 中已有技能目录打包为 zip 流式下载（custom 或市场已安装）。排除 `.hub_installed`、`.category`、`.install_name`。仅需 `HERMES_INTEGRATION=1`；不要求 `SKILLHUB_URL`。体积/文件数受 `HERMES_WEBUI_FOLDER_ZIP_MAX_MB` 与 `HERMES_WEBUI_FOLDER_ZIP_MAX_FILES` 约束。",
+        "description": "将 `shared_skills_dir` 中已有技能目录打包为 zip 流式下载（custom 或市场已安装）。zip 内文件以 leaf 目录为前缀（如 `apple-reminders/SKILL.md`），并附带 `.skill-origin.json` sidecar（含完整 `dir_name` / `category`）。仍排除 `.hub_installed`、`.category`、`.install_name`。仅需 `HERMES_INTEGRATION=1`；不要求 `SKILLHUB_URL`。体积/文件数受 `HERMES_WEBUI_FOLDER_ZIP_MAX_MB` 与 `HERMES_WEBUI_FOLDER_ZIP_MAX_FILES` 约束。",
         "parameters": [
           { "name": "name", "in": "query", "required": true, "schema": { "type": "string" }, "description": "列表名（SKILL.md frontmatter name）" },
           { "name": "dir_name", "in": "query", "schema": { "type": "string" }, "description": "相对 skills/ 的目录路径（可选）" }
@@ -1850,7 +1879,7 @@
       "post": {
         "tags": ["SkillHub"],
         "summary": "上传本地 custom 技能",
-        "description": "仅写入 `{HERMES_HOME}/skills`（shared_skills_dir），不调用 SkillHub 上游。需要 `HERMES_INTEGRATION=1`；不要求 `SKILLHUB_URL`。支持 `.md` / `.zip`（multipart）或 JSON。单文件 `.md` 的目录名由 `name`/文件名决定；`.zip` 可含多个技能目录（每个含 SKILL.md）。若提供 `category` 则落盘为 `skills/<category>/<leaf>/` 并写入 `.category`；无 category 时平铺 `skills/<leaf>/`。`overwrite=true` 时仅可覆盖 custom 技能；市场安装（`.hub_installed`）仍 409。响应含 `skill_count`、`file_count` 与 `skills[]`（每项含 `dir_name`、`name`、`category`）。SKILL.md 须含 frontmatter，必填 `name`、`description`。",
+        "description": "仅写入 `{HERMES_HOME}/skills`（shared_skills_dir），不调用 SkillHub 上游。需要 `HERMES_INTEGRATION=1`；不要求 `SKILLHUB_URL`。支持 `.md` / `.zip`（multipart）或 JSON。单文件 `.md` 的 leaf 由 SKILL.md frontmatter `name` 决定（不再用 `SKILL.md` 文件名 stem）；`.zip` 可含多个技能目录（每个含 SKILL.md），可含 `.skill-origin.json` sidecar。目标路径优先级：`dir_name` 参数 > sidecar.dir_name > 已有同名 custom 目录 > `category`+leaf。`overwrite=true` 时按 frontmatter `name` 删除全部 custom 副本后写入；市场安装（`.hub_installed`）仍 409。响应含 `skill_count`、`file_count` 与 `skills[]`（每项含 `dir_name`、`name`、`category`）。SKILL.md 须含 frontmatter，必填 `name`、`description`。",
         "requestBody": {
           "required": true,
           "content": {
@@ -1866,7 +1895,11 @@
                   },
                   "name": {
                     "type": "string",
-                    "description": "目录名 dir_name（可选；缺省为文件名主干）"
+                    "description": "可选目录名 hint（legacy）；leaf 以 SKILL.md frontmatter name 为准"
+                  },
+                  "dir_name": {
+                    "type": "string",
+                    "description": "可选；相对 skills/ 的目标路径（如 apple/apple-reminders）"
                   },
                   "category": {
                     "type": "string",
@@ -1874,7 +1907,7 @@
                   },
                   "overwrite": {
                     "type": "string",
-                    "description": "设为 1/true/yes 时覆盖已有 custom 技能；市场安装不可覆盖"
+                    "description": "设为 1/true/yes 时按 frontmatter name 覆盖全部 custom 副本；市场安装不可覆盖"
                   }
                 }
               }
@@ -2297,12 +2330,13 @@
       "SkillHubUploadJsonRequest": {
         "type": "object",
         "properties": {
-          "name":      { "type": "string", "description": "dir_name（必填）" },
+          "name":      { "type": "string", "description": "可选目录名 hint（legacy）" },
           "content":   { "type": "string", "description": "SKILL.md 全文" },
           "category":  { "type": "string", "description": "可选分类" },
-          "overwrite": { "type": "boolean", "description": "为 true 时覆盖已有 custom 技能" }
+          "dir_name":  { "type": "string", "description": "可选；相对 skills/ 的目标路径" },
+          "overwrite": { "type": "boolean", "description": "为 true 时按 frontmatter name 覆盖全部 custom 副本" }
         },
-        "required": ["name", "content"]
+        "required": ["content"]
       },
       "SkillHubUploadResponse": {
         "type": "object",
@@ -2342,11 +2376,13 @@
           "skill_count":      { "type": "integer" },
           "info": {
             "type": "object",
-            "description": "profile/info.json 内容；logo 为 Data URI base64，单图 raw ≤ 100KB",
+            "description": "profile/info.json 内容；logo 为 Data URI base64，单图 raw ≤ 4MB；置顶字段 pinned/pin_order 亦在此返回",
             "properties": {
               "display_name": { "type": "string" },
               "description":  { "type": "string" },
-              "logo":         { "type": "string", "description": "data:image/...;base64,..." }
+              "logo":         { "type": "string", "description": "data:image/...;base64,..." },
+              "pinned":       { "type": "boolean", "description": "仅 true 时返回；来自 info.json" },
+              "pin_order":    { "type": "integer", "description": "置顶组内排序，越小越靠前；新置顶为 1 并顺延其余；仅 pinned=true 时返回" }
             },
             "additionalProperties": true
           },
@@ -2435,6 +2471,14 @@
           "logo_preset":   { "type": "string", "description": "内置 logo id，与 logo_base64 互斥" },
           "logo_base64":   { "type": "string", "description": "Data URI 或 base64，与 logo_preset 互斥" },
           "remove_logo":   { "type": "boolean" }
+        }
+      },
+      "ProfilePinRequest": {
+        "type": "object",
+        "required": ["name"],
+        "properties": {
+          "name":   { "type": "string", "description": "Profile 名称（含 default）" },
+          "pinned": { "type": "boolean", "default": true, "description": "true 置顶，false 取消置顶" }
         }
       },
       "ProfileInfoUpdateResponse": {
@@ -2659,7 +2703,8 @@
           "mtime_ns": { "type": "integer", "nullable": true },
           "ctime_ns": { "type": "integer", "nullable": true, "description": "时间纳秒：优先 birthtime，否则 st_ctime（元数据变更时间）；stat 失败时为 null" },
           "ext": { "type": "string", "description": "小写扩展名，无扩展名为空字符串" },
-          "mime": { "type": "string" }
+          "mime": { "type": "string" },
+          "profile": { "type": "string", "description": "可选。manifest 成果文件所属 profile（session.profile）；非成果文件省略" }
         }
       },
       "IntegrationWorkspaceFilesResponse": {
@@ -2674,6 +2719,7 @@
           "type": { "type": "string" },
           "sort": { "type": "string", "enum": ["path", "size", "mtime", "ctime"] },
           "order": { "type": "string", "enum": ["asc", "desc"] },
+          "profile": { "type": "string", "description": "请求 echo；传入时为过滤用的 profile" },
           "total": { "type": "integer" },
           "has_more": { "type": "boolean" },
           "files": {

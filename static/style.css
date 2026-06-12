@@ -2165,6 +2165,8 @@
   .preview-media-wrap .msg-media-video{max-height:60vh;}
   .preview-pdf-wrap{display:flex;flex:1;min-height:360px;border:1px solid var(--border2);border-radius:8px;overflow:hidden;background:#fff;}
   .preview-pdf-frame{width:100%;height:100%;min-height:70vh;border:none;background:#fff;}
+  .preview-browser-wrap{display:flex;flex:1;min-height:360px;border:1px solid var(--border2);border-radius:8px;overflow:hidden;background:#0b0b0b;}
+  .preview-browser-frame{width:100%;height:100%;min-height:70vh;border:none;background:#0b0b0b;}
   /* Markdown rendered preview */
   .preview-md{font-size:13px;line-height:1.7;color:var(--text);flex:1;overflow-y:auto;min-height:0;}
   .preview-md p{margin-bottom:10px;}.preview-md p:last-child{margin-bottom:0;}
@@ -2200,6 +2202,7 @@
   .preview-badge.pdf{background:rgba(239,68,68,.12);color:#f87171;}
   .preview-badge.md{background:var(--accent-bg-strong);color:var(--accent-text);}
   .preview-badge.code{background:var(--hover-bg);color:var(--muted);}
+  .preview-badge.browser{background:rgba(59,130,246,.14);color:#60a5fa;}
   ::-webkit-scrollbar{width:4px;height:4px}
   ::-webkit-scrollbar-track{background:transparent}
   ::-webkit-scrollbar-thumb{background:rgba(255,255,255,.1);border-radius:99px;transition:background .2s}
@@ -2557,6 +2560,12 @@
 .profile-card-meta{font-size:11px;color:var(--muted);margin-top:3px;padding-left:12px;}
 .profile-card.active .profile-card-meta{color:var(--accent-text);opacity:.8;}
 .profile-card-actions{display:flex;gap:4px;flex-shrink:0;}
+.profile-card--pinned{border-color:var(--border);}
+.profile-pin-btn,.profile-pin-detail-btn{display:inline-flex;align-items:center;justify-content:center;padding:4px;border:1px solid transparent;border-radius:6px;background:transparent;color:var(--muted);cursor:pointer;transition:color .15s,background .15s,border-color .15s;}
+.profile-pin-btn:hover,.profile-pin-detail-btn:hover{color:var(--text);background:var(--surface);border-color:var(--border);}
+.profile-pin-btn.is-pinned,.profile-pin-detail-btn.is-pinned{color:var(--link);}
+.profile-opt-pin{display:inline-flex;align-items:center;justify-content:center;margin-right:4px;color:var(--link);vertical-align:-2px;}
+.profile-opt-pin svg{width:12px;height:12px;}
 /* ── Slash command autocomplete dropdown ── */
 .cmd-dropdown{display:none;position:absolute;left:0;right:0;bottom:calc(100% + 4px);width:auto;max-width:100%;background:var(--surface);border:1px solid var(--border2);border-radius:10px;box-shadow:0 -8px 24px rgba(0,0,0,.4);z-index:200;max-height:240px;overflow-y:auto;}
 .cmd-dropdown.open{display:block;}
@@ -4709,6 +4718,19 @@ main.main > .main-view:not([id="mainChat"]):not([id="mainSettings"]) .main-view-
 .rightpanel[data-active-tab="tasks"] .workspace-tasks{display:block;}
 .rightpanel[data-active-tab="references"] .workspace-references{display:block;}
 .rightpanel[data-active-tab="files"] .workspace-inspector-list{display:none!important;}
+.rightpanel.browser-preview-active .workspace-panel-tabs,
+.rightpanel.browser-preview-active .breadcrumb-bar,
+.rightpanel.browser-preview-active .file-tree,
+.rightpanel.browser-preview-active .workspace-inspector-list,
+.rightpanel.browser-preview-active #wsEmptyState{display:none!important;}
+.rightpanel.browser-preview-active .panel-header .workspace-panel-title-group,
+.rightpanel.browser-preview-active .panel-header .git-badge,
+.rightpanel.browser-preview-active .panel-header .panel-actions > :not(#btnClearPreview){display:none!important;}
+.rightpanel.browser-preview-active .panel-header{padding:6px 8px;border-bottom:1px solid var(--border);}
+.rightpanel.browser-preview-active .panel-header .panel-actions{margin-left:auto;width:100%;justify-content:flex-end;}
+.rightpanel.browser-preview-active .preview-area{flex:1;min-height:0;overflow:hidden;padding:6px 8px 8px;}
+.rightpanel.browser-preview-active .preview-browser-wrap{flex:1;min-height:0;}
+.rightpanel.browser-preview-active .preview-browser-frame{min-height:0;height:100%;}
 .workspace-artifacts,.workspace-artifacts-count{/* legacy aliases */}
 
 .cron-run-usage-strip{display:inline-flex;align-items:center;gap:4px;margin-left:8px;color:var(--text-secondary);font-size:11px;opacity:.72;white-space:nowrap;}

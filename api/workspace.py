@@ -1356,6 +1356,47 @@ def workspace_file_entry_fields(rel_path: str) -> dict:
     return {"ext": ext, "mime": mime}
 
 
+def _workspace_file_entry_from_stat(rel_path: str, st: os.stat_result) -> dict:
+    mtime_ns, ctime_ns = _workspace_file_times(st)
+    entry = {
+        "path": rel_path,
+        "size": st.st_size,
+        "mtime_ns": mtime_ns,
+        "ctime_ns": ctime_ns,
+    }
+    entry.update(workspace_file_entry_fields(rel_path))
+    return entry
+
+
+def _append_workspace_file_entry(
+    entries: list[dict],
+    *,
+    workspace_root: Path,
+    fp: Path,
+) -> None:
+    if fp.is_symlink():
+        try:
+            resolved = fp.resolve()
+            if not resolved.is_relative_to(workspace_root):
+                return
+            if not resolved.is_file():
+                return
+        except (ValueError, OSError):
+            return
+    elif not fp.is_file():
+        return
+    try:
+        resolved = fp.resolve()
+        rel_path = resolved.relative_to(workspace_root).as_posix()
+    except (ValueError, OSError):
+        return
+    try:
+        st = resolved.stat()
+    except OSError:
+        return
+    entries.append(_workspace_file_entry_from_stat(rel_path, st))
+
+
 def _collect_workspace_file_entries(workspace: Path, rel: str) -> list[dict]:
     """Walk workspace under *rel* and collect file metadata entries."""
     workspace_root = workspace.expanduser().resolve()
@@ -1364,58 +1405,68 @@ def _collect_workspace_file_entries(workspace: Path, rel: str) -> list[dict]:
         raise FileNotFoundError(f"Not a directory: {rel}")
 
     entries: list[dict] = []
-    for root, dirs, names in os.walk(target, followlinks=False):
-        root_path = Path(root)
+
+    def _scan_dir(dir_path: Path) -> None:
         try:
-            if not root_path.resolve().is_relative_to(workspace_root):
-                dirs[:] = []
-                continue
+            if not dir_path.resolve().is_relative_to(workspace_root):
+                return
         except (ValueError, OSError):
-            dirs[:] = []
+            return
+        try:
+            with os.scandir(dir_path) as scan_it:
+                subdirs: list[str] = []
+                names: list[str] = []
+                for entry in scan_it:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            if should_prune_workspace_walk_dir(entry.name):
+                                continue
+                            subdirs.append(entry.name)
+                        elif entry.is_file(follow_symlinks=False) or entry.is_symlink():
+                            if is_workspace_cruft_basename(entry.name):
+                                continue
+                            names.append(entry.name)
+                    except OSError:
+                        continue
+                for name in sorted(subdirs):
+                    _scan_dir(dir_path / name)
+                for name in sorted(names):
+                    _append_workspace_file_entry(
+                        entries,
+                        workspace_root=workspace_root,
+                        fp=dir_path / name,
+                    )
+        except OSError:
+            return
+
+    _scan_dir(target)
+    return entries
+
+
+def collect_workspace_file_entries_for_paths(
+    workspace: Path,
+    paths: set[str] | frozenset[str],
+) -> list[dict]:
+    """Build file metadata entries for explicit workspace-relative paths."""
+    workspace_root = workspace.expanduser().resolve()
+    entries: list[dict] = []
+    for rel_path in sorted(paths):
+        path = str(rel_path or "").strip()
+        if not path:
             continue
-        dirs.sort()
-        dirs[:] = [d for d in dirs if not should_prune_workspace_walk_dir(d)]
-        for name in sorted(names):
-            if is_workspace_cruft_basename(name):
-                continue
-            fp = root_path / name
-            if fp.is_symlink():
-                try:
-                    if not fp.resolve().is_relative_to(workspace_root):
-                        continue
-                except (ValueError, OSError):
-                    continue
-                try:
-                    if not fp.resolve().is_file():
-                        continue
-                except OSError:
-                    continue
-            elif not fp.is_file():
-                continue
-            try:
-                resolved = fp.resolve()
-                rel_path = resolved.relative_to(workspace_root).as_posix()
-            except (ValueError, OSError):
-                continue
-
-            size = None
-            mtime_ns = None
-            ctime_ns = None
-            try:
-                st = resolved.stat()
-                size = st.st_size
-                mtime_ns, ctime_ns = _workspace_file_times(st)
-            except OSError:
-                pass
-
-            entry = {
-                "path": rel_path,
-                "size": size,
-                "mtime_ns": mtime_ns,
-                "ctime_ns": ctime_ns,
-            }
-            entry.update(workspace_file_entry_fields(rel_path))
-            entries.append(entry)
+        if is_workspace_cruft_basename(Path(path).name):
+            continue
+        try:
+            target = safe_resolve_ws(workspace, path)
+        except ValueError:
+            continue
+        if not target.is_file():
+            continue
+        _append_workspace_file_entry(
+            entries,
+            workspace_root=workspace_root,
+            fp=target,
+        )
     return entries
 
 
@@ -1469,9 +1520,8 @@ def _sort_workspace_file_entries(
     return entries
 
 
-def walk_workspace_files_page(
-    workspace: Path,
-    rel: str = ".",
+def paginate_workspace_file_entries(
+    entries: list[dict],
     *,
     page: int,
     page_size: int,
@@ -1480,11 +1530,7 @@ def walk_workspace_files_page(
     sort: str = "path",
     order: str = "desc",
 ) -> dict:
-    """Walk workspace under *rel*, filter/sort, and return one page of files.
-
-    Paths are relative to *workspace* root (POSIX). Pagination uses
-    ``offset = (page - 1) * page_size`` over the filtered sorted file order.
-    """
+    """Filter/sort *entries* and return one page of files."""
     if sort not in WORKSPACE_FILE_SORT_FIELDS:
         raise ValueError(f"Invalid sort: {sort}")
     if order not in WORKSPACE_FILE_SORT_ORDERS:
@@ -1495,7 +1541,6 @@ def walk_workspace_files_page(
     if type_ext and type_ext_norm is None:
         raise ValueError(f"Invalid type: {type_ext}")
 
-    entries = _collect_workspace_file_entries(workspace, rel)
     filtered = [
         entry for entry in entries
         if _matches_workspace_file_filters(entry, q_norm, type_ext_norm)
@@ -1512,6 +1557,38 @@ def walk_workspace_files_page(
         "total": total,
         "has_more": has_more,
     }
+
+
+def walk_workspace_files_page(
+    workspace: Path,
+    rel: str = ".",
+    *,
+    page: int,
+    page_size: int,
+    q: str | None = None,
+    type_ext: str | None = None,
+    sort: str = "path",
+    order: str = "desc",
+    allowed_paths: set[str] | frozenset[str] | None = None,
+) -> dict:
+    """Walk workspace under *rel*, filter/sort, and return one page of files.
+
+    Paths are relative to *workspace* root (POSIX). Pagination uses
+    ``offset = (page - 1) * page_size`` over the filtered sorted file order.
+    """
+    entries = _collect_workspace_file_entries(workspace, rel)
+    if allowed_paths is not None:
+        allowed = allowed_paths
+        entries = [entry for entry in entries if entry.get('path') in allowed]
+    return paginate_workspace_file_entries(
+        entries,
+        page=page,
+        page_size=page_size,
+        q=q,
+        type_ext=type_ext,
+        sort=sort,
+        order=order,
+    )
 
 
 # ── Git detection ──────────────────────────────────────────────────────────

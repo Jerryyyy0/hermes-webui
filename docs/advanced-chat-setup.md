@@ -81,3 +81,29 @@ locally and want browser-originated chat to use the same runtime/tool path as
 messaging surfaces. Attachments, cancellation, approvals, and clarify prompts
 still follow WebUI's current compatibility path and may not match every messaging
 surface until the runtime-adapter migration is complete.
+
+## Browser tool preview (Camofox / remote VNC)
+
+详细 SSE 契约与前端行为见 **[browser-preview-sse.md](./browser-preview-sse.md)**。
+
+When the agent uses browser tools in a WebUI chat turn, the server can emit a
+one-shot SSE event named `browser_preview` so the UI embeds the remote preview
+in the right-hand workspace panel. Configure the preview endpoint with:
+
+```bash
+# Agent browser control (Hermes / Camofox)
+CAMOFOX_URL=http://192.168.1.139:9377
+
+# Embedded noVNC viewer (can differ from CAMOFOX_URL)
+BROWSER_PREVIEW_URL=http://192.168.1.139:6080/vnc.html?path=websockify?token=user1
+```
+
+The event is sent on the **first** `browser_*` tool start in each chat stream,
+not at `/api/chat/start`. If neither `BROWSER_PREVIEW_URL` nor `CAMOFOX_URL` is
+set to a valid `http://` / `https://` URL, no event is emitted. When both are
+set, `BROWSER_PREVIEW_URL` wins for the workspace iframe. The SSE payload
+includes `session_id`, `stream_id`, `url`, `source` (`camofox`), and the
+triggering tool name. The WebUI adds the preview origin to CSP `frame-src`
+automatically. Use `HERMES_WEBUI_CSP_FRAME_EXTRA` to allow additional iframe
+origins if needed. The preview toolbar includes **Open in browser** to pop the
+VNC viewer out into a separate tab.

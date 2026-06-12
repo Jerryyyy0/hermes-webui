@@ -6,7 +6,7 @@ import base64
 import json
 from pathlib import Path
 
-from integration.profiles.enrich import normalize_logo_data_uri
+from integration.profiles.enrich import LOGO_MAX_BYTES, normalize_logo_data_uri
 
 _PRESETS_ROOT = Path(__file__).resolve().parent.parent / "assets" / "profile-logos"
 _MANIFEST_PATH = _PRESETS_ROOT / "manifest.json"
@@ -90,7 +90,7 @@ def preset_logo_data_uri(preset_id: str) -> str | None:
         "webp": "image/webp",
     }.get(ext, "image/png")
     raw = file_path.read_bytes()
-    if len(raw) > 100 * 1024:
+    if len(raw) > LOGO_MAX_BYTES:
         return None
     b64 = base64.b64encode(raw).decode("ascii")
     return normalize_logo_data_uri(f"data:{mime};base64,{b64}")

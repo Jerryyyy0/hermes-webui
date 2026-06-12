@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Added
+- **Browser tool preview SSE.** When `BROWSER_PREVIEW_URL` or `CAMOFOX_URL` is set to a valid `http://` or `https://` remote viewer endpoint, WebUI emits a one-shot `browser_preview` chat-stream event the first time a `browser_*` tool starts in a turn so the UI embeds the preview in the workspace panel (`BROWSER_PREVIEW_URL` overrides `CAMOFOX_URL` when both are set).
+
 ## [v0.51.335] — 2026-06-08 — Release KY (normalize inline thinking extraction)
 
 ### Fixed

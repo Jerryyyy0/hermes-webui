@@ -248,14 +248,31 @@ def _run_gateway_chat_streaming(
         except Exception:
             logger.debug("Failed to put gateway event to queue")
 
+    from api.browser_preview import BrowserPreviewEmitter
+
+    _browser_preview = BrowserPreviewEmitter()
+
+    def _maybe_emit_gateway_browser_preview(tool_name):
+        _browser_preview.maybe_emit(put_gateway_event, session_id, stream_id, tool_name)
+
     manifest_delta_sequence = [0]
     manifest_turn_key = str(stream_turn_key or "").strip()
+    gateway_session = None
     if not manifest_turn_key:
         try:
-            current_session = get_session(session_id)
-            manifest_turn_key = f"turn:{len(getattr(current_session, 'messages', []) or [])}"
+            gateway_session = get_session(session_id)
+            manifest_turn_key = f"turn:{len(getattr(gateway_session, 'messages', []) or [])}"
         except Exception:
             manifest_turn_key = ""
+
+    def _gateway_manifest_default_profile() -> str:
+        nonlocal gateway_session
+        try:
+            if gateway_session is None:
+                gateway_session = get_session(session_id)
+            return str(getattr(gateway_session, 'profile', None) or '').strip()
+        except Exception:
+            return ''
 
     def _gateway_manifest_skills_dir():
         try:
@@ -292,6 +309,7 @@ def _run_gateway_chat_streaming(
                 sequence=manifest_delta_sequence[0],
                 source_kind="tool_complete" if is_complete else "tool_start",
                 skills_dir=_gateway_manifest_skills_dir(),
+                default_profile=_gateway_manifest_default_profile(),
             )
             if not (delta.get("todos") or delta.get("artifacts") or delta.get("references")):
                 return
@@ -442,6 +460,8 @@ def _run_gateway_chat_streaming(
                                         shared_tc["is_error"] = bool(event_payload.get("is_error"))
                                         break
                         emit_gateway_manifest_delta(event_payload, event_name)
+                        if event_name == "tool":
+                            _maybe_emit_gateway_browser_preview(event_payload.get("name"))
                         put_gateway_event(event_name, event_payload)
                         update_active_run(stream_id, phase="gateway-tool", latest_tool=event_payload.get("name"))
                     sse_event = "message"
@@ -526,19 +546,21 @@ def _run_gateway_chat_streaming(
         gateway_session_payload = s.compact() | {"messages": s.messages, "tool_calls": []}
         try:
             from api.session_manifest import (
-                extract_manifest_delta_from_assistant_media,
+                extract_manifest_delta_from_turn_reconcile,
                 merge_manifest_delta,
             )
             manifest_delta_sequence[0] += 1
-            media_delta = extract_manifest_delta_from_assistant_media(
+            reconcile_delta = extract_manifest_delta_from_turn_reconcile(
                 list(getattr(s, "messages", None) or []),
                 Path(str(workspace)),
                 session_id=session_id,
                 stream_id=stream_id,
                 turn_key=manifest_turn_key,
                 sequence=manifest_delta_sequence[0],
+                default_profile=_gateway_manifest_default_profile(),
+                skills_dir=_gateway_manifest_skills_dir(),
             )
-            if media_delta.get("artifacts") or media_delta.get("turns"):
+            if reconcile_delta.get("artifacts") or reconcile_delta.get("turns"):
                 with STREAMS_LOCK:
                     live_manifest = merge_manifest_delta(
                         STREAM_LIVE_MANIFEST.get(stream_id) or {
@@ -547,13 +569,13 @@ def _run_gateway_chat_streaming(
                             "references": [],
                             "turns": [],
                         },
-                        media_delta,
+                        reconcile_delta,
                         scope="active_stream",
                     )
                     STREAM_LIVE_MANIFEST[stream_id] = live_manifest
-                put_gateway_event("manifest_delta", media_delta)
+                put_gateway_event("manifest_delta", reconcile_delta)
         except Exception:
-            logger.debug("Failed to emit gateway turn_complete MEDIA manifest_delta", exc_info=True)
+            logger.debug("Failed to emit gateway turn_complete reconcile manifest_delta", exc_info=True)
         put_gateway_event("done", {"session": redact_session_data(gateway_session_payload), "usage": usage})
         put_gateway_event("stream_end", {"session_id": session_id})
     except urllib.error.HTTPError as exc:

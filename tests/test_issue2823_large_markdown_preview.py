@@ -32,7 +32,7 @@ def test_large_markdown_preview_limits_are_source_controlled():
 
 
 def test_backend_file_read_limit_allows_plain_text_markdown_fallback():
-    assert "MAX_FILE_BYTES = 400_000" in CONFIG_PY
+    assert 'MAX_FILE_BYTES = _env_mb_bytes("HERMES_WEBUI_MAX_FILE_MB", 10)' in CONFIG_PY
 
 
 def test_large_markdown_force_render_affordance_exists():

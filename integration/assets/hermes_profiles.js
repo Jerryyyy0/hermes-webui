@@ -4,8 +4,13 @@
   const cfg = window.__HERMES_CONFIG__ || {};
   if (!cfg.integrationSkills) return;
 
+  const LOGO_MAX_BYTES = 4 * 1024 * 1024;
+
   let _presetsCache = null;
   let _logoPickerState = { mode: 'none', presetId: '', logoBase64: '' };
+
+  const PIN_ICON = '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" stroke="none" aria-hidden="true"><polygon points="8,1.5 9.8,5.8 14.5,6.2 11,9.4 12,14 8,11.5 4,14 5,9.4 1.5,6.2 6.2,5.8"/></svg>';
+  const UNPIN_ICON = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><polygon points="8,2 9.8,6.2 14.2,6.2 10.7,9.2 12,13.8 8,11 4,13.8 5.3,9.2 1.8,6.2 6.2,6.2"/></svg>';
 
   function profileInfo(p) {
     return (p && p.info && typeof p.info === 'object') ? p.info : {};
@@ -30,6 +35,41 @@
     const src = profileLogo(p);
     if (!src) return '';
     return `<img class="${cls}" src="${src}" alt="" loading="lazy">`;
+  }
+
+  function profilePinned(p) {
+    return profileInfo(p).pinned === true;
+  }
+
+  function profilePinLabel(pinned) {
+    if (typeof t !== 'function') return pinned ? 'Unpin' : 'Pin';
+    return pinned ? t('profile_unpin') : t('profile_pin');
+  }
+
+  function profilePinBtnHtml(p) {
+    if (!p) return '';
+    const pinned = profilePinned(p);
+    const label = profilePinLabel(pinned);
+    return `<button type="button" class="profile-pin-btn${pinned ? ' is-pinned' : ''}" title="${esc(label)}" aria-label="${esc(label)}">${pinned ? PIN_ICON : UNPIN_ICON}</button>`;
+  }
+
+  function profileOptPinHtml(p) {
+    if (!p || !profilePinned(p)) return '';
+    return `<span class="profile-opt-pin" title="${esc(profilePinLabel(true))}" aria-hidden="true">${PIN_ICON}</span>`;
+  }
+
+  async function toggleProfilePin(profile, nextPinned) {
+    if (!profile || !profile.name) return;
+    try {
+      await api('/api/profile/pin', {
+        method: 'POST',
+        body: JSON.stringify({ name: profile.name, pinned: !!nextPinned }),
+      });
+      await loadProfilesPanel();
+    } catch (e) {
+      const msg = (e && e.message) || (typeof t === 'function' ? t('profiles_load_failed') : 'Failed');
+      if (typeof showToast === 'function') showToast(msg);
+    }
   }
 
   function resetLogoPickerState(initial) {
@@ -106,8 +146,8 @@
       fileInput.onchange = () => {
         const file = fileInput.files && fileInput.files[0];
         if (!file) return;
-        if (file.size > 100 * 1024) {
-          if (typeof showToast === 'function') showToast('Logo must be 100KB or smaller');
+        if (file.size > LOGO_MAX_BYTES) {
+          if (typeof showToast === 'function') showToast('Logo must be 4MB or smaller');
           return;
         }
         const reader = new FileReader();
@@ -173,7 +213,7 @@
         : (data.active || 'default');
       for (const p of data.profiles) {
         const card = document.createElement('div');
-        card.className = 'profile-card';
+        card.className = 'profile-card' + (profilePinned(p) ? ' profile-card--pinned' : '');
         card.dataset.name = p.name;
         const { title, sub } = profileTitle(p);
         const desc = profileDescription(p);
@@ -197,7 +237,15 @@
             ${meta.length ? `<div class="profile-card-meta">${esc(meta.join(' · '))}</div>` : `<div class="profile-card-meta">${esc(typeof t === 'function' ? t('profile_no_configuration') : '')}</div>`}
             ${desc ? `<div class="profile-card-meta" style="margin-top:4px">${esc(desc)}</div>` : ''}
           </div>
+          <div class="profile-card-actions">${profilePinBtnHtml(p)}</div>
         </div>`;
+        const pinBtn = card.querySelector('.profile-pin-btn');
+        if (pinBtn) {
+          pinBtn.onclick = (ev) => {
+            ev.stopPropagation();
+            toggleProfilePin(p, !profilePinned(p));
+          };
+        }
         card.onclick = () => typeof openProfileDetail === 'function' && openProfileDetail(p.name, card);
         if (typeof _currentProfileDetail !== 'undefined' && _currentProfileDetail && _currentProfileDetail.name === p.name) card.classList.add('active');
         panel.appendChild(card);
@@ -231,7 +279,7 @@
       const checkmark = p.name === active ? ' <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--link)" stroke-width="3" style="vertical-align:-1px"><polyline points="20 6 9 17 4 12"/></svg>' : '';
       const defaultBadge = p.is_default ? ` <span style="opacity:.5;font-weight:400">${esc(typeof t === 'function' ? t('profile_default_label') : 'default')}</span>` : '';
       const subHtml = sub ? `<div class="profile-opt-meta" style="opacity:.65">${esc(sub)}</div>` : '';
-      opt.innerHTML = `<div class="profile-opt-name">${logoImg(p, 'profile-opt-logo')}${gwDot}${esc(title)}${defaultBadge}${checkmark}</div>` +
+      opt.innerHTML = `<div class="profile-opt-name">${profileOptPinHtml(p)}${logoImg(p, 'profile-opt-logo')}${gwDot}${esc(title)}${defaultBadge}${checkmark}</div>` +
         subHtml +
         (meta.length ? `<div class="profile-opt-meta">${esc(meta.join(' · '))}</div>` : '');
       opt.onclick = async () => {
@@ -294,7 +342,8 @@
       ? `<span class="detail-badge ok">${esc(typeof t === 'function' ? t('profile_gateway_running') : 'Gateway running')}</span>`
       : `<span class="detail-badge">${esc(typeof t === 'function' ? t('profile_gateway_stopped') : 'Gateway stopped')}</span>`;
     const rows = [];
-    rows.push(`<div class="detail-row"><div class="detail-row-label">Status</div><div class="detail-row-value">${statusBadge}${defaultBadge}</div></div>`);
+    const pinBtn = `<button type="button" class="btn btn-sm profile-pin-detail-btn${profilePinned(p) ? ' is-pinned' : ''}" id="btnProfilePin">${esc(profilePinLabel(profilePinned(p)))}</button>`;
+    rows.push(`<div class="detail-row"><div class="detail-row-label">Status</div><div class="detail-row-value">${statusBadge}${defaultBadge}${pinBtn ? ` ${pinBtn}` : ''}</div></div>`);
     rows.push(`<div class="detail-row"><div class="detail-row-label">Gateway</div><div class="detail-row-value">${gwBadge}</div></div>`);
     if (p.model) rows.push(`<div class="detail-row"><div class="detail-row-label">Model</div><div class="detail-row-value"><code>${esc(p.model)}</code></div></div>`);
     if (p.provider) rows.push(`<div class="detail-row"><div class="detail-row-label">Provider</div><div class="detail-row-value">${esc(p.provider)}</div></div>`);
@@ -327,6 +376,8 @@
     if (typeof _setProfileHeaderButtons === 'function') _setProfileHeaderButtons('read', p, activeName);
     const editBtn = $('btnEditProfileInfo');
     if (editBtn) editBtn.onclick = () => openProfileEdit(p);
+    const pinDetailBtn = $('btnProfilePin');
+    if (pinDetailBtn) pinDetailBtn.onclick = () => toggleProfilePin(p, !profilePinned(p));
   }
 
   function openProfileEdit(p) {

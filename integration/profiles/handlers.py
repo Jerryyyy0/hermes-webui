@@ -7,6 +7,7 @@ from urllib.parse import parse_qs
 from api.helpers import bad, j
 
 from integration.config import integration_enabled
+from integration.profiles.pin import set_profile_pinned
 from integration.profiles.presets import list_logo_presets
 from integration.profiles.write import save_profile_info
 
@@ -38,6 +39,20 @@ def try_handle_post(handler, parsed, body: dict | None) -> bool:
                 fields[key] = body[key]
         try:
             result = save_profile_info(name, fields)
+            j(handler, result)
+        except FileNotFoundError as exc:
+            bad(handler, str(exc), 404)
+        except ValueError as exc:
+            bad(handler, str(exc), 400)
+        return True
+    if parsed.path == "/api/profile/pin":
+        name = str(body.get("name") or "").strip()
+        if not name:
+            bad(handler, "name is required")
+            return True
+        pinned = bool(body.get("pinned", True))
+        try:
+            result = set_profile_pinned(name, pinned)
             j(handler, result)
         except FileNotFoundError as exc:
             bad(handler, str(exc), 404)

@@ -54,27 +54,31 @@ Manifest **不是**：
 
 ### 归纳规则
 
-聚合统计当前会话所有轮次中由**写入类工具**带来的路径，以及 assistant 正文中显式交付的 **`MEDIA:` 本地文件**。
+聚合统计当前会话所有轮次中由**写入类工具**带来的路径、assistant 正文中显式交付的 **`MEDIA:` 本地文件**，以及 **turn 完成后的明确交付路径 reconcile**。实现上会先从 assistant/tool 文本中广泛收集文件路径候选，但候选不会直接展示；只有具备写入、交付、转换输出等证据并通过真实文件预览校验后，才提升为 Artifacts。
 
 路径来源包括：
 
 - 工具参数里明确的路径字段；
 - patch / diff 文本中能解析出的目标文件；
-- **`role=assistant` 消息**中的 `MEDIA:<local-path>`（正则与 `/api/media` 一致；`source_tool` 固定为 `media`）。
+- **`role=assistant` 消息**中的 `MEDIA:<local-path>`（正则与 `/api/media` 一致；`source_tool` 固定为 `media`）；
+- **assistant 明确交付语句**中的路径，例如 `文件路径：...`、`已保存: ...`、`已保存到 ...`、`输出文件：...`，以及含“已生成 / Word 版已生成 / converted / generated”等交付语境的 backtick / Markdown 路径（`source_tool` 为 `assistant_prose`；须 workspace 内文件真实存在）；
+- **通用工具结果**（如 `execute_code`、`terminal`）输出中的明确交付语句（`source_tool` 保留原工具名；JSON 结果会解码 `output` 等字段后再匹配；须 workspace 内文件真实存在）；
+- **通用命令的明确输出参数**，例如 `terminal` 中的 `pandoc input.md -o output.docx` / `--output output.docx`（仅作为 turn reconcile 的高置信写入证据；须 workspace 内文件真实存在）。
 
 **不算**成果的情况：
 
 - 仅 `read_file`、`grep`、`list_dir` 等只读操作（归入「参考」）；
 - 助手回复里提到「我改了某某文件」但未产生对应工具记录；
-- `role=user` 消息中的 `MEDIA:`、助手 prose 里随口提到的路径（无 `MEDIA:` 标记）；
+- `role=user` 消息中的 `MEDIA:`、assistant/tool 文本里**随口提到**的路径（可进入内部候选池，但无 `MEDIA:`、写入、交付语境或转换输出证据时不会进入 Artifacts）；
 - `MEDIA:https://...` 远程 URL、工具 JSON 里的 `file_path`/`media_tag`（未写入 assistant 正文）；
-- 整个 workspace 目录扫描结果。
+- 整个 workspace 目录扫描结果、`ls` / `rg` / 搜索结果 / 日志 / traceback 中普通出现的文件路径；
+- workspace 外绝对路径（除非来自 assistant `MEDIA:`）。
 
 同一路径若既有写入类工具又有 `MEDIA:`，`source_tool` **保留写入工具名**（`write_file` 优先于 `media`）。
 
 ### 路径与预览
 
-Manifest **只返回可预览条目**；每条仅含 `path`、`preview`（`"file"` | `"skill"`）、`source_tool` 三字段。不可预览路径（目录、缺失、过大、cruft 等）不出现在列表中；常见依赖/构建目录（如 `.git`、`node_modules`、虚拟环境等）会被过滤。用户点击条目时如何拉取正文，见下文 [文件预览接口](#文件预览接口)。
+Manifest **只返回可预览条目**；每条含 `path`、`preview`（`"file"` | `"skill"`）、`source_tool`；`artifacts[]` 还可选带 `profile`（来自 `session.profile`）。不可预览路径（目录、缺失、过大、cruft 等）不出现在列表中；常见依赖/构建目录（如 `.git`、`node_modules`、虚拟环境等）会被过滤。用户点击条目时如何拉取正文，见下文 [文件预览接口](#文件预览接口)。
 
 `preview: "file"` 时 **`path` 形态决定拉取接口**（不新增 preview 枚举）：
 
@@ -83,7 +87,7 @@ Manifest **只返回可预览条目**；每条仅含 `path`、`preview`（`"file
 | workspace **相对路径** | session workspace 内文件 | `/api/integration/workspace/file?path=` |
 | **绝对路径** | workspace 外、由 assistant `MEDIA:` 引用的本地文件（`source_tool=media`） | `/api/media?path=&session_id=` |
 
-同一文件若在不同轮次或同一轮中被多次写入，**右侧 Artifacts tab** 中合并为一条。聊天区则在每轮对话 **done** 后，于该轮 assistant 下方展示本轮成果文件 chips，不在流式中途展示。
+同一文件若在不同轮次或同一轮中被多次写入，**右侧 Artifacts tab** 中合并为一条。聊天区则在每轮对话 **done** 后，于该轮 assistant 下方展示本轮成果文件 chips，不在流式中途展示。Turn reconcile 仅归因当前轮消息切片，以及 `assistant_msg_idx` 落在该轮 `[start_msg_idx, end_msg_idx]` 范围内的 `session.tool_calls`，避免后续轮次产物回填到早期轮次。
 
 ## 参考（References）
 
@@ -98,7 +102,7 @@ Manifest **只返回可预览条目**；每条仅含 `path`、`preview`（`"file
 - 写入类工具改过的文件（归入「成果」）；
 - 搜索命中的文件，但后续没有被读取/打开；
 - 列目录看到的目录或文件名；
-- 助手正文里提到的路径，但没有对应读取记录。
+- 助手正文里提到的路径（含明确交付语句），**永远不进入 References**；交付语句只可能进入 Artifacts。
 
 ### 路径与预览
 
@@ -246,7 +250,7 @@ SkillHub UI 可选 `scope=custom`（仅本地）或 `scope=hub`（仅上游）�
 - Tasks 展示从 `todo` 工具结果合并出的最新快照；
 - Artifacts 展示所有轮次产生的成果，按路径聚合去重（右侧 tab）；
 - References 展示所有轮次实际读取/打开过的内容来源，按来源聚合去重（右侧 tab）；
-- Turns 供聊天区 per-turn 成果展示：每轮 **done** 后，在该轮 assistant 下方展示本轮 `artifacts[]`（仅写入类工具明确解析出的路径）。
+- Turns 供聊天区 per-turn 成果展示：每轮 **done** 后，在该轮 assistant 下方展示本轮 `artifacts[]`（仅写入类工具明确解析出的路径；`session.tool_calls` 需按该轮消息范围归因）。
 
 当 manifest 暂时不可用或成果列表为空时，**成果** tab 可能用当前页面上已知的工具活动做**窄范围**的补充（仅写入类工具与 diff 片段），一旦 manifest 返回则以后端归纳结果为准。
 
@@ -366,17 +370,22 @@ Manifest 会在这些时机**重新拉取**（通常带短防抖，避免工具�
   - 通用写入类工具（见上）直接写入 profile `{HERMES_HOME}/skills/.../SKILL.md` 时同样写入 `artifacts[]`，`path` 为相对 skills 根的技能名；仅 `SKILL.md` 触发，skills 下其它文件不算 skill 成果。
   - 校验 session profile skills 目录下 `SKILL.md` 存在；`delete` / `remove_file` 不算成果；`in_progress` 不 wire。
 - 解析来源（MEDIA 交付）：`media`（仅 `role=assistant` 正文中的本地 `MEDIA:` 标记；不解析 `role=user`、远程 URL、工具 JSON）。
+- 解析来源（交付 prose）：`assistant_prose`（带明确交付关键词的 assistant 语句，如 `文件路径`、`已保存`、`输出文件`；或交付语境中的 backtick / Markdown 路径，如“Word 版已生成：`foo.docx`”；普通路径提及只作为内部候选，不直接展示）。
+- 解析来源（工具交付输出）：通用工具（如 `execute_code`、`terminal`）JSON/文本结果中的明确交付语句，或 `pandoc -o/--output` 这类明确输出参数；`source_tool` 保留原工具名。
 - 解析时机：
   - `tool_start`：仅从写入类工具参数解析路径，生成 `status='in_progress'` 的 delta。
-  - `tool_complete`：再次解析写入类参数/结果/diff；**不产生** MEDIA 条目（此时尚无 assistant `MEDIA:` 正文）。
-  - `turn_complete`（SSE）：assistant 消息落盘后、`done` 前，从**本轮** assistant 消息解析 `MEDIA:` → `manifest_delta`（`source.kind=turn_complete`）。
-  - `/api/session/manifest` 构建：从持久化 assistant/tool 消息、`session.tool_calls` 与全会话 assistant `MEDIA:` 重建 artifacts，并归属到对应 turn。
+  - `tool_complete`：再次解析写入类参数/结果/diff；**不产生** MEDIA / 交付 prose 条目（此时尚无 assistant 正文）。
+  - `turn_complete`（SSE）：assistant 消息落盘后、`done` 前，从**本轮** transcript reconcile（`MEDIA:`、assistant 交付 prose、工具交付输出、通用命令输出参数）→ `manifest_delta`（`source.kind=turn_complete`）。
+  - `/api/session/manifest` 构建：从持久化 assistant/tool 消息、`session.tool_calls`、全会话 `MEDIA:` 与 per-turn reconcile 重建 artifacts，并归属到对应 turn。
 - 字段来源：
   - 工具参数里的明确路径字段，如 `path`、`file_path`、`target`、`destination`、`filename`、`paths[]`、`edits[].path`。
   - unified diff 中的 `+++ b/path` / `--- a/path`。
   - ApplyPatch 文本中的 `*** Add File:` / `*** Update File:`。
   - assistant 正文 `MEDIA:([^\s\)\]]+)`（跳过含 `://` 的 ref）。
-- 不解析只读工具结果、无 `MEDIA:` 标记的 assistant prose、全 workspace 扫描结果，以及 `.git`、`node_modules`、虚拟环境、构建目录等忽略路径。workspace 外路径**仅**在 `source_tool=media` 时可预览列出。
+  - assistant / 工具结果中的明确交付语句（带交付关键词 + 路径；reconcile 时须文件真实存在）。
+  - assistant / tool 文本中的广泛文件路径候选池（backtick、Markdown link label、绝对路径、workspace 相对路径）；候选必须经过写入/交付/转换证据提升后才进入 `artifacts[]`。
+  - `terminal` / `shell` 等通用命令中的高置信输出参数（当前支持 `pandoc -o/--output/--output-file`）。
+- 不提升只读工具结果、无交付语境的 assistant prose、全 workspace 扫描结果、`ls` / `rg` / 搜索结果 / 日志 / traceback 中普通出现的路径，以及 `.git`、`node_modules`、虚拟环境、构建目录等忽略路径。workspace 外路径**仅**在 `source_tool=media` 时可预览列出。`execute_code` 等通用执行工具**不**进入写入工具白名单。
 
 ### References
 
@@ -395,14 +404,14 @@ Manifest 会在这些时机**重新拉取**（通常带短防抖，避免工具�
 | --- | --- | --- | --- |
 | `tool_start` | 不解析 | 从写入类工具参数解析明确路径，标记 `in_progress` | 从读取/打开工具参数解析明确路径，标记 `in_progress` |
 | `tool_complete` | 从 `todo` 结果顶层 `todos[]` 解析最新快照 | 从写入类工具参数、结果、diff/patch 解析目标路径 | 从读取/打开工具参数确认实际引用来源 |
-| `turn_complete` | 不解析 | 从本轮已落盘 assistant 消息解析本地 `MEDIA:` | 不解析 |
-| `/api/session/manifest` | 从持久化 tool 消息按 `id` 合并 `todos[]` | 从持久化工具活动 + assistant `MEDIA:` 重建全会话和轮次 artifacts | 从持久化工具活动重建全会话和轮次 references |
+| `turn_complete` | 不解析 | 从本轮 transcript reconcile（`MEDIA:`、assistant 交付 prose、tool args/result/diff、通用命令输出参数；须 workspace 内文件真实存在） | 不解析 |
+| `/api/session/manifest` | 从持久化 tool 消息按 `id` 合并 `todos[]` | 从持久化工具活动 + `MEDIA:` + turn reconcile 重建全会话和轮次 artifacts | 从持久化工具活动重建全会话和轮次 references |
 | SSE replay | 重放已 journaled 的 `manifest_delta`，前端幂等合并 | 重放已 journaled 的 `manifest_delta`，前端幂等合并 | 重放已 journaled 的 `manifest_delta`，前端幂等合并 |
 
 ## 设计约束（实现时必须遵守）
 
 1. **派生而非权威**：不替代 transcript；不以 manifest 驱动 Agent 执行。
-2. **Artifacts ⊆ 写入工具产物 ∪ assistant `MEDIA:` 本地交付物**：跨轮次聚合去重，不混入全 workspace、不混入只读访问。
+2. **Artifacts ⊆ 写入工具产物 ∪ assistant `MEDIA:` 本地交付物 ∪ turn_complete transcript reconcile（`MEDIA:`、assistant 交付 prose、tool 侧路径、通用命令输出参数；且仅 workspace 内已存在可预览文件）**：跨轮次聚合去重；assistant/tool 文本中的路径可先作为内部候选，但没有写入/交付/转换证据时不得展示，不混入全 workspace 扫描、不混入只读访问。
 3. **References ⊆ 全会话实际读取的内容来源**：跨轮次聚合去重，搜索命中、目录列表、助手 prose 提到的路径都不默认算参考。
 4. **Tasks = 合并后的最新 `todo` 快照**：不是 todo 历史；局部更新按 `id` 合并。
 5. **路径安全**：workspace 内相对路径 + 既有预览边界；workspace 外绝对路径仅 `source_tool=media` 且文件存在时可列出，预览走 `/api/media`（须已在 assistant 正文中出现）。

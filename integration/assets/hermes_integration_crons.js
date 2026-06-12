@@ -678,6 +678,13 @@
     return role || 'Message';
   }
 
+  function stripCronExecutionHint(text) {
+    return String(text || '').replace(
+      /^\s*\[IMPORTANT: You are running as a scheduled cron job\.[\s\S]*?or say \[SILENT\] and nothing more\.\]\s*/i,
+      ''
+    ).trim();
+  }
+
   function renderSessionMessages(session) {
     const messages = Array.isArray(session?.messages) ? session.messages : [];
     if (!messages.length) {
@@ -686,7 +693,8 @@
     return messages
       .map((message, idx) => {
         const role = String(message.role || 'message').toLowerCase();
-        const text = messageText(message);
+        let text = messageText(message);
+        if (role === 'user') text = stripCronExecutionHint(text);
         const html = typeof renderMd === 'function' ? renderMd(text || '') : esc(text || '');
         const ts = message.timestamp ? new Date(message.timestamp * 1000).toLocaleString() : '';
         return `<div class="integration-cron-session-message" data-role="${esc(role)}">

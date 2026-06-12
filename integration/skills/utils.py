@@ -68,7 +68,12 @@ def extract_zip_and_flatten(zip_bytes: bytes, target_dir: Path) -> None:
             dest.write_bytes(zf.read(member))
 
 
-def stream_zip_to_handler(handler, zip_name: str, files: list[tuple[Path, str]]) -> None:
+def stream_zip_to_handler(
+    handler,
+    zip_name: str,
+    files: list[tuple[Path, str]],
+    extra_entries: list[tuple[bytes, str]] | None = None,
+) -> None:
     """Stream a zip archive to the HTTP handler response body."""
     from api.routes import _content_disposition_value
 
@@ -92,4 +97,7 @@ def stream_zip_to_handler(handler, zip_name: str, files: list[tuple[Path, str]])
                 written += 1
             except (OSError, PermissionError) as exc:
                 _log.warning("skill-download: skipping %s: %s", fp, exc)
+        for content, arcname in extra_entries or []:
+            zf.writestr(arcname, content)
+            written += 1
     _log.debug("skill-download: streamed %d/%d files as %s", written, len(files), zip_name)

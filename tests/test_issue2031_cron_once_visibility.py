@@ -80,3 +80,5 @@ def test_cron_form_surfaces_one_shot_warning_copy_and_styles():
     assert ".cron-once-warning" in style
     assert i18n.count("cron_schedule_once_warning") >= 9
     assert "Duration forms like '30m' run once" in i18n
+    assert "remain in the task list after completion" in i18n
+    assert "removed after running" not in i18n

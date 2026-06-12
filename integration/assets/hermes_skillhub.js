@@ -679,8 +679,10 @@
       showToast(skillCount > 1 ? `${base} (${skillCount})` : base);
     }
     const first = imported[0];
-    if (first && first.name) {
-      const item = (_skillhubData || []).find(s => s.name === first.name);
+    if (first) {
+      const item =
+        (_skillhubData || []).find(s => s.dir_name === first.dir_name) ||
+        (_skillhubData || []).find(s => s.name === first.name);
       if (item) openSkillHubItem(item);
     }
   }

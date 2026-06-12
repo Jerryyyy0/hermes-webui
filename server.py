@@ -642,6 +642,7 @@ if __name__ == '__main__':
     os.environ['ZHILING_CONTROL_PLANE_URL'] = os.getenv('ZHILING_CONTROL_PLANE_URL', 'http://192.168.1.139:23001/')
     os.environ['ZHILING_LOGOUT_API_URL'] = os.getenv('ZHILING_LOGOUT_API_URL', 'http://auth-proxy:8080')
     os.environ['KNOWLEDGE_BASE_URL'] = os.getenv('KNOWLEDGE_BASE_URL', 'http://192.168.1.139:17861/')
+    os.environ['BROWSER_PREVIEW_URL'] = os.getenv('BROWSER_PREVIEW_URL', 'http://192.168.1.139:6080/vnc.html?path=websockify?token=user1')
     # from integration.config import ensure_skillhub_no_proxy
     # ensure_skillhub_no_proxy()
     main()

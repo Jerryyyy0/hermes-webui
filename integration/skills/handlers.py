@@ -101,6 +101,7 @@ def handle_skillhub_upload(handler) -> bool:
 
         request_name = str(fields.get("name", "") or "").strip()
         category = str(fields.get("category", "") or "").strip()
+        explicit_dir_name = str(fields.get("dir_name", "") or "").strip()
         overwrite = _parse_upload_overwrite(fields)
 
         if suffix == ".zip":
@@ -110,6 +111,7 @@ def handle_skillhub_upload(handler) -> bool:
                 zip_bytes=file_bytes,
                 filename=upload_name,
                 overwrite=overwrite,
+                explicit_dir_name=explicit_dir_name,
             )
         else:
             text = file_bytes.decode("utf-8", errors="replace")
@@ -119,6 +121,7 @@ def handle_skillhub_upload(handler) -> bool:
                 content=text,
                 filename=upload_name,
                 overwrite=overwrite,
+                explicit_dir_name=explicit_dir_name,
             )
     else:
         try:
@@ -136,6 +139,7 @@ def handle_skillhub_upload(handler) -> bool:
             content=str(content),
             filename=None,
             overwrite=_parse_upload_overwrite(body),
+            explicit_dir_name=str(body.get("dir_name", "") or "").strip(),
         )
 
     return _upload_result(handler, result)
@@ -220,6 +224,7 @@ def _get_skillhub_download(handler, parsed) -> bool:
         handler,
         str(result["zip_basename"]),
         result["files"],
+        result.get("extra_zip_entries"),
     )
     return True
 

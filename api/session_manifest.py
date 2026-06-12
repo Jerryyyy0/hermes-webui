@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import copy
 import re
+import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -64,7 +65,43 @@ MANIFEST_PREVIEW_FILE = 'file'
 MANIFEST_PREVIEW_SKILL = 'skill'
 
 MEDIA_ARTIFACT_SOURCE = 'media'
+ASSISTANT_PROSE_ARTIFACT_SOURCE = 'assistant_prose'
+TURN_RECONCILE_SOURCE = 'reconcile'
 _MEDIA_TOKEN_RE = re.compile(r'MEDIA:([^\s\)\]]+)')
+
+# Explicit delivery prose (labelled lines only — not casual path mentions).
+_DELIVERY_LABEL = (
+    r'文件位置|文件路径|保存(?:至|到)?|已保存(?:至|到)?|生成(?:于|到)?|'
+    r'输出文件|输出(?:至|到)?|位于|'
+    r'file\s*(?:path|location)?|saved\s+(?:to|at)|written\s+to|output\s+(?:to|at)|path'
+)
+_DELIVERY_LABELED_RE = re.compile(
+    r'(?:\*{1,2})?'
+    rf'(?:{_DELIVERY_LABEL})'
+    r'(?:\*{1,2})?'
+    r'(?:[：:]\s*|\s+)'
+    r'(?:`([^`]+)`|'
+    r'(/[^\s`\'"<>|，,；;。)\]]+|(?:\./|\../)?[^\s`\'"<>|，,；;。)\]]+/[^\s`\'"<>|，,；;。)\]]+)'
+    r')',
+    re.IGNORECASE,
+)
+_DELIVERY_CONTEXT_RE = re.compile(
+    r'已(?:生成|转换|创建|写入|保存|存好)|生成(?:成功|于|到)?|转换(?:成功|为|成)?|'
+    r'文件生成成功|Word\s*版已生成|saved|generated|converted|created|written|wrote',
+    re.IGNORECASE,
+)
+_CODE_SPAN_RE = re.compile(r'`([^`\n]+)`')
+_MARKDOWN_LINK_LABEL_RE = re.compile(r'\[([^\]]+)\]\([^)]+\)')
+_BROAD_ABSOLUTE_PATH_RE = re.compile(r'(/[^\s`\'"<>|，,；;。：)\]]+\.[A-Za-z0-9][A-Za-z0-9]+)')
+_BROAD_RELATIVE_PATH_RE = re.compile(
+    r'((?:\./|\../)?[^\s`\'"<>|，,；;。：)\]]+/[^\s`\'"<>|，,；;。：)\]]+\.[A-Za-z0-9][A-Za-z0-9]+)'
+)
+_BROAD_BASENAME_RE = re.compile(r'(?<![\w./-])([A-Za-z0-9_.-]+\.[A-Za-z0-9][A-Za-z0-9]+)(?![\w./-])')
+_REFERENCE_ONLY_TOOLS = (
+    REFERENCE_READ_TOOLS
+    | REFERENCE_DISCOVERY_TOOLS
+    | REFERENCE_SKILL_TOOLS
+)
 
 PATH_ARG_KEYS = (
     'path',
@@ -105,6 +142,15 @@ class ToolEvent:
     source: str = 'message'
 
 
+@dataclass
+class PathCandidate:
+    path: str
+    raw: str
+    source: str
+    confidence: str
+    context: str = ''
+
+
 def _normalize_tool_name(name: str | None) -> str:
     return str(name or '').replace('functions.', '').strip().lower()
 
@@ -113,7 +159,7 @@ def _artifact_source_priority(source_tool: str) -> int:
     tool = str(source_tool or '').strip().lower()
     if tool in ARTIFACT_MUTATION_TOOLS:
         return 2
-    if tool == MEDIA_ARTIFACT_SOURCE:
+    if tool in (MEDIA_ARTIFACT_SOURCE, ASSISTANT_PROSE_ARTIFACT_SOURCE):
         return 1
     return 0
 
@@ -130,6 +176,115 @@ def _paths_from_assistant_media(text: str, workspace: Path) -> list[str]:
         if normalized and normalized not in seen:
             seen.add(normalized)
             paths.append(normalized)
+    return paths
+
+
+def _has_delivery_context(text: str) -> bool:
+    return bool(text and _DELIVERY_CONTEXT_RE.search(text))
+
+
+def _path_candidates_from_text(
+    text: str,
+    workspace: Path,
+    *,
+    source: str = 'text',
+) -> list[PathCandidate]:
+    """Collect broad path-like candidates; callers decide whether to promote."""
+    if not text or not isinstance(text, str):
+        return []
+    candidates: list[PathCandidate] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add(raw: str, candidate_source: str, context: str, confidence: str) -> None:
+        raw = str(raw or '').strip()
+        if not raw:
+            return
+        normalized = _resolve_manifest_path(workspace, raw)
+        if not normalized:
+            return
+        key = (normalized, candidate_source)
+        if key in seen:
+            return
+        seen.add(key)
+        candidates.append(PathCandidate(
+            path=normalized,
+            raw=raw,
+            source=f'{source}:{candidate_source}',
+            confidence=confidence,
+            context=context,
+        ))
+
+    for line in text.splitlines():
+        context = line.strip()
+        if not context:
+            continue
+        has_delivery_context = _has_delivery_context(context)
+        for match in _CODE_SPAN_RE.finditer(context):
+            add(match.group(1), 'code_span', context, 'explicit')
+        for match in _MARKDOWN_LINK_LABEL_RE.finditer(context):
+            add(match.group(1), 'markdown_link_label', context, 'explicit')
+        for pattern, kind in (
+            (_BROAD_ABSOLUTE_PATH_RE, 'absolute_path'),
+            (_BROAD_RELATIVE_PATH_RE, 'relative_path'),
+        ):
+            for match in pattern.finditer(context):
+                add(match.group(1), kind, context, 'broad')
+        if has_delivery_context:
+            for match in _BROAD_BASENAME_RE.finditer(context):
+                add(match.group(1), 'basename_with_delivery_context', context, 'contextual')
+    return candidates
+
+
+def _delivery_context_paths_from_text(text: str, workspace: Path) -> list[str]:
+    if not _has_delivery_context(text):
+        return []
+    paths: list[str] = []
+    seen: set[str] = set()
+    for candidate in _path_candidates_from_text(text, workspace, source='delivery_context'):
+        if candidate.path not in seen:
+            seen.add(candidate.path)
+            paths.append(candidate.path)
+    return paths
+
+
+def _paths_from_delivery_prose(text: str, workspace: Path) -> list[str]:
+    """Extract file paths from explicit delivery statements (assistant or tool output)."""
+    if not text or not isinstance(text, str):
+        return []
+    paths: list[str] = []
+    seen: set[str] = set()
+
+    def add(raw: str) -> None:
+        normalized = _resolve_manifest_path(workspace, raw.strip())
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            paths.append(normalized)
+
+    for match in _DELIVERY_LABELED_RE.finditer(text):
+        raw = (match.group(1) or match.group(2) or '').strip()
+        if raw:
+            add(raw)
+    for line in text.splitlines():
+        if not _DELIVERY_LABELED_RE.search(line):
+            continue
+        link_match = re.search(r'\[([^\]]+)\]\([^)]+\)', line)
+        if link_match:
+            add(link_match.group(1))
+    for path in _delivery_context_paths_from_text(text, workspace):
+        add(path)
+    return paths
+
+
+def _paths_from_assistant_prose(text: str, workspace: Path) -> list[str]:
+    """Extract file paths from assistant prose (delivery prose + broad regex scan)."""
+    if not text or not isinstance(text, str):
+        return []
+    paths = _paths_from_delivery_prose(text, workspace)
+    seen = set(paths)
+    for candidate in _path_candidates_from_text(text, workspace, source='broad_scan'):
+        if candidate.path not in seen and candidate.confidence != 'contextual':
+            seen.add(candidate.path)
+            paths.append(candidate.path)
     return paths
 
 
@@ -179,6 +334,39 @@ def _collect_media_artifact_events(messages: list, workspace: Path, *, turn_key:
                 args={'path': path},
                 assistant_msg_idx=msg_idx,
                 source='assistant_media',
+            ))
+    return events
+
+
+def _collect_assistant_prose_artifact_events(
+    messages: list,
+    workspace: Path,
+    *,
+    turn_key: str = '',
+) -> list[ToolEvent]:
+    events: list[ToolEvent] = []
+    seen: set[tuple[str, int]] = set()
+    indices: list[int] = []
+    if turn_key:
+        indices = _assistant_message_indices_for_turn(messages, turn_key)
+    else:
+        indices = [
+            idx for idx, message in enumerate(messages or [])
+            if isinstance(message, dict) and message.get('role') == 'assistant'
+        ]
+    for msg_idx in indices:
+        message = messages[msg_idx]
+        text = _message_text(message.get('content'))
+        for path in _paths_from_assistant_prose(text, workspace):
+            key = (path, msg_idx)
+            if key in seen:
+                continue
+            seen.add(key)
+            events.append(ToolEvent(
+                name=ASSISTANT_PROSE_ARTIFACT_SOURCE,
+                args={'path': path},
+                assistant_msg_idx=msg_idx,
+                source='assistant_prose',
             ))
     return events
 
@@ -432,6 +620,85 @@ def _paths_from_args(args: dict[str, Any], workspace: Path) -> list[str]:
             if isinstance(edit, dict):
                 add(edit.get('path'))
     return paths
+
+
+def _command_working_dir_from_tokens(tokens: list[str], workspace: Path) -> Path:
+    cwd = workspace.expanduser().resolve()
+    for idx, token in enumerate(tokens[:-1]):
+        if token != 'cd':
+            continue
+        target = tokens[idx + 1]
+        if target in ('&&', ';', '||') or target.startswith('-'):
+            continue
+        try:
+            path = Path(target).expanduser()
+            cwd = path.resolve() if path.is_absolute() else (cwd / path).resolve()
+        except (ValueError, OSError):
+            continue
+    return cwd
+
+
+def _resolve_command_output_path(workspace: Path, cwd: Path, raw: str) -> str:
+    raw = str(raw or '').strip()
+    if not raw:
+        return ''
+    try:
+        path = Path(raw).expanduser()
+        candidate = path.resolve() if path.is_absolute() else (cwd / path).resolve()
+    except (ValueError, OSError):
+        return ''
+    return _resolve_manifest_path(workspace, candidate.as_posix())
+
+
+def _path_candidates_from_command_output_args(args: dict[str, Any], workspace: Path) -> list[PathCandidate]:
+    if not isinstance(args, dict):
+        return []
+    command = str(args.get('command') or args.get('cmd') or '').strip()
+    if not command:
+        return []
+    try:
+        tokens = shlex.split(command.replace('\\\n', ' '))
+    except ValueError:
+        return []
+    if not tokens:
+        return []
+    cwd = _command_working_dir_from_tokens(tokens, workspace)
+    candidates: list[PathCandidate] = []
+    seen: set[str] = set()
+
+    def add(raw: str, context: str) -> None:
+        normalized = _resolve_command_output_path(workspace, cwd, raw)
+        if not normalized or normalized in seen:
+            return
+        seen.add(normalized)
+        candidates.append(PathCandidate(
+            path=normalized,
+            raw=raw,
+            source='command_output_arg',
+            confidence='explicit',
+            context=context,
+        ))
+
+    control_tokens = {'&&', ';', '||', '|'}
+    idx = 0
+    while idx < len(tokens):
+        token = tokens[idx]
+        if Path(token).name != 'pandoc':
+            idx += 1
+            continue
+        segment: list[str] = []
+        idx += 1
+        while idx < len(tokens) and tokens[idx] not in control_tokens:
+            segment.append(tokens[idx])
+            idx += 1
+        for pos, item in enumerate(segment):
+            if item in ('-o', '--output', '--output-file') and pos + 1 < len(segment):
+                add(segment[pos + 1], command)
+            elif item.startswith('--output='):
+                add(item.split('=', 1)[1], command)
+            elif item.startswith('--output-file='):
+                add(item.split('=', 1)[1], command)
+    return candidates
 
 
 def _paths_from_diff_text(text: str, workspace: Path) -> list[str]:
@@ -839,6 +1106,42 @@ def _turn_key_for_event(event: ToolEvent, turns: list[dict[str, Any]]) -> str | 
     return None
 
 
+def _turn_record_for_key(messages: list, turn_key: str) -> dict[str, Any] | None:
+    key = str(turn_key or '').strip()
+    if not key:
+        return None
+    for turn in _message_turns(messages or []):
+        if str(turn.get('turn_key') or '') == key:
+            return turn
+    return None
+
+
+def _tool_calls_for_turn(
+    tool_calls: list | None,
+    *,
+    start_msg_idx: int | None,
+    end_msg_idx: int | None,
+) -> list:
+    """Keep persisted session tool-call snippets scoped to one transcript turn."""
+    if (
+        isinstance(start_msg_idx, bool)
+        or isinstance(end_msg_idx, bool)
+        or not isinstance(start_msg_idx, int)
+        or not isinstance(end_msg_idx, int)
+    ):
+        return []
+    scoped: list = []
+    for tc in tool_calls or []:
+        if not isinstance(tc, dict):
+            continue
+        assistant_idx = tc.get('assistant_msg_idx')
+        if isinstance(assistant_idx, bool) or not isinstance(assistant_idx, int):
+            continue
+        if start_msg_idx <= assistant_idx <= end_msg_idx:
+            scoped.append(tc)
+    return scoped
+
+
 def _extract_manifest_records(
     events: list[ToolEvent],
     workspace: Path,
@@ -907,11 +1210,6 @@ def _extract_manifest_records(
             for path in args_paths:
                 add_artifact(path)
 
-        if name in REFERENCE_READ_TOOLS:
-            for path in args_paths:
-                entry_kind = 'dir' if name in REFERENCE_DIR_TOOLS else 'file'
-                add_reference(path, entry_kind)
-
         if name in REFERENCE_SKILL_TOOLS:
             skill_name = _skill_name_from_args(event.args)
             if skill_name:
@@ -968,6 +1266,306 @@ def _extract_artifacts_and_references(
     return artifacts, references
 
 
+def _artifact_path_is_real(workspace: Path, rel: str) -> bool:
+    """True when rel resolves to an existing previewable workspace file."""
+    return _file_preview_path(workspace, rel, 'file') is not None
+
+
+def _turn_message_slice(messages: list, turn_key: str) -> list:
+    key = str(turn_key or '').strip()
+    for turn in _message_turns(messages or []):
+        if str(turn.get('turn_key') or '') == key:
+            start = int(turn.get('start_msg_idx', 0))
+            end = int(turn.get('end_msg_idx', len(messages or []) - 1))
+            return list(messages[start:end + 1])
+    return []
+
+
+def _records_by_path(rows: list[dict] | None) -> dict[str, dict]:
+    out: dict[str, dict] = {}
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        path = str(row.get('path') or '').strip()
+        if path:
+            out[path] = row
+    return out
+
+
+def _event_text_blobs(event: ToolEvent) -> list[str]:
+    blobs: list[str] = []
+    if event.result:
+        blobs.append(event.result)
+        payload = _parse_json_object(event.result)
+        if payload:
+            for key in ('output', 'content', 'message', 'text', 'stdout', 'stderr'):
+                value = payload.get(key)
+                if isinstance(value, str) and value.strip():
+                    blobs.append(value)
+    if event.args:
+        try:
+            blobs.append(json.dumps(event.args, ensure_ascii=False))
+        except (TypeError, ValueError):
+            pass
+    return blobs
+
+
+def _event_has_diff_evidence(event: ToolEvent, workspace: Path) -> bool:
+    for blob in _event_text_blobs(event):
+        if _paths_from_diff_text(blob, workspace):
+            return True
+    return False
+
+
+def _is_reference_only_tool(name: str) -> bool:
+    return name in _REFERENCE_ONLY_TOOLS
+
+
+def _promote_artifact_candidates(
+    candidates: list[PathCandidate],
+    event: ToolEvent,
+    workspace: Path,
+) -> list[str]:
+    """Promote broad candidates only when artifact evidence is strong enough."""
+    if not candidates or _is_reference_only_tool(event.name):
+        return []
+    paths: list[str] = []
+    seen: set[str] = set()
+    execution_tools = {'terminal', 'shell', 'execute_code'}
+
+    def has_evidence(candidate: PathCandidate) -> bool:
+        source = candidate.source
+        if event.name == MEDIA_ARTIFACT_SOURCE:
+            return True
+        if event.name == ASSISTANT_PROSE_ARTIFACT_SOURCE:
+            if candidate.confidence != 'contextual':
+                return True
+            return _has_delivery_context(candidate.context)
+        if source == 'command_output_arg' and event.name in execution_tools:
+            return True
+        if _has_delivery_context(candidate.context) and event.name not in REFERENCE_DISCOVERY_TOOLS:
+            return True
+        return False
+
+    for candidate in candidates:
+        if candidate.path in seen:
+            continue
+        if not has_evidence(candidate):
+            continue
+        if not _artifact_path_is_real(workspace, candidate.path):
+            continue
+        seen.add(candidate.path)
+        paths.append(candidate.path)
+    return paths
+
+
+def _reconcile_candidate_paths(event: ToolEvent, workspace: Path) -> list[str]:
+    """Collect workspace-relative candidate paths for turn reconcile extraction."""
+    name = event.name
+    if name in ARTIFACT_MUTATION_TOOLS or _is_skill_manage_mutation_event(event):
+        return []
+    blobs = _event_text_blobs(event)
+    diff_paths: list[str] = []
+    for blob in blobs:
+        diff_paths.extend(_paths_from_diff_text(blob, workspace))
+    args_paths = _paths_from_args(event.args, workspace)
+    text_candidates: list[PathCandidate] = []
+    for blob in blobs:
+        text_candidates.extend(_path_candidates_from_text(blob, workspace, source='tool_text'))
+    command_output_candidates = _path_candidates_from_command_output_args(event.args, workspace)
+
+    if name == MEDIA_ARTIFACT_SOURCE:
+        return args_paths
+
+    if name == ASSISTANT_PROSE_ARTIFACT_SOURCE:
+        promoted = _promote_artifact_candidates(text_candidates, event, workspace)
+        return args_paths + [path for path in promoted if path not in args_paths]
+
+    if name in REFERENCE_READ_TOOLS:
+        return []
+    if _is_reference_only_tool(name):
+        return diff_paths if _event_has_diff_evidence(event, workspace) else []
+
+    delivery_paths: list[str] = []
+    for blob in blobs:
+        delivery_paths.extend(_paths_from_delivery_prose(blob, workspace))
+    promoted_paths = _promote_artifact_candidates(
+        text_candidates + command_output_candidates,
+        event,
+        workspace,
+    )
+
+    paths: list[str] = []
+    seen: set[str] = set()
+    for path in args_paths + diff_paths + delivery_paths + promoted_paths:
+        if path and path not in seen:
+            seen.add(path)
+            paths.append(path)
+    return paths
+
+
+def _merge_reconcile_artifacts_for_turn(
+    artifact_records: dict[str, dict],
+    turn_record: dict[str, Any],
+    messages: list,
+    workspace: Path,
+    *,
+    skills_dir: Path | None = None,
+    tool_calls: list | None = None,
+) -> None:
+    """Merge transcript-mined artifact candidates for one turn into record dicts."""
+    turn_key = str(turn_record.get('turn_key') or '').strip()
+    if not turn_key:
+        return
+    turn_messages = _turn_message_slice(messages, turn_key)
+    if not turn_messages:
+        return
+
+    turn_artifact_records = _records_by_path(turn_record.get('artifacts'))
+    turn_reference_paths = set(_records_by_path(turn_record.get('references')).keys())
+    scoped_tool_calls = _tool_calls_for_turn(
+        tool_calls,
+        start_msg_idx=turn_record.get('start_msg_idx'),
+        end_msg_idx=turn_record.get('end_msg_idx'),
+    )
+    events = _collect_tool_events(turn_messages, scoped_tool_calls)
+    # turn_messages is already sliced; scan all assistant rows in the slice (not global turn_key).
+    events.extend(_collect_media_artifact_events(turn_messages, workspace))
+    events.extend(_collect_assistant_prose_artifact_events(turn_messages, workspace))
+    local_turn_record = {
+        'turn_key': turn_key,
+        'start_msg_idx': 0,
+        'end_msg_idx': max(0, len(turn_messages) - 1),
+    }
+
+    for event in events:
+        event_turn_record = turn_record if event.source == 'session_tool_calls' else local_turn_record
+        if _turn_key_for_event(event, [event_turn_record]) != turn_key:
+            continue
+        if event.name == 'todo':
+            continue
+        for path in _reconcile_candidate_paths(event, workspace):
+            if path in turn_reference_paths:
+                continue
+            if not _artifact_path_is_real(workspace, path):
+                if event.name != ASSISTANT_PROSE_ARTIFACT_SOURCE:
+                    continue
+                if _session_media_preview_path(workspace, path, 'file') is None:
+                    continue
+            skill_name = _skill_manifest_name_from_skills_path(path, skills_dir)
+            if skill_name:
+                _merge_skill_records(artifact_records, skill_name=skill_name, event=event)
+                _merge_skill_records(turn_artifact_records, skill_name=skill_name, event=event)
+            else:
+                _merge_file_records(
+                    artifact_records,
+                    kind='artifact',
+                    path=path,
+                    event=event,
+                    entry_kind='file',
+                    workspace=workspace,
+                )
+                _merge_file_records(
+                    turn_artifact_records,
+                    kind='artifact',
+                    path=path,
+                    event=event,
+                    entry_kind='file',
+                    workspace=workspace,
+                )
+
+    turn_artifacts = sorted(turn_artifact_records.values(), key=lambda row: row['path'])
+    _clean_record_keys(turn_artifacts)
+    turn_record['artifacts'] = turn_artifacts
+
+
+def _apply_turn_reconcile_to_manifest_records(
+    artifact_records: dict[str, dict],
+    turn_records: list[dict[str, Any]],
+    messages: list,
+    workspace: Path,
+    *,
+    skills_dir: Path | None = None,
+    tool_calls: list | None = None,
+) -> None:
+    for turn in turn_records:
+        _merge_reconcile_artifacts_for_turn(
+            artifact_records,
+            turn,
+            messages,
+            workspace,
+            skills_dir=skills_dir,
+            tool_calls=tool_calls,
+        )
+
+
+def reconcile_turn_artifact_events(
+    messages: list,
+    workspace: Path,
+    turn_key: str,
+    *,
+    skills_dir: Path | None = None,
+    tool_calls: list | None = None,
+) -> list[ToolEvent]:
+    """Return tool/media events for one turn (inputs to reconcile extraction)."""
+    turn_messages = _turn_message_slice(messages, turn_key)
+    if not turn_messages:
+        return []
+    turn_record = _turn_record_for_key(messages, turn_key)
+    scoped_tool_calls = _tool_calls_for_turn(
+        tool_calls,
+        start_msg_idx=turn_record.get('start_msg_idx') if turn_record else None,
+        end_msg_idx=turn_record.get('end_msg_idx') if turn_record else None,
+    )
+    events = _collect_tool_events(turn_messages, scoped_tool_calls)
+    events.extend(_collect_media_artifact_events(turn_messages, workspace))
+    events.extend(_collect_assistant_prose_artifact_events(turn_messages, workspace))
+    return events
+
+
+def _reconcile_turn_artifact_rows(
+    messages: list,
+    workspace: Path,
+    turn_key: str,
+    *,
+    skills_dir: Path | None = None,
+    tool_calls: list | None = None,
+) -> tuple[list[dict], list[dict]]:
+    """Build reconciled artifact rows for one turn (pre-wire internal records)."""
+    turn_messages = _turn_message_slice(messages, turn_key)
+    if not turn_messages:
+        return [], []
+    turns = _message_turns(messages)
+    turn_record: dict[str, Any] = {
+        'turn_key': turn_key,
+        'artifacts': [],
+        'references': [],
+    }
+    for turn in turns:
+        if str(turn.get('turn_key') or '') == turn_key:
+            turn_record = {
+                'turn_key': turn_key,
+                'user_msg_idx': turn.get('user_msg_idx'),
+                'start_msg_idx': turn.get('start_msg_idx'),
+                'end_msg_idx': turn.get('end_msg_idx'),
+                'artifacts': [],
+                'references': [],
+            }
+            break
+    artifact_records: dict[str, dict] = {}
+    _merge_reconcile_artifacts_for_turn(
+        artifact_records,
+        turn_record,
+        messages,
+        workspace,
+        skills_dir=skills_dir,
+        tool_calls=tool_calls,
+    )
+    artifact_list = sorted(artifact_records.values(), key=lambda row: row['path'])
+    _clean_record_keys(artifact_list)
+    return artifact_list, list(turn_record.get('artifacts') or [])
+
+
 def _workspace_relative_path(workspace: Path, rel: str) -> tuple[str, bool]:
     if not rel:
         return '', False
@@ -980,12 +1578,22 @@ def _workspace_relative_path(workspace: Path, rel: str) -> tuple[str, bool]:
         return rel, False
 
 
-def _serialize_manifest_row(path: str, preview: str, source_tool: str) -> dict[str, str]:
-    return {
+def _serialize_manifest_row(
+    path: str,
+    preview: str,
+    source_tool: str,
+    *,
+    profile: str = '',
+) -> dict[str, str]:
+    row = {
         'path': path,
         'preview': preview,
         'source_tool': source_tool,
     }
+    profile_text = str(profile or '').strip()
+    if profile_text:
+        row['profile'] = profile_text
+    return row
 
 
 def _session_media_preview_path(workspace: Path, rel: str, entry_kind: str) -> str | None:
@@ -1033,10 +1641,17 @@ def _file_preview_path(workspace: Path, rel: str, entry_kind: str) -> str | None
         return None
 
 
-def _row_to_wire(row: dict, workspace: Path, skills_dir: Path | None = None) -> dict[str, str] | None:
+def _row_to_wire(
+    row: dict,
+    workspace: Path,
+    skills_dir: Path | None = None,
+    *,
+    default_profile: str = '',
+) -> dict[str, str] | None:
     source_tool = str(row.get('source_tool') or '').strip()
     if not source_tool:
         return None
+    profile = str(default_profile or '').strip()
     if row.get('kind') == 'skill' or row.get('resource_type') == 'skill':
         skill_name = str(row.get('skill_name') or row.get('path') or '').strip()
         if not skill_name or not _skillhub_preview_available():
@@ -1046,16 +1661,22 @@ def _row_to_wire(row: dict, workspace: Path, skills_dir: Path | None = None) -> 
                 return None
             if not _skill_exists_in_dir(skills_dir, skill_name):
                 return None
-        return _serialize_manifest_row(skill_name, MANIFEST_PREVIEW_SKILL, source_tool)
+        return _serialize_manifest_row(
+            skill_name, MANIFEST_PREVIEW_SKILL, source_tool, profile=profile,
+        )
     rel = str(row.get('path') or '').strip()
     entry_kind = str(row.get('kind') or 'file')
     preview_path = _file_preview_path(workspace, rel, entry_kind)
     if preview_path:
-        return _serialize_manifest_row(preview_path, MANIFEST_PREVIEW_FILE, source_tool)
-    if source_tool == MEDIA_ARTIFACT_SOURCE:
+        return _serialize_manifest_row(
+            preview_path, MANIFEST_PREVIEW_FILE, source_tool, profile=profile,
+        )
+    if source_tool in (MEDIA_ARTIFACT_SOURCE, ASSISTANT_PROSE_ARTIFACT_SOURCE):
         media_path = _session_media_preview_path(workspace, rel, entry_kind)
         if media_path:
-            return _serialize_manifest_row(media_path, MANIFEST_PREVIEW_FILE, source_tool)
+            return _serialize_manifest_row(
+                media_path, MANIFEST_PREVIEW_FILE, source_tool, profile=profile,
+            )
     return None
 
 
@@ -1063,11 +1684,13 @@ def _rows_to_wire(
     rows: list[dict] | None,
     workspace: Path,
     skills_dir: Path | None = None,
+    *,
+    default_profile: str = '',
 ) -> list[dict[str, str]]:
     out: list[dict[str, str]] = []
     seen: set[str] = set()
     for row in rows or []:
-        wire = _row_to_wire(row, workspace, skills_dir)
+        wire = _row_to_wire(row, workspace, skills_dir, default_profile=default_profile)
         if wire is None:
             continue
         path = wire['path']
@@ -1078,10 +1701,18 @@ def _rows_to_wire(
     return sorted(out, key=lambda item: item['path'])
 
 
-def _turn_to_wire(turn: dict, workspace: Path, skills_dir: Path | None = None) -> dict[str, Any]:
+def _turn_to_wire(
+    turn: dict,
+    workspace: Path,
+    skills_dir: Path | None = None,
+    *,
+    default_profile: str = '',
+) -> dict[str, Any]:
     return {
         'turn_key': str(turn.get('turn_key') or ''),
-        'artifacts': _rows_to_wire(turn.get('artifacts'), workspace, skills_dir),
+        'artifacts': _rows_to_wire(
+            turn.get('artifacts'), workspace, skills_dir, default_profile=default_profile,
+        ),
         'references': _rows_to_wire(turn.get('references'), workspace, skills_dir),
     }
 
@@ -1111,7 +1742,8 @@ def _merge_rows_by_path(existing_rows: list | None, incoming_rows: list | None) 
         source_tool = str(row.get('source_tool') or '').strip()
         if not path or preview not in (MANIFEST_PREVIEW_FILE, MANIFEST_PREVIEW_SKILL) or not source_tool:
             continue
-        rows[path] = _serialize_manifest_row(path, preview, source_tool)
+        profile = str(row.get('profile') or '').strip()
+        rows[path] = _serialize_manifest_row(path, preview, source_tool, profile=profile)
     return sorted(rows.values(), key=lambda item: item['path'])
 
 
@@ -1179,6 +1811,7 @@ def extract_manifest_delta_from_tool_event(
     sequence: int | None = None,
     source_kind: str = '',
     skills_dir: Path | None = None,
+    default_profile: str = '',
 ) -> dict[str, Any]:
     """Build a manifest_delta SSE payload from one explicit tool event."""
     normalized_event = ToolEvent(
@@ -1205,7 +1838,9 @@ def extract_manifest_delta_from_tool_event(
             'tid': normalized_event.tid,
             'status': normalized_event.status,
         },
-        'artifacts': _rows_to_wire(artifacts, workspace, skills_dir),
+        'artifacts': _rows_to_wire(
+            artifacts, workspace, skills_dir, default_profile=default_profile,
+        ),
         'references': _rows_to_wire(references, workspace, skills_dir),
     }
     if sequence is not None:
@@ -1228,22 +1863,50 @@ def extract_manifest_delta_from_assistant_media(
     stream_id: str = '',
     turn_key: str = '',
     sequence: int | None = None,
+    default_profile: str = '',
 ) -> dict[str, Any]:
     """Build a manifest_delta SSE payload from assistant MEDIA: tokens in one turn."""
+    return extract_manifest_delta_from_turn_reconcile(
+        messages,
+        workspace,
+        session_id=session_id,
+        stream_id=stream_id,
+        turn_key=turn_key,
+        sequence=sequence,
+        default_profile=default_profile,
+    )
+
+
+def extract_manifest_delta_from_turn_reconcile(
+    messages: list,
+    workspace: Path,
+    *,
+    session_id: str = '',
+    stream_id: str = '',
+    turn_key: str = '',
+    sequence: int | None = None,
+    default_profile: str = '',
+    skills_dir: Path | None = None,
+    tool_calls: list | None = None,
+) -> dict[str, Any]:
+    """Build a turn_complete manifest_delta from transcript reconcile (incl. MEDIA)."""
     turn_key = str(turn_key or '').strip()
     if not turn_key:
         return {}
-    events = _collect_media_artifact_events(messages, workspace, turn_key=turn_key)
-    if not events:
-        return {}
-    artifacts, _references, turns = _extract_manifest_records(events, workspace, messages)
-    wire_artifacts = _rows_to_wire(artifacts, workspace)
+    session_artifacts, turn_artifacts = _reconcile_turn_artifact_rows(
+        messages,
+        workspace,
+        turn_key,
+        skills_dir=skills_dir,
+        tool_calls=tool_calls,
+    )
+    wire_artifacts = _rows_to_wire(
+        session_artifacts, workspace, skills_dir, default_profile=default_profile,
+    )
     if not wire_artifacts:
         return {}
-    current_turn = next((turn for turn in turns if turn.get('turn_key') == turn_key), None)
-    turn_artifacts = _rows_to_wire(
-        (current_turn or {}).get('artifacts') or artifacts,
-        workspace,
+    turn_wire = _rows_to_wire(
+        turn_artifacts, workspace, skills_dir, default_profile=default_profile,
     )
     payload: dict[str, Any] = {
         'version': 1,
@@ -1252,14 +1915,14 @@ def extract_manifest_delta_from_assistant_media(
         'turn_key': turn_key,
         'source': {
             'kind': 'turn_complete',
-            'tool': MEDIA_ARTIFACT_SOURCE,
+            'tool': TURN_RECONCILE_SOURCE,
             'tid': '',
             'status': 'completed',
         },
         'artifacts': wire_artifacts,
         'turns': [{
             'turn_key': turn_key,
-            'artifacts': turn_artifacts,
+            'artifacts': turn_wire,
             'references': [],
         }],
     }
@@ -1308,9 +1971,26 @@ def build_session_manifest(session) -> dict[str, Any]:
     artifacts, references, turns = _extract_manifest_records(
         events, workspace, messages, skills_dir=skills_dir,
     )
+    artifact_records = _records_by_path(artifacts)
+    _apply_turn_reconcile_to_manifest_records(
+        artifact_records,
+        turns,
+        messages,
+        workspace,
+        skills_dir=skills_dir,
+        tool_calls=tool_calls,
+    )
+    artifacts = sorted(artifact_records.values(), key=lambda row: row['path'])
+    _clean_record_keys(artifacts + references)
+    profile = str(getattr(session, 'profile', None) or '').strip()
     return {
         'todos': _wire_todos(todos),
-        'artifacts': _rows_to_wire(artifacts, workspace, skills_dir),
+        'artifacts': _rows_to_wire(
+            artifacts, workspace, skills_dir, default_profile=profile,
+        ),
         'references': _rows_to_wire(references, workspace, skills_dir),
-        'turns': [_turn_to_wire(turn, workspace, skills_dir) for turn in turns],
+        'turns': [
+            _turn_to_wire(turn, workspace, skills_dir, default_profile=profile)
+            for turn in turns
+        ],
     }

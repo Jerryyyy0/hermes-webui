@@ -60,10 +60,12 @@ _CSP_EXTRA_CONNECT_RE = _re.compile(
     r"^(?:https?|wss?)://(?:\*\.)?[A-Za-z0-9._~-]+(?::(?P<port>\d{1,5}|\*))?$"
 )
 _CSP_HEADER_NAME = 'Content-Security-Policy'
+_CSP_FRAME_BASE = "'self'"
 _CSP_SHARED_POLICY_TEMPLATE = (
     "default-src 'self' https://*.cloudflareaccess.com; "
     "object-src 'none'; "
     "frame-ancestors 'none'; "
+    "frame-src {frame_src}; "
     "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://static.cloudflareinsights.com blob:; "
     "worker-src blob: 'self' https://cdn.jsdelivr.net; "
     "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com; "
@@ -100,6 +102,33 @@ def _csp_extra_connect_src() -> str:
     return " " + " ".join(sources)
 
 
+def _csp_camofox_frame_src() -> str:
+    try:
+        from api.browser_preview import resolve_browser_preview_frame_origin
+
+        origin = resolve_browser_preview_frame_origin()
+    except Exception:
+        origin = ""
+    return f" {origin}" if origin else ""
+
+
+def _csp_extra_frame_src() -> str:
+    raw = os.getenv("HERMES_WEBUI_CSP_FRAME_EXTRA", "").strip()
+    if not raw:
+        return ""
+    sources = raw.split()
+    if not sources or any(not _valid_csp_extra_connect_source(src) for src in sources):
+        logger.warning("Ignoring invalid HERMES_WEBUI_CSP_FRAME_EXTRA value")
+        return ""
+    return " " + " ".join(sources)
+
+
+def _csp_frame_src(extra_frame_src: str | None = None) -> str:
+    if extra_frame_src is None:
+        extra_frame_src = _csp_extra_frame_src()
+    return f"{_CSP_FRAME_BASE}{_csp_camofox_frame_src()}{extra_frame_src}"
+
+
 def _csp_connect_src(extra_connect_src: str = "") -> str:
     return f"{_CSP_CONNECT_BASE} https://cdn.jsdelivr.net{extra_connect_src}"
 
@@ -108,7 +137,8 @@ def _build_csp_enforced_policy(extra_connect_src: str | None = None) -> str:
     if extra_connect_src is None:
         extra_connect_src = _csp_extra_connect_src()
     return _CSP_SHARED_POLICY_TEMPLATE.format(
-        connect_src=_csp_connect_src(extra_connect_src)
+        connect_src=_csp_connect_src(extra_connect_src),
+        frame_src=_csp_frame_src(),
     )
 
 

@@ -240,6 +240,43 @@ def _webui_cron_session_ids_for_job(job_id: str) -> set[str]:
     return session_ids
 
 
+def materialized_cron_session_ids_for_runs(
+    job_id: str,
+    runs: list[dict[str, Any]],
+    *,
+    max_delta_seconds: float = CRON_ORPHAN_OUTPUT_MAX_DELTA_SECONDS,
+) -> dict[str, str]:
+    """Map output filenames to already-materialized WebUI cron session IDs.
+
+    This is a fallback for one-shot jobs that were removed from jobs.json before
+    history lookup. In that case we cannot call materialize_cron_sessions_for_runs
+    with a live job record, but an imported sidecar may already exist.
+    """
+    sessions: list[tuple[str, float]] = []
+    for sid in _webui_cron_session_ids_for_job(job_id):
+        ts = _cron_run_timestamp_from_session_id(sid)
+        if ts is not None:
+            sessions.append((sid, ts))
+    if not sessions:
+        return {}
+
+    out: dict[str, str] = {}
+    for run in runs:
+        filename = str(run.get("filename") or "")
+        if not filename:
+            continue
+        try:
+            modified = float(run.get("modified") or run.get("run_mtime") or 0)
+        except (TypeError, ValueError):
+            modified = 0.0
+        if modified <= 0:
+            continue
+        sid, ts = min(sessions, key=lambda item: abs(item[1] - modified))
+        if abs(ts - modified) <= max_delta_seconds:
+            out[filename] = sid
+    return out
+
+
 def _delete_webui_cron_session_sidecar(sid: str) -> bool:
     try:
         from api.config import LOCK, SESSION_DIR, SESSIONS, _evict_session_agent
