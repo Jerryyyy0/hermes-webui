@@ -89,7 +89,7 @@ def try_handle_post(handler, parsed, body: dict | None) -> bool:
 
     try:
         if policy_type == "open":
-            rules = generate_iptables_open_rules()
+            rules = generate_iptables_open_rules(nflog_group_allowed=egress_nflog_group_allowed())
             payload: dict = {"policy_type": "open"}
         elif policy_type == "whitelist":
             allowed = body.get("allowed_ips")
@@ -102,7 +102,11 @@ def try_handle_post(handler, parsed, body: dict | None) -> bool:
                 if client_ip:
                     ips.append(client_ip)
             normalized = normalize_allowed_ips(ips)
-            rules = generate_iptables_whitelist(normalized)
+            rules = generate_iptables_whitelist(
+                normalized,
+                nflog_group_allowed=egress_nflog_group_allowed(),
+                nflog_group_denied=egress_nflog_group_denied(),
+            )
             payload = {"policy_type": "whitelist", "allowed_ips": normalized, "include_request_ip": include_request_ip}
         else:
             bad(handler, "policy_type must be 'open' or 'whitelist'", status=400)

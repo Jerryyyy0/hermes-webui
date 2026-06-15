@@ -129,3 +129,20 @@ def test_get_traffic_tcpdump_missing_returns_500():
                 assert try_handle_get(handler, parsed) is True
     handler.send_response.assert_called_with(500)
 
+
+def test_post_whitelist_passes_nflog_groups_from_config():
+    handler = MagicMock()
+    handler.client_address = ("1.2.3.4", 7777)
+    parsed = urlparse("/api/integration/egress/policy")
+    with patch("integration.egress.handlers.egress_policy_enabled", return_value=True):
+        with patch("integration.egress.handlers.egress_policy_rules_path", return_value="/tmp/rules.v4"):
+            with patch("integration.egress.handlers.egress_nflog_group_allowed", return_value=111):
+                with patch("integration.egress.handlers.egress_nflog_group_denied", return_value=222):
+                    with patch("integration.egress.handlers.generate_iptables_whitelist", return_value="RULES") as gen:
+                        with patch("integration.egress.handlers.apply_iptables_rules",
+                                   return_value=ApplyResult(ok=True, rules_path="/tmp/rules.v4")):
+                            body = {"policy_type": "whitelist", "allowed_ips": ["10.0.0.0/24"]}
+                            assert try_handle_post(handler, parsed, body) is True
+    assert gen.call_args.kwargs["nflog_group_allowed"] == 111
+    assert gen.call_args.kwargs["nflog_group_denied"] == 222
+
