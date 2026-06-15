@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+from urllib.parse import parse_qs
+
 from api.helpers import bad, j, require, _sanitize_error
 
 from integration.config import egress_policy_enabled, egress_policy_rules_path
+from integration.config import egress_capture_dir, egress_nflog_group_allowed, egress_nflog_group_denied
 from integration.egress.apply import apply_iptables_rules, get_current_iptables_rules
+from integration.egress.capture import read_traffic
 from integration.egress.rules import generate_iptables_open_rules, generate_iptables_whitelist, normalize_allowed_ips
 
 
@@ -22,13 +26,48 @@ def _client_ip(handler) -> str:
 def try_handle_get(handler, parsed) -> bool:
     if not egress_policy_enabled():
         return False
-    if parsed.path != "/api/integration/egress/policy":
-        return False
-    result = get_current_iptables_rules()
-    if not result.ok:
-        bad(handler, result.error or "failed", status=500)
+    if parsed.path == "/api/integration/egress/policy":
+        result = get_current_iptables_rules()
+        if not result.ok:
+            bad(handler, result.error or "failed", status=500)
+            return True
+        j(handler, {"ok": True, "rules": result.stdout})
         return True
-    j(handler, {"ok": True, "rules": result.stdout})
+    if parsed.path == "/api/integration/egress/traffic":
+        return _handle_traffic_get(handler, parsed)
+    return False
+
+
+def _handle_traffic_get(handler, parsed) -> bool:
+    qs = parse_qs(parsed.query)
+    verdict = (qs.get("verdict", [None])[0] or None)
+    if verdict is not None:
+        verdict = verdict.strip().lower()
+        if verdict not in ("allowed", "denied"):
+            bad(handler, "verdict must be 'allowed' or 'denied'", status=400)
+            return True
+    all_records = (qs.get("all", ["0"])[0]).strip().lower() in ("1", "true", "yes", "on")
+    raw_limit = (qs.get("limit", ["100"])[0]).strip()
+    try:
+        limit = int(raw_limit)
+    except ValueError:
+        limit = 100
+    if limit < 0:
+        limit = 0
+    try:
+        records = read_traffic(
+            egress_capture_dir(),
+            limit=limit,
+            all_records=all_records,
+            verdict=verdict,
+        )
+    except FileNotFoundError:
+        bad(handler, "tcpdump not found in container", status=500)
+        return True
+    except Exception as exc:
+        bad(handler, _sanitize_error(exc), status=500)
+        return True
+    j(handler, {"ok": True, "count": len(records), "records": records})
     return True
 
 
