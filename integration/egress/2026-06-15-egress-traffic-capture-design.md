@@ -182,20 +182,55 @@ GET /api/integration/egress/traffic
 
 ## 运维：容器启动命令
 
-在容器启动命令的 `apt-get install` 行加入 `tcpdump`，并在 `server.py` 前常驻两个 tcpdump：
+容器需 `--cap-add=NET_ADMIN --cap-add=NET_RAW`（NFLOG + tcpdump 所需）。相比原启动命令的增量：`apt-get install` 加 `tcpdump`、建抓包目录、在 `server.py` 前常驻两个 tcpdump 分别抓 `nflog:100`（放行）/ `nflog:200`（拒绝）。完整命令：
 
 ```bash
+docker run -d \
+--name zhiling-user-user-zrf \
+--cap-add=NET_ADMIN \
+--cap-add=NET_RAW \
+-v $(pwd)/workspace:/workspace \
+-v $(pwd)/.hermes:/home/hermeswebui/.hermes \
+-e PYTHONPATH=/home/hermeswebui/.hermes/hermes-agent \
+-e HERMES_BUNDLED_SKILLS=/home/hermeswebui/.hermes/skills \
+-e HERMES_HOME=/home/hermeswebui/.hermes/ \
+-e HERMES_WEBUI_STATE_DIR=/home/hermeswebui/.hermes/webui \
+-e HERMES_WEBUI_AGENT_DIR=/home/hermeswebui/.hermes/hermes-agent \
+-e UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
+-e SKILLHUB_URL=http://192.168.1.139:18702 \
+-e ZHILING_CONTROL_PLANE_URL=http://192.168.1.139:23001 \
+-e ZHILING_LOGOUT_API_URL=http://auth-proxy:8080 \
+-e BROWSER_PREVIEW_URL="http://192.168.1.139:6090/vnc.html?path=websockify%3Ftoken%3Dtest&autoconnect=true&reconnect=true&reconnect_delay=2000" \
+-e HERMES_INTEGRATION=1 \
+-e HERMES_EGRESS_POLICY_ENABLED=1 \
+-p 18787:8787 \
+--entrypoint /bin/bash \
+hermes-webui:zhiling-v8 \
 -c "apt-get update && apt-get install -y --no-install-recommends iptables tcpdump \
-  && mkdir -p /var/log/egress \
-  && ( tcpdump -i nflog:100 -nn -U -w /var/log/egress/allowed.pcap -C 10 -W 5 -Z root & ) \
-  && ( tcpdump -i nflog:200 -nn -U -w /var/log/egress/denied.pcap  -C 10 -W 5 -Z root & ) \
-  && cd /home/hermeswebui/.hermes/hermes-webui \
-  && ( /app/venv/bin/hermes gateway run & ) && sleep 3 && /app/venv/bin/python server.py"
+&& mkdir -p /var/log/egress \
+&& ( tcpdump -i nflog:100 -nn -U -w /var/log/egress/allowed.pcap -C 10 -W 5 -Z root & ) \
+&& ( tcpdump -i nflog:200 -nn -U -w /var/log/egress/denied.pcap  -C 10 -W 5 -Z root & ) \
+&& cd /home/hermeswebui/.hermes/hermes-webui \
+&& ( /app/venv/bin/hermes gateway run & ) && sleep 3 && /app/venv/bin/python server.py"
 ```
+
+抓包参数：`-C 10 -W 5`（每份 10MB、最多 5 个滚动文件，每路 ~50MB 硬上限，两路共 ~100MB）；`-U` 包级 flush 使读接口立即可见；`-Z root` 抓包后保持 root。
 
 说明：
 
-- group/目录/轮转由 env 调整：`HERMES_EGRESS_CAPTURE_DIR`、`HERMES_EGRESS_NFLOG_GROUP_ALLOWED`、`HERMES_EGRESS_NFLOG_GROUP_DENIED`。改了 group 时上面 `nflog:100/200` 也要同步。
-- 只有应用过策略（`POST /policy`，open 或 whitelist）后才会产生 NFLOG 记录。若希望容器一起来就抓，可在 `sleep 3` 后追加：
-  `&& curl -s -XPOST http://localhost:8787/api/integration/egress/policy -H 'Content-Type: application/json' -d '{"policy_type":"open"}'`
-- 读取：`curl -s 'http://localhost:18787/api/integration/egress/traffic?limit=50' | jq`
+- group/目录/轮转由 env 调整：`HERMES_EGRESS_CAPTURE_DIR`、`HERMES_EGRESS_NFLOG_GROUP_ALLOWED`、`HERMES_EGRESS_NFLOG_GROUP_DENIED`。改了 group 时上面 `nflog:100/200` 与 `-w` 路径也要同步。
+- **只有应用过策略（`POST /policy`，open 或 whitelist）后才会产生 NFLOG 记录**。tcpdump 先于策略启动也没关系，应用策略后自动开始进数据。容器起来后从外部应用：
+  ```bash
+  curl -s -X POST http://localhost:18787/api/integration/egress/policy \
+    -H 'Content-Type: application/json' \
+    -d '{"policy_type":"whitelist","allowed_ips":["10.0.0.0/24"],"include_request_ip":true}'
+  ```
+- 读取流量日志：
+  ```bash
+  curl -s 'http://localhost:18787/api/integration/egress/traffic?limit=50' | jq                  # 最新 50 条(放行+拒绝)
+  curl -s 'http://localhost:18787/api/integration/egress/traffic?all=1&verdict=denied' | jq       # 全部被拒绝的
+  ```
+- 可选：让容器一启动就自应用 open 策略开始抓（`server.py` 是前台阻塞进程，故用后台延时 curl，且用容器内端口 `8787` 而非宿主 `18787`）。在 `sleep 3` 之后、`server.py` 之前插入：
+  ```bash
+  && ( sleep 5 && curl -s -X POST http://localhost:8787/api/integration/egress/policy -H 'Content-Type: application/json' -d '{"policy_type":"open"}' >/dev/null 2>&1 & ) \
+  ```
