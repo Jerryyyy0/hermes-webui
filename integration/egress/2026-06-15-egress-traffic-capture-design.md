@@ -179,3 +179,23 @@ GET /api/integration/egress/traffic
 - **读取正在写入的 pcap**：末尾可能有半截记录，解析时跳过坏行即可。
 - **轮转文件命名**：`-C -W` 后缀因 tcpdump 版本而异，统一用 glob + mtime 排序规避。
 - **依赖 tcpdump 存在**：缺失时接口返回明确错误，提示容器需安装 tcpdump。
+
+## 运维：容器启动命令
+
+在容器启动命令的 `apt-get install` 行加入 `tcpdump`，并在 `server.py` 前常驻两个 tcpdump：
+
+```bash
+-c "apt-get update && apt-get install -y --no-install-recommends iptables tcpdump \
+  && mkdir -p /var/log/egress \
+  && ( tcpdump -i nflog:100 -nn -U -w /var/log/egress/allowed.pcap -C 10 -W 5 -Z root & ) \
+  && ( tcpdump -i nflog:200 -nn -U -w /var/log/egress/denied.pcap  -C 10 -W 5 -Z root & ) \
+  && cd /home/hermeswebui/.hermes/hermes-webui \
+  && ( /app/venv/bin/hermes gateway run & ) && sleep 3 && /app/venv/bin/python server.py"
+```
+
+说明：
+
+- group/目录/轮转由 env 调整：`HERMES_EGRESS_CAPTURE_DIR`、`HERMES_EGRESS_NFLOG_GROUP_ALLOWED`、`HERMES_EGRESS_NFLOG_GROUP_DENIED`。改了 group 时上面 `nflog:100/200` 也要同步。
+- 只有应用过策略（`POST /policy`，open 或 whitelist）后才会产生 NFLOG 记录。若希望容器一起来就抓，可在 `sleep 3` 后追加：
+  `&& curl -s -XPOST http://localhost:8787/api/integration/egress/policy -H 'Content-Type: application/json' -d '{"policy_type":"open"}'`
+- 读取：`curl -s 'http://localhost:18787/api/integration/egress/traffic?limit=50' | jq`
