@@ -44,8 +44,13 @@ def generate_iptables_open_rules() -> str:
     return "\n".join(rules)
 
 
-def generate_iptables_whitelist(allowed_ips: list[str]) -> str:
-    """Generate iptables-restore rules content (default drop + allowlist)."""
+def generate_iptables_whitelist(
+    allowed_ips: list[str],
+    *,
+    nflog_group_allowed: int = 100,
+    nflog_group_denied: int = 200,
+) -> str:
+    """Generate iptables-restore rules content (default drop + allowlist + NFLOG audit)."""
     ips = normalize_allowed_ips(allowed_ips)
     rules: list[str] = []
     rules.append("*filter")
@@ -54,24 +59,29 @@ def generate_iptables_whitelist(allowed_ips: list[str]) -> str:
     rules.append(":INPUT DROP [0:0]")
     rules.append(":FORWARD DROP [0:0]")
     rules.append(":OUTPUT DROP [0:0]")
+    rules.append(":EGRESS_ALLOW - [0:0]")
     rules.append("")
     rules.append("# 允许本地回环接口")
     rules.append("-A INPUT -i lo -j ACCEPT")
     rules.append("-A OUTPUT -o lo -j ACCEPT")
     rules.append("")
-    rules.append("# 允许已建立和相关连接的响应流量")
+    rules.append("# 允许已建立和相关连接的响应流量（回包/续传，不记录以降噪）")
     rules.append("-A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT")
     rules.append("-A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT")
+    rules.append("")
+    rules.append("# 放行路径：先记 NFLOG（放行）再 ACCEPT")
+    rules.append(f"-A EGRESS_ALLOW -j NFLOG --nflog-group {nflog_group_allowed}")
+    rules.append("-A EGRESS_ALLOW -j ACCEPT")
     rules.append("")
     rules.append("# 白名单：允许指定的 IP 地址")
     for ip in ips:
         rules.append(f"# 允许 IP: {ip}")
         rules.append(f"-A INPUT -s {ip} -j ACCEPT")
-        rules.append(f"-A OUTPUT -d {ip} -j ACCEPT")
+        rules.append(f"-A OUTPUT -d {ip} -j EGRESS_ALLOW")
         rules.append("")
-    rules.append("# 可选：允许 DNS 查询（如需要）")
-    rules.append("#-A OUTPUT -p udp --dport 53 -j ACCEPT")
-    rules.append("#-A OUTPUT -p tcp --dport 53 -j ACCEPT")
+    rules.append("# 兜底：被拒绝的出口包先记 NFLOG（拒绝）再 DROP")
+    rules.append(f"-A OUTPUT -j NFLOG --nflog-group {nflog_group_denied}")
+    rules.append("-A OUTPUT -j DROP")
     rules.append("")
     rules.append("COMMIT")
     return "\n".join(rules)

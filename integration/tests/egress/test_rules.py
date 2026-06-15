@@ -38,5 +38,23 @@ def test_whitelist_rules_default_drop_and_allow_loopback_and_established():
     assert "-A INPUT -i lo -j ACCEPT" in text
     assert "ESTABLISHED,RELATED" in text
     assert "-A INPUT -s 1.2.3.4 -j ACCEPT" in text
-    assert "-A OUTPUT -d 1.2.3.4 -j ACCEPT" in text
+    # 出口白名单改为先经自定义链记日志再放行
+    assert "-A OUTPUT -d 1.2.3.4 -j EGRESS_ALLOW" in text
+
+
+def test_whitelist_rules_nflog_allowed_and_denied():
+    text = generate_iptables_whitelist(["1.2.3.4"])
+    assert ":EGRESS_ALLOW -" in text
+    # 放行路径记 group 100
+    assert "-A EGRESS_ALLOW -j NFLOG --nflog-group 100" in text
+    assert "-A EGRESS_ALLOW -j ACCEPT" in text
+    # 拒绝兜底记 group 200 再 DROP
+    assert "-A OUTPUT -j NFLOG --nflog-group 200" in text
+    assert "-A OUTPUT -j DROP" in text
+
+
+def test_whitelist_rules_custom_groups():
+    text = generate_iptables_whitelist(["1.2.3.4"], nflog_group_allowed=11, nflog_group_denied=22)
+    assert "-A EGRESS_ALLOW -j NFLOG --nflog-group 11" in text
+    assert "-A OUTPUT -j NFLOG --nflog-group 22" in text
 
