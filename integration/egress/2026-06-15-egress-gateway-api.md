@@ -2,9 +2,6 @@
 
 - 模块：`integration/egress`
 - 能力：用 iptables 控制容器出口流量（全放行 / 白名单），并用 NFLOG + tcpdump 记录出口流量（放行与被拒绝的都记录），通过 HTTP 接口在容器外查询。
-- 关联文档：设计 `2026-06-15-egress-traffic-capture-design.md`；测试 `2026-06-15-egress-traffic-capture-test-manual.md`。
-
----
 
 ## 启用条件
 
@@ -200,9 +197,30 @@ curl -s 'http://localhost:18787/api/integration/egress/traffic?all=1' | jq
 2. **`apt-get install` 行加 `tcpdump`**：`... iptables tcpdump`
 3. **`server.py` 之前常驻两个 tcpdump**，并建抓包目录。
 
-`-c` 脚本改为：
+run0610.sh里的docker run内容改为：
 
 ```bash
+docker run -d \
+--name webui \
+--cap-add=NET_ADMIN \
+--cap-add=NET_RAW \
+-v $(pwd)/workspace:/workspace \
+-v $(pwd)/.hermes:/home/hermeswebui/.hermes \
+-e PYTHONPATH=/home/hermeswebui/.hermes/hermes-agent \
+-e HERMES_BUNDLED_SKILLS=/home/hermeswebui/.hermes/skills \
+-e HERMES_HOME=/home/hermeswebui/.hermes/ \
+-e HERMES_WEBUI_STATE_DIR=/home/hermeswebui/.hermes/webui \
+-e HERMES_WEBUI_AGENT_DIR=/home/hermeswebui/.hermes/hermes-agent \
+-e UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
+-e SKILLHUB_URL=http://192.168.1.139:18702 \
+-e ZHILING_CONTROL_PLANE_URL=http://192.168.1.139:23001 \
+-e ZHILING_LOGOUT_API_URL=http://auth-proxy:8080 \
+-e BROWSER_PREVIEW_URL="http://192.168.1.139:6090/vnc.html?path=websockify%3Ftoken%3Dtest&autoconnect=true&reconnect=true&reconnect_delay=2000" \
+-e HERMES_INTEGRATION=1 \
+-e HERMES_EGRESS_POLICY_ENABLED=1 \
+-p 38787:8787 \
+--entrypoint /bin/bash \
+hermes-webui:zhiling-v8 \
 -c "apt-get update && apt-get install -y --no-install-recommends iptables tcpdump \
 && mkdir -p /var/log/egress \
 && ( tcpdump -i nflog:100 -nn -U -w /var/log/egress/allowed.pcap -C 10 -W 5 -Z root & ) \
