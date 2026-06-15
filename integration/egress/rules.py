@@ -30,8 +30,8 @@ def normalize_allowed_ips(values: Iterable[str]) -> list[str]:
     return normalized
 
 
-def generate_iptables_open_rules() -> str:
-    """Generate iptables-restore rules content (accept all)."""
+def generate_iptables_open_rules(*, nflog_group_allowed: int = 100) -> str:
+    """Generate iptables-restore rules content (accept all + NFLOG new egress for audit)."""
     rules: list[str] = []
     rules.append("*filter")
     rules.append("")
@@ -39,6 +39,15 @@ def generate_iptables_open_rules() -> str:
     rules.append(":INPUT ACCEPT [0:0]")
     rules.append(":FORWARD ACCEPT [0:0]")
     rules.append(":OUTPUT ACCEPT [0:0]")
+    rules.append("")
+    rules.append("# 允许本地回环接口")
+    rules.append("-A OUTPUT -o lo -j ACCEPT")
+    rules.append("")
+    rules.append("# 已建立/相关连接不记录以降噪")
+    rules.append("-A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT")
+    rules.append("")
+    rules.append("# 审计：仅对新出口连接记 NFLOG（放行）")
+    rules.append(f"-A OUTPUT -m conntrack --ctstate NEW -j NFLOG --nflog-group {nflog_group_allowed}")
     rules.append("")
     rules.append("COMMIT")
     return "\n".join(rules)

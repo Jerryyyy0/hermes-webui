@@ -58,3 +58,14 @@ def test_whitelist_rules_custom_groups():
     assert "-A EGRESS_ALLOW -j NFLOG --nflog-group 11" in text
     assert "-A OUTPUT -j NFLOG --nflog-group 22" in text
 
+
+def test_open_rules_nflog_new_connections():
+    text = generate_iptables_open_rules()
+    assert ":OUTPUT ACCEPT" in text
+    assert "--ctstate NEW -j NFLOG --nflog-group 100" in text
+
+
+def test_open_rules_custom_group():
+    text = generate_iptables_open_rules(nflog_group_allowed=33)
+    assert "--ctstate NEW -j NFLOG --nflog-group 33" in text
+
