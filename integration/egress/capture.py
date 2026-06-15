@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import ipaddress
 import re
+import subprocess
+from pathlib import Path
 
 _TS = r"(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+)"
 _LINE_RE = re.compile(
@@ -63,3 +65,33 @@ def parse_tcpdump_line(line: str, verdict: str) -> dict | None:
         "length": length,
         "flags": flags,
     }
+
+
+def list_capture_files(capture_dir: str, prefix: str) -> list[Path]:
+    """Return capture files matching prefix, newest (by mtime) first. Empty if dir missing."""
+    base = Path(capture_dir)
+    if not base.is_dir():
+        return []
+    files = [p for p in base.glob(prefix + "*") if p.is_file()]
+    files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return files
+
+
+def parse_pcap_file(path: Path, verdict: str) -> list[dict]:
+    """Run `tcpdump -r path` and parse its lines into records.
+
+    Raises FileNotFoundError if tcpdump is not installed. Tolerates non-zero
+    return codes (e.g. truncated dump file) by parsing whatever was produced.
+    """
+    proc = subprocess.run(
+        ["tcpdump", "-nn", "-tttt", "-r", str(path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    records: list[dict] = []
+    for line in (proc.stdout or "").splitlines():
+        rec = parse_tcpdump_line(line, verdict)
+        if rec is not None:
+            records.append(rec)
+    return records
