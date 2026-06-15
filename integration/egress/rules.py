@@ -31,7 +31,7 @@ def normalize_allowed_ips(values: Iterable[str]) -> list[str]:
 
 
 def generate_iptables_open_rules(*, nflog_group_allowed: int = 100) -> str:
-    """Generate iptables-restore rules content (accept all + NFLOG new egress for audit)."""
+    """生成 iptables-restore 规则内容（全部放行 + 对新出口连接做 NFLOG 审计）。"""
     rules: list[str] = []
     rules.append("*filter")
     rules.append("")
@@ -59,7 +59,7 @@ def generate_iptables_whitelist(
     nflog_group_allowed: int = 100,
     nflog_group_denied: int = 200,
 ) -> str:
-    """Generate iptables-restore rules content (default drop + allowlist + NFLOG audit)."""
+    """生成 iptables-restore 规则内容（默认拒绝 + 白名单放行 + NFLOG 审计）。"""
     ips = normalize_allowed_ips(allowed_ips)
     rules: list[str] = []
     rules.append("*filter")

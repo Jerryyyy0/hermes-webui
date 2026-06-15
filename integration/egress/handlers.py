@@ -24,6 +24,10 @@ def _client_ip(handler) -> str:
 
 
 def try_handle_get(handler, parsed) -> bool:
+    """分发 egress 的 GET 路由：/policy 查看当前规则，/traffic 读取出口流量日志。
+
+    未启用 egress 策略或路径不匹配时返回 False，交还给上层路由继续处理。
+    """
     if not egress_policy_enabled():
         return False
     if parsed.path == "/api/integration/egress/policy":
@@ -39,14 +43,18 @@ def try_handle_get(handler, parsed) -> bool:
 
 
 def _handle_traffic_get(handler, parsed) -> bool:
+    """处理 GET /traffic：按 verdict/all/limit 查询参数返回出口流量记录。"""
     qs = parse_qs(parsed.query)
+    # verdict 可选，留空表示放行+拒绝都返回；给了值则必须是 allowed/denied。
     verdict = (qs.get("verdict", [None])[0] or None)
     if verdict is not None:
         verdict = verdict.strip().lower()
         if verdict not in ("allowed", "denied"):
             bad(handler, "verdict must be 'allowed' or 'denied'", status=400)
             return True
+    # all=1/true/yes/on 时返回全量，忽略 limit。
     all_records = (qs.get("all", ["0"])[0]).strip().lower() in ("1", "true", "yes", "on")
+    # limit 默认 100，非法值回落默认，负数视为 0。
     raw_limit = (qs.get("limit", ["100"])[0]).strip()
     try:
         limit = int(raw_limit)
