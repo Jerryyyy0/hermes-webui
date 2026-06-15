@@ -68,13 +68,24 @@ def parse_tcpdump_line(line: str, verdict: str) -> dict | None:
 
 
 def list_capture_files(capture_dir: str, prefix: str) -> list[Path]:
-    """Return capture files matching prefix, newest (by mtime) first. Empty if dir missing."""
+    """Return capture files matching prefix, newest (by mtime) first. Empty if dir missing.
+
+    Files that vanish between globbing and stat (e.g. concurrent tcpdump rotation)
+    are skipped rather than raising.
+    """
     base = Path(capture_dir)
     if not base.is_dir():
         return []
-    files = [p for p in base.glob(prefix + "*") if p.is_file()]
-    files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    return files
+    stamped: list[tuple[float, Path]] = []
+    for p in base.glob(prefix + "*"):
+        try:
+            if not p.is_file():
+                continue
+            stamped.append((p.stat().st_mtime, p))
+        except OSError:
+            continue
+    stamped.sort(key=lambda item: item[0], reverse=True)
+    return [p for _, p in stamped]
 
 
 def parse_pcap_file(path: Path, verdict: str) -> list[dict]:

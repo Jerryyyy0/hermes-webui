@@ -1,3 +1,4 @@
+from pathlib import Path
 from unittest.mock import patch
 
 from integration.egress import capture
@@ -84,3 +85,21 @@ def test_parse_pcap_file_runs_tcpdump_and_parses(tmp_path):
     assert len(recs) == 1
     assert recs[0]["dst"] == "8.8.8.8"
     assert recs[0]["verdict"] == "allowed"
+
+
+def test_list_capture_files_skips_vanished_file(tmp_path):
+    a = tmp_path / "allowed.pcap"
+    b = tmp_path / "allowed.pcap1"
+    a.write_text("x")
+    b.write_text("y")
+    real_stat = Path.stat
+
+    def flaky_stat(self, *args, **kwargs):
+        if self.name == "allowed.pcap1":
+            raise FileNotFoundError("rotated away")
+        return real_stat(self, *args, **kwargs)
+
+    with patch.object(Path, "stat", flaky_stat):
+        files = capture.list_capture_files(str(tmp_path), "allowed.pcap")
+    # 消失的文件被跳过，不抛异常
+    assert [p.name for p in files] == ["allowed.pcap"]
