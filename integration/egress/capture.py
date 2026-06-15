@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import re
 
 _TS = r"(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+)"
@@ -14,10 +15,15 @@ def _split_host_port(token: str) -> tuple[str, int | None]:
     if "." not in token:
         return token, None
     host, _, port = token.rpartition(".")
-    try:
-        return host, int(port)
-    except ValueError:
+    if not port.isdigit():
         return token, None
+    # A bare IPv4 address (no port) must not be split, e.g. ICMP "8.8.8.8".
+    try:
+        ipaddress.ip_address(token)
+        return token, None
+    except ValueError:
+        pass
+    return host, int(port)
 
 
 def parse_tcpdump_line(line: str, verdict: str) -> dict | None:

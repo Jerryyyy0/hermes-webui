@@ -35,3 +35,17 @@ def test_parse_udp_line():
 def test_parse_garbage_line_returns_none():
     assert parse_tcpdump_line("reading from file x.pcap, link-type ...", "allowed") is None
     assert parse_tcpdump_line("", "allowed") is None
+
+
+def test_parse_icmp_portless_does_not_corrupt_ip():
+    line = (
+        "2026-06-15 11:20:32.000000 IP 172.17.0.5 > 8.8.8.8: "
+        "ICMP echo request, id 1, seq 1, length 64"
+    )
+    rec = parse_tcpdump_line(line, "allowed")
+    assert rec["proto"] == "icmp"
+    assert rec["src"] == "172.17.0.5"
+    assert rec["sport"] is None
+    assert rec["dst"] == "8.8.8.8"
+    assert rec["dport"] is None
+    assert rec["length"] == 64
