@@ -91,3 +91,25 @@ def knowledge_base_url() -> str | None:
 
 def knowledge_base_enabled() -> bool:
     return integration_enabled() and bool(knowledge_base_url())
+
+
+def egress_capture_dir() -> str:
+    return str(os.getenv("HERMES_EGRESS_CAPTURE_DIR", "").strip() or "/var/log/egress")
+
+
+def _egress_int_env(name: str, default: int) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def egress_nflog_group_allowed() -> int:
+    return _egress_int_env("HERMES_EGRESS_NFLOG_GROUP_ALLOWED", 100)
+
+
+def egress_nflog_group_denied() -> int:
+    return _egress_int_env("HERMES_EGRESS_NFLOG_GROUP_DENIED", 200)
