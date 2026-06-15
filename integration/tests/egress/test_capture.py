@@ -103,3 +103,49 @@ def test_list_capture_files_skips_vanished_file(tmp_path):
         files = capture.list_capture_files(str(tmp_path), "allowed.pcap")
     # 消失的文件被跳过，不抛异常
     assert [p.name for p in files] == ["allowed.pcap"]
+
+
+def _rec(ts, verdict, dst):
+    return {"ts": ts, "verdict": verdict, "proto": "tcp", "src": "172.17.0.5",
+            "sport": 1, "dst": dst, "dport": 443, "length": 0, "flags": "S"}
+
+
+def test_read_traffic_merges_and_sorts_desc_and_limits():
+    allowed = [_rec("2026-06-15 11:00:00.000000", "allowed", "1.1.1.1"),
+               _rec("2026-06-15 11:00:02.000000", "allowed", "1.1.1.2")]
+    denied = [_rec("2026-06-15 11:00:01.000000", "denied", "9.9.9.9")]
+
+    def fake_collect(capture_dir, prefix, verdict):
+        return allowed if verdict == "allowed" else denied
+
+    with patch("integration.egress.capture._collect_records", side_effect=fake_collect):
+        recs = capture.read_traffic("/cap", limit=2, all_records=False, verdict=None)
+    # 时间倒序
+    assert [r["ts"] for r in recs] == [
+        "2026-06-15 11:00:02.000000",
+        "2026-06-15 11:00:01.000000",
+    ]
+
+
+def test_read_traffic_verdict_filter():
+    allowed = [_rec("2026-06-15 11:00:00.000000", "allowed", "1.1.1.1")]
+    denied = [_rec("2026-06-15 11:00:01.000000", "denied", "9.9.9.9")]
+
+    def fake_collect(capture_dir, prefix, verdict):
+        return allowed if verdict == "allowed" else denied
+
+    with patch("integration.egress.capture._collect_records", side_effect=fake_collect):
+        recs = capture.read_traffic("/cap", limit=100, all_records=False, verdict="denied")
+    assert len(recs) == 1
+    assert recs[0]["verdict"] == "denied"
+
+
+def test_read_traffic_all_ignores_limit():
+    allowed = [_rec(f"2026-06-15 11:00:0{i}.000000", "allowed", "1.1.1.1") for i in range(5)]
+
+    def fake_collect(capture_dir, prefix, verdict):
+        return allowed if verdict == "allowed" else []
+
+    with patch("integration.egress.capture._collect_records", side_effect=fake_collect):
+        recs = capture.read_traffic("/cap", limit=2, all_records=True, verdict=None)
+    assert len(recs) == 5

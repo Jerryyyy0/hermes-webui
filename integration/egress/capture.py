@@ -106,3 +106,38 @@ def parse_pcap_file(path: Path, verdict: str) -> list[dict]:
         if rec is not None:
             records.append(rec)
     return records
+
+
+ALLOWED_PREFIX = "allowed.pcap"
+DENIED_PREFIX = "denied.pcap"
+
+
+def _collect_records(capture_dir: str, prefix: str, verdict: str) -> list[dict]:
+    records: list[dict] = []
+    for path in list_capture_files(capture_dir, prefix):
+        records.extend(parse_pcap_file(path, verdict))
+    return records
+
+
+def read_traffic(
+    capture_dir: str,
+    *,
+    limit: int,
+    all_records: bool,
+    verdict: str | None,
+) -> list[dict]:
+    """Read, merge, sort (newest first) and slice egress traffic records.
+
+    verdict: None for both, or 'allowed'/'denied' to filter.
+    Raises FileNotFoundError if tcpdump is missing (propagated from parse).
+    """
+    records: list[dict] = []
+    if verdict in (None, "allowed"):
+        records.extend(_collect_records(capture_dir, ALLOWED_PREFIX, "allowed"))
+    if verdict in (None, "denied"):
+        records.extend(_collect_records(capture_dir, DENIED_PREFIX, "denied"))
+    # ts 为定宽字符串，字典序即时间序
+    records.sort(key=lambda r: r["ts"], reverse=True)
+    if all_records:
+        return records
+    return records[: max(0, limit)]
