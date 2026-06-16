@@ -1056,12 +1056,17 @@ def _get_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
         except Exception:
             pass
 
-    from agent.skill_utils import iter_skill_index_files, parse_frontmatter, skill_matches_platform
-    
+    try:
+        from agent.skill_utils import iter_skill_index_files, parse_frontmatter, skill_matches_platform
+    except ImportError:
+        res = (0, 0)
+        _SKILLS_STATS_CACHE[profile_dir] = (res[0], res[1], now + _SKILLS_STATS_CACHE_TTL)
+        return res
+
     seen_names = set()
     enabled_count = 0
     compatible_count = 0
-    
+
     for skill_md in iter_skill_index_files(skills_dir, "SKILL.md"):
         try:
             content = skill_md.read_text(encoding="utf-8")[:4000]
@@ -1072,13 +1077,13 @@ def _get_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
             if name in seen_names:
                 continue
             seen_names.add(name)
-            
+
             compatible_count += 1
             if name not in disabled:
                 enabled_count += 1
         except Exception:
             pass
-            
+
     res = (enabled_count, compatible_count)
     _SKILLS_STATS_CACHE[profile_dir] = (res[0], res[1], now + _SKILLS_STATS_CACHE_TTL)
     return res

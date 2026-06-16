@@ -53,20 +53,39 @@ def _is_success_code(code: Any) -> bool:
 
 
 def parse_upstream_response(resp: httpx.Response) -> tuple[int, Any]:
-    """Map downstream {code, msg, data} to (http_status, body)."""
+    """Map downstream response to (http_status, body).
+
+    Handles two formats:
+    - Standard wrapper: {"code": "200", "msg": "...", "data": ...}
+    - Direct payload:   {"total": N, "data": [...]}  (no code/msg fields)
+    """
     try:
         payload = resp.json()
     except Exception:
         return 502, {
             "error": "knowledge_base_upstream_failed",
-            "message": "invalid JSON from upstream",
+            "message": f"invalid JSON from upstream (HTTP {resp.status_code})",
         }
+
+    # Some proxies double-encode JSON: resp.json() yields a str instead of dict.
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except Exception:
+            return 502, {
+                "error": "knowledge_base_upstream_failed",
+                "message": "upstream returned a non-JSON string",
+            }
 
     if not isinstance(payload, dict):
         return 502, {
             "error": "knowledge_base_upstream_failed",
             "message": "unexpected upstream response shape",
         }
+
+    # Responses without a "code" field are treated as direct payloads.
+    if "code" not in payload:
+        return 200, payload
 
     code = payload.get("code")
     msg = payload.get("msg", "")

@@ -32,6 +32,25 @@ def test_parse_upstream_response_business_error():
     assert body["code"] == 500
 
 
+def test_parse_upstream_response_direct_payload():
+    """Downstream returns data without {code, msg, data} wrapper."""
+    resp = MagicMock(spec=httpx.Response)
+    resp.json.return_value = {"total": 7, "data": [{"id": 1}]}
+    status, body = client.parse_upstream_response(resp)
+    assert status == 200
+    assert body == {"total": 7, "data": [{"id": 1}]}
+
+
+def test_parse_upstream_response_double_encoded_json():
+    """Proxy double-encodes JSON: resp.json() yields a string."""
+    inner = {"total": 3, "data": [{"id": 1}, {"id": 2}, {"id": 3}]}
+    resp = MagicMock(spec=httpx.Response)
+    resp.json.return_value = json.dumps(inner)
+    status, body = client.parse_upstream_response(resp)
+    assert status == 200
+    assert body == inner
+
+
 def test_build_create_payload_fixed_values():
     body = {
         "account": "admin",
