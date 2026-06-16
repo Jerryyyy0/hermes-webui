@@ -20,17 +20,18 @@ def _on_session_saved(session) -> None:
     except (TypeError, ValueError, OSError):
         return
 
-    from integration.workspace.artifact_profiles import update_workspace_artifact_profile_for_session
     from integration.workspace.file_index_cache import invalidate_workspace_file_index
 
     invalidate_workspace_file_index(workspace)
-    try:
-        update_workspace_artifact_profile_for_session(session, workspace_root=workspace)
-    except Exception:
-        logger.debug(
-            "Failed to incrementally update workspace artifact profile index",
-            exc_info=True,
-        )
+    # Profile artifact index maintenance temporarily disabled (scheme C).
+    # from integration.workspace.artifact_profiles import update_workspace_artifact_profile_for_session
+    # try:
+    #     update_workspace_artifact_profile_for_session(session, workspace_root=workspace)
+    # except Exception:
+    #     logger.debug(
+    #         "Failed to incrementally update workspace artifact profile index",
+    #         exc_info=True,
+    #     )
 
 
 def install_workspace_integration_hooks() -> None:

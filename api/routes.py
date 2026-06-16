@@ -8879,6 +8879,15 @@ def handle_post(handler, parsed) -> bool:
             logger.exception("rollback/restore failed")
             return bad(handler, str(e), status=500)
 
+    # ── MCP Reload (POST) ──
+    if parsed.path == "/api/mcp/reload":
+        return _handle_mcp_reload(handler)
+
+    # ── MCP Server Test (POST) ──
+    if parsed.path.startswith("/api/mcp/servers/") and parsed.path.endswith("/test"):
+        name = parsed.path[len("/api/mcp/servers/"):-len("/test")]
+        return _handle_mcp_server_test(handler, name)
+
     return False  # 404
 
 
@@ -11795,15 +11804,21 @@ def _checkpoint_user_message_for_eager_session_save(s, msg: str, attachments, st
         user_msg["timestamp"] = int(started_at)
     if attachments:
         user_msg["attachments"] = list(attachments)
+    from api.session_manifest import _next_turn_key
+    user_msg["_turn_key"] = _next_turn_key(existing)
     s.messages.append(user_msg)
 
 
 def _turn_key_for_pending_user_message(s, msg: str) -> str:
-    """Return the canonical manifest turn key for the submitted user turn."""
+    """返回当前提交用户轮次的 manifest turn key（优先使用稳定的 _turn_key）。"""
     messages = list(getattr(s, "messages", None) or [])
-    if get_webui_session_save_mode() == "eager" and messages:
+    if messages:
         latest = messages[-1]
         if isinstance(latest, dict) and latest.get("role") == "user":
+            # 优先使用稳定的 _turn_key
+            turn_key = latest.get("_turn_key", "")
+            if turn_key:
+                return turn_key
             row_text = " ".join(str(latest.get("content") or "").split())
             msg_text = " ".join(str(msg or "").split())
             if row_text == msg_text:
@@ -16404,3 +16419,61 @@ def _handle_mcp_server_update(handler, name, body):
     _save_yaml_config_file(_get_config_path(), cfg)
     reload_config()
     return j(handler, {"ok": True, "server": _server_summary(name, server_cfg)})
+
+
+def _handle_mcp_reload(handler):
+    """Reload all MCP servers from config (POST /api/mcp/reload)."""
+    from api.commands import _run_reload_mcp_command
+    try:
+        summary = _run_reload_mcp_command()
+        return j(handler, {"ok": True, "summary": summary})
+    except Exception as e:
+        logger.exception("MCP reload failed")
+        return bad(handler, str(e))
+
+
+def _handle_mcp_server_test(handler, name):
+    """Test connection to an MCP server by name (POST /api/mcp/servers/{name}/test).
+
+    Validates the config is well-formed and that the MCP runtime is available.
+    A full subprocess-based connectivity test is a future enhancement.
+    """
+    from urllib.parse import unquote as _unquote
+
+    name = _unquote(name)
+    if not name:
+        return bad(handler, "name is required")
+    cfg = get_config()
+    servers = cfg.get("mcp_servers", {})
+    if not isinstance(servers, dict):
+        servers = {}
+    srv = servers.get(name)
+    if not isinstance(srv, dict):
+        return bad(handler, f"MCP server '{name}' not found", 404)
+
+    errors = []
+    if "url" in srv:
+        if not srv["url"] or not isinstance(srv["url"], str):
+            errors.append("url is invalid")
+    elif "command" in srv:
+        if not srv["command"] or not isinstance(srv["command"], str):
+            errors.append("command is invalid")
+    else:
+        errors.append("neither url nor command configured")
+
+    if errors:
+        return j(handler, {"ok": False, "error": "; ".join(errors)})
+
+    try:
+        from tools.mcp_tool import get_mcp_status
+        _mcp_tool_available = True
+    except Exception:
+        _mcp_tool_available = False
+
+    return j(handler, {
+        "ok": True,
+        "name": name,
+        "transport": "http" if "url" in srv else "stdio",
+        "mcp_tool_available": _mcp_tool_available,
+        "note": "Config validated. Full connectivity test requires MCP runtime (run /reload-mcp or start a session).",
+    })

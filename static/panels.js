@@ -6055,7 +6055,7 @@ function switchSettingsSection(name){
       });
     }
   }
-  let section=(name==='appearance'||name==='preferences'||name==='providers'||name==='plugins'||name==='system'||name==='help')?name:'conversation';
+  let section=(name==='appearance'||name==='preferences'||name==='providers'||name==='plugins'||name==='mcp'||name==='system'||name==='help')?name:'conversation';
   // Deep-linking to the Plugins pane when the tab is hidden (no plugins
   // installed, #3457) falls back to Conversation. Resolve this BEFORE toggling
   // panes/sidebar/dropdown below so every downstream selection uses the
@@ -6067,13 +6067,13 @@ function switchSettingsSection(name){
   }
   _settingsSection=section;
   _currentSettingsSection=section;
-  const map={conversation:'Conversation',appearance:'Appearance',preferences:'Preferences',providers:'Providers',plugins:'Plugins',system:'System',help:'Help'};
+  const map={conversation:'Conversation',appearance:'Appearance',preferences:'Preferences',providers:'Providers',plugins:'Plugins',mcp:'Mcp',system:'System',help:'Help'};
   // Sidebar menu items
   document.querySelectorAll('#settingsMenu .side-menu-item').forEach(it=>{
     it.classList.toggle('active', it.dataset.settingsSection===section);
   });
   // Panes in main
-  ['conversation','appearance','preferences','providers','plugins','system','help'].forEach(key=>{
+  ['conversation','appearance','preferences','providers','plugins','mcp','system','help'].forEach(key=>{
     const pane=$('settingsPane'+map[key]);
     if(pane) pane.classList.toggle('active', key===section);
   });
@@ -8347,11 +8347,193 @@ function loadMcpServers(){
           ${statusBadge}
         </div>
         <div class="mcp-server-detail">${esc(detail)}${secretInfo?' | '+esc(secretInfo):''}</div>
-        <div class="mcp-server-meta"><span class="mcp-tool-count">${esc(t('mcp_tool_count',toolCount))}</span>${toggleBtn}</div>
+        <div class="mcp-server-meta"><span class="mcp-tool-count">${esc(t('mcp_tool_count',toolCount))}</span>
+          <span style="display:flex;gap:4px">
+            <button class="mcp-action-btn" onclick="showEditMcpServerModal('${encodedName}')" title="${esc(t('mcp_edit_server'))}" style="font-size:11px">✎</button>
+            <button class="mcp-action-btn mcp-action-test" onclick="testMcpServer('${encodedName}')" title="${esc(t('mcp_test_connection'))}" style="font-size:11px">⟳</button>
+            <button class="mcp-action-btn mcp-action-delete" onclick="deleteMcpServer('${encodedName}')" title="${esc(t('mcp_delete_server'))}" style="font-size:11px">✕</button>
+          </span>
+          ${toggleBtn}
+        </div>
       </div>`;
     }).join('');
   }).catch(()=>{list.innerHTML=`<div class="mcp-error-state" style="color:#ef4444;font-size:12px;padding:6px 0">${esc(t('mcp_load_failed'))}</div>`});
 }
+
+// ── MCP CRUD & test helpers ──
+
+let _editingMcpServer=null;
+
+function showAddMcpServerModal(){
+  _editingMcpServer=null;
+  $('mcpModalTitle').textContent=t('mcp_add_server');
+  $('mcpFormName').value='';
+  $('mcpFormName').readOnly=false;
+  $('mcpFormCommand').value='';
+  $('mcpFormArgs').value='';
+  $('mcpFormUrl').value='';
+  $('mcpFormTimeout').value='120';
+  $('mcpFormOriginalName').value='';
+  document.querySelector('input[name="mcpTransport"][value="stdio"]').checked=true;
+  document.getElementById('mcpFormEnvRows').innerHTML='';
+  document.getElementById('mcpFormHeaderRows').innerHTML='';
+  toggleMcpTransportFields();
+  $('mcpServerModal').style.display='flex';
+}
+
+function showEditMcpServerModal(name){
+  _editingMcpServer=name;
+  $('mcpModalTitle').textContent=t('mcp_edit_server')+': '+name;
+  $('mcpFormName').value=name;
+  $('mcpFormName').readOnly=true;
+  $('mcpFormOriginalName').value=name;
+  api('/api/mcp/servers').then(r=>{
+    const server=(r.servers||[]).find(s=>s.name===name);
+    if(!server) return;
+    const isStdio=server.transport==='stdio'||!!server.command;
+    document.querySelector('input[name="mcpTransport"][value="'+(isStdio?'stdio':'http')+'"]').checked=true;
+    toggleMcpTransportFields();
+    $('mcpFormCommand').value=server.command||'';
+    $('mcpFormArgs').value=Array.isArray(server.args)?server.args.join('\n'):'';
+    $('mcpFormUrl').value=server.url||'';
+    $('mcpFormTimeout').value=String(server.timeout||120);
+    document.getElementById('mcpFormEnvRows').innerHTML='';
+    document.getElementById('mcpFormHeaderRows').innerHTML='';
+    if(server.env){
+      Object.entries(server.env).forEach(([k,v])=>addMcpKvRow('mcpFormEnvRows',k,v));
+    }
+    if(server.headers){
+      Object.entries(server.headers).forEach(([k,v])=>addMcpKvRow('mcpFormHeaderRows',k,v));
+    }
+  });
+  $('mcpServerModal').style.display='flex';
+}
+
+function closeMcpServerModal(){
+  $('mcpServerModal').style.display='none';
+  _editingMcpServer=null;
+}
+
+function toggleMcpTransportFields(){
+  const isStdio=document.querySelector('input[name="mcpTransport"]:checked').value==='stdio';
+  document.getElementById('mcpFormStdioFields').style.display=isStdio?'block':'none';
+  document.getElementById('mcpFormHttpFields').style.display=isStdio?'none':'block';
+}
+
+function addMcpEnvRow(){addMcpKvRow('mcpFormEnvRows')}
+function addMcpHeaderRow(){addMcpKvRow('mcpFormHeaderRows')}
+
+function addMcpKvRow(containerId, key, value){
+  const container=document.getElementById(containerId);
+  if(!container) return;
+  const row=document.createElement('div');
+  row.className='mcp-kv-row';
+  const placeholder=t('mcp_field_name').toLowerCase().includes('name')?'KEY':'Name';
+  row.innerHTML='<input class="mcp-form-input mcp-kv-key" placeholder="'+esc(placeholder)+'" value="'+esc(key||'')+'" style="flex:1;font-size:11px">'+
+    '<input class="mcp-form-input mcp-kv-value" placeholder="Value" value="'+esc(value||'')+'" style="flex:1;font-size:11px">'+
+    '<button class="mcp-action-btn" onclick="this.parentElement.remove()" style="font-size:11px;padding:2px 6px">✕</button>';
+  container.appendChild(row);
+}
+
+function saveMcpServer(){
+  const name=$('mcpFormName').value.trim();
+  if(!name){showToast(t('mcp_name_required'),'error');return;}
+  const isStdio=document.querySelector('input[name="mcpTransport"]:checked').value==='stdio';
+  const originalName=$('mcpFormOriginalName').value||name;
+  const body={timeout:parseInt($('mcpFormTimeout').value)||120};
+  if(isStdio){
+    const command=$('mcpFormCommand').value.trim();
+    if(!command){showToast(t('mcp_command_required'),'error');return;}
+    body.command=command;
+    const argsText=$('mcpFormArgs').value.trim();
+    body.args=argsText?argsText.split('\n').map(s=>s.trim()).filter(Boolean):[];
+    body.env=collectKeyValues('mcpFormEnvRows');
+  }else{
+    const url=$('mcpFormUrl').value.trim();
+    if(!url){showToast(t('mcp_url_required'),'error');return;}
+    body.url=url;
+    body.headers=collectKeyValues('mcpFormHeaderRows');
+  }
+  const btn=$('mcpServerModal').querySelector('.sm-btn:last-child');
+  if(btn) btn.disabled=true;
+  api('/api/mcp/servers/'+encodeURIComponent(originalName),{
+    method:'PUT',
+    body:JSON.stringify(body),
+  }).then(r=>{
+    if(r&&r.ok){
+      showToast(t('mcp_saved'));
+      closeMcpServerModal();
+      loadMcpServers();
+    }else{
+      showToast(t('mcp_save_failed'),'error');
+    }
+  }).catch(()=>showToast(t('mcp_save_failed'),'error'))
+  .finally(()=>{if(btn) btn.disabled=false;});
+}
+
+function deleteMcpServer(name){
+  if(!confirm(t('mcp_delete_confirm_message',decodeURIComponent(name)))) return;
+  api('/api/mcp/servers/'+name,{
+    method:'DELETE',
+  }).then(r=>{
+    if(r&&r.ok){
+      showToast(t('mcp_deleted'));
+      loadMcpServers();
+    }else{
+      showToast(t('mcp_delete_failed'),'error');
+    }
+  }).catch(()=>showToast(t('mcp_delete_failed'),'error'));
+}
+
+function collectKeyValues(containerId){
+  const container=document.getElementById(containerId);
+  if(!container) return {};
+  const result={};
+  container.querySelectorAll('.mcp-kv-row').forEach(row=>{
+    const k=row.querySelector('.mcp-kv-key')?.value?.trim();
+    const v=row.querySelector('.mcp-kv-value')?.value;
+    if(k) result[k]=v||'';
+  });
+  return result;
+}
+
+function testMcpServer(name){
+  showToast(t('mcp_testing'));
+  api('/api/mcp/servers/'+name+'/test',{
+    method:'POST',
+  }).then(r=>{
+    if(r&&r.ok){
+      showToast(t('mcp_test_success',r.tool_count||0));
+    }else{
+      showToast(t('mcp_test_failed',r?.error||''),'error');
+    }
+  }).catch(()=>showToast(t('mcp_test_failed'),'error'));
+}
+
+function reloadMcpServers(){
+  showToast(t('mcp_reloading'));
+  const btn=document.querySelector('[onclick="reloadMcpServers()"]');
+  if(btn) btn.disabled=true;
+  api('/api/mcp/reload',{method:'POST'}).then(r=>{
+    if(r&&r.ok){
+      showToast(r.summary||t('mcp_reload_success'));
+      loadMcpServers();
+      loadMcpTools();
+    }else{
+      showToast(t('mcp_reload_failed'),'error');
+    }
+  }).catch(()=>showToast(t('mcp_reload_failed'),'error'))
+  .finally(()=>{if(btn) btn.disabled=false;});
+}
+
+// ESC key closes MCP modal
+document.addEventListener('keydown', function(e){
+  if(e.key==='Escape'){
+    const modal=$('mcpServerModal');
+    if(modal&&modal.style.display==='flex') closeMcpServerModal();
+  }
+});
+
 let _mcpToolsCache=[];
 let _mcpToolsMeta={};
 let _mcpToolsPage=1;
@@ -8508,11 +8690,12 @@ function loadGatewayStatus(){
     card.innerHTML=`<div style="display:flex;align-items:center;gap:6px;margin-bottom:8px"><span style="width:8px;height:8px;border-radius:50%;background:#22c55e;display:inline-block"></span><span style="font-size:13px;font-weight:500;color:#22c55e">${esc(t('gateway_running_label'))}</span></div>${badges?`<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px">${badges}</div>`:''}<div style="display:flex;gap:12px">${sessionInfo}${lastActive}</div>`;
   }).catch(()=>{card.innerHTML=`<div style="color:#ef4444;font-size:12px">${esc(t('gateway_load_failed'))}</div>`});
 }
-// Load MCP servers when system settings tab opens
+// Load MCP servers when MCP settings tab opens
 const _origSwitchSettings=switchSettingsSection;
 switchSettingsSection=function(name){
   _origSwitchSettings(name);
-  if(name==='system'){loadMcpServers();loadMcpTools();loadGatewayStatus();}
+  if(name==='mcp'){loadMcpServers();loadMcpTools();}
+  if(name==='system'){loadGatewayStatus();}
 };
 
 // ── Checkpoints / Rollback ──────────────────────────────────────────────────

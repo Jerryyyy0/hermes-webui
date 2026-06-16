@@ -3796,6 +3796,20 @@ main.main > #mainPlugin{display:none;}
 .mcp-tool-page-btn:hover:not(:disabled){border-color:var(--accent-bg-strong);color:var(--accent-text);}
 .mcp-tool-page-btn:disabled{opacity:.45;cursor:not-allowed;}
 
+/* MCP form & actions */
+.mcp-form-group{margin-bottom:12px;}
+.mcp-form-group label{display:block;font-size:11px;font-weight:600;color:var(--muted);margin-bottom:4px;}
+.mcp-form-input{width:100%;padding:7px 9px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:12px;outline:none;box-sizing:border-box;}
+.mcp-form-input:focus{border-color:var(--accent);}
+.mcp-form-textarea{resize:vertical;min-height:40px;font-family:inherit;}
+.mcp-kv-row{display:flex;gap:6px;margin-bottom:4px;align-items:center;}
+.mcp-kv-row input{flex:1;}
+.mcp-kv-row button{flex-shrink:0;}
+.mcp-action-btn{background:none;border:1px solid var(--border2);border-radius:5px;color:var(--muted);cursor:pointer;font-size:12px;padding:3px 7px;transition:color .15s;line-height:1.4;}
+.mcp-action-btn:hover{color:var(--text);}
+.mcp-action-delete:hover{color:#ef4444;border-color:#ef4444;}
+.mcp-action-test:hover{color:#22c55e;border-color:#22c55e;}
+
 /* Picker grids (theme / skin / font-size): make the card chrome use
    tokens so all skins flip correctly. */
 #mainSettings .theme-pick-btn,

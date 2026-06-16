@@ -1037,6 +1037,41 @@ def _finalize_cancelled_turn(session, *, ephemeral: bool = False, message: str =
         logger.debug("Failed to persist cancelled turn", exc_info=True)
 
 
+def _persist_turn_artifact_paths(s) -> None:
+    """Extract and persist artifact paths produced by tools in the current turn.
+
+    Called after display/context messages are merged and _turn_key is stamped,
+    but before s.save(). This freezes artefact attribution at turn-completion
+    time, eliminating the cross-turn prose contamination that plagues the
+    reconcile-based manifest pass.
+    """
+    if not getattr(s, 'messages', None):
+        return
+    # Find the current turn_key from the last user message.
+    _turn_key = ''
+    for _m in reversed(s.messages):
+        if isinstance(_m, dict) and _m.get('role') == 'user':
+            _turn_key = str(_m.get('_turn_key', '') or '')
+            if _turn_key:
+                break
+    if not _turn_key:
+        return
+    # Slice the turn's messages and extract tool-produced paths.
+    from pathlib import Path as _Path
+    from api.session_manifest import (
+        _extract_turn_artifact_paths,
+        _turn_message_slice,
+    )
+    _slice = _turn_message_slice(s.messages, _turn_key)
+    if not _slice:
+        return
+    _workspace = _Path(str(getattr(s, 'workspace', '') or '')).expanduser().resolve()
+    _paths = _extract_turn_artifact_paths(_slice, getattr(s, 'tool_calls', None), _workspace)
+    if not hasattr(s, 'turn_artifacts'):
+        s.turn_artifacts = {}
+    s.turn_artifacts[_turn_key] = _paths
+
+
 def _aiagent_import_error_detail() -> str:
     """Return a multi-line diagnostic string for the "AIAgent not available" path.
 
@@ -4225,6 +4260,8 @@ def _materialize_pending_user_turn_before_error(session) -> bool:
     pending_attachments = getattr(session, 'pending_attachments', None)
     if pending_attachments:
         recovered['attachments'] = list(pending_attachments)
+    from api.session_manifest import _next_turn_key
+    recovered["_turn_key"] = _next_turn_key(session.messages)
     session.messages.append(recovered)
     return True
 
@@ -6368,6 +6405,12 @@ def _run_agent_streaming(
                     _restore_display_reasoning_metadata(_previous_messages, _result_messages),
                     msg_text,
                 )
+                # Stamp _turn_key on user messages missing it (deferred save mode)
+                from api.session_manifest import _next_turn_key as _ntk
+                for _m in s.messages:
+                    if isinstance(_m, dict) and _m.get('role') == 'user' and not _m.get('_turn_key'):
+                        if not _is_context_compression_marker(_m):
+                            _m['_turn_key'] = _ntk(s.messages)
                 # Strip XML tool-call blocks from assistant message content.
                 # DeepSeek and some other providers emit <function_calls>...</function_calls>
                 # in the raw response text; this must be removed before the content is
@@ -6647,6 +6690,11 @@ def _run_agent_streaming(
                                     _restore_reasoning_metadata(_previous_messages, _result_messages),
                                     msg_text,
                                 )
+                                # Stamp _turn_key on user messages missing it (deferred save mode)
+                                from api.session_manifest import _next_turn_key as _ntk2
+                                for _m in s.messages:
+                                    if isinstance(_m, dict) and _m.get('role') == 'user' and not _m.get('_turn_key'):
+                                        _m['_turn_key'] = _ntk2(s.messages)
                                 # Skip the error block — jump directly to the
                                 # normal post-result persistence path by
                                 # leaving _assistant_added truthy (set below).
@@ -7111,6 +7159,9 @@ def _run_agent_streaming(
                         logger.debug("Failed to append cancelled turn journal event", exc_info=True)
                     put('cancel', {'message': 'Cancelled by user'})
                     return
+                # Persist per-turn artifact paths so the manifest can skip the
+                # error-prone prose-reconcile pass (cross-turn contamination).
+                _persist_turn_artifact_paths(s)
                 s.save()
                 if cancel_event.is_set():
                     _finalize_cancelled_turn(s, ephemeral=False)
@@ -7594,6 +7645,11 @@ def _run_agent_streaming(
                                     _restore_reasoning_metadata(_previous_messages, _result_messages),
                                     msg_text,
                                 )
+                                # Stamp _turn_key on user messages missing it (deferred save mode)
+                                from api.session_manifest import _next_turn_key as _ntk3
+                                for _m in s.messages:
+                                    if isinstance(_m, dict) and _m.get('role') == 'user' and not _m.get('_turn_key'):
+                                        _m['_turn_key'] = _ntk3(s.messages)
                                 s.save()
                         logger.info('[webui] self-heal (except path): retry succeeded')
                         return  # skip error emission

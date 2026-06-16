@@ -14,6 +14,8 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Changed
 
+- **Integration workspace files profile (temporarily disabled)** — `GET /api/integration/workspace/files` no longer builds the cross-session artifact profile index, ignores `?profile=`, and omits `profile` on file rows. Session-save hook no longer incrementally updates `artifact_profiles.py`. Restore by uncommenting scheme C blocks in `integration/workspace/handlers.py` and `hooks.py`.
+
 - **Integration workspace files performance** — `GET /api/integration/workspace/files` keeps an in-memory workspace file index (invalidated on session save and optional `refresh=1`); pagination/filter/sort reuse the cached index instead of re-walking the tree on every request. Collection uses `os.scandir`; `?profile=` stat-only fast path skips full walk. Artifact profile index skips unrelated sessions by workspace, merges incrementally on session save, and left-rail UI reloads on SSE `manifest_delta` file artifacts. Set `HERMES_DEBUG_TIMING=1` for `X-Hermes-Timing-*` response headers.
 
 - **SkillHub download sidecar filename** — Zip sidecar renamed from `.hermes-skill-origin.json` to `.skill-origin.json` (`GET /api/skillhub/download` / upload round-trip).

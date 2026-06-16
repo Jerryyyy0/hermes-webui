@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import copy
 import re
-import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -68,35 +67,9 @@ MEDIA_ARTIFACT_SOURCE = 'media'
 ASSISTANT_PROSE_ARTIFACT_SOURCE = 'assistant_prose'
 TURN_RECONCILE_SOURCE = 'reconcile'
 _MEDIA_TOKEN_RE = re.compile(r'MEDIA:([^\s\)\]]+)')
-
-# Explicit delivery prose (labelled lines only — not casual path mentions).
-_DELIVERY_LABEL = (
-    r'文件位置|文件路径|保存(?:至|到)?|已保存(?:至|到)?|生成(?:于|到)?|'
-    r'输出文件|输出(?:至|到)?|位于|'
-    r'file\s*(?:path|location)?|saved\s+(?:to|at)|written\s+to|output\s+(?:to|at)|path'
-)
-_DELIVERY_LABELED_RE = re.compile(
-    r'(?:\*{1,2})?'
-    rf'(?:{_DELIVERY_LABEL})'
-    r'(?:\*{1,2})?'
-    r'(?:[：:]\s*|\s+)'
-    r'(?:`([^`]+)`|'
-    r'(/[^\s`\'"<>|，,；;。)\]]+|(?:\./|\../)?[^\s`\'"<>|，,；;。)\]]+/[^\s`\'"<>|，,；;。)\]]+)'
-    r')',
-    re.IGNORECASE,
-)
-_DELIVERY_CONTEXT_RE = re.compile(
-    r'已(?:生成|转换|创建|写入|保存|存好)|生成(?:成功|于|到)?|转换(?:成功|为|成)?|'
-    r'文件生成成功|Word\s*版已生成|saved|generated|converted|created|written|wrote',
-    re.IGNORECASE,
-)
 _CODE_SPAN_RE = re.compile(r'`([^`\n]+)`')
 _MARKDOWN_LINK_LABEL_RE = re.compile(r'\[([^\]]+)\]\([^)]+\)')
 _BROAD_ABSOLUTE_PATH_RE = re.compile(r'(/[^\s`\'"<>|，,；;。：)\]]+\.[A-Za-z0-9][A-Za-z0-9]+)')
-_BROAD_RELATIVE_PATH_RE = re.compile(
-    r'((?:\./|\../)?[^\s`\'"<>|，,；;。：)\]]+/[^\s`\'"<>|，,；;。：)\]]+\.[A-Za-z0-9][A-Za-z0-9]+)'
-)
-_BROAD_BASENAME_RE = re.compile(r'(?<![\w./-])([A-Za-z0-9_.-]+\.[A-Za-z0-9][A-Za-z0-9]+)(?![\w./-])')
 _REFERENCE_ONLY_TOOLS = (
     REFERENCE_READ_TOOLS
     | REFERENCE_DISCOVERY_TOOLS
@@ -122,11 +95,6 @@ _DIFF_PATH_RE = re.compile(
 _DIFF_ADD_UPDATE_RE = re.compile(
     r'^\*\*\* (?:Add|Update) File:\s+(.+)$',
     re.MULTILINE,
-)
-
-# Workspace-relative paths in tool output (conservative: must look like a path).
-_RESULT_PATH_RE = re.compile(
-    r'(?:^|[\s\'"`])([A-Za-z0-9_./-]+(?:\.[A-Za-z0-9]+))(?:[\s\'"`.,:;]|$)',
 )
 
 
@@ -179,10 +147,6 @@ def _paths_from_assistant_media(text: str, workspace: Path) -> list[str]:
     return paths
 
 
-def _has_delivery_context(text: str) -> bool:
-    return bool(text and _DELIVERY_CONTEXT_RE.search(text))
-
-
 def _path_candidates_from_text(
     text: str,
     workspace: Path,
@@ -218,71 +182,31 @@ def _path_candidates_from_text(
         context = line.strip()
         if not context:
             continue
-        has_delivery_context = _has_delivery_context(context)
         for match in _CODE_SPAN_RE.finditer(context):
             add(match.group(1), 'code_span', context, 'explicit')
         for match in _MARKDOWN_LINK_LABEL_RE.finditer(context):
             add(match.group(1), 'markdown_link_label', context, 'explicit')
-        for pattern, kind in (
-            (_BROAD_ABSOLUTE_PATH_RE, 'absolute_path'),
-            (_BROAD_RELATIVE_PATH_RE, 'relative_path'),
-        ):
-            for match in pattern.finditer(context):
-                add(match.group(1), kind, context, 'broad')
-        if has_delivery_context:
-            for match in _BROAD_BASENAME_RE.finditer(context):
-                add(match.group(1), 'basename_with_delivery_context', context, 'contextual')
+        for match in _BROAD_ABSOLUTE_PATH_RE.finditer(context):
+            add(match.group(1), 'absolute_path', context, 'broad')
     return candidates
 
 
-def _delivery_context_paths_from_text(text: str, workspace: Path) -> list[str]:
-    if not _has_delivery_context(text):
-        return []
-    paths: list[str] = []
-    seen: set[str] = set()
-    for candidate in _path_candidates_from_text(text, workspace, source='delivery_context'):
-        if candidate.path not in seen:
-            seen.add(candidate.path)
-            paths.append(candidate.path)
-    return paths
-
-
-def _paths_from_delivery_prose(text: str, workspace: Path) -> list[str]:
-    """Extract file paths from explicit delivery statements (assistant or tool output)."""
-    if not text or not isinstance(text, str):
-        return []
-    paths: list[str] = []
-    seen: set[str] = set()
-
-    def add(raw: str) -> None:
-        normalized = _resolve_manifest_path(workspace, raw.strip())
-        if normalized and normalized not in seen:
-            seen.add(normalized)
-            paths.append(normalized)
-
-    for match in _DELIVERY_LABELED_RE.finditer(text):
-        raw = (match.group(1) or match.group(2) or '').strip()
-        if raw:
-            add(raw)
-    for line in text.splitlines():
-        if not _DELIVERY_LABELED_RE.search(line):
-            continue
-        link_match = re.search(r'\[([^\]]+)\]\([^)]+\)', line)
-        if link_match:
-            add(link_match.group(1))
-    for path in _delivery_context_paths_from_text(text, workspace):
-        add(path)
-    return paths
 
 
 def _paths_from_assistant_prose(text: str, workspace: Path) -> list[str]:
-    """Extract file paths from assistant prose (delivery prose + broad regex scan)."""
+    """Extract file paths from assistant prose via broad regex scan.
+
+    Only absolute paths (starting with ``/``) are promoted — bare filenames in
+    code spans or table cells are just casual mentions, not artifact deliveries.
+    """
     if not text or not isinstance(text, str):
         return []
-    paths = _paths_from_delivery_prose(text, workspace)
-    seen = set(paths)
-    for candidate in _path_candidates_from_text(text, workspace, source='broad_scan'):
+    paths: list[str] = []
+    seen: set[str] = set()
+    for candidate in _path_candidates_from_text(text, workspace, source='assistant_prose'):
         if candidate.path not in seen and candidate.confidence != 'contextual':
+            if not candidate.raw.startswith('/'):
+                continue
             seen.add(candidate.path)
             paths.append(candidate.path)
     return paths
@@ -324,6 +248,10 @@ def _collect_media_artifact_events(messages: list, workspace: Path, *, turn_key:
     for msg_idx in indices:
         message = messages[msg_idx]
         text = _message_text(message.get('content'))
+        # Skip context-compaction messages — those are system-generated
+        # handoffs, not media produced during the turn.
+        if text.startswith('[CONTEXT COMPACTION \u2014 REFERENCE ONLY]'):
+            continue
         for path in _paths_from_assistant_media(text, workspace):
             key = (path, msg_idx)
             if key in seen:
@@ -336,8 +264,6 @@ def _collect_media_artifact_events(messages: list, workspace: Path, *, turn_key:
                 source='assistant_media',
             ))
     return events
-
-
 def _collect_assistant_prose_artifact_events(
     messages: list,
     workspace: Path,
@@ -357,6 +283,10 @@ def _collect_assistant_prose_artifact_events(
     for msg_idx in indices:
         message = messages[msg_idx]
         text = _message_text(message.get('content'))
+        # Skip context-compaction messages — those are system-generated
+        # handoffs, not artifacts produced during the turn.
+        if text.startswith('[CONTEXT COMPACTION \u2014 REFERENCE ONLY]'):
+            continue
         for path in _paths_from_assistant_prose(text, workspace):
             key = (path, msg_idx)
             if key in seen:
@@ -622,85 +552,6 @@ def _paths_from_args(args: dict[str, Any], workspace: Path) -> list[str]:
     return paths
 
 
-def _command_working_dir_from_tokens(tokens: list[str], workspace: Path) -> Path:
-    cwd = workspace.expanduser().resolve()
-    for idx, token in enumerate(tokens[:-1]):
-        if token != 'cd':
-            continue
-        target = tokens[idx + 1]
-        if target in ('&&', ';', '||') or target.startswith('-'):
-            continue
-        try:
-            path = Path(target).expanduser()
-            cwd = path.resolve() if path.is_absolute() else (cwd / path).resolve()
-        except (ValueError, OSError):
-            continue
-    return cwd
-
-
-def _resolve_command_output_path(workspace: Path, cwd: Path, raw: str) -> str:
-    raw = str(raw or '').strip()
-    if not raw:
-        return ''
-    try:
-        path = Path(raw).expanduser()
-        candidate = path.resolve() if path.is_absolute() else (cwd / path).resolve()
-    except (ValueError, OSError):
-        return ''
-    return _resolve_manifest_path(workspace, candidate.as_posix())
-
-
-def _path_candidates_from_command_output_args(args: dict[str, Any], workspace: Path) -> list[PathCandidate]:
-    if not isinstance(args, dict):
-        return []
-    command = str(args.get('command') or args.get('cmd') or '').strip()
-    if not command:
-        return []
-    try:
-        tokens = shlex.split(command.replace('\\\n', ' '))
-    except ValueError:
-        return []
-    if not tokens:
-        return []
-    cwd = _command_working_dir_from_tokens(tokens, workspace)
-    candidates: list[PathCandidate] = []
-    seen: set[str] = set()
-
-    def add(raw: str, context: str) -> None:
-        normalized = _resolve_command_output_path(workspace, cwd, raw)
-        if not normalized or normalized in seen:
-            return
-        seen.add(normalized)
-        candidates.append(PathCandidate(
-            path=normalized,
-            raw=raw,
-            source='command_output_arg',
-            confidence='explicit',
-            context=context,
-        ))
-
-    control_tokens = {'&&', ';', '||', '|'}
-    idx = 0
-    while idx < len(tokens):
-        token = tokens[idx]
-        if Path(token).name != 'pandoc':
-            idx += 1
-            continue
-        segment: list[str] = []
-        idx += 1
-        while idx < len(tokens) and tokens[idx] not in control_tokens:
-            segment.append(tokens[idx])
-            idx += 1
-        for pos, item in enumerate(segment):
-            if item in ('-o', '--output', '--output-file') and pos + 1 < len(segment):
-                add(segment[pos + 1], command)
-            elif item.startswith('--output='):
-                add(item.split('=', 1)[1], command)
-            elif item.startswith('--output-file='):
-                add(item.split('=', 1)[1], command)
-    return candidates
-
-
 def _paths_from_diff_text(text: str, workspace: Path) -> list[str]:
     if not text:
         return []
@@ -715,26 +566,31 @@ def _paths_from_diff_text(text: str, workspace: Path) -> list[str]:
     return paths
 
 
-def _paths_from_result_text(text: str, *, files_only: bool, workspace: Path) -> list[str]:
-    if not text:
-        return []
+def _extract_turn_artifact_paths(
+    turn_messages: list,
+    tool_calls: list | None,
+    workspace: Path,
+) -> list[str]:
+    """Extract workspace-relative artifact paths from tool events in a turn's message slice.
+
+    Only paths produced by ARTIFACT_MUTATION_TOOLS (write_file, edit_file, patch, etc.)
+    are included. Paths from assistant prose mentions are NOT included — those are
+    handled by the reconcile pass and are not reliable for cross-turn attribution.
+    """
+    events = _collect_tool_events(turn_messages, tool_calls)
     paths: list[str] = []
     seen: set[str] = set()
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
+    for ev in events:
+        if ev.name not in ARTIFACT_MUTATION_TOOLS:
             continue
-        for match in _RESULT_PATH_RE.finditer(line):
-            candidate = match.group(1)
-            if '/' not in candidate and '\\' not in candidate:
-                continue
-            normalized = _resolve_manifest_path(workspace, candidate)
-            if not normalized or normalized in seen:
-                continue
-            if files_only and normalized.endswith('/'):
-                continue
-            seen.add(normalized)
-            paths.append(normalized)
+        for p in _paths_from_args(ev.args, workspace):
+            if p and p not in seen:
+                seen.add(p)
+                paths.append(p)
+        for p in _paths_from_diff_text(ev.result or '', workspace):
+            if p and p not in seen:
+                seen.add(p)
+                paths.append(p)
     return paths
 
 
@@ -1074,15 +930,76 @@ def _clean_record_keys(rows: list[dict]) -> list[dict]:
     return rows
 
 
+def _next_turn_key(messages: list) -> str:
+    """通过扫描现存用户消息，返回下一个稳定的 turn key。"""
+    max_num = 0
+    for msg in messages or []:
+        if not isinstance(msg, dict) or msg.get('role') != 'user':
+            continue
+        key = msg.get('_turn_key', '')
+        if key and key.startswith('turn:'):
+            try:
+                num = int(key.split(':', 1)[1])
+                max_num = max(max_num, num)
+            except (TypeError, ValueError):
+                pass
+    return f'turn:{max_num + 1}'
+
+
+def _ensure_turn_keys(messages: list) -> list:
+    """确保所有用户消息都有 _turn_key（给缺失的重新打戳）。
+
+    仅当已有用户消息带 _turn_key 时才补全；存量会话没有任何 _turn_key
+    时原样返回，保持索引 key 兼容。"""
+    # 存量会话没有任何 _turn_key → 不做修改，保持降级到索引 key
+    if not any(
+        isinstance(m, dict) and m.get('role') == 'user' and m.get('_turn_key', '')
+        for m in (messages or [])
+    ):
+        return messages
+
+    max_num = 0
+    for msg in messages or []:
+        if not isinstance(msg, dict) or msg.get('role') != 'user':
+            continue
+        key = msg.get('_turn_key', '')
+        if key and key.startswith('turn:'):
+            try:
+                num = int(key.split(':', 1)[1])
+                max_num = max(max_num, num)
+            except (TypeError, ValueError):
+                pass
+    from api.compression_anchor import is_context_compression_marker
+
+    next_num = max_num + 1
+    for msg in messages or []:
+        if not isinstance(msg, dict) or msg.get('role') != 'user':
+            continue
+        if is_context_compression_marker(msg):
+            continue
+        if not msg.get('_turn_key'):
+            msg['_turn_key'] = f'turn:{next_num}'
+            next_num += 1
+    return messages
+
+
 def _message_turns(messages: list) -> list[dict[str, Any]]:
+    from api.compression_anchor import is_context_compression_marker
+
     turns: list[dict[str, Any]] = []
     for idx, message in enumerate(messages or []):
         if not isinstance(message, dict) or message.get('role') != 'user':
             continue
+        if is_context_compression_marker(message):
+            continue
         if turns:
             turns[-1]['end_msg_idx'] = idx - 1
+        # 优先使用稳定的 _turn_key；没有时降级为索引 key
+        turn_key = str(message.get('_turn_key', '') or '')
+        if not turn_key:
+            turn_key = f'turn:{idx}'
         turns.append({
-            'turn_key': f'turn:{idx}',
+            'turn_key': turn_key,
             'user_msg_idx': idx,
             'start_msg_idx': idx,
             'end_msg_idx': len(messages or []) - 1,
@@ -1292,71 +1209,8 @@ def _records_by_path(rows: list[dict] | None) -> dict[str, dict]:
     return out
 
 
-def _event_text_blobs(event: ToolEvent) -> list[str]:
-    blobs: list[str] = []
-    if event.result:
-        blobs.append(event.result)
-        payload = _parse_json_object(event.result)
-        if payload:
-            for key in ('output', 'content', 'message', 'text', 'stdout', 'stderr'):
-                value = payload.get(key)
-                if isinstance(value, str) and value.strip():
-                    blobs.append(value)
-    if event.args:
-        try:
-            blobs.append(json.dumps(event.args, ensure_ascii=False))
-        except (TypeError, ValueError):
-            pass
-    return blobs
-
-
-def _event_has_diff_evidence(event: ToolEvent, workspace: Path) -> bool:
-    for blob in _event_text_blobs(event):
-        if _paths_from_diff_text(blob, workspace):
-            return True
-    return False
-
-
 def _is_reference_only_tool(name: str) -> bool:
     return name in _REFERENCE_ONLY_TOOLS
-
-
-def _promote_artifact_candidates(
-    candidates: list[PathCandidate],
-    event: ToolEvent,
-    workspace: Path,
-) -> list[str]:
-    """Promote broad candidates only when artifact evidence is strong enough."""
-    if not candidates or _is_reference_only_tool(event.name):
-        return []
-    paths: list[str] = []
-    seen: set[str] = set()
-    execution_tools = {'terminal', 'shell', 'execute_code'}
-
-    def has_evidence(candidate: PathCandidate) -> bool:
-        source = candidate.source
-        if event.name == MEDIA_ARTIFACT_SOURCE:
-            return True
-        if event.name == ASSISTANT_PROSE_ARTIFACT_SOURCE:
-            if candidate.confidence != 'contextual':
-                return True
-            return _has_delivery_context(candidate.context)
-        if source == 'command_output_arg' and event.name in execution_tools:
-            return True
-        if _has_delivery_context(candidate.context) and event.name not in REFERENCE_DISCOVERY_TOOLS:
-            return True
-        return False
-
-    for candidate in candidates:
-        if candidate.path in seen:
-            continue
-        if not has_evidence(candidate):
-            continue
-        if not _artifact_path_is_real(workspace, candidate.path):
-            continue
-        seen.add(candidate.path)
-        paths.append(candidate.path)
-    return paths
 
 
 def _reconcile_candidate_paths(event: ToolEvent, workspace: Path) -> list[str]:
@@ -1364,44 +1218,16 @@ def _reconcile_candidate_paths(event: ToolEvent, workspace: Path) -> list[str]:
     name = event.name
     if name in ARTIFACT_MUTATION_TOOLS or _is_skill_manage_mutation_event(event):
         return []
-    blobs = _event_text_blobs(event)
-    diff_paths: list[str] = []
-    for blob in blobs:
-        diff_paths.extend(_paths_from_diff_text(blob, workspace))
     args_paths = _paths_from_args(event.args, workspace)
-    text_candidates: list[PathCandidate] = []
-    for blob in blobs:
-        text_candidates.extend(_path_candidates_from_text(blob, workspace, source='tool_text'))
-    command_output_candidates = _path_candidates_from_command_output_args(event.args, workspace)
-
     if name == MEDIA_ARTIFACT_SOURCE:
         return args_paths
-
     if name == ASSISTANT_PROSE_ARTIFACT_SOURCE:
-        promoted = _promote_artifact_candidates(text_candidates, event, workspace)
-        return args_paths + [path for path in promoted if path not in args_paths]
-
+        return args_paths
     if name in REFERENCE_READ_TOOLS:
         return []
     if _is_reference_only_tool(name):
-        return diff_paths if _event_has_diff_evidence(event, workspace) else []
-
-    delivery_paths: list[str] = []
-    for blob in blobs:
-        delivery_paths.extend(_paths_from_delivery_prose(blob, workspace))
-    promoted_paths = _promote_artifact_candidates(
-        text_candidates + command_output_candidates,
-        event,
-        workspace,
-    )
-
-    paths: list[str] = []
-    seen: set[str] = set()
-    for path in args_paths + diff_paths + delivery_paths + promoted_paths:
-        if path and path not in seen:
-            seen.add(path)
-            paths.append(path)
-    return paths
+        return []
+    return []
 
 
 def _merge_reconcile_artifacts_for_turn(
@@ -1448,10 +1274,7 @@ def _merge_reconcile_artifacts_for_turn(
             if path in turn_reference_paths:
                 continue
             if not _artifact_path_is_real(workspace, path):
-                if event.name != ASSISTANT_PROSE_ARTIFACT_SOURCE:
-                    continue
-                if _session_media_preview_path(workspace, path, 'file') is None:
-                    continue
+                continue
             skill_name = _skill_manifest_name_from_skills_path(path, skills_dir)
             if skill_name:
                 _merge_skill_records(artifact_records, skill_name=skill_name, event=event)
@@ -1671,7 +1494,7 @@ def _row_to_wire(
         return _serialize_manifest_row(
             preview_path, MANIFEST_PREVIEW_FILE, source_tool, profile=profile,
         )
-    if source_tool in (MEDIA_ARTIFACT_SOURCE, ASSISTANT_PROSE_ARTIFACT_SOURCE):
+    if source_tool == MEDIA_ARTIFACT_SOURCE:
         media_path = _session_media_preview_path(workspace, rel, entry_kind)
         if media_path:
             return _serialize_manifest_row(
@@ -1962,6 +1785,7 @@ def _load_display_messages(session) -> list:
 def build_session_manifest(session) -> dict[str, Any]:
     """Build structured todos, artifacts, and references for one session."""
     messages = _load_display_messages(session)
+    messages = _ensure_turn_keys(messages)
     tool_calls = list(getattr(session, 'tool_calls', None) or [])
     workspace = Path(str(session.workspace)).expanduser().resolve()
     skills_dir = _skills_dir_for_session(session)
@@ -1980,6 +1804,41 @@ def build_session_manifest(session) -> dict[str, Any]:
         skills_dir=skills_dir,
         tool_calls=tool_calls,
     )
+
+    # Prefer persisted turn_artifacts over reconcile results.
+    # When the streaming pipeline persists artifact paths at turn completion,
+    # those paths are more reliable than the reconcile pass (which can suffer
+    # from cross-turn prose contamination — see docs/turn-key-backend.md §8.3).
+    persisted = getattr(session, 'turn_artifacts', None)
+    if isinstance(persisted, dict) and persisted:
+        default_profile = str(getattr(session, 'profile', None) or '').strip()
+        for turn in turns:
+            tk = turn.get('turn_key', '')
+            if tk not in persisted:
+                continue
+            paths = persisted[tk]
+            if not isinstance(paths, list):
+                continue
+            # Build artifact record dicts from persisted paths.
+            turn_artifacts: list[dict] = []
+            for p in paths:
+                if not isinstance(p, str) or not p.strip():
+                    continue
+                if not _artifact_path_is_real(workspace, p):
+                    continue
+                record: dict[str, Any] = {
+                    'path': p,
+                    'source_tool': 'write_file',
+                    'kind': 'artifact',
+                    'entry_kind': 'file',
+                    'preview': 'file',
+                    'profile': default_profile,
+                }
+                turn_artifacts.append(record)
+                if p not in artifact_records:
+                    artifact_records[p] = record
+            turn['artifacts'] = turn_artifacts
+
     artifacts = sorted(artifact_records.values(), key=lambda row: row['path'])
     _clean_record_keys(artifacts + references)
     profile = str(getattr(session, 'profile', None) or '').strip()

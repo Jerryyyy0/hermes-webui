@@ -1475,6 +1475,69 @@
         "responses": { "200": { "description": "MCP 工具列表" } }
       }
     },
+    "/api/mcp/servers/{name}": {
+      "put": {
+        "tags": ["MCP"],
+        "summary": "创建或更新 MCP 服务器",
+        "parameters": [
+          { "name": "name", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "url": { "type": "string", "description": "HTTP 传输 URL" },
+                  "command": { "type": "string", "description": "stdio 传输命令" },
+                  "args": { "type": "array", "items": { "type": "string" }, "description": "命令参数" },
+                  "headers": { "type": "object", "description": "HTTP 请求头" },
+                  "env": { "type": "object", "description": "环境变量" },
+                  "timeout": { "type": "integer", "description": "超时秒数" }
+                }
+              }
+            }
+          }
+        },
+        "responses": { "200": { "description": "操作结果" } }
+      },
+      "delete": {
+        "tags": ["MCP"],
+        "summary": "删除 MCP 服务器",
+        "parameters": [
+          { "name": "name", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "删除结果" } }
+      },
+      "patch": {
+        "tags": ["MCP"],
+        "summary": "切换 MCP 服务器启用状态",
+        "parameters": [
+          { "name": "name", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "enabled": { "type": "boolean" }
+                },
+                "required": ["enabled"]
+              }
+            }
+          }
+        },
+        "responses": { "200": { "description": "操作结果" } }
+      }
+    },
+    "/api/mcp/reload": {
+      "post": {
+        "tags": ["MCP"],
+        "summary": "重新加载所有 MCP 服务器",
+        "responses": { "200": { "description": "重新加载结果摘要" } }
+      }
+    },
 
     "/api/approval/pending": {
       "get": {

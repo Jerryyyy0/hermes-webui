@@ -8216,7 +8216,8 @@ function renderMessages(options){
         currentAssistantTurnUserRawIdx=questionRawIdxByAssistantRawIdx.get(rawIdx);
       }
       if(currentAssistantTurnUserRawIdx!==undefined&&currentAssistantTurnUserRawIdx!==null&&currentAssistantTurnUserRawIdx>=0){
-        currentAssistantTurn.dataset.turnKey=`turn:${currentAssistantTurnUserRawIdx}`;
+        const userMsg = S.messages?.[currentAssistantTurnUserRawIdx];
+        currentAssistantTurn.dataset.turnKey = (userMsg && userMsg._turn_key) ? userMsg._turn_key : `turn:${currentAssistantTurnUserRawIdx}`;
       }
       inner.appendChild(currentAssistantTurn);
     }

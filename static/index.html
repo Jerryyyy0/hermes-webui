@@ -457,6 +457,10 @@
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2l3 7h7l-5.5 4.3 2.1 7L12 16.2 5.4 20.3l2.1-7L2 9h7z"/></svg>
           <span data-i18n="settings_tab_plugins">Plugins</span>
         </button>
+        <button type="button" class="side-menu-item" data-settings-section="mcp" onclick="switchSettingsSection('mcp')">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="15" x2="15" y2="15"/></svg>
+          <span data-i18n="settings_tab_mcp">MCP</span>
+        </button>
         <button type="button" class="side-menu-item" data-settings-section="system" onclick="switchSettingsSection('system')">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="20" height="8" rx="2"/><rect x="2" y="13" width="20" height="8" rx="2"/><line x1="6" y1="7" x2="6.01" y2="7"/><line x1="6" y1="17" x2="6.01" y2="17"/></svg>
           <span data-i18n="settings_tab_system">System</span>
@@ -1493,14 +1497,26 @@
               <div style="font-size:11px;color:var(--muted);margin-bottom:8px" data-i18n="settings_desc_gateway_status">Status of the Hermes gateway (Telegram, Discord, Slack, etc.)</div>
               <div id="gatewayStatusCard"><span style="color:var(--muted);font-size:12px">Loading…</span></div>
             </div>
-            <!-- MCP Servers Section -->
-            <div class="settings-field" style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
+            <button class="sm-btn" onclick="saveSettings()" style="margin-top:12px;width:100%;padding:8px;font-weight:600" data-i18n="settings_save_btn">Save Settings</button>
+          </div>
+          <!-- MCP Settings Pane -->
+          <div class="settings-pane" id="settingsPaneMcp">
+            <div class="settings-section-head">
+              <div>
+                <div class="settings-section-title" data-i18n="settings_tab_mcp">MCP</div>
+                <div class="settings-section-meta" data-i18n="settings_section_mcp_meta">Model Context Protocol server configuration.</div>
+              </div>
+            </div>
+            <div class="settings-field">
               <label data-i18n="mcp_servers_title">MCP Servers</label>
               <div style="font-size:11px;color:var(--muted);margin-bottom:8px" data-i18n="mcp_servers_desc">View Model Context Protocol servers configured in config.yaml.</div>
+              <div style="display:flex;gap:8px;margin-bottom:8px">
+                <button class="sm-btn" onclick="showAddMcpServerModal()" data-i18n="mcp_add_server">+ Add Server</button>
+                <button class="sm-btn" onclick="reloadMcpServers()" data-i18n="mcp_reload">Reload MCP</button>
+              </div>
               <div id="mcpServerList"></div>
-              <div class="mcp-restart-hint" data-i18n="mcp_restart_hint">Server changes are read-only here for now. Edit config.yaml and restart Hermes for changes to take effect.</div>
+              <div class="mcp-restart-hint" data-i18n="mcp_manage_hint">Use Add/Edit/Delete to manage servers, then click Reload MCP to apply changes.</div>
             </div>
-            <!-- MCP Tools Section -->
             <div class="settings-field" style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
               <label data-i18n="mcp_tools_title">MCP Tools</label>
               <div style="font-size:11px;color:var(--muted);margin-bottom:8px" data-i18n="mcp_tools_desc">Search known tools across active MCP servers.</div>
@@ -1510,7 +1526,63 @@
               <div id="mcpToolPager" class="mcp-tool-pager" aria-label="MCP tools pagination" data-i18n-aria-label="mcp_tools_pagination_label"></div>
               <div class="mcp-restart-hint" data-i18n="mcp_tools_runtime_note">Tool inventory only uses already-known active MCP runtime data; the WebUI does not start or probe servers.</div>
             </div>
-            <button class="sm-btn" onclick="saveSettings()" style="margin-top:12px;width:100%;padding:8px;font-weight:600" data-i18n="settings_save_btn">Save Settings</button>
+            <!-- MCP Server Modal (fixed overlay) -->
+            <div id="mcpServerModal" style="display:none;position:fixed;inset:0;z-index:9999;align-items:center;justify-content:center;background:rgba(0,0,0,0.6)" onclick="if(event.target===this)closeMcpServerModal()">
+              <div style="background:var(--bg);border:1px solid var(--border);border-radius:12px;width:520px;max-width:92vw;max-height:85vh;display:flex;flex-direction:column;box-shadow:0 8px 32px rgba(0,0,0,0.4)">
+                <div style="display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid var(--border)">
+                  <div id="mcpModalTitle" style="font-weight:600;font-size:14px" data-i18n="mcp_add_server">Add MCP Server</div>
+                  <button onclick="closeMcpServerModal()" style="background:none;border:none;color:var(--fg);cursor:pointer;font-size:18px;padding:0 4px">&times;</button>
+                </div>
+                <div style="flex:1;overflow:auto;padding:16px">
+                  <div class="mcp-form-group">
+                    <label data-i18n="mcp_field_name">Server Name</label>
+                    <input type="text" id="mcpFormName" class="mcp-form-input" maxlength="64">
+                  </div>
+                  <div class="mcp-form-group">
+                    <label data-i18n="mcp_transport_label">Transport Type</label>
+                    <div style="display:flex;gap:12px">
+                      <label><input type="radio" name="mcpTransport" value="stdio" checked onchange="toggleMcpTransportFields()"> stdio</label>
+                      <label><input type="radio" name="mcpTransport" value="http" onchange="toggleMcpTransportFields()"> HTTP</label>
+                    </div>
+                  </div>
+                  <div id="mcpFormStdioFields">
+                    <div class="mcp-form-group">
+                      <label data-i18n="mcp_field_command">Command</label>
+                      <input type="text" id="mcpFormCommand" class="mcp-form-input" placeholder="/usr/local/bin/npx">
+                    </div>
+                    <div class="mcp-form-group">
+                      <label data-i18n="mcp_field_args">Arguments</label>
+                      <textarea id="mcpFormArgs" class="mcp-form-input mcp-form-textarea" rows="3" placeholder="@modelcontextprotocol/server-filesystem&#10;/workspace"></textarea>
+                    </div>
+                    <div class="mcp-form-group">
+                      <label data-i18n="mcp_field_env">Environment Variables</label>
+                      <div id="mcpFormEnvRows"></div>
+                      <button class="sm-btn" onclick="addMcpEnvRow()" style="font-size:11px;margin-top:4px">+ Add</button>
+                    </div>
+                  </div>
+                  <div id="mcpFormHttpFields" style="display:none">
+                    <div class="mcp-form-group">
+                      <label data-i18n="mcp_field_url">URL</label>
+                      <input type="text" id="mcpFormUrl" class="mcp-form-input" placeholder="http://localhost:8000/mcp">
+                    </div>
+                    <div class="mcp-form-group">
+                      <label>Headers</label>
+                      <div id="mcpFormHeaderRows"></div>
+                      <button class="sm-btn" onclick="addMcpHeaderRow()" style="font-size:11px;margin-top:4px">+ Add</button>
+                    </div>
+                  </div>
+                  <div class="mcp-form-group">
+                    <label data-i18n="mcp_field_timeout">Timeout (seconds)</label>
+                    <input type="number" id="mcpFormTimeout" class="mcp-form-input" value="120" min="1" max="600" style="width:100px">
+                  </div>
+                  <input type="hidden" id="mcpFormOriginalName" value="">
+                </div>
+                <div style="display:flex;gap:8px;justify-content:flex-end;padding:12px 16px;border-top:1px solid var(--border)">
+                  <button class="sm-btn" onclick="closeMcpServerModal()" data-i18n="mcp_cancel">Cancel</button>
+                  <button class="sm-btn" onclick="saveMcpServer()" style="background:var(--accent);color:var(--accent-text)" data-i18n="mcp_save">Save</button>
+                </div>
+              </div>
+            </div>
           </div>
           <div class="settings-pane" id="settingsPaneHelp">
             <div class="settings-section-head">

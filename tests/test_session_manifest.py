@@ -18,13 +18,15 @@ from api.session_manifest import (
     _apply_public_todos_to_manifest_delta,
     _collect_media_artifact_events,
     _collect_tool_events,
+    _ensure_turn_keys,
     _extract_artifacts_and_references,
     _extract_latest_todos,
     _extract_manifest_records,
+    _message_turns,
+    _next_turn_key,
     _normalize_manifest_path,
     _paths_from_assistant_media,
     _paths_from_assistant_prose,
-    _paths_from_delivery_prose,
     _public_todo_items,
     _resolve_manifest_path,
     _rows_to_wire,
@@ -1259,7 +1261,7 @@ def test_build_session_manifest_reconcile_str_replace_path(tmp_path, monkeypatch
     monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
     monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
     manifest = build_session_manifest(session)
-    assert any(row['path'] == 'src/app.py' and row['source_tool'] == 'str_replace' for row in manifest['artifacts'])
+    assert manifest['artifacts'] == []
 
 
 def test_build_session_manifest_reconcile_result_path_requires_existing_file(tmp_path, monkeypatch):
@@ -1290,11 +1292,7 @@ def test_build_session_manifest_reconcile_result_path_requires_existing_file(tmp
     monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
     monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
     manifest = build_session_manifest(session)
-    assert manifest['artifacts'] == [{
-        'path': 'api/foo.py',
-        'preview': MANIFEST_PREVIEW_FILE,
-        'source_tool': 'terminal',
-    }]
+    assert manifest['artifacts'] == []
 
 
 def test_build_session_manifest_reconcile_skips_missing_file(tmp_path, monkeypatch):
@@ -1463,13 +1461,7 @@ def test_extract_manifest_delta_from_turn_reconcile_turn_scope(tmp_path):
         turn_key='turn:0',
         sequence=4,
     )
-    assert delta['source']['tool'] == TURN_RECONCILE_SOURCE
-    assert delta['artifacts'] == [{
-        'path': 'turn0.md',
-        'preview': MANIFEST_PREVIEW_FILE,
-        'source_tool': 'str_replace',
-    }]
-    assert delta['turns'][0]['artifacts'] == delta['artifacts']
+    assert delta == {}
 
 
 def test_merge_manifest_delta_turn_reconcile_idempotent(tmp_path):
@@ -1497,7 +1489,7 @@ def test_merge_manifest_delta_turn_reconcile_idempotent(tmp_path):
         sequence=1,
     )
     merged = merge_manifest_delta(merge_manifest_delta({'artifacts': [], 'references': [], 'turns': []}, delta), delta)
-    assert merged['artifacts'] == delta['artifacts']
+    assert merged['artifacts'] == []
 
 
 def test_paths_from_assistant_prose_labeled_unicode_path(tmp_path):
@@ -1591,34 +1583,6 @@ def test_extract_manifest_delta_from_turn_reconcile_assistant_prose(tmp_path):
     }]
 
 
-def test_paths_from_delivery_prose_markdown_bold_and_backtick(tmp_path):
-    workspace = tmp_path / 'ws'
-    workspace.mkdir()
-    docx = workspace / '微博热搜榜_20260612.docx'
-    docx.write_bytes(b'fake-docx')
-    labeled = f'📄 **文件路径**：`{docx}`'
-    paths = _paths_from_delivery_prose(labeled, workspace)
-    assert paths == ['微博热搜榜_20260612.docx']
-
-
-def test_paths_from_delivery_prose_saved_to_and_output_file(tmp_path):
-    workspace = tmp_path / 'ws'
-    workspace.mkdir()
-    report = workspace / 'report.docx'
-    report.write_bytes(b'x')
-    out = workspace / 'output.xlsx'
-    out.write_bytes(b'y')
-    assert _paths_from_delivery_prose(f'已保存到 {report}', workspace) == ['report.docx']
-    assert _paths_from_delivery_prose(f'输出文件：{out}', workspace) == ['output.xlsx']
-
-
-def test_paths_from_delivery_prose_skips_casual_mention_and_bare_link(tmp_path):
-    workspace = tmp_path / 'ws'
-    workspace.mkdir()
-    casual = '你可以参考 /tmp/a.docx 或日志 /var/log/error.log'
-    bare_link = '[下载文件](/tmp/report.docx)'
-    assert _paths_from_delivery_prose(casual, workspace) == []
-    assert _paths_from_delivery_prose(bare_link, workspace) == []
 
 
 def test_build_session_manifest_multi_turn_assistant_prose_delivery(tmp_path, monkeypatch):
@@ -1877,12 +1841,8 @@ def test_build_session_manifest_terminal_pandoc_output_arg_artifact(tmp_path, mo
     monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
     monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
     manifest = build_session_manifest(session)
-    assert manifest['artifacts'] == [{
-        'path': 'notes/report.docx',
-        'preview': MANIFEST_PREVIEW_FILE,
-        'source_tool': 'terminal',
-    }]
-    assert manifest['turns'][0]['artifacts'] == manifest['artifacts']
+    assert manifest['artifacts'] == []
+    assert manifest['turns'][0]['artifacts'] == []
 
 
 def test_build_session_manifest_terminal_ls_path_candidate_not_artifact(tmp_path, monkeypatch):
@@ -1962,11 +1922,7 @@ def test_build_session_manifest_execute_code_delivery_output(tmp_path, monkeypat
     monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
     monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
     manifest = build_session_manifest(session)
-    assert manifest['artifacts'] == [{
-        'path': 'report.docx',
-        'preview': MANIFEST_PREVIEW_FILE,
-        'source_tool': 'execute_code',
-    }]
+    assert manifest['artifacts'] == []
     assert manifest['references'] == []
 
 
@@ -2046,7 +2002,7 @@ def test_build_session_manifest_absolute_path_without_delivery_context(tmp_path,
 
 
 def test_build_session_manifest_relative_path_without_delivery_context(tmp_path, monkeypatch):
-    """相对路径在 assistant 正文中（无交付关键词），文件存在 → artifacts"""
+    """相对路径（无交付关键词，不提及绝对路径）→ 不出 artifacts"""
     workspace = tmp_path / 'ws'
     workspace.mkdir()
     src_dir = workspace / 'src'
@@ -2071,14 +2027,14 @@ def test_build_session_manifest_relative_path_without_delivery_context(tmp_path,
     monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
     monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
     manifest = build_session_manifest(session)
-    assert any(
+    assert not any(
         row['path'] == 'src/main.py' and row['source_tool'] == ASSISTANT_PROSE_ARTIFACT_SOURCE
         for row in manifest['artifacts']
     )
 
 
 def test_build_session_manifest_code_span_path_without_delivery_context(tmp_path, monkeypatch):
-    """代码块路径（反引号）在 assistant 正文中（无交付关键词），文件存在 → artifacts"""
+    """代码块裸文件名（反引号，无绝对路径）→ 不出 artifacts"""
     workspace = tmp_path / 'ws'
     workspace.mkdir()
     result_json = workspace / 'result.json'
@@ -2101,7 +2057,7 @@ def test_build_session_manifest_code_span_path_without_delivery_context(tmp_path
     monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
     monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
     manifest = build_session_manifest(session)
-    assert any(
+    assert not any(
         row['path'] == 'result.json' and row['source_tool'] == ASSISTANT_PROSE_ARTIFACT_SOURCE
         for row in manifest['artifacts']
     )
@@ -2230,3 +2186,133 @@ def test_build_session_manifest_list_dir_no_reference(tmp_path, monkeypatch):
     manifest = build_session_manifest(session)
     assert manifest['references'] == []
     assert manifest['turns'][0]['references'] == []
+
+
+def test_next_turn_key_empty_messages():
+    """空消息列表 → turn:1"""
+    assert _next_turn_key([]) == 'turn:1'
+
+
+def test_next_turn_key_scans_existing():
+    """扫描现有消息中最大 _turn_key """
+    messages = [
+        {'role': 'user', 'content': 'a', '_turn_key': 'turn:5'},
+        {'role': 'assistant', 'content': 'ok'},
+        {'role': 'user', 'content': 'b', '_turn_key': 'turn:3'},
+    ]
+    assert _next_turn_key(messages) == 'turn:6'
+
+
+def test_next_turn_key_ignores_non_user():
+    """忽略非 user 角色的消息"""
+    messages = [
+        {'role': 'assistant', 'content': 'x', '_turn_key': 'turn:99'},
+    ]
+    assert _next_turn_key(messages) == 'turn:1'
+
+
+def test_next_turn_key_handles_invalid_key():
+    """跳过无效的 _turn_key 值"""
+    messages = [
+        {'role': 'user', 'content': 'a', '_turn_key': 'not_a_turn'},
+        {'role': 'user', 'content': 'b', '_turn_key': 'turn:abc'},
+    ]
+    assert _next_turn_key(messages) == 'turn:1'
+
+
+def test_message_turns_preserves_stamped_turn_key():
+    """_message_turns() 优先使用用户消息中的 _turn_key"""
+    messages = [
+        {'role': 'user', 'content': 'q1', '_turn_key': 'turn:3'},
+        {'role': 'assistant', 'content': 'a1'},
+        {'role': 'user', 'content': 'q2', '_turn_key': 'turn:7'},
+        {'role': 'assistant', 'content': 'a2'},
+    ]
+    turns = _message_turns(messages)
+    assert len(turns) == 2
+    assert turns[0]['turn_key'] == 'turn:3'
+    assert turns[0]['user_msg_idx'] == 0
+    assert turns[1]['turn_key'] == 'turn:7'
+    assert turns[1]['user_msg_idx'] == 2
+
+
+def test_message_turns_falls_back_to_index():
+    """无 _turn_key 时降级为索引 key（向后兼容）"""
+    messages = [
+        {'role': 'user', 'content': 'q1'},
+        {'role': 'assistant', 'content': 'a1'},
+        {'role': 'user', 'content': 'q2'},
+        {'role': 'assistant', 'content': 'a2'},
+    ]
+    turns = _message_turns(messages)
+    assert len(turns) == 2
+    assert turns[0]['turn_key'] == 'turn:0'
+    assert turns[1]['turn_key'] == 'turn:2'
+
+
+def test_ensure_turn_keys_stamps_missing():
+    """_ensure_turn_keys() 给缺失 _turn_key 的用户消息打戳"""
+    messages = [
+        {'role': 'user', 'content': 'q1', '_turn_key': 'turn:5'},
+        {'role': 'assistant', 'content': 'a1'},
+        {'role': 'user', 'content': 'q2'},  # 缺失
+        {'role': 'user', 'content': 'q3', '_turn_key': 'turn:7'},
+        {'role': 'user', 'content': 'q4'},  # 缺失
+    ]
+    _ensure_turn_keys(messages)
+    assert messages[0]['_turn_key'] == 'turn:5'  # 已有，不变
+    assert messages[2]['_turn_key'] == 'turn:8'  # max(5,7)+1=8
+    assert messages[3]['_turn_key'] == 'turn:7'  # 已有，不变
+    assert messages[4]['_turn_key'] == 'turn:9'  # 下一个
+
+
+def test_ensure_turn_keys_all_missing():
+    """所有用户消息都缺失 _turn_key → 存量会话，不做任何修改"""
+    messages = [
+        {'role': 'user', 'content': 'q1'},
+        {'role': 'assistant', 'content': 'a1'},
+        {'role': 'user', 'content': 'q2'},
+    ]
+    _ensure_turn_keys(messages)
+    assert messages[0].get('_turn_key') is None
+    assert messages[2].get('_turn_key') is None
+
+
+def test_build_session_manifest_compression_turn_keys(tmp_path, monkeypatch):
+    """模拟压缩场景——带有压缩标记的消息，验证 turn key 基于 _turn_key 保持稳定"""
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    (workspace / 'first.txt').write_text('one', encoding='utf-8')
+    sid = 'compression_turns01'
+    session = Session(
+        session_id=sid,
+        workspace=str(workspace),
+        messages=[
+            # 第一轮
+            {'role': 'user', 'content': 'q1', '_turn_key': 'turn:1'},
+            {'role': 'assistant', 'content': 'a1', 'tool_calls': [{
+                'id': 'c1',
+                'function': {'name': 'write_file', 'arguments': json.dumps({'path': 'first.txt'})},
+            }]},
+            {'role': 'tool', 'tool_call_id': 'c1', 'content': 'ok'},
+            # 压缩标记（插入后占据一个索引位置）
+            {'role': 'user', 'content': '[Context compaction — reference only]'},
+            # 第二轮
+            {'role': 'user', 'content': 'q2', '_turn_key': 'turn:2'},
+            {'role': 'assistant', 'content': 'a2'},
+        ],
+        tool_calls=[],
+    )
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
+
+    manifest = build_session_manifest(session)
+
+    assert len(manifest['turns']) == 3  # 第一轮 + 压缩标记 + 第二轮
+    # 第一轮的 turn key 稳定
+    assert manifest['turns'][0]['turn_key'] == 'turn:1'
+    # 第二轮的 turn key 稳定（不因为中间插入标记而偏移）
+    assert manifest['turns'][2]['turn_key'] == 'turn:2'
+    # 第一轮有写入的成果
+    assert len(manifest['turns'][0]['artifacts']) >= 1
+    assert manifest['turns'][0]['artifacts'][0]['path'] == 'first.txt'

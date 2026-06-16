@@ -936,6 +936,7 @@ class Session:
             'read_only': self.read_only,
             'enabled_toolsets': self.enabled_toolsets,
             'composer_draft': self.composer_draft if isinstance(self.composer_draft, dict) else {},
+            'turn_artifacts': getattr(self, 'turn_artifacts', None) or {},
             'is_streaming': _is_streaming_session(
                 self.active_stream_id, active_stream_ids
             ) if include_runtime else False,

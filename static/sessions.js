@@ -1740,6 +1740,9 @@ async function _ensureMessagesLoaded(sid) {
   }
   if(S.session&&S.session.session_id===sid){
     S.session.message_count=Number(data.session.message_count || msgs.length);
+    // Sync S.session.messages with the loaded messages so turn_key lookup
+    // (ui.js renderMessages) works correctly after metadata-only preload.
+    if(msgs.length) S.session.messages = msgs;
     S.lastUsage={...(data.session.last_usage||S.lastUsage||{})};
     // Phase 2: the messages=1 response carries the canonical cold-load
     // `todo_state` snapshot, derived server-side from the FULL untruncated
@@ -2203,6 +2206,7 @@ async function _loadOlderMessages() {
       nextMessages = window._carryForwardEphemeralTurnFields(S.messages || [], nextMessages);
     }
     S.messages = nextMessages;
+    if(S.session && S.session.session_id === sid) S.session.messages = nextMessages;
     _syncToolCallsForLoadedMessages(nextMessages, responseSession.tool_calls);
     // renderMessages() windows long transcripts from the end. If we do not
     // expand that window before rendering, the newly prepended page stays
@@ -2299,6 +2303,7 @@ async function _ensureAllMessagesLoaded() {
     _syncToolCallsForLoadedMessages(msgs, data.session.tool_calls);
     if (S.session && S.session.session_id === sid) {
       S.session.message_count = Number(data.session.message_count || msgs.length);
+      if(msgs.length) S.session.messages = _msgsToAssign;
     }
   } finally {
     _loadingOlder = false;
@@ -3624,6 +3629,7 @@ function startGatewaySSE(){
                     }
                     S.messages = _nextToAssign;
                     if(S.session && S.session.session_id === activeSid){
+                      S.session.messages = _nextToAssign;
                       S.session.message_count = next.length;
                       const newest = next.length ? next[next.length - 1] : null;
                       const newestTs = Number((newest && (newest.timestamp || newest._ts)) || 0);
