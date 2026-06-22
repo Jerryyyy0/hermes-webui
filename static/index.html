@@ -1540,9 +1540,10 @@
                   </div>
                   <div class="mcp-form-group">
                     <label data-i18n="mcp_transport_label">Transport Type</label>
-                    <div style="display:flex;gap:12px">
-                      <label><input type="radio" name="mcpTransport" value="stdio" checked onchange="toggleMcpTransportFields()"> stdio</label>
-                      <label><input type="radio" name="mcpTransport" value="http" onchange="toggleMcpTransportFields()"> HTTP</label>
+                    <div style="display:flex;gap:12px;flex-wrap:wrap">
+                      <label><input type="radio" name="mcpTransport" value="stdio" checked onchange="toggleMcpTransportFields()"> <span data-i18n="mcp_transport_stdio">stdio</span></label>
+                      <label><input type="radio" name="mcpTransport" value="http" onchange="toggleMcpTransportFields()"> <span data-i18n="mcp_transport_http">HTTP (Streamable)</span></label>
+                      <label><input type="radio" name="mcpTransport" value="sse" onchange="toggleMcpTransportFields()"> <span data-i18n="mcp_transport_sse">SSE</span></label>
                     </div>
                   </div>
                   <div id="mcpFormStdioFields">

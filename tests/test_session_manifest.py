@@ -22,6 +22,7 @@ from api.session_manifest import (
     _extract_artifacts_and_references,
     _extract_latest_todos,
     _extract_manifest_records,
+    _extract_turn_artifact_paths,
     _message_turns,
     _next_turn_key,
     _normalize_manifest_path,
@@ -36,7 +37,10 @@ from api.session_manifest import (
     extract_manifest_delta_from_assistant_media,
     extract_manifest_delta_from_turn_reconcile,
     extract_manifest_delta_from_tool_event,
+    filter_existing_turn_artifact_paths,
     merge_manifest_delta,
+    turn_artifacts_for_wire,
+    _turn_message_slice,
 )
 
 
@@ -212,6 +216,50 @@ def test_merge_manifest_delta_preserves_profile():
     assert merged['artifacts'][0]['profile'] == 'ops'
 
 
+def test_merge_manifest_delta_keeps_same_path_for_distinct_profiles():
+    base = {
+        'todos': {'items': []},
+        'artifacts': [{
+            'path': 'notes.txt',
+            'preview': 'file',
+            'source_tool': 'write_file',
+            'profile': 'ops',
+        }],
+        'references': [],
+        'turns': [],
+    }
+    delta = {
+        'artifacts': [{
+            'path': 'notes.txt',
+            'preview': 'file',
+            'source_tool': 'write_file',
+            'profile': 'research',
+        }],
+    }
+    merged = merge_manifest_delta(base, delta)
+    assert [(row['path'], row.get('profile')) for row in merged['artifacts']] == [
+        ('notes.txt', 'ops'),
+        ('notes.txt', 'research'),
+    ]
+
+
+def test_rows_to_wire_keeps_same_path_for_distinct_profiles(tmp_path):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    (workspace / 'notes.txt').write_text('hello', encoding='utf-8')
+    rows = [
+        {'path': 'notes.txt', 'source_tool': 'write_file', 'profile': 'ops'},
+        {'path': 'notes.txt', 'source_tool': 'write_file', 'profile': 'research'},
+    ]
+
+    wire = _rows_to_wire(rows, workspace)
+
+    assert [(row['path'], row.get('profile')) for row in wire] == [
+        ('notes.txt', 'ops'),
+        ('notes.txt', 'research'),
+    ]
+
+
 def test_extract_manifest_delta_from_tool_event_includes_profile(tmp_path):
     workspace = tmp_path / 'ws'
     workspace.mkdir()
@@ -280,6 +328,55 @@ def test_build_session_manifest_persists_workspace_files(tmp_path, monkeypatch):
         'preview': 'file',
         'source_tool': 'write_file',
     }
+
+
+def test_build_session_manifest_prefers_store_artifacts(tmp_path, monkeypatch):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    target = workspace / 'notes.txt'
+    target.write_text('hello', encoding='utf-8')
+
+    session = Session(
+        session_id='manifeststore01',
+        workspace=str(workspace),
+        profile='ops',
+        messages=[
+            {'role': 'user', 'content': 'write notes', '_turn_key': 'turn:1'},
+            {
+                'role': 'assistant',
+                'tool_calls': [{
+                    'id': 'c1',
+                    'function': {'name': 'write_file', 'arguments': '{"path":"notes.txt"}'},
+                }],
+            },
+            {'role': 'tool', 'tool_call_id': 'c1', 'content': 'ok'},
+        ],
+        tool_calls=[],
+    )
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr(
+        'api.session_manifest_store.load_manifest_records',
+        lambda s, include_lineage=True: [{
+            'session_id': s.session_id,
+            'lineage_key': s.session_id,
+            'profile': 'ops',
+            'turn_key': 'turn:1',
+            'record_kind': 'artifact',
+            'path': 'notes.txt',
+            'preview': 'file',
+            'source_tool': 'media',
+        }],
+    )
+
+    manifest = build_session_manifest(session)
+
+    assert manifest['artifacts'] == [{
+        'path': 'notes.txt',
+        'preview': 'file',
+        'source_tool': 'media',
+        'profile': 'ops',
+    }]
+    assert manifest['turns'][0]['artifacts'] == manifest['artifacts']
 
 
 def test_build_session_manifest_resolves_absolute_write_path(tmp_path, monkeypatch):
@@ -1746,6 +1843,54 @@ def test_build_session_manifest_turn_reconcile_scopes_session_tool_calls(tmp_pat
     assert delta == {}
 
 
+def test_extract_turn_artifact_paths_scopes_session_tool_calls(tmp_path):
+    """Earlier turns' write_file snippets must not leak into later turn extraction."""
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    report = workspace / 'report.md'
+    report.write_text('# report', encoding='utf-8')
+
+    messages = [
+        {'role': 'user', 'content': 'create report', '_turn_key': 'turn:1'},
+        {'role': 'assistant', 'content': 'done'},
+        {'role': 'user', 'content': 'weather today', '_turn_key': 'turn:4'},
+        {'role': 'assistant', 'content': 'sunny'},
+    ]
+    tool_calls = [
+        {
+            'name': 'write_file',
+            'args': {'path': str(report)},
+            'assistant_msg_idx': 1,
+            'tid': 'write-turn1',
+        },
+        {
+            'name': 'web_search',
+            'args': {'query': 'beijing weather'},
+            'assistant_msg_idx': 3,
+            'tid': 'search-turn4',
+        },
+    ]
+    turns = {turn['turn_key']: turn for turn in _message_turns(messages)}
+
+    turn1_paths = _extract_turn_artifact_paths(
+        _turn_message_slice(messages, 'turn:1'),
+        tool_calls,
+        workspace,
+        start_msg_idx=turns['turn:1']['start_msg_idx'],
+        end_msg_idx=turns['turn:1']['end_msg_idx'],
+    )
+    assert turn1_paths == ['report.md']
+
+    turn4_paths = _extract_turn_artifact_paths(
+        _turn_message_slice(messages, 'turn:4'),
+        tool_calls,
+        workspace,
+        start_msg_idx=turns['turn:4']['start_msg_idx'],
+        end_msg_idx=turns['turn:4']['end_msg_idx'],
+    )
+    assert turn4_paths == []
+
+
 def test_extract_manifest_delta_from_turn_reconcile_multi_turn_key(tmp_path):
     workspace = tmp_path / 'ws'
     workspace.mkdir()
@@ -2308,11 +2453,374 @@ def test_build_session_manifest_compression_turn_keys(tmp_path, monkeypatch):
 
     manifest = build_session_manifest(session)
 
-    assert len(manifest['turns']) == 3  # 第一轮 + 压缩标记 + 第二轮
-    # 第一轮的 turn key 稳定
+    # 压缩标记由 is_context_compression_marker() 跳过，不算独立 turn
+    assert len(manifest['turns']) == 2
     assert manifest['turns'][0]['turn_key'] == 'turn:1'
-    # 第二轮的 turn key 稳定（不因为中间插入标记而偏移）
-    assert manifest['turns'][2]['turn_key'] == 'turn:2'
-    # 第一轮有写入的成果
-    assert len(manifest['turns'][0]['artifacts']) >= 1
+    assert manifest['turns'][1]['turn_key'] == 'turn:2'
     assert manifest['turns'][0]['artifacts'][0]['path'] == 'first.txt'
+    assert manifest['turns'][1]['artifacts'] == []
+
+
+def test_session_load_restores_turn_artifacts(tmp_path, monkeypatch):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    sid = 'turn_artifacts_load01'
+    session_path = tmp_path / 'sessions' / f'{sid}.json'
+    session_path.parent.mkdir(parents=True)
+    session_path.write_text(json.dumps({
+        'session_id': sid,
+        'title': 't',
+        'workspace': str(workspace),
+        'messages': [],
+        'turn_artifacts': {'turn:1': ['report.md']},
+    }), encoding='utf-8')
+    monkeypatch.setattr('api.models.SESSION_DIR', session_path.parent)
+
+    loaded = Session.load(sid)
+    assert loaded is not None
+    assert loaded.turn_artifacts == {'turn:1': ['report.md']}
+
+
+def test_turn_artifacts_for_wire_filters_missing_files(tmp_path):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    (workspace / 'report.md').write_text('# report', encoding='utf-8')
+    session = Session(
+        session_id='turn_artifacts_wire01',
+        workspace=str(workspace),
+        turn_artifacts={
+            'turn:1': ['report.md'],
+            'turn:2': ['make_docx.py', 'make_poster.py', 'report.md'],
+        },
+    )
+
+    wired = turn_artifacts_for_wire(session)
+    assert wired == {
+        'turn:1': ['report.md'],
+        'turn:2': ['report.md'],
+    }
+    assert session.compact()['turn_artifacts'] == wired
+
+
+def test_build_session_manifest_turn_artifacts_match_wire(tmp_path, monkeypatch):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    (workspace / 'report.md').write_text('# report', encoding='utf-8')
+    (workspace / 'deliver.docx').write_text('doc', encoding='utf-8')
+    session = Session(
+        session_id='turn_artifacts_manifest01',
+        workspace=str(workspace),
+        profile='default',
+        messages=[
+            {'role': 'user', 'content': 'q1', '_turn_key': 'turn:1'},
+            {'role': 'assistant', 'content': 'a1'},
+            {'role': 'user', 'content': 'q2', '_turn_key': 'turn:2'},
+            {'role': 'assistant', 'content': 'a2'},
+        ],
+        turn_artifacts={
+            'turn:1': ['report.md', 'missing.py'],
+            'turn:2': ['make_docx.py', 'deliver.docx'],
+        },
+    )
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+
+    wired = turn_artifacts_for_wire(session)
+    manifest = build_session_manifest(session)
+
+    assert wired == {
+        'turn:1': ['report.md'],
+        'turn:2': ['deliver.docx'],
+    }
+    manifest_by_turn = {
+        turn['turn_key']: [row['path'] for row in turn['artifacts']]
+        for turn in manifest['turns']
+    }
+    assert manifest_by_turn['turn:1'] == wired['turn:1']
+    assert manifest_by_turn['turn:2'] == wired['turn:2']
+
+
+def test_filter_existing_turn_artifact_paths_deduplicates(tmp_path):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    (workspace / 'report.md').write_text('# report', encoding='utf-8')
+
+    filtered = filter_existing_turn_artifact_paths(
+        workspace,
+        ['report.md', 'report.md', 'missing.py', ''],
+    )
+    assert filtered == ['report.md']
+
+
+def test_build_session_manifest_groups_references_by_turn(tmp_path, monkeypatch):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    skills_dir = tmp_path / 'profile-home' / 'skills'
+    _write_local_skill(skills_dir, 'skill-a')
+    _write_local_skill(skills_dir, 'skill-b')
+    session = Session(
+        session_id='manifestrefs01',
+        workspace=str(workspace),
+        messages=[
+            {'role': 'user', 'content': 'read a', '_turn_key': 'turn:1'},
+            {
+                'role': 'assistant',
+                'tool_calls': [{
+                    'id': 'c1',
+                    'function': {
+                        'name': 'skill_view',
+                        'arguments': json.dumps({'name': 'skill-a'}),
+                    },
+                }],
+            },
+            {'role': 'tool', 'tool_call_id': 'c1', 'content': 'ok'},
+            {'role': 'user', 'content': 'read b', '_turn_key': 'turn:2'},
+            {
+                'role': 'assistant',
+                'tool_calls': [{
+                    'id': 'c2',
+                    'function': {
+                        'name': 'skill_view',
+                        'arguments': json.dumps({'name': 'skill-b'}),
+                    },
+                }],
+            },
+            {'role': 'tool', 'tool_call_id': 'c2', 'content': 'ok'},
+        ],
+        tool_calls=[],
+    )
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('api.session_manifest._skills_dir_for_session', lambda s: skills_dir)
+    monkeypatch.setattr('api.session_manifest._skillhub_preview_available', lambda: True)
+
+    manifest = build_session_manifest(session)
+
+    assert len(manifest['turns']) == 2
+    first_refs = manifest['turns'][0]['references']
+    second_refs = manifest['turns'][1]['references']
+    assert [row['path'] for row in first_refs] == ['skill-a']
+    assert [row['path'] for row in second_refs] == ['skill-b']
+    assert {row['path'] for row in manifest['references']} == {'skill-a', 'skill-b'}
+
+
+def test_persist_turn_artifact_paths_filters_missing_files(tmp_path):
+    from api.streaming import _persist_turn_artifact_paths
+
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    (workspace / 'deliver.docx').write_text('doc', encoding='utf-8')
+    session = Session(
+        session_id='persist_filter01',
+        workspace=str(workspace),
+        messages=[
+            {'role': 'user', 'content': 'q1', '_turn_key': 'turn:1'},
+            {'role': 'assistant', 'content': 'a1'},
+            {'role': 'user', 'content': 'q2', '_turn_key': 'turn:2'},
+            {
+                'role': 'assistant',
+                'tool_calls': [
+                    {
+                        'id': 'c2',
+                        'function': {
+                            'name': 'write_file',
+                            'arguments': json.dumps({'path': 'deliver.docx'}),
+                        },
+                    },
+                    {
+                        'id': 'c3',
+                        'function': {
+                            'name': 'write_file',
+                            'arguments': json.dumps({'path': 'make_docx.py'}),
+                        },
+                    },
+                ],
+            },
+            {'role': 'tool', 'tool_call_id': 'c2', 'content': 'ok'},
+            {'role': 'tool', 'tool_call_id': 'c3', 'content': 'ok'},
+        ],
+        tool_calls=[],
+    )
+
+    _persist_turn_artifact_paths(session)
+
+    assert session.turn_artifacts['turn:2'] == [{'path': 'deliver.docx', 'source_tool': 'write_file'}]
+    assert 'turn:1' not in session.turn_artifacts
+
+
+def test_persist_turn_artifact_paths_scopes_session_tool_calls(tmp_path):
+    from api.streaming import _persist_turn_artifact_paths
+
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    (workspace / 'report.md').write_text('# report', encoding='utf-8')
+    (workspace / 'deliver.docx').write_text('doc', encoding='utf-8')
+    session = Session(
+        session_id='persist_scope01',
+        workspace=str(workspace),
+        messages=[
+            {'role': 'user', 'content': 'q1', '_turn_key': 'turn:1'},
+            {'role': 'assistant', 'content': 'a1'},
+            {'role': 'user', 'content': 'q2', '_turn_key': 'turn:2'},
+            {'role': 'assistant', 'content': 'a2'},
+        ],
+        tool_calls=[
+            {
+                'name': 'write_file',
+                'args': {'path': 'report.md'},
+                'assistant_msg_idx': 1,
+                'tid': 'write-turn1',
+            },
+            {
+                'name': 'write_file',
+                'args': {'path': 'deliver.docx'},
+                'assistant_msg_idx': 3,
+                'tid': 'write-turn2',
+            },
+        ],
+    )
+
+    _persist_turn_artifact_paths(session)
+
+    assert session.turn_artifacts == {'turn:2': [{'path': 'deliver.docx', 'source_tool': 'write_file'}]}
+
+
+def test_persist_turn_artifact_paths_keeps_same_path_across_turns(tmp_path):
+    from api.streaming import _persist_turn_artifact_paths
+
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    artifact = workspace / 'worldcup-poster.png'
+    artifact.write_bytes(b'png')
+    abs_path = artifact.as_posix()
+    session = Session(
+        session_id='persist_cross_turn_keep01',
+        workspace=str(workspace),
+        messages=[
+            {'role': 'user', 'content': 'turn1', '_turn_key': 'turn:1'},
+            {'role': 'assistant', 'content': f'已生成\n\nMEDIA:{abs_path}'},
+            {'role': 'user', 'content': 'turn2', '_turn_key': 'turn:2'},
+            {'role': 'assistant', 'content': f'重生成\n\nMEDIA:{abs_path}'},
+        ],
+        tool_calls=[],
+    )
+
+    _persist_turn_artifact_paths(session, 'turn:1')
+    _persist_turn_artifact_paths(session, 'turn:2')
+
+    expected = [{'path': 'worldcup-poster.png', 'source_tool': 'assistant_prose'}]
+    assert session.turn_artifacts['turn:1'] == expected
+    assert session.turn_artifacts['turn:2'] == expected
+
+
+def test_session_get_turn_artifacts_matches_manifest_via_routes(tmp_path, monkeypatch):
+    from urllib.parse import urlparse
+
+    import api.routes as routes
+
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    (workspace / 'report.md').write_text('# report', encoding='utf-8')
+    (workspace / 'deliver.docx').write_text('doc', encoding='utf-8')
+    session = Session(
+        session_id='http_align01',
+        workspace=str(workspace),
+        profile='default',
+        messages=[
+            {'role': 'user', 'content': 'q1', '_turn_key': 'turn:1'},
+            {'role': 'assistant', 'content': 'a1'},
+            {'role': 'user', 'content': 'q2', '_turn_key': 'turn:2'},
+            {'role': 'assistant', 'content': 'a2'},
+        ],
+        turn_artifacts={
+            'turn:1': ['report.md', 'missing.py'],
+            'turn:2': ['deliver.docx', 'make_docx.py'],
+        },
+    )
+    monkeypatch.setattr(routes, 'get_session', lambda sid, metadata_only=False: session)
+    monkeypatch.setattr(routes, '_clear_stale_stream_state', lambda _s: None)
+    monkeypatch.setattr(routes, 'redact_session_data', lambda payload: payload)
+    monkeypatch.setattr(routes, 'j', lambda _handler, payload, status=200, extra_headers=None: payload)
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('api.session_manifest._skills_dir_for_session', lambda s: tmp_path / 'skills')
+    monkeypatch.setattr('api.session_manifest._skillhub_preview_available', lambda: False)
+
+    session_resp = routes.handle_get(
+        object(),
+        urlparse('/api/session?session_id=http_align01&messages=0&resolve_model=0'),
+    )
+    manifest_resp = routes.handle_get(
+        object(),
+        urlparse('/api/session/manifest?session_id=http_align01'),
+    )
+
+    wired = session_resp['session']['turn_artifacts']
+    manifest_by_turn = {
+        turn['turn_key']: [row['path'] for row in turn['artifacts']]
+        for turn in manifest_resp['manifest']['turns']
+    }
+    assert wired == {'turn:1': ['report.md'], 'turn:2': ['deliver.docx']}
+    assert manifest_by_turn['turn:1'] == wired['turn:1']
+    assert manifest_by_turn['turn:2'] == wired['turn:2']
+
+
+def test_build_session_manifest_multi_turn_mixed_artifacts_and_references(tmp_path, monkeypatch):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    skills_dir = tmp_path / 'profile-home' / 'skills'
+    _write_local_skill(skills_dir, 'docx-generation')
+    (workspace / 'report.md').write_text('# report', encoding='utf-8')
+    (workspace / 'deliver.docx').write_text('doc', encoding='utf-8')
+    session = Session(
+        session_id='mixed_turn_manifest01',
+        workspace=str(workspace),
+        profile='default',
+        messages=[
+            {'role': 'user', 'content': 'write report', '_turn_key': 'turn:1'},
+            {
+                'role': 'assistant',
+                'tool_calls': [{
+                    'id': 'c1',
+                    'function': {
+                        'name': 'write_file',
+                        'arguments': json.dumps({'path': 'report.md'}),
+                    },
+                }],
+            },
+            {'role': 'tool', 'tool_call_id': 'c1', 'content': 'ok'},
+            {'role': 'user', 'content': 'make docx', '_turn_key': 'turn:2'},
+            {
+                'role': 'assistant',
+                'tool_calls': [{
+                    'id': 'c2',
+                    'function': {
+                        'name': 'skill_view',
+                        'arguments': json.dumps({'name': 'docx-generation'}),
+                    },
+                }],
+            },
+            {'role': 'tool', 'tool_call_id': 'c2', 'content': 'ok'},
+        ],
+        turn_artifacts={
+            'turn:1': ['report.md', 'missing.py'],
+            'turn:2': ['deliver.docx', 'make_docx.py'],
+        },
+        tool_calls=[],
+    )
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('api.session_manifest._skills_dir_for_session', lambda s: skills_dir)
+    monkeypatch.setattr('api.session_manifest._skillhub_preview_available', lambda: True)
+
+    wired = turn_artifacts_for_wire(session)
+    manifest = build_session_manifest(session)
+    manifest_by_turn = {
+        turn['turn_key']: {
+            'artifacts': [row['path'] for row in turn['artifacts']],
+            'references': [row['path'] for row in turn['references']],
+        }
+        for turn in manifest['turns']
+    }
+
+    assert wired == {'turn:1': ['report.md'], 'turn:2': ['deliver.docx']}
+    assert manifest_by_turn['turn:1']['artifacts'] == ['report.md']
+    assert manifest_by_turn['turn:1']['references'] == []
+    assert manifest_by_turn['turn:2']['artifacts'] == ['deliver.docx']
+    assert manifest_by_turn['turn:2']['references'] == ['docx-generation']

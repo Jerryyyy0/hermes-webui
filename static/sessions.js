@@ -1606,6 +1606,7 @@ let _messagesTruncated = false;
 // msg_limit (default 30): only fetch the last N messages for fast switching.
 // Older messages are loaded on-demand via _loadOlderMessages().
 const _INITIAL_MSG_LIMIT = 30;
+const _TURN_ALIGN_PARAM = '&turn_align=1';
 let _sameSessionForceReloadHint = null;
 
 function _currentLoadedRenderableMessageCount(){
@@ -1689,15 +1690,12 @@ async function _ensureMessagesLoaded(sid) {
   // Fetch session messages with a tail window for fast initial load.
   const reloadLimit = _messageReloadLimitForSession(sid); // defaults to _INITIAL_MSG_LIMIT
   const reloadLimitParam = reloadLimit ? `&msg_limit=${reloadLimit}` : '';
-  // expand_renderable=1 is sent ONLY here, on the initial cold load: it tells
-  // the server to expand the tail window backward until it holds ~msg_limit
-  // *renderable* rows so a tool-heavy session doesn't open showing 1-2 visible
-  // messages (#3790). The "Load earlier" path (_loadOlderMessages) deliberately
-  // omits it to keep its raw transport cap.
-  const expandParam = reloadLimit ? '&expand_renderable=1' : '';
+  // turn_align=1 keeps each cold-load page on whole user turns. expand_renderable
+  // is omitted here because the backend ignores it when turn_align is set.
+  const turnAlignParam = reloadLimit ? _TURN_ALIGN_PARAM : '';
   let data;
   try {
-    data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0${reloadLimitParam}${expandParam}`);
+    data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0${reloadLimitParam}${turnAlignParam}`);
   } finally {
     _clearSameSessionForceReloadHint(sid);
   }
@@ -2138,7 +2136,7 @@ async function _loadOlderMessages() {
     // Cumulative growth: each "load more" asks for currentLoaded + 30, and the
     // newly exposed head is what we expose to the user.
     const requestedLimit = Math.max(_INITIAL_MSG_LIMIT, (S.messages || []).length + _INITIAL_MSG_LIMIT);
-    const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_limit=${requestedLimit}`);
+    const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_limit=${requestedLimit}${_TURN_ALIGN_PARAM}`);
     // Guard: api() may have redirected (401) and returned undefined.
     if (!data || !data.session) { _loadingOlder = false; return; }
     //  - response shape sane
@@ -2182,7 +2180,7 @@ async function _loadOlderMessages() {
       // Race fallback: keep the legacy index-page request as the
       // correctness-preserving alternative. Same guards reapplied because
       // we just awaited again.
-      const fallback = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_before=${_oldestIdx}&msg_limit=${_INITIAL_MSG_LIMIT}`);
+      const fallback = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_before=${_oldestIdx}&msg_limit=${requestedLimit}${_TURN_ALIGN_PARAM}`);
       if (!fallback || !fallback.session) { _loadingOlder = false; return; }
       if (!S.session || S.session.session_id !== sid) return;
       if (_loadingSessionId !== null && _loadingSessionId !== sid) return;
@@ -2190,6 +2188,25 @@ async function _loadOlderMessages() {
       responseSession = fallback.session;
       olderMsgs = (responseSession.messages || []).filter(m => m && m.role);
       nextMessages = [...olderMsgs, ...S.messages];
+    } else if (
+      !olderMsgs.length
+      && (_oldestIdx > 0 || responseSession._messages_truncated)
+    ) {
+      // turn_align: a larger cumulative msg_limit may still return the same
+      // whole-turn window when the next older turn exceeds the budget (e.g.
+      // current tail is one 44-msg turn, budget 74 cannot add a 100-msg turn).
+      // Page backward via msg_before on the prefix instead of no-oping.
+      const fallback = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_before=${_oldestIdx}&msg_limit=${requestedLimit}${_TURN_ALIGN_PARAM}`);
+      if (!fallback || !fallback.session) { _loadingOlder = false; return; }
+      if (!S.session || S.session.session_id !== sid) return;
+      if (_loadingSessionId !== null && _loadingSessionId !== sid) return;
+      if (_messagesGeneration !== startGeneration) return;
+      responseSession = fallback.session;
+      const prefixMsgs = (responseSession.messages || []).filter(m => m && m.role);
+      if (prefixMsgs.length) {
+        olderMsgs = prefixMsgs;
+        nextMessages = [...prefixMsgs, ...S.messages];
+      }
     }
     if (!olderMsgs.length) { _messagesTruncated = !!responseSession._messages_truncated; return; }
     // Replace with the larger tail window and preserve scroll as if older

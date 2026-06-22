@@ -6,8 +6,11 @@ from api.routes import (
     _handle_mcp_server_update,
     _handle_mcp_server_delete,
     _handle_mcp_server_toggle,
+    _handle_mcp_server_test,
     _mask_secrets,
+    _mcp_transport_from_cfg,
     _parse_mcp_enabled,
+    _probe_mcp_server_connectivity,
     _server_summary,
     _strip_masked_values,
 )
@@ -35,7 +38,12 @@ SAMPLE_MCP = {
         "url": "http://localhost:3001/mcp",
         "timeout": 60,
         "headers": {"Authorization": "Bearer secret123"}
-    }
+    },
+    "legacy-sse": {
+        "url": "http://localhost:8000/sse",
+        "transport": "sse",
+        "timeout": 60,
+    },
 }
 
 
@@ -115,6 +123,17 @@ class TestMcpList:
         assert summary['url'] == 'http://localhost:3001/mcp'
         assert '••••' in summary['headers']['Authorization']
 
+    def test_server_summary_sse(self):
+        summary = _server_summary('legacy-sse', SAMPLE_MCP['legacy-sse'])
+        assert summary['transport'] == 'sse'
+        assert summary['url'] == 'http://localhost:8000/sse'
+
+    def test_mcp_transport_from_cfg(self):
+        assert _mcp_transport_from_cfg({'command': 'x'}) == 'stdio'
+        assert _mcp_transport_from_cfg({'url': 'http://x'}) == 'http'
+        assert _mcp_transport_from_cfg({'url': 'http://x', 'transport': 'sse'}) == 'sse'
+        assert _mcp_transport_from_cfg('bad') == 'invalid'
+
     def test_server_summary_default_timeout(self):
         summary = _server_summary('minimal', {'command': 'x'})
         assert summary['timeout'] == 120
@@ -154,6 +173,42 @@ class TestMcpSave:
         _handle_mcp_server_update(h, 'http-srv', body)
         saved = mock_save.call_args[0][1]
         assert saved['mcp_servers']['http-srv']['url'] == 'http://localhost:4000'
+        assert 'transport' not in saved['mcp_servers']['http-srv']
+
+    @patch('api.routes.reload_config')
+    @patch('api.routes._save_yaml_config_file')
+    @patch('api.routes._get_config_path', return_value='/tmp/test.yaml')
+    @patch('api.routes.get_config')
+    def test_add_new_sse_server(self, mock_cfg, mock_path, mock_save, mock_reload):
+        mock_cfg.return_value = {}
+        h = _make_handler()
+        h.command = 'PUT'
+        body = {"url": "http://localhost:8000/sse", "transport": "sse", "timeout": 60}
+        _handle_mcp_server_update(h, 'sse-srv', body)
+        saved = mock_save.call_args[0][1]
+        assert saved['mcp_servers']['sse-srv']['url'] == 'http://localhost:8000/sse'
+        assert saved['mcp_servers']['sse-srv']['transport'] == 'sse'
+
+    @patch('api.routes.reload_config')
+    @patch('api.routes._save_yaml_config_file')
+    @patch('api.routes._get_config_path', return_value='/tmp/test.yaml')
+    @patch('api.routes.get_config')
+    def test_update_sse_to_http_clears_transport(self, mock_cfg, mock_path, mock_save, mock_reload):
+        mock_cfg.return_value = {
+            'mcp_servers': {
+                'remote': {
+                    'url': 'http://localhost:8000/sse',
+                    'transport': 'sse',
+                }
+            }
+        }
+        h = _make_handler()
+        h.command = 'PUT'
+        body = {"url": "http://localhost:4000/mcp"}
+        _handle_mcp_server_update(h, 'remote', body)
+        saved = mock_save.call_args[0][1]
+        assert saved['mcp_servers']['remote']['url'] == 'http://localhost:4000/mcp'
+        assert 'transport' not in saved['mcp_servers']['remote']
 
     @patch('api.routes.reload_config')
     @patch('api.routes._save_yaml_config_file')
@@ -388,3 +443,72 @@ class TestMcpToggle:
         saved = mock_save.call_args[0][1]
         assert 'my server' in saved['mcp_servers']
         assert saved['mcp_servers']['my server']['enabled'] is False
+
+
+class TestMcpServerTest:
+    """POST /api/mcp/servers/<name>/test — connectivity probe."""
+
+    @patch('api.routes._probe_mcp_server_connectivity')
+    @patch('api.routes.get_config')
+    def test_success_returns_tool_count(self, mock_cfg, mock_probe):
+        mock_cfg.return_value = {
+            'mcp_servers': {
+                'sse-srv': {
+                    'url': 'http://localhost:8000/sse',
+                    'transport': 'sse',
+                }
+            }
+        }
+        mock_probe.return_value = (True, 7, None)
+        h = _make_handler()
+        h.command = 'POST'
+        _handle_mcp_server_test(h, 'sse-srv')
+        payload = _json_payload(h)
+        assert payload['ok'] is True
+        assert payload['transport'] == 'sse'
+        assert payload['tool_count'] == 7
+        assert payload['mcp_tool_available'] is True
+        mock_probe.assert_called_once()
+
+    @patch('api.routes._probe_mcp_server_connectivity')
+    @patch('api.routes.get_config')
+    def test_connect_failure_returns_error(self, mock_cfg, mock_probe):
+        mock_cfg.return_value = {'mcp_servers': {'bad': {'url': 'http://localhost:1/mcp'}}}
+        mock_probe.return_value = (False, 0, 'connection refused')
+        h = _make_handler()
+        h.command = 'POST'
+        _handle_mcp_server_test(h, 'bad')
+        payload = _json_payload(h)
+        assert payload['ok'] is False
+        assert payload['tool_count'] == 0
+        assert payload['error'] == 'connection refused'
+
+    @patch('api.routes._probe_mcp_server_connectivity')
+    @patch('api.routes.get_config')
+    def test_runtime_unavailable_skips_probe(self, mock_cfg, mock_probe):
+        import builtins
+        mock_cfg.return_value = {'mcp_servers': {'srv': {'command': 'x'}}}
+        h = _make_handler()
+        h.command = 'POST'
+        real_import = builtins.__import__
+
+        def _import(name, globals=None, locals=None, fromlist=(), level=0):
+            if name == 'tools':
+                raise ImportError('no mcp')
+            return real_import(name, globals, locals, fromlist, level)
+
+        with patch('builtins.__import__', side_effect=_import):
+            _handle_mcp_server_test(h, 'srv')
+        mock_probe.assert_not_called()
+        payload = _json_payload(h)
+        assert payload['ok'] is False
+        assert payload['mcp_tool_available'] is False
+
+    @patch('api.routes.get_config')
+    def test_missing_server_returns_404(self, mock_cfg):
+        mock_cfg.return_value = {'mcp_servers': {}}
+        h = _make_handler()
+        h.command = 'POST'
+        _handle_mcp_server_test(h, 'missing')
+        status = h.send_response.call_args[0][0]
+        assert status == 404

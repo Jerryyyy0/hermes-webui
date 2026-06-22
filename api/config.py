@@ -5417,9 +5417,10 @@ def save_settings(settings: dict) -> dict:
             skin_value = None
     current["theme"], current["skin"] = _normalize_appearance(theme_value, skin_value)
 
-    current["default_workspace"] = str(
-        resolve_default_workspace(current.get("default_workspace"))
-    )
+    if "default_workspace" in settings:
+        current["default_workspace"] = str(
+            resolve_default_workspace(settings["default_workspace"])
+        )
     persisted = {k: v for k, v in current.items() if k != "default_model"}
     SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
     SETTINGS_FILE.write_text(
@@ -5457,14 +5458,12 @@ if _settings_file_exists:
         )
     _startup_settings.pop("default_model", None)  # always drop stale value; model comes from config.yaml
     if _startup_settings.get("default_workspace") != str(DEFAULT_WORKSPACE):
-        _startup_settings["default_workspace"] = str(DEFAULT_WORKSPACE)
-        try:
-            SETTINGS_FILE.write_text(
-                json.dumps(_startup_settings, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-        except Exception:
-            pass
+        logger.info(
+            "default_workspace changed at runtime from '%s' to '%s' "
+            "(not persisted — stored setting kept intact)",
+            _startup_settings.get("default_workspace"),
+            DEFAULT_WORKSPACE,
+        )
 
 # ── SESSIONS in-memory cache (LRU OrderedDict) ───────────────────────────────
 SESSIONS: collections.OrderedDict = collections.OrderedDict()

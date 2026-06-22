@@ -134,6 +134,44 @@ from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
+# Fork/integration env defaults when `python server.py` is invoked directly.
+# Must run before `api.config` is imported so HOST/PORT pick up the values.
+if __name__ == "__main__":
+    os.environ["HERMES_WEBUI_HOST"] = os.getenv("HERMES_WEBUI_HOST", "0.0.0.0")
+    os.environ["SKILLHUB_URL"] = os.getenv("SKILLHUB_URL", "http://192.168.1.139:18702/")
+    os.environ["HERMES_INTEGRATION"] = os.getenv("HERMES_INTEGRATION", "1")
+    os.environ["ZHILING_CONTROL_PLANE_URL"] = os.getenv(
+        "ZHILING_CONTROL_PLANE_URL", "http://192.168.1.139:23001/"
+    )
+    os.environ["ZHILING_LOGOUT_API_URL"] = os.getenv(
+        "ZHILING_LOGOUT_API_URL", "http://auth-proxy:8080"
+    )
+    os.environ["KNOWLEDGE_BASE_URL"] = os.getenv(
+        "KNOWLEDGE_BASE_URL", "http://192.168.1.139:17862/"
+    )
+    os.environ["BROWSER_PREVIEW_MODE"] = os.getenv(
+        "BROWSER_PREVIEW_MODE", "legacy"
+    )
+    os.environ["BROWSER_PREVIEW_URL"] = os.getenv(
+        "BROWSER_PREVIEW_URL",
+        "http://192.168.1.139:38787/browser-preview/",
+    )
+    os.environ["BROWSER_SNAPSHOT_PREVIEW_URL"] = os.getenv(
+        "BROWSER_SNAPSHOT_PREVIEW_URL",
+        "http://192.168.1.139:38787/browser-snapshot/",
+    )
+    os.environ["CAMOFOX_URL"] = os.getenv(
+        "CAMOFOX_URL", "http://zhiling-camofox:9377"
+    )
+    os.environ["CAMOFOX_USER_ID"] = os.getenv("CAMOFOX_USER_ID", "testwzq")
+    os.environ["CAMOFOX_SESSION_KEY"] = os.getenv(
+        "CAMOFOX_SESSION_KEY", "runtime-testwzq"
+    )
+    os.environ["CAMOFOX_ADOPT_EXISTING_TAB"] = os.getenv(
+        "CAMOFOX_ADOPT_EXISTING_TAB", "1"
+    )
+    
+
 from api.auth import check_auth
 from api.config import HOST, PORT, STATE_DIR, SESSION_DIR, DEFAULT_WORKSPACE
 from api.helpers import (
@@ -637,12 +675,4 @@ def main() -> None:
             logger.debug("Failed to drain lifecycle on shutdown", exc_info=True)
 
 if __name__ == '__main__':
-    os.environ['SKILLHUB_URL'] = os.getenv('SKILLHUB_URL', 'http://192.168.1.139:18702/')
-    os.environ['HERMES_INTEGRATION'] = os.getenv('HERMES_INTEGRATION', '1')
-    os.environ['ZHILING_CONTROL_PLANE_URL'] = os.getenv('ZHILING_CONTROL_PLANE_URL', 'http://192.168.1.139:23001/')
-    os.environ['ZHILING_LOGOUT_API_URL'] = os.getenv('ZHILING_LOGOUT_API_URL', 'http://auth-proxy:8080')
-    os.environ['KNOWLEDGE_BASE_URL'] = os.getenv('KNOWLEDGE_BASE_URL', 'http://192.168.1.139:17861/')
-    os.environ['BROWSER_PREVIEW_URL'] = os.getenv('BROWSER_PREVIEW_URL', 'http://192.168.1.139:6080/vnc.html?path=websockify?token=user1')
-    # from integration.config import ensure_skillhub_no_proxy
-    # ensure_skillhub_no_proxy()
     main()

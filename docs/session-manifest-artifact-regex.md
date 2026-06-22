@@ -15,6 +15,7 @@
 | 写入类工具 | `write_file` / `edit_file` / `patch` / `apply_patch` 等 | 工具结构化参数 + diff 文本正则 |
 | `MEDIA:` 标记 | `media` | `_MEDIA_TOKEN_RE` |
 | Assistant 正文 | `assistant_prose` | 三条路径正则 + 绝对路径硬过滤 |
+| Assistant 末条正文 | `assistant_prose` | `_BROAD_FILENAME_EXT_RE` + 工作空间存在性校验（仅最后一轮最后一条 assistant 消息） |
 | Skill 变更 | `skill_manage` 等 | 参数 / 结果路径（非本文重点） |
 
 **`assistant_prose` 的入库时机**：首轮 `_extract_manifest_records` 不直接处理 prose；在 per-turn **reconcile** 阶段（`_collect_assistant_prose_artifact_events` → `_reconcile_candidate_paths`）写入 `artifacts[]`。
@@ -23,7 +24,7 @@
 
 ## 2. 正则一览
 
-当前文件中与成果相关的正则共 **6 条**：
+当前文件中与成果相关的正则共 **7 条**：
 
 | 名称 | 模式 | 用途 |
 |------|------|------|
@@ -32,6 +33,7 @@
 | `_CODE_SPAN_RE` | `` `([^`\n]+)` `` | 反引号包裹内容 |
 | `_MARKDOWN_LINK_LABEL_RE` | `\[([^\]]+)\]\([^)]+\)` | Markdown 链接的 label 文本 |
 | `_BROAD_ABSOLUTE_PATH_RE` | `(/[^\s`'"<>|，,；;。：)\]]+\.[A-Za-z0-9][A-Za-z0-9]+)` | 行内裸绝对路径 |
+| `_BROAD_FILENAME_EXT_RE` | `([\w\u4e00-\u9fff/._-]{1,240}\.[A-Za-z0-9]{2,8})` | 仅最后一条 assistant 消息的相对路径/裸文件名，经工作空间存在性校验 |
 | `_DIFF_PATH_RE` | `(?:^|\n)(?:\+\+\+\|---)\s+(?:[ab]/)([^\n\t]+)` | unified diff 的 `+++` / `---` 头 |
 | `_DIFF_ADD_UPDATE_RE` | `^\*\*\* (?:Add\|Update) File:\s+(.+)$` | `*** Add File:` / `*** Update File:` 行 |
 
@@ -150,6 +152,9 @@
 | `[CONTEXT COMPACTION — REFERENCE ONLY] .../old.md` | 否（整消息跳过） |
 | `MEDIA:notes/chart.png` | 是（`source_tool: media`，非 prose） |
 | `write_file` 写入 `src/app.py` | 是（`source_tool: write_file`，非 prose） |
+| **仅最后一条 assistant 消息**，表格中 `华为官网当季新品摘要.md`（文件存在） | **是**（`_BROAD_FILENAME_EXT_RE` + 存在性校验） |
+| **非最后一条** assistant 消息，表格中 `华为官网当季新品摘要.md`（文件存在） | 否（仅扫最后一条） |
+| 最后一条 assistant 消息，`README.md`（文件不存在） | 否（存在性校验失败） |
 
 ---
 
@@ -175,6 +180,21 @@ Manifest 构建入口 `build_session_manifest()` 顺序：
 1. `_collect_tool_events` + `_collect_media_artifact_events` → `_extract_manifest_records`（写入类工具、media）
 2. `_apply_turn_reconcile_to_manifest_records`（per-turn 补全 `assistant_prose` / 再次校验 media）
 
+**末条 assistant 消息相对路径扫描流程**（`_persist_turn_artifact_paths` 中的 `_paths_from_last_assistant_message`）：
+
+```mermaid
+flowchart TD
+    A[Turn slice 中最后一条 assistant 消息] --> B["_BROAD_FILENAME_EXT_RE 扫描"]
+    B --> C{"含 :// ?"}
+    C -->|是| Z[跳过]
+    C -->|否| D["_resolve_manifest_path()"]
+    D --> E{文件真实存在?}
+    E -->|否| Z
+    E -->|是| F["turn_artifacts[] 写入"]
+```
+
+此通道仅作用于 `_persist_turn_artifact_paths`（streaming.py 中 turn 完成时调用），**不通过 reconcile 通道**，且只扫当前 turn 切片中最后一条 assistant 消息。
+
 ---
 
 ## 9. 已移除的历史规则
@@ -191,6 +211,8 @@ Manifest 构建入口 `build_session_manifest()` 顺序：
 | Pandoc `-o` 命令参数解析 | 从 terminal 命令推断输出文件 |
 
 若文档其它处仍描述「交付关键词即可收录相对路径 / 裸文件名」，以本文与 `api/session_manifest.py` 为准。
+
+> **例外（v2）**：`_BROAD_FILENAME_EXT_RE` 新增了一条窄范围的相对路径/裸文件名扫描通道，**仅作用于最后一轮的最后一条 assistant 消息**（通常是交付摘要），且必须通过工作空间真实存在性校验才会入库。这与早期 `_BROAD_RELATIVE_PATH_RE` 的全量宽泛扫描有本质区别——后者对所有消息生效且无存在性门槛，因此被移除。详见第 2 节和第 7 节。
 
 ---
 

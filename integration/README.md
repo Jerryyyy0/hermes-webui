@@ -15,7 +15,7 @@ export SKILLHUB_URL=http://127.0.0.1:8000   # optional; SkillHub market only (se
 - **Cross-profile cron** — Cron Hub and grouped cron APIs across profiles.
 - **SkillHub** — UI and `/api/skillhub/*` routes are active only when `SKILLHUB_URL` is also set.
 - **Egress policy (iptables)** — gated API to apply iptables open/whitelist policies (see below). **Off by default**; requires `HERMES_EGRESS_POLICY_ENABLED=1`.
-- **Knowledge base BFF** — `POST /api/integration/knowledge-base/*` routes are active only when `KNOWLEDGE_BASE_URL` is also set.
+- **Knowledge base BFF** — `POST /api/integration/knowledge_base/*` routes are active only when `KNOWLEDGE_BASE_URL` is also set.
 
 If you use a local HTTP proxy (`HTTP_PROXY`, e.g. Clash), add the SkillHub host to `NO_PROXY` (or rely on `ensure_skillhub_no_proxy()` at server startup, which appends the hostname from `SKILLHUB_URL`). Without this, `/api/skillhub/*` may return 502 while `curl` to the same upstream works.
 
@@ -209,26 +209,29 @@ export KNOWLEDGE_BASE_URL=http://192.168.1.132:17861
 
 | Method | Path | 下游 | 调用方必填 |
 |--------|------|------|-----------|
-| POST | `/api/integration/knowledge-base/list` | `list_ps_knowledge_bases` | `account`, `uuid`, `isPersonal` |
-| POST | `/api/integration/knowledge-base/joined` | `user_joined_shkbs` | `account`, `uuid` |
-| POST | `/api/integration/knowledge-base/create` | `create_ps_kb` | `account`, `uuid`, `showName`, `isPersonal` |
-| POST | `/api/integration/knowledge-base/info` | `show_ps_kb_info` | `kbName` |
-| POST | `/api/integration/knowledge-base/edit` | `edit_kb_information` | `kbName`, `showName` |
-| POST | `/api/integration/knowledge-base/delete` | `delete_ps_kb` | `account`, `kbName` |
-| POST | `/api/integration/knowledge-base/available` | `available_shkbs` | `account`, `uuid`, `page`, `size` |
-| POST | `/api/integration/knowledge-base/apply-join` | `apply_join_shkb` | `account`, `uuid`, `kbName` |
-| POST | `/api/integration/knowledge-base/members` | `get_user_inshkb` | `uuid`, `kbName`, `page`, `size` |
-| POST | `/api/integration/knowledge-base/documents` | `list_knowledge_bases_details` | `kbName`, `page`, `size` |
-| POST | `/api/integration/knowledge-base/upload-docs` | `upload_docs` | multipart：`uuid`, `kbName`, `files`, `fileProperties` |
-| POST | `/api/integration/knowledge-base/update-docs` | `update_docs` | `kbName`, `fileNames`, `fileProperties` |
-| POST | `/api/integration/knowledge-base/delete-docs` | `delete_docs` | `kbName`, `fileNames` |
+| POST | `/api/integration/knowledge_base/list` | `list_ps_knowledge_bases` | `account`, `uuid`, `isPersonal` |
+| POST | `/api/integration/knowledge_base/joined` | `user_joined_shkbs` | `account`, `uuid` |
+| POST | `/api/integration/knowledge_base/create` | `create_ps_kb` | `account`, `uuid`, `showName`, `isPersonal` |
+| POST | `/api/integration/knowledge_base/info` | `show_ps_kb_info` | `kbName` |
+| POST | `/api/integration/knowledge_base/edit` | `edit_kb_information` | `kbName`, `showName` |
+| POST | `/api/integration/knowledge_base/delete` | `delete_ps_kb` | `account`, `kbName` |
+| POST | `/api/integration/knowledge_base/available` | `available_shkbs` | `account`, `uuid`, `page`, `size` |
+| POST | `/api/integration/knowledge_base/apply-join` | `apply_join_shkb` | `account`, `uuid`, `kbName` |
+| POST | `/api/integration/knowledge_base/members` | `get_user_inshkb` | `uuid`, `kbName`, `page`, `size` |
+| POST | `/api/integration/knowledge_base/documents` | `list_knowledge_bases_details` | `kbName`, `page`, `size` |
+| POST | `/api/integration/knowledge_base/upload-docs` | `upload_docs` | multipart：`uuid`, `kbName`, `files`, `fileProperties` |
+| POST | `/api/integration/knowledge_base/update-docs` | `update_docs` | `kbName`, `fileNames`, `fileProperties` |
+| POST | `/api/integration/knowledge_base/delete-docs` | `delete_docs` | `kbName`, `fileNames` |
+| POST | `/api/integration/knowledge_base/show_pdf` | `show_pdf` | `kbName`, `fileName`（可选 `flag`） |
+| POST | `/api/integration/knowledge_base/search_docs` | `search_docs` | `query`, `kbName`（可选 `topK`, `scoreThreshold`） |
+| POST | `/api/integration/knowledge_base/search_docs_xcore` | `search_docs_xcore` | `query`, `kbNames`（非空数组；可选 `topK`, `scoreThreshold`） |
 
-成功时 HTTP 200 响应体为下游 `data` 字段（无 envelope）。业务失败 HTTP 400：`{ error, message, code }`；下游不可达 HTTP 502。
+成功时 HTTP 状态码与 JSON body **原样透传**下游响应（含 `code` / `msg` / `data` 包装）。`show_pdf` 在下游返回 PDF 时透传二进制。BFF 自身错误：请求校验失败 HTTP 400；下游不可达 HTTP 502。
 
 文档上传须两步串联：`upload-docs` 成功后再 `update-docs`。
 
 ```bash
-curl -sS -X POST http://127.0.0.1:8787/api/integration/knowledge-base/list \
+curl -sS -X POST http://127.0.0.1:8787/api/integration/knowledge_base/list \
   -H "Content-Type: application/json" \
   -d '{"account":"admin","uuid":"aaaaaaaa0000aaaa0000aaaaaaaaaaaa","isPersonal":1}'
 ```
@@ -282,7 +285,7 @@ Response includes global `stats`: `{ hub, installed, not_installed, custom }` ac
 | Path | Role |
 |------|------|
 | `config.py` | `HERMES_INTEGRATION`, `SKILLHUB_URL`, `KNOWLEDGE_BASE_URL`, `ZHILING_CONTROL_PLANE_URL`, `ZHILING_LOGOUT_API_URL`, `skillhub_enabled()`, `knowledge_base_enabled()`, `identity_lookup_enabled()`, `zhiling_logout_enabled()` |
-| `knowledge_base/` | `/api/integration/knowledge-base/*` → `{KNOWLEDGE_BASE_URL}/knowledge_base/*` |
+| `knowledge_base/` | `/api/integration/knowledge_base/*` → `{KNOWLEDGE_BASE_URL}/knowledge_base/*` |
 | `identity/` | `GET /api/integration/login` → Control Plane `/api/identity/lookup` |
 | `logout/` | `POST /api/integration/logout` → `{ZHILING_LOGOUT_API_URL}/api/logout` |
 | `skills/skillhub.py` | Upstream httpx client |

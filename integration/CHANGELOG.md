@@ -8,11 +8,27 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Added
 
+- **Knowledge base search_docs_xcore** — `POST /api/integration/knowledge_base/search_docs_xcore` proxies downstream `POST /knowledge_base/search_docs_xcore` with `query`, `kbNames` (→ downstream `kbNames`), optional `topK` (default 3), and `scoreThreshold` (default 1.0). Success returns `{kbNames, docNames, context}` from upstream `data`.
+
+- **Knowledge base search_docs** — `POST /api/integration/knowledge_base/search_docs` proxies downstream `POST /knowledge_base/search_docs` with `query`, `kbName` (→ `knowledge_base_name`), optional `topK` (default 3), and `scoreThreshold` (default 1.0). Returns matched document chunks as JSON array.
+
+- **Knowledge base show_pdf binary passthrough** — `show_pdf` proxies downstream PDF bytes (`application/pdf`) instead of requiring JSON; JSON errors still mapped as before.
+
+- **Knowledge base show_pdf** — `POST /api/integration/knowledge_base/show_pdf` proxies downstream `POST /knowledge_base/show_pdf` with `kbName`, `fileName`, and optional `flag`.
+
 - **Profile pin** — `POST /api/profile/pin` (`name`, `pinned`) stores pin state in each profile's `info.json` (`pinned`, `pin_order`), including `default`. New pins get `pin_order: 1` (topmost) and bump existing pinned orders. `GET /api/profiles` returns `info.pinned` / `info.pin_order` and sorts pinned (by `pin_order`) → unpinned `default` → alphabetical (max 5 pins). Profiles panel and compose dropdown UI in `hermes_profiles.js`.
 
 - **Zhiling identity lookup API doc** — [`docs/integration-login-api.md`](../docs/integration-login-api.md) documents `GET /api/integration/login` request/response contract, auth, and error semantics.
 
 ### Changed
+
+- **Knowledge base BFF passthrough responses** — JSON proxy routes now return downstream HTTP status and body unchanged (no `data` unwrapping or business-error remapping). `show_pdf` binary responses still passthrough bytes; upload-docs no longer maps `data: null` to `{"ok": true}`.
+
+- **MCP 传输类型** — 设置面板添加 MCP 服务器时支持三种传输：`stdio`、HTTP (Streamable)、SSE。SSE 保存为 `transport: sse`；HTTP Streamable 仅写 `url`/`headers`。同步更新 `PUT /api/mcp/servers/{name}` 列表摘要与 integration Swagger。
+
+- **MCP 连通性测试** — `POST /api/mcp/servers/{name}/test` 现真正连接目标服务器（含 SSE）并返回 `tool_count`；探测为临时连接，不修改长期 MCP registry。
+
+- **Knowledge base BFF route prefix** — WebUI proxy paths use `/api/integration/knowledge_base/*` (underscore), aligned with downstream `/knowledge_base/*`. Hyphenated `/api/integration/knowledge-base/*` is no longer served.
 
 - **Integration workspace files profile (temporarily disabled)** — `GET /api/integration/workspace/files` no longer builds the cross-session artifact profile index, ignores `?profile=`, and omits `profile` on file rows. Session-save hook no longer incrementally updates `artifact_profiles.py`. Restore by uncommenting scheme C blocks in `integration/workspace/handlers.py` and `hooks.py`.
 

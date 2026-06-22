@@ -8302,6 +8302,31 @@ function _mcpStatusLabel(status){
   }[status]||'mcp_status_unknown';
   return t(key);
 }
+function _mcpSelectedTransport(){
+  const el=document.querySelector('input[name="mcpTransport"]:checked');
+  return el?el.value:'stdio';
+}
+function _mcpResolveTransportFromServer(server){
+  if(!server||typeof server!=='object') return 'stdio';
+  if(server.transport==='stdio'||server.command) return 'stdio';
+  if(server.transport==='sse') return 'sse';
+  if(server.transport==='http'||server.url) return 'http';
+  return 'stdio';
+}
+function _mcpTransportMeta(transport){
+  if(transport==='stdio') return {label:t('mcp_transport_stdio'),cssClass:'mcp-stdio',detailType:'stdio'};
+  if(transport==='sse') return {label:t('mcp_transport_sse'),cssClass:'mcp-sse',detailType:'url'};
+  if(transport==='http') return {label:t('mcp_transport_http'),cssClass:'mcp-http',detailType:'url'};
+  return {label:transport||t('mcp_status_unknown'),cssClass:'mcp-unknown',detailType:'invalid'};
+}
+function _mcpServerDetail(server, meta){
+  if(meta.detailType==='url') return server.url||'';
+  if(meta.detailType==='stdio'){
+    const args=Array.isArray(server.args)?server.args.join(' '):'';
+    return `${server.command||''} ${args}`.trim();
+  }
+  return t('mcp_status_invalid_config');
+}
 function toggleMcpServer(name, enabled){
   api('/api/mcp/servers/'+encodeURIComponent(name),{
     method:'PATCH',
@@ -8323,15 +8348,12 @@ function loadMcpServers(){
       return;
     }
     list.innerHTML=r.servers.map(s=>{
-      const transportLabel=s.transport==='http'?'HTTP':s.transport==='stdio'?'stdio':(''+(s.transport||'unknown'));
-      const transportClass=s.transport==='http'?'mcp-http':s.transport==='stdio'?'mcp-stdio':'mcp-unknown';
-      const transportBadge=`<span class="mcp-transport-badge ${transportClass}">${esc(transportLabel)}</span>`;
+      const transportMeta=_mcpTransportMeta(s.transport||'unknown');
+      const transportBadge=`<span class="mcp-transport-badge ${transportMeta.cssClass}">${esc(transportMeta.label)}</span>`;
       const status=s.status||'configured';
       const statusBadge=`<span class="mcp-status-badge mcp-status-${esc(status)}">${esc(_mcpStatusLabel(status))}</span>`;
       const toolCount=s.tool_count===null||typeof s.tool_count==='undefined'?'—':String(s.tool_count);
-      const detail=s.transport==='http'
-        ? (s.url||'')
-        : (s.transport==='stdio'?`${s.command||''} ${Array.isArray(s.args)?s.args.join(' '):''}`:t('mcp_status_invalid_config'));
+      const detail=_mcpServerDetail(s,transportMeta);
       const envInfo=s.env?Object.entries(s.env).map(([k,v])=>`${k}=${v}`).join(', '):'';
       const headersInfo=s.headers?Object.entries(s.headers).map(([k,v])=>`${k}=${v}`).join(', '):'';
       const secretInfo=[envInfo,headersInfo].filter(Boolean).join(' | ');
@@ -8390,8 +8412,8 @@ function showEditMcpServerModal(name){
   api('/api/mcp/servers').then(r=>{
     const server=(r.servers||[]).find(s=>s.name===name);
     if(!server) return;
-    const isStdio=server.transport==='stdio'||!!server.command;
-    document.querySelector('input[name="mcpTransport"][value="'+(isStdio?'stdio':'http')+'"]').checked=true;
+    const transport=_mcpResolveTransportFromServer(server);
+    document.querySelector('input[name="mcpTransport"][value="'+transport+'"]').checked=true;
     toggleMcpTransportFields();
     $('mcpFormCommand').value=server.command||'';
     $('mcpFormArgs').value=Array.isArray(server.args)?server.args.join('\n'):'';
@@ -8415,7 +8437,8 @@ function closeMcpServerModal(){
 }
 
 function toggleMcpTransportFields(){
-  const isStdio=document.querySelector('input[name="mcpTransport"]:checked').value==='stdio';
+  const transport=_mcpSelectedTransport();
+  const isStdio=transport==='stdio';
   document.getElementById('mcpFormStdioFields').style.display=isStdio?'block':'none';
   document.getElementById('mcpFormHttpFields').style.display=isStdio?'none':'block';
 }
@@ -8438,10 +8461,10 @@ function addMcpKvRow(containerId, key, value){
 function saveMcpServer(){
   const name=$('mcpFormName').value.trim();
   if(!name){showToast(t('mcp_name_required'),'error');return;}
-  const isStdio=document.querySelector('input[name="mcpTransport"]:checked').value==='stdio';
+  const transport=_mcpSelectedTransport();
   const originalName=$('mcpFormOriginalName').value||name;
   const body={timeout:parseInt($('mcpFormTimeout').value)||120};
-  if(isStdio){
+  if(transport==='stdio'){
     const command=$('mcpFormCommand').value.trim();
     if(!command){showToast(t('mcp_command_required'),'error');return;}
     body.command=command;
@@ -8453,6 +8476,7 @@ function saveMcpServer(){
     if(!url){showToast(t('mcp_url_required'),'error');return;}
     body.url=url;
     body.headers=collectKeyValues('mcpFormHeaderRows');
+    if(transport==='sse') body.transport='sse';
   }
   const btn=$('mcpServerModal').querySelector('.sm-btn:last-child');
   if(btn) btn.disabled=true;

@@ -245,13 +245,11 @@ def load_workspaces() -> list:
             raw = json.loads(ws_file.read_text(encoding='utf-8'))
             cleaned = _clean_workspace_list(raw)
             if len(cleaned) != len(raw):
-                # Persist the cleaned version so stale entries don't keep reappearing
-                try:
-                    ws_file.write_text(
-                        json.dumps(cleaned, ensure_ascii=False, indent=2), encoding='utf-8'
-                    )
-                except Exception:
-                    logger.debug("Failed to persist cleaned workspace list")
+                logger.info(
+                    "Workspace list cleaned: removed %d entry(s) (cross-profile leaks, "
+                    "renamed 'default'→'Home') — not persisted; user's saved list kept intact",
+                    len(raw) - len(cleaned),
+                )
             return cleaned or [{'path': _profile_default_workspace(), 'name': 'Home'}]
         except Exception:
             logger.debug("Failed to load workspaces from %s", ws_file)

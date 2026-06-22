@@ -2895,7 +2895,54 @@ def _message_counts_as_renderable_for_window(message) -> bool:
     return bool(role and role != "tool")
 
 
-def _message_window_for_display(messages, msg_limit=None, msg_before=None, expand_renderable=False) -> tuple[list, int]:
+def _turn_aligned_window_indices(source: list, limit: int) -> tuple[int, int]:
+    """Return ``(start_idx, end_idx)`` for a tail window aligned to user turns.
+
+    ``limit`` is a raw-message budget. The last turn is always returned whole
+  even when it exceeds ``limit``; otherwise whole turns are accumulated backward
+    until adding another turn would exceed the budget.
+    """
+    from api.session_manifest import _message_turns
+
+    limit = max(1, int(limit))
+    end_idx = len(source)
+    turns = _message_turns(source)
+    if not turns:
+        start_idx = max(0, end_idx - limit)
+        return start_idx, end_idx
+
+    last = turns[-1]
+    last_start = int(last["start_msg_idx"])
+    last_end = int(last["end_msg_idx"])
+    last_size = last_end - last_start + 1
+
+    if last_size > limit:
+        return last_start, last_end + 1
+
+    selected = [last]
+    total = last_size
+    for turn in reversed(turns[:-1]):
+        turn_start = int(turn["start_msg_idx"])
+        turn_end = int(turn["end_msg_idx"])
+        turn_size = turn_end - turn_start + 1
+        if total + turn_size <= limit:
+            selected.insert(0, turn)
+            total += turn_size
+        else:
+            break
+
+    start_idx = int(selected[0]["start_msg_idx"])
+    end_idx = int(selected[-1]["end_msg_idx"]) + 1
+    return start_idx, end_idx
+
+
+def _message_window_for_display(
+    messages,
+    msg_limit=None,
+    msg_before=None,
+    expand_renderable=False,
+    turn_align=False,
+) -> tuple[list, int]:
     """Return a paginated message window plus its offset in ``messages``.
 
     The normal fast path is a raw tail window. If that window contains no
@@ -2903,6 +2950,10 @@ def _message_window_for_display(messages, msg_limit=None, msg_before=None, expan
     the visible assistant tail, shift the window end back to the newest
     renderable row. This preserves the raw index cursor while avoiding the
     WebUI blank-transcript trap.
+
+    When ``turn_align`` is true (requires ``msg_limit``), the window is aligned
+    to whole user turns via ``_turn_aligned_window_indices`` instead of a raw
+    tail slice. ``expand_renderable`` is ignored on that path.
     """
     messages = list(messages or [])
     if msg_before is not None:
@@ -2915,6 +2966,17 @@ def _message_window_for_display(messages, msg_limit=None, msg_before=None, expan
     if not msg_limit:
         return source, 0
     limit = max(1, int(msg_limit))
+    if turn_align:
+        start_idx, end_idx = _turn_aligned_window_indices(source, limit)
+        window = source[start_idx:end_idx]
+        if window and not any(_message_counts_as_renderable_for_window(msg) for msg in window):
+            for idx in range(end_idx - 1, -1, -1):
+                if _message_counts_as_renderable_for_window(source[idx]):
+                    trimmed = source[:idx + 1]
+                    start_idx, end_idx = _turn_aligned_window_indices(trimmed, limit)
+                    window = trimmed[start_idx:end_idx]
+                    break
+        return window, start_idx
     end_idx = len(source)
     start_idx = max(0, end_idx - limit)
     window = source[start_idx:end_idx]
@@ -5526,6 +5588,11 @@ def handle_get(handler, parsed) -> bool:
         # keeping their raw transport cap (#3790).
         _expand_renderable = query.get("expand_renderable", [None])[0]
         expand_renderable = str(_expand_renderable).strip() in ("1", "true", "True")
+        # ?turn_align=1 — align the msg_limit tail window to whole user turns.
+        # Requires msg_limit; independent of expand_renderable (which stays on
+        # the raw tail path only).
+        _turn_align = query.get("turn_align", [None])[0]
+        turn_align = str(_turn_align or "").strip().lower() in ("1", "true")
         try:
             _t1 = _time.monotonic()
             s = get_session(sid, metadata_only=(not load_messages))
@@ -5611,6 +5678,7 @@ def handle_get(handler, parsed) -> bool:
                     msg_limit=msg_limit,
                     msg_before=msg_before,
                     expand_renderable=expand_renderable,
+                    turn_align=turn_align,
                 )
                 if msg_before is not None:
                     _before_idx = max(0, min(int(msg_before), len(_all_msgs)))
@@ -5740,7 +5808,9 @@ def handle_get(handler, parsed) -> bool:
             # For msg_before paging, compare against the filtered set,
             # not the full list — otherwise we signal truncation even when
             # all older messages were returned.
-            if msg_before is not None:
+            if turn_align and msg_limit is not None:
+                _truncated = load_messages and _messages_offset > 0
+            elif msg_before is not None:
                 _truncated = load_messages and msg_limit is not None and len(_slice) > msg_limit
             else:
                 _truncated = load_messages and msg_limit is not None and len(_all_msgs) > msg_limit
@@ -7556,6 +7626,12 @@ def handle_post(handler, parsed) -> bool:
             delete_run_journal(sid)
         except Exception:
             logger.debug("Failed to delete run journal for deleted session %s", sid)
+        try:
+            from api.session_manifest_store import delete_session_manifest_records
+
+            delete_session_manifest_records(sid)
+        except Exception:
+            logger.debug("Failed to delete session manifest records for deleted session %s", sid)
         # Prune the per-session agent lock so deleted sessions don't leak
         # Lock entries in SESSION_AGENT_LOCKS forever.
         with SESSION_AGENT_LOCKS_LOCK:
@@ -7613,6 +7689,13 @@ def handle_post(handler, parsed) -> bool:
         with _get_session_agent_lock(sid):
             s.messages = []
             s.tool_calls = []
+            s.turn_artifacts = {}
+            try:
+                from api.session_manifest_store import delete_session_manifest_records
+
+                delete_session_manifest_records(sid)
+            except Exception:
+                logger.debug("Failed to delete session manifest records for cleared session %s", sid)
             # Reset the title via the rename helper so clearing a manually-named
             # session also clears manual_title/llm_title_generated — otherwise the
             # reused session keeps its manual-title protection and never auto-names
@@ -7662,6 +7745,24 @@ def handle_post(handler, parsed) -> bool:
             # turns on the next turn (#2914).
             if isinstance(getattr(s, 'context_messages', None), list):
                 s.context_messages = s.context_messages[:keep]
+            try:
+                from api.session_manifest import _message_turns
+                from api.session_manifest_store import delete_session_manifest_turns
+
+                keep_turn_keys = {
+                    str(turn.get('turn_key') or '').strip()
+                    for turn in _message_turns(s.messages or [])
+                    if str(turn.get('turn_key') or '').strip()
+                }
+                if isinstance(getattr(s, 'turn_artifacts', None), dict):
+                    s.turn_artifacts = {
+                        key: value
+                        for key, value in s.turn_artifacts.items()
+                        if str(key or '').strip() in keep_turn_keys
+                    }
+                delete_session_manifest_turns(s.session_id, keep_turn_keys)
+            except Exception:
+                logger.debug("Failed to prune session manifest records for truncated session %s", s.session_id)
             try:
                 from api.session_ops import _truncation_watermark_for
                 s.truncation_watermark = _truncation_watermark_for(s.messages)
@@ -11810,20 +11911,25 @@ def _checkpoint_user_message_for_eager_session_save(s, msg: str, attachments, st
 
 
 def _turn_key_for_pending_user_message(s, msg: str) -> str:
-    """返回当前提交用户轮次的 manifest turn key（优先使用稳定的 _turn_key）。"""
+    """返回当前提交用户轮次的 manifest turn key（优先使用稳定的 _turn_key）。
+
+    逻辑：
+    1. 如果 s.messages 最后一条用户消息的 content 与当前 msg 一致
+       → 这是已持久化的待提交消息（eager save 模式），优先用其 _turn_key
+    2. 否则，基于现存用户消息数计算 _next_turn_key（只统计 role=user 的消息）
+    """
     messages = list(getattr(s, "messages", None) or [])
+    from api.session_manifest import _next_turn_key
     if messages:
         latest = messages[-1]
         if isinstance(latest, dict) and latest.get("role") == "user":
-            # 优先使用稳定的 _turn_key
-            turn_key = latest.get("_turn_key", "")
-            if turn_key:
-                return turn_key
             row_text = " ".join(str(latest.get("content") or "").split())
             msg_text = " ".join(str(msg or "").split())
             if row_text == msg_text:
-                return f"turn:{len(messages) - 1}"
-    return f"turn:{len(messages)}"
+                # 最后一条用户消息就是当前待提交的消息（eager save 模式）
+                turn_key = latest.get("_turn_key", "")
+                return turn_key if turn_key else _next_turn_key(messages)
+    return _next_turn_key(messages)
 
 
 def _is_default_or_empty_session_title(title) -> bool:
@@ -12045,6 +12151,7 @@ def _start_chat_stream_for_session(
                     model_provider=model_provider,
                     stream_id=stream_id,
                 )
+                stream_turn_key = _turn_key_for_pending_user_message(s, msg)
                 break
         if needs_stale_cleanup:
             diag.stage("stale_stream_cleanup") if diag else None
@@ -12056,7 +12163,6 @@ def _start_chat_stream_for_session(
                     "active_stream_id": getattr(s, "active_stream_id", None),
                     "_status": 409,
                 }
-        stream_turn_key = _turn_key_for_pending_user_message(s, msg)
     if was_hidden_empty_session:
         publish_session_list_changed("session_new", profile=getattr(s, "profile", None))
     diag.stage("turn_journal_submitted") if diag else None
@@ -15588,6 +15694,109 @@ def _mcp_runtime_status_by_name() -> dict[str, dict]:
     }
 
 
+def _mcp_transport_from_cfg(cfg):
+    """Return the MCP transport label for a server config dict."""
+    if not isinstance(cfg, dict):
+        return "invalid"
+    if "url" in cfg:
+        return "sse" if cfg.get("transport") == "sse" else "http"
+    if "command" in cfg:
+        return "stdio"
+    return "invalid"
+
+
+def _mcp_prepare_server_cfg(srv_cfg):
+    """Return a copy of an MCP server config with env interpolation when available."""
+    cfg = dict(srv_cfg) if isinstance(srv_cfg, dict) else {}
+    try:
+        from tools.mcp_tool import _interpolate_env_vars
+    except Exception:
+        return cfg
+    try:
+        interpolated = _interpolate_env_vars(cfg)
+    except Exception:
+        return cfg
+    return interpolated if isinstance(interpolated, dict) else cfg
+
+
+def _mcp_format_probe_error(exc):
+    """Return a user-safe MCP connectivity error string."""
+    try:
+        from tools.mcp_tool import _format_connect_error, _sanitize_error
+        return _sanitize_error(_format_connect_error(exc))
+    except Exception:
+        return str(exc)
+
+
+def _probe_mcp_server_connectivity(name, srv_cfg):
+    """Connect to one MCP server, count discovered tools, then disconnect.
+
+    Returns:
+        tuple[bool, int, str | None]: (connected, tool_count, error_message)
+    """
+    import asyncio
+
+    cfg = _mcp_prepare_server_cfg(srv_cfg)
+    try:
+        from tools import mcp_tool
+    except Exception as exc:
+        return False, 0, f"MCP runtime unavailable: {exc}"
+
+    if not getattr(mcp_tool, "_MCP_AVAILABLE", True):
+        return False, 0, "MCP SDK not available"
+
+    connect_server = getattr(mcp_tool, "_connect_server", None)
+    run_on_mcp_loop = getattr(mcp_tool, "_run_on_mcp_loop", None)
+    ensure_mcp_loop = getattr(mcp_tool, "_ensure_mcp_loop", None)
+    stop_mcp_loop_if_idle = getattr(mcp_tool, "_stop_mcp_loop_if_idle", None)
+    default_connect_timeout = getattr(mcp_tool, "_DEFAULT_CONNECT_TIMEOUT", 60)
+
+    probe_all = getattr(mcp_tool, "probe_mcp_server_tools", None)
+    if not connect_server or not run_on_mcp_loop:
+        if not probe_all:
+            return False, 0, "MCP probe API unavailable"
+        try:
+            results = probe_all()
+            tools = results.get(name) if isinstance(results, dict) else None
+            if tools is None:
+                return False, 0, f"Failed to connect to MCP server '{name}'"
+            return True, len(tools), None
+        except Exception as exc:
+            return False, 0, _mcp_format_probe_error(exc)
+
+    connect_timeout = cfg.get("connect_timeout", default_connect_timeout)
+    try:
+        connect_timeout = float(connect_timeout)
+    except (TypeError, ValueError):
+        connect_timeout = float(default_connect_timeout)
+    probe_timeout = max(connect_timeout + 30.0, 60.0)
+
+    async def _probe_one():
+        server = await asyncio.wait_for(connect_server(name, cfg), timeout=connect_timeout)
+        try:
+            tools = getattr(server, "_tools", None) or []
+            return len(tools)
+        finally:
+            await server.shutdown()
+
+    def _cleanup_probe_loop():
+        if stop_mcp_loop_if_idle:
+            try:
+                stop_mcp_loop_if_idle()
+            except Exception:
+                pass
+
+    try:
+        if ensure_mcp_loop:
+            ensure_mcp_loop()
+        tool_count = run_on_mcp_loop(_probe_one, timeout=probe_timeout)
+        return True, int(tool_count or 0), None
+    except Exception as exc:
+        return False, 0, _mcp_format_probe_error(exc)
+    finally:
+        _cleanup_probe_loop()
+
+
 def _server_summary(name, cfg, runtime_status=None):
     """Return a safe summary of an MCP server config."""
     runtime_status = runtime_status if isinstance(runtime_status, dict) else {}
@@ -15607,7 +15816,7 @@ def _server_summary(name, cfg, runtime_status=None):
     enabled = _parse_mcp_enabled(cfg.get("enabled", True))
     connected = bool(runtime_status.get("connected")) if enabled else False
     if "url" in cfg:
-        out["transport"] = "http"
+        out["transport"] = _mcp_transport_from_cfg(cfg)
         # Mask auth headers
         if "headers" in cfg:
             out["headers"] = _mask_secrets(cfg["headers"])
@@ -16399,6 +16608,8 @@ def _handle_mcp_server_update(handler, name, body):
     existing_cfg = servers.get(name, {})
     if body.get("url"):
         server_cfg["url"] = body["url"].strip()
+        if body.get("transport") == "sse":
+            server_cfg["transport"] = "sse"
         if body.get("headers"):
             server_cfg["headers"] = _strip_masked_values(body["headers"], existing_cfg.get("headers", {}))
     elif body.get("command"):
@@ -16433,10 +16644,10 @@ def _handle_mcp_reload(handler):
 
 
 def _handle_mcp_server_test(handler, name):
-    """Test connection to an MCP server by name (POST /api/mcp/servers/{name}/test).
+    """Test connectivity to an MCP server by name (POST /api/mcp/servers/{name}/test).
 
-    Validates the config is well-formed and that the MCP runtime is available.
-    A full subprocess-based connectivity test is a future enhancement.
+    Connects to the configured server (stdio / HTTP / SSE), discovers tools, then
+    disconnects without mutating the long-lived MCP registry.
     """
     from urllib.parse import unquote as _unquote
 
@@ -16465,15 +16676,37 @@ def _handle_mcp_server_test(handler, name):
         return j(handler, {"ok": False, "error": "; ".join(errors)})
 
     try:
-        from tools.mcp_tool import get_mcp_status
+        from tools import mcp_tool as _mcp_tool  # noqa: F401
         _mcp_tool_available = True
     except Exception:
         _mcp_tool_available = False
 
+    if not _mcp_tool_available:
+        return j(handler, {
+            "ok": False,
+            "name": name,
+            "transport": _mcp_transport_from_cfg(srv),
+            "mcp_tool_available": False,
+            "tool_count": 0,
+            "error": "MCP runtime unavailable",
+        })
+
+    connected, tool_count, probe_error = _probe_mcp_server_connectivity(name, srv)
+    if not connected:
+        return j(handler, {
+            "ok": False,
+            "name": name,
+            "transport": _mcp_transport_from_cfg(srv),
+            "mcp_tool_available": True,
+            "tool_count": 0,
+            "error": probe_error or f"Failed to connect to MCP server '{name}'",
+        })
+
     return j(handler, {
         "ok": True,
         "name": name,
-        "transport": "http" if "url" in srv else "stdio",
-        "mcp_tool_available": _mcp_tool_available,
-        "note": "Config validated. Full connectivity test requires MCP runtime (run /reload-mcp or start a session).",
+        "transport": _mcp_transport_from_cfg(srv),
+        "mcp_tool_available": True,
+        "tool_count": tool_count,
+        "note": f"Connected successfully and discovered {tool_count} tool(s).",
     })

@@ -2,7 +2,7 @@
 
 本文档梳理 **`GET /api/session/manifest`** 响应中 `manifest.artifacts[]` 与 `manifest.turns[].artifacts[]` 的完整构建链路：数据来源、分阶段处理、过滤门槛与流式增量关系。
 
-相关实现：`api/session_manifest.py`（构建）、`api/routes.py`（HTTP）、`api/streaming.py` / `api/gateway_chat.py`（SSE）。产品语义见 [session-inspector-manifest.md](./session-inspector-manifest.md)；HTTP 契约见 [session-manifest-api.md](./session-manifest-api.md)；路径正则见 [session-manifest-artifact-regex.md](./session-manifest-artifact-regex.md)。
+相关实现：`api/session_manifest.py`（构建）、`api/session_manifest_store.py`（profile-aware artifact store）、`api/routes.py`（HTTP）、`api/streaming.py` / `api/gateway_chat.py`（SSE）。产品语义见 [session-inspector-manifest.md](./session-inspector-manifest.md)；HTTP 契约见 [session-manifest-api.md](./session-manifest-api.md)；路径正则见 [session-manifest-artifact-regex.md](./session-manifest-artifact-regex.md)。
 
 ---
 
@@ -28,14 +28,14 @@ return {"manifest": manifest}
 **要点：**
 
 - 权威构建函数是 `build_session_manifest(session)`。
-- 流式进行中，GET 会把 `STREAM_LIVE_MANIFEST[stream_id]` 里的 delta **叠加**到持久化 manifest 上（按 `path` 去重合并）。
+- 流式进行中，GET 会把 `STREAM_LIVE_MANIFEST[stream_id]` 里的 delta **叠加**到持久化 manifest 上（按 `profile + path` 去重合并）。
 - 本轮 `done` 后应以 GET 结果为准；SSE 仅为乐观更新。
 
 ---
 
 ## 2. 总览：构建流水线
 
-`build_session_manifest()` 对 artifacts 的处理分 **四个阶段** + **最终 wire 过滤**：
+`build_session_manifest()` 对 artifacts 的处理以 **store 为权威来源**，transcript/tool/prose reconcile 仅用于缺失记录回填：
 
 ```mermaid
 flowchart TB
@@ -43,7 +43,8 @@ flowchart TB
     M[session.messages]
     TC[session.tool_calls]
     WS[session.workspace]
-    TA[session.turn_artifacts 可选]
+    Store[session_manifest.db]
+    TA[legacy session.turn_artifacts 可选]
   end
 
   subgraph phase1 [阶段 1：工具事件提取]
@@ -56,8 +57,9 @@ flowchart TB
     R2[_apply_turn_reconcile_to_manifest_records]
   end
 
-  subgraph phase3 [阶段 3：持久化 turn_artifacts 覆盖]
-    R3[session.turn_artifacts 按 turn 覆盖]
+  subgraph phase3 [阶段 3：Store 优先合并]
+    R3[store records 覆盖/补充]
+    B1[legacy turn_artifacts backfill]
   end
 
   subgraph phase4 [阶段 4：Wire 过滤]
@@ -72,7 +74,9 @@ flowchart TB
   E2 --> R1
   R1 --> R2
   R2 --> R3
-  TA --> R3
+  Store --> R3
+  TA --> B1
+  B1 --> R3
   R3 --> W
   WS --> W
   W --> OUT[manifest.artifacts / turns]
@@ -82,8 +86,10 @@ flowchart TB
 |------|------|------|
 | 1 | `_extract_manifest_records` | 从工具白名单事件直接归纳 artifact **内部记录** |
 | 2 | `_apply_turn_reconcile_to_manifest_records` | 按 turn 补全 `MEDIA:`、`assistant_prose`；**须文件真实存在** |
-| 3 | `session.turn_artifacts` | 流式 turn 结束时持久化的写入工具路径，**覆盖**该 turn 的 reconcile 结果 |
+| 3 | `session_manifest.db` | 流式 turn 结束时写入的 profile-aware artifact store，**覆盖**该 turn 的 reconcile 结果 |
 | 4 | `_rows_to_wire` | 仅输出可预览条目（文件存在 / skill 存在） |
+
+Store v1 只保存 artifacts，不保存 todos/references。身份键为 `lineage_key + profile + turn_key + record_kind + path`；正常写入路径中一个 WebUI session 只产生一个 profile，缺失 profile 写 `""`。
 
 ---
 

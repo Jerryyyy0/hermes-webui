@@ -13,7 +13,7 @@
 | 字段 | 含义 | 唯一数据来源 |
 | --- | --- | --- |
 | `todos` | 待办最新快照 | `todo` 工具结果 JSON 顶层 `todos[]` |
-| `artifacts` | 写入类工具创建/修改过的路径，及明确交付的文件 | 写入工具白名单 + diff/patch + `MEDIA:` + turn reconcile（assistant 交付 prose / 工具交付输出） |
+| `artifacts` | 写入类工具创建/修改过的路径，及明确交付的文件 | `session_manifest.db` 中的 artifact store；transcript/tool/prose reconcile 仅作缺失记录 backfill |
 | `references` | 实际读取/打开的内容来源 | 读取/列目录工具白名单 |
 | `turns[]` | 按 user 消息划分的轮次视图 | 同上，归属 `turn:<user_msg_idx>` |
 
@@ -92,9 +92,19 @@ GET /api/session/manifest?session_id=abc123
 
 1. 加载会话展示用消息 + `session.tool_calls`，收集 `ToolEvent`。
 2. **Todos**：仅在**当前轮**（最后一个 `role=user` 之后）的 `role=tool` 消息中解析顶层 `todos[]`，按 `id` 合并；同轮内 `content` 为空或为 `(no description)` 时保留旧 `content`。对外下发的 `todos.items` 只包含带可展示 `content` 的条目（无则 `items: []`）。
-3. **Artifacts / References**：按工具白名单与路径规则归纳，会话级按 `path` 去重。
-4. **Turns**：每个 `role=user` 开启一轮，`turn_key = turn:<user_msg_idx>`。
-5. 过滤并序列化为可预览行（仅 `path`、`preview`、`source_tool`）。
+3. **Artifacts**：优先读取 profile-aware artifact store；store 已有记录是权威来源。缺失时才从工具白名单、`MEDIA:`、assistant 交付 prose 和旧 `turn_artifacts` 回填，回填不得覆盖 store 记录。
+4. **References**：按读取/技能工具白名单从 transcript/tool events 派生。
+5. **Turns**：每个 `role=user` 开启一轮，`turn_key = turn:<user_msg_idx>`。
+6. 过滤并序列化为可预览行（仅 `path`、`preview`、`source_tool`，有明确 profile 时包含 `profile`）。
+
+Artifact store 规则：
+
+- v1 只持久化 artifacts，不持久化 todos/references。
+- artifact 身份键为 `lineage_key + profile + turn_key + record_kind + path`。
+- 一个 WebUI session 正常只归属一个 profile；写入 store 时只读取 `session.profile`，缺失写 `""`，不从 active profile、parent、workspace 或 path 推断。
+- `source_tool` 不允许为空；assistant prose/旧空值统一为 `"assistant_prose"`。
+- profile 缺失时 wire 输出不包含 `profile` 字段。
+- `GET /api/session/manifest` 可执行 read-repair 写回缺失 artifacts，但不得更新 session `updated_at`、sidebar recency 或发布 session-list 变更事件。
 
 #### 前端拉取时机
 

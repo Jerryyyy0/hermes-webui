@@ -9,46 +9,68 @@ from integration.knowledge_base import client
 
 def test_parse_upstream_response_success():
     resp = MagicMock(spec=httpx.Response)
-    resp.json.return_value = {"code": 200, "msg": "success", "data": [{"kbName": "kb1"}]}
+    resp.status_code = 200
+    wrapper = {"code": 200, "msg": "success", "data": [{"kbName": "kb1"}]}
+    resp.json.return_value = wrapper
     status, body = client.parse_upstream_response(resp)
     assert status == 200
-    assert body == [{"kbName": "kb1"}]
+    assert body == wrapper
 
 
 def test_parse_upstream_response_success_string_code():
     resp = MagicMock(spec=httpx.Response)
-    resp.json.return_value = {"code": "200", "msg": "success", "data": None}
+    resp.status_code = 200
+    wrapper = {"code": "200", "msg": "success", "data": None}
+    resp.json.return_value = wrapper
     status, body = client.parse_upstream_response(resp)
     assert status == 200
-    assert body is None
+    assert body == wrapper
 
 
 def test_parse_upstream_response_business_error():
     resp = MagicMock(spec=httpx.Response)
-    resp.json.return_value = {"code": 500, "msg": "failed", "data": None}
+    resp.status_code = 500
+    wrapper = {"code": 500, "msg": "failed", "data": None}
+    resp.json.return_value = wrapper
     status, body = client.parse_upstream_response(resp)
-    assert status == 400
-    assert body["error"] == "knowledge_base_upstream_error"
-    assert body["code"] == 500
+    assert status == 500
+    assert body == wrapper
 
 
 def test_parse_upstream_response_direct_payload():
     """Downstream returns data without {code, msg, data} wrapper."""
     resp = MagicMock(spec=httpx.Response)
-    resp.json.return_value = {"total": 7, "data": [{"id": 1}]}
+    resp.status_code = 200
+    payload = {"total": 7, "data": [{"id": 1}]}
+    resp.json.return_value = payload
     status, body = client.parse_upstream_response(resp)
     assert status == 200
-    assert body == {"total": 7, "data": [{"id": 1}]}
+    assert body == payload
 
 
-def test_parse_upstream_response_double_encoded_json():
-    """Proxy double-encodes JSON: resp.json() yields a string."""
-    inner = {"total": 3, "data": [{"id": 1}, {"id": 2}, {"id": 3}]}
+def test_parse_upstream_response_direct_array():
+    """Downstream returns a JSON array (e.g. search_docs chunks)."""
+    chunks = [
+        {
+            "page_content": "slice text",
+            "metadata": {"source": "knowledge_base/share46/content/a.pdf", "file_name": "a.pdf"},
+        }
+    ]
     resp = MagicMock(spec=httpx.Response)
-    resp.json.return_value = json.dumps(inner)
+    resp.status_code = 200
+    resp.json.return_value = chunks
     status, body = client.parse_upstream_response(resp)
     assert status == 200
-    assert body == inner
+    assert body == chunks
+
+
+def test_parse_upstream_response_invalid_json():
+    resp = MagicMock(spec=httpx.Response)
+    resp.status_code = 502
+    resp.json.side_effect = ValueError("not json")
+    status, body = client.parse_upstream_response(resp)
+    assert status == 502
+    assert body["error"] == "knowledge_base_upstream_failed"
 
 
 def test_build_create_payload_fixed_values():
@@ -72,6 +94,121 @@ def test_build_edit_payload_location_number():
     assert isinstance(payload["location"], int)
 
 
+def test_build_search_docs_payload_defaults():
+    body = {"query": "党建知识库", "kbName": "share46"}
+    payload = client.build_search_docs_payload(body)
+    assert payload == {
+        "query": "党建知识库",
+        "knowledge_base_name": "share46",
+        "top_k": 3,
+        "score_threshold": 1.0,
+    }
+
+
+def test_build_search_docs_payload_overrides():
+    body = {
+        "query": "党建知识库",
+        "kbName": "share46",
+        "topK": 5,
+        "scoreThreshold": 0.5,
+    }
+    payload = client.build_search_docs_payload(body)
+    assert payload["top_k"] == 5
+    assert payload["score_threshold"] == 0.5
+
+
+def test_build_search_docs_xcore_payload_defaults():
+    body = {"query": "电力交易", "kbNames": ["share15"]}
+    payload = client.build_search_docs_xcore_payload(body)
+    assert payload == {
+        "query": "电力交易",
+        "kbNames": ["share15"],
+        "top_k": 3,
+        "score_threshold": 1.0,
+    }
+
+
+def test_build_search_docs_xcore_payload_overrides():
+    body = {
+        "query": "电力交易",
+        "kbNames": ["share15", "share20"],
+        "topK": 5,
+        "scoreThreshold": 0.5,
+    }
+    payload = client.build_search_docs_xcore_payload(body)
+    assert payload["kbNames"] == ["share15", "share20"]
+    assert payload["top_k"] == 5
+    assert payload["score_threshold"] == 0.5
+
+
+def test_build_show_pdf_payload_without_flag():
+    body = {"kbName": "share54", "fileName": "1656号附件-电力中长期市场基本规则.pdf"}
+    payload = client.build_show_pdf_payload(body)
+    assert payload == {
+        "kbName": "share54",
+        "fileName": "1656号附件-电力中长期市场基本规则.pdf",
+        "aes_key": "",
+        "aes_nonce": "",
+    }
+
+
+def test_build_show_pdf_payload_with_flag():
+    body = {
+        "kbName": "share54",
+        "fileName": "关于促进电网高质量发展的指导意见(发改能源〔2025〕1710 号).docx",
+        "flag": True,
+    }
+    payload = client.build_show_pdf_payload(body)
+    assert payload["kbName"] == "share54"
+    assert payload["flag"] is True
+
+
+def test_post_show_pdf_json_error():
+    resp = MagicMock(spec=httpx.Response)
+    resp.status_code = 200
+    resp.headers = {"content-type": "application/json"}
+    resp.content = b'{"code":404,"msg":"not found","data":null}'
+    resp.json.return_value = {"code": 404, "msg": "not found", "data": None}
+
+    with patch("integration.knowledge_base.client.knowledge_base_url", return_value="http://kb.test"):
+        with patch("httpx.Client") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client.__enter__.return_value = mock_client
+            mock_client.post.return_value = resp
+            mock_client_cls.return_value = mock_client
+            result = client.post_show_pdf({"kbName": "kb1", "fileName": "a.pdf", "aes_key": "", "aes_nonce": ""})
+
+    assert result.kind == "json"
+    assert result.status == 200
+    assert result.payload == {"code": 404, "msg": "not found", "data": None}
+
+
+def test_post_show_pdf_binary_pdf():
+    pdf_bytes = b"%PDF-1.4 fake pdf content"
+    resp = MagicMock(spec=httpx.Response)
+    resp.status_code = 200
+    resp.headers = {
+        "content-type": "application/pdf",
+        "content-disposition": 'inline; filename="doc.pdf"',
+    }
+    resp.content = pdf_bytes
+    resp.json.side_effect = ValueError("not json")
+
+    with patch("integration.knowledge_base.client.knowledge_base_url", return_value="http://kb.test"):
+        with patch("httpx.Client") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client.__enter__.return_value = mock_client
+            mock_client.post.return_value = resp
+            mock_client_cls.return_value = mock_client
+            result = client.post_show_pdf({"kbName": "kb1", "fileName": "doc.pdf", "aes_key": "", "aes_nonce": ""})
+
+    assert result.kind == "binary"
+    assert result.status == 200
+    assert result.content == pdf_bytes
+    assert result.content_type == "application/pdf"
+    assert result.extra_headers["Content-Disposition"] == 'inline; filename="doc.pdf"'
+
+
 def test_post_json_upstream_unreachable():
     with patch("integration.knowledge_base.client.knowledge_base_url", return_value="http://kb.test"):
         with patch("httpx.Client") as mock_client_cls:
@@ -90,6 +227,7 @@ def test_post_json_forwards_body():
         captured["url"] = url
         captured["json"] = json
         resp = MagicMock(spec=httpx.Response)
+        resp.status_code = 200
         resp.json.return_value = {"code": 200, "msg": "ok", "data": []}
         return resp
 
@@ -104,7 +242,7 @@ def test_post_json_forwards_body():
                 {"account": "admin", "uuid": "uuid-1", "isPersonal": 1},
             )
     assert status == 200
-    assert body == []
+    assert body == {"code": 200, "msg": "ok", "data": []}
     assert captured["url"] == "http://kb.test/knowledge_base/list_ps_knowledge_bases"
     assert captured["json"]["account"] == "admin"
     assert captured["json"]["uuid"] == "uuid-1"

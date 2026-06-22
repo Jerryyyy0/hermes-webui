@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
@@ -13,6 +14,8 @@ from integration.knowledge_base.constants import (
     DEFAULT_CHUNK_SIZE,
     DEFAULT_LOCATION,
     DEFAULT_PAGE_SIZE,
+    DEFAULT_SCORE_THRESHOLD,
+    DEFAULT_TOP_K,
     DELETE_CONTENT,
     EMBED_MODEL,
     ICON_TYPE,
@@ -28,6 +31,16 @@ _UPLOAD_TIMEOUT = 120.0
 
 class KnowledgeBaseUpstreamError(Exception):
     """Downstream unreachable or misconfigured."""
+
+
+@dataclass(frozen=True)
+class KnowledgeBaseShowPdfResult:
+    kind: str  # "json" | "binary"
+    status: int
+    payload: Any = None
+    content: bytes = b""
+    content_type: str = ""
+    extra_headers: dict[str, str] = field(default_factory=dict)
 
 
 def _base_url() -> str:
@@ -48,57 +61,58 @@ def _downstream_url(route_key: str) -> str:
     return f"{_base_url()}{API_PREFIX}/{path}"
 
 
-def _is_success_code(code: Any) -> bool:
-    return str(code) == "200"
-
-
 def parse_upstream_response(resp: httpx.Response) -> tuple[int, Any]:
-    """Map downstream response to (http_status, body).
-
-    Handles two formats:
-    - Standard wrapper: {"code": "200", "msg": "...", "data": ...}
-    - Direct payload:   {"total": N, "data": [...]}  (no code/msg fields)
-    """
+    """Return downstream HTTP status and JSON body unchanged."""
     try:
         payload = resp.json()
     except Exception:
-        return 502, {
+        return resp.status_code, {
             "error": "knowledge_base_upstream_failed",
             "message": f"invalid JSON from upstream (HTTP {resp.status_code})",
         }
+    return resp.status_code, payload
 
-    # Some proxies double-encode JSON: resp.json() yields a str instead of dict.
-    if isinstance(payload, str):
-        try:
-            payload = json.loads(payload)
-        except Exception:
-            return 502, {
-                "error": "knowledge_base_upstream_failed",
-                "message": "upstream returned a non-JSON string",
-            }
 
-    if not isinstance(payload, dict):
-        return 502, {
-            "error": "knowledge_base_upstream_failed",
-            "message": "unexpected upstream response shape",
-        }
+def _content_type_base(resp: httpx.Response) -> str:
+    return (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
 
-    # Responses without a "code" field are treated as direct payloads.
-    if "code" not in payload:
-        return 200, payload
 
-    code = payload.get("code")
-    msg = payload.get("msg", "")
-    data = payload.get("data")
+def _is_json_upstream_response(resp: httpx.Response) -> bool:
+    content_type = _content_type_base(resp)
+    if content_type in ("application/json", "text/json"):
+        return True
+    if content_type in ("application/pdf", "application/octet-stream"):
+        return False
+    content = resp.content
+    if not content:
+        return True
+    return content.lstrip().startswith((b"{", b"["))
 
-    if _is_success_code(code):
-        return 200, data
 
-    return 400, {
-        "error": "knowledge_base_upstream_error",
-        "message": str(msg) if msg is not None else "",
-        "code": code,
-    }
+def post_show_pdf(body: dict[str, Any]) -> KnowledgeBaseShowPdfResult:
+    url = _downstream_url("show_pdf")
+    try:
+        with _client() as client:
+            resp = client.post(url, json=body)
+    except httpx.HTTPError as exc:
+        raise KnowledgeBaseUpstreamError(str(exc)) from exc
+
+    if _is_json_upstream_response(resp):
+        status, payload = parse_upstream_response(resp)
+        return KnowledgeBaseShowPdfResult(kind="json", status=status, payload=payload)
+
+    content_type = _content_type_base(resp) or "application/octet-stream"
+    extra_headers: dict[str, str] = {}
+    content_disposition = resp.headers.get("content-disposition")
+    if content_disposition:
+        extra_headers["Content-Disposition"] = content_disposition
+    return KnowledgeBaseShowPdfResult(
+        kind="binary",
+        status=resp.status_code,
+        content=resp.content,
+        content_type=content_type,
+        extra_headers=extra_headers,
+    )
 
 
 def post_json(route_key: str, body: dict[str, Any]) -> tuple[int, Any]:
@@ -253,6 +267,39 @@ def build_delete_docs_payload(body: dict[str, Any]) -> dict[str, Any]:
         "deleteContent": body.get("deleteContent", DELETE_CONTENT),
         "notRefreshVsCache": body.get("notRefreshVsCache", NOT_REFRESH_VS_CACHE),
     }
+
+
+def build_search_docs_payload(body: dict[str, Any]) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "query": body["query"],
+        "knowledge_base_name": body["kbName"],
+        "top_k": body.get("topK", DEFAULT_TOP_K),
+        "score_threshold": body.get("scoreThreshold", DEFAULT_SCORE_THRESHOLD),
+    }
+    return payload
+
+
+def build_search_docs_xcore_payload(body: dict[str, Any]) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "query": body["query"],
+        "kbNames": body["kbNames"],
+        "top_k": body.get("topK", DEFAULT_TOP_K),
+        "score_threshold": body.get("scoreThreshold", DEFAULT_SCORE_THRESHOLD),
+    }
+    return payload
+
+
+def build_show_pdf_payload(body: dict[str, Any]) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "kbName": body["kbName"],
+        "fileName": body["fileName"],
+        # Downstream schema requires these keys; callers do not supply them.
+        "aes_key": "",
+        "aes_nonce": "",
+    }
+    if "flag" in body and body["flag"] is not None:
+        payload["flag"] = body["flag"]
+    return payload
 
 
 def parse_file_properties_json(raw: str) -> list[dict[str, Any]]:

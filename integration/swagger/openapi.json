@@ -981,7 +981,7 @@
         }
       }
     },
-    "/api/integration/knowledge-base/list": {
+    "/api/integration/knowledge_base/list": {
       "post": {
         "tags": ["IntegrationKnowledgeBase"],
         "summary": "个人/团队知识库列表",
@@ -994,7 +994,7 @@
         }
       }
     },
-    "/api/integration/knowledge-base/joined": {
+    "/api/integration/knowledge_base/joined": {
       "post": {
         "tags": ["IntegrationKnowledgeBase"],
         "summary": "已加入的团队知识库",
@@ -1006,19 +1006,19 @@
         }
       }
     },
-    "/api/integration/knowledge-base/create": {
+    "/api/integration/knowledge_base/create": {
       "post": {
         "tags": ["IntegrationKnowledgeBase"],
         "summary": "创建知识库",
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseCreateRequest" } } } },
         "responses": {
-          "200": { "description": "创建成功（下游 data 常为 null）" },
+          "200": { "description": "下游原始 JSON 响应（含 code/msg/data 包装）" },
           "400": { "description": "缺参或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
           "502": { "description": "下游不可达", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
         }
       }
     },
-    "/api/integration/knowledge-base/info": {
+    "/api/integration/knowledge_base/info": {
       "post": {
         "tags": ["IntegrationKnowledgeBase"],
         "summary": "知识库详情",
@@ -1030,7 +1030,7 @@
         }
       }
     },
-    "/api/integration/knowledge-base/edit": {
+    "/api/integration/knowledge_base/edit": {
       "post": {
         "tags": ["IntegrationKnowledgeBase"],
         "summary": "编辑知识库信息",
@@ -1042,7 +1042,7 @@
         }
       }
     },
-    "/api/integration/knowledge-base/delete": {
+    "/api/integration/knowledge_base/delete": {
       "post": {
         "tags": ["IntegrationKnowledgeBase"],
         "summary": "删除知识库",
@@ -1054,7 +1054,7 @@
         }
       }
     },
-    "/api/integration/knowledge-base/available": {
+    "/api/integration/knowledge_base/available": {
       "post": {
         "tags": ["IntegrationKnowledgeBase"],
         "summary": "可加入的团队知识库（分页）",
@@ -1066,7 +1066,7 @@
         }
       }
     },
-    "/api/integration/knowledge-base/apply-join": {
+    "/api/integration/knowledge_base/apply-join": {
       "post": {
         "tags": ["IntegrationKnowledgeBase"],
         "summary": "申请加入团队知识库",
@@ -1078,7 +1078,7 @@
         }
       }
     },
-    "/api/integration/knowledge-base/members": {
+    "/api/integration/knowledge_base/members": {
       "post": {
         "tags": ["IntegrationKnowledgeBase"],
         "summary": "知识库成员列表（分页）",
@@ -1090,7 +1090,7 @@
         }
       }
     },
-    "/api/integration/knowledge-base/documents": {
+    "/api/integration/knowledge_base/documents": {
       "post": {
         "tags": ["IntegrationKnowledgeBase"],
         "summary": "知识库文档列表（分页）",
@@ -1102,7 +1102,7 @@
         }
       }
     },
-    "/api/integration/knowledge-base/upload-docs": {
+    "/api/integration/knowledge_base/upload-docs": {
       "post": {
         "tags": ["IntegrationKnowledgeBase"],
         "summary": "上传文档（multipart）",
@@ -1127,13 +1127,13 @@
           }
         },
         "responses": {
-          "200": { "description": "上传成功（data 为空时返回 `{ok:true}`）" },
+          "200": { "description": "下游原始 JSON 响应" },
           "400": { "description": "缺参或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
           "502": { "description": "下游不可达", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
         }
       }
     },
-    "/api/integration/knowledge-base/update-docs": {
+    "/api/integration/knowledge_base/update-docs": {
       "post": {
         "tags": ["IntegrationKnowledgeBase"],
         "summary": "更新文档属性并触发解析",
@@ -1145,13 +1145,75 @@
         }
       }
     },
-    "/api/integration/knowledge-base/delete-docs": {
+    "/api/integration/knowledge_base/delete-docs": {
       "post": {
         "tags": ["IntegrationKnowledgeBase"],
         "summary": "删除文档",
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseDeleteDocsRequest" } } } },
         "responses": {
           "200": { "description": "删除成功" },
+          "400": { "description": "缺参或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
+          "502": { "description": "下游不可达", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
+        }
+      }
+    },
+    "/api/integration/knowledge_base/show_pdf": {
+      "post": {
+        "tags": ["IntegrationKnowledgeBase"],
+        "summary": "预览 PDF / 文档",
+        "description": "代理 `POST {KNOWLEDGE_BASE_URL}/knowledge_base/show_pdf`。必填：`kbName`、`fileName`。可选 `flag`（如 docx 转 PDF 预览）。BFF 内部向下游注入空 `aes_key`/`aes_nonce`。成功且下游返回 PDF 时，BFF 透传 `application/pdf` 二进制；业务错误仍为 JSON。",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseShowPdfRequest" } } } },
+        "responses": {
+          "200": {
+            "description": "PDF 二进制（application/pdf）或 JSON data",
+            "content": {
+              "application/pdf": { "schema": { "type": "string", "format": "binary" } },
+              "application/json": { "schema": { "type": "object" } }
+            }
+          },
+          "400": { "description": "缺参或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
+          "502": { "description": "下游不可达", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
+        }
+      }
+    },
+    "/api/integration/knowledge_base/search_docs": {
+      "post": {
+        "tags": ["IntegrationKnowledgeBase"],
+        "summary": "检索知识库切片",
+        "description": "代理 `POST {KNOWLEDGE_BASE_URL}/knowledge_base/search_docs`。必填：`query`、`kbName`（转发为下游 `knowledge_base_name`）。可选 `topK`（默认 3）、`scoreThreshold`（默认 1.0，0–1，越小相关度越高）。成功返回匹配切片 JSON 数组。",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseSearchDocsRequest" } } } },
+        "responses": {
+          "200": {
+            "description": "匹配切片数组",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": { "$ref": "#/components/schemas/KnowledgeBaseSearchDocChunk" }
+                }
+              }
+            }
+          },
+          "400": { "description": "缺参或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
+          "502": { "description": "下游不可达", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
+        }
+      }
+    },
+    "/api/integration/knowledge_base/search_docs_xcore": {
+      "post": {
+        "tags": ["IntegrationKnowledgeBase"],
+        "summary": "跨库检索知识库切片（xcore）",
+        "description": "代理 `POST {KNOWLEDGE_BASE_URL}/knowledge_base/search_docs_xcore`。必填：`query`、`kbNames`（非空字符串数组，原样转发为下游 `kbNames`）。可选 `topK`（默认 3）、`scoreThreshold`（默认 1.0）。成功返回 `{kbNames, docNames, context}`。",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseSearchDocsXcoreRequest" } } } },
+        "responses": {
+          "200": {
+            "description": "检索命中结果",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/KnowledgeBaseSearchDocsXcoreResponse" }
+              }
+            }
+          },
           "400": { "description": "缺参或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
           "502": { "description": "下游不可达", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
         }
@@ -1465,14 +1527,34 @@
       "get": {
         "tags": ["MCP"],
         "summary": "获取 MCP 服务器列表",
-        "responses": { "200": { "description": "MCP 服务器列表" } }
+        "description": "返回已配置的 MCP 服务器及其运行时状态。仅读取当前 registry，不会发起子进程探测。",
+        "responses": {
+          "200": {
+            "description": "MCP 服务器列表",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/McpServersListResponse" }
+              }
+            }
+          }
+        }
       }
     },
     "/api/mcp/tools": {
       "get": {
         "tags": ["MCP"],
         "summary": "获取 MCP 工具列表",
-        "responses": { "200": { "description": "MCP 工具列表" } }
+        "description": "返回当前已知运行时状态中的 MCP 工具清单。不会发起子进程探测；若运行时尚未就绪则回退到注册表索引。",
+        "responses": {
+          "200": {
+            "description": "MCP 工具列表",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/McpToolsListResponse" }
+              }
+            }
+          }
+        }
       }
     },
     "/api/mcp/servers/{name}": {
@@ -1483,23 +1565,24 @@
           { "name": "name", "in": "path", "required": true, "schema": { "type": "string" } }
         ],
         "requestBody": {
+          "required": true,
           "content": {
             "application/json": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "url": { "type": "string", "description": "HTTP 传输 URL" },
-                  "command": { "type": "string", "description": "stdio 传输命令" },
-                  "args": { "type": "array", "items": { "type": "string" }, "description": "命令参数" },
-                  "headers": { "type": "object", "description": "HTTP 请求头" },
-                  "env": { "type": "object", "description": "环境变量" },
-                  "timeout": { "type": "integer", "description": "超时秒数" }
-                }
-              }
+              "schema": { "$ref": "#/components/schemas/McpServerUpdateRequest" }
             }
           }
         },
-        "responses": { "200": { "description": "操作结果" } }
+        "responses": {
+          "200": {
+            "description": "操作结果",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/McpServerUpdateResponse" }
+              }
+            }
+          },
+          "400": { "description": "请求无效（缺少 url 或 command）" }
+        }
       },
       "delete": {
         "tags": ["MCP"],
@@ -1507,7 +1590,17 @@
         "parameters": [
           { "name": "name", "in": "path", "required": true, "schema": { "type": "string" } }
         ],
-        "responses": { "200": { "description": "删除结果" } }
+        "responses": {
+          "200": {
+            "description": "删除结果",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/McpServerDeleteResponse" }
+              }
+            }
+          },
+          "404": { "description": "服务器未找到" }
+        }
       },
       "patch": {
         "tags": ["MCP"],
@@ -1516,6 +1609,7 @@
           { "name": "name", "in": "path", "required": true, "schema": { "type": "string" } }
         ],
         "requestBody": {
+          "required": true,
           "content": {
             "application/json": {
               "schema": {
@@ -1528,14 +1622,57 @@
             }
           }
         },
-        "responses": { "200": { "description": "操作结果" } }
+        "responses": {
+          "200": {
+            "description": "操作结果",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/McpServerToggleResponse" }
+              }
+            }
+          },
+          "400": { "description": "请求无效（缺少 enabled）" },
+          "404": { "description": "服务器未找到" }
+        }
       }
     },
     "/api/mcp/reload": {
       "post": {
         "tags": ["MCP"],
         "summary": "重新加载所有 MCP 服务器",
-        "responses": { "200": { "description": "重新加载结果摘要" } }
+        "description": "关闭所有 MCP 服务器连接并从配置重新发现。等价于在 Agent 中执行 /reload-mcp 命令。",
+        "responses": {
+          "200": {
+            "description": "重新加载结果摘要",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/McpReloadResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "/api/mcp/servers/{name}/test": {
+      "post": {
+        "tags": ["MCP"],
+        "summary": "测试 MCP 服务器连接",
+        "description": "临时连接指定 MCP 服务器（stdio / HTTP Streamable / SSE），发现工具后断开，不修改长期 MCP registry。",
+        "parameters": [
+          { "name": "name", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "测试结果",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/McpServerTestResponse" }
+              }
+            }
+          },
+          "404": { "description": "服务器未找到" }
+        }
       }
     },
 
@@ -2001,6 +2138,144 @@
 
   "components": {
     "schemas": {
+      "McpServerSummary": {
+        "type": "object",
+        "required": ["name", "transport", "timeout", "connect_timeout", "enabled", "active", "status"],
+        "properties": {
+          "name": { "type": "string", "description": "MCP 服务器名称" },
+          "transport": { "type": "string", "enum": ["http", "stdio", "sse", "invalid"], "description": "传输协议类型" },
+          "url": { "type": "string", "description": "HTTP/SSE 传输 URL（transport 为 http 或 sse 时存在）" },
+          "headers": { "type": "object", "description": "HTTP/SSE 请求头（已脱敏，transport 为 http 或 sse 时存在）", "additionalProperties": { "type": "string" } },
+          "command": { "type": "string", "description": "stdio 传输命令（仅 transport=stdio 时存在）" },
+          "args": { "type": "array", "items": { "type": "string" }, "description": "命令参数（仅 transport=stdio 时存在）" },
+          "env": { "type": "object", "description": "环境变量（已脱敏，仅 transport=stdio 时存在）", "additionalProperties": { "type": "string" } },
+          "timeout": { "type": "integer", "description": "超时秒数" },
+          "connect_timeout": { "type": "integer", "description": "连接超时秒数" },
+          "enabled": { "type": "boolean", "description": "是否启用" },
+          "active": { "type": "boolean", "description": "是否已连接" },
+          "status": { "type": "string", "enum": ["active", "disabled", "configured", "invalid_config"], "description": "当前状态" },
+          "tool_count": { "type": "integer", "nullable": true, "description": "已知工具数量" }
+        }
+      },
+      "McpServersListResponse": {
+        "type": "object",
+        "required": ["servers", "toggle_supported", "reload_required"],
+        "properties": {
+          "servers": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/McpServerSummary" }
+          },
+          "toggle_supported": {
+            "type": "boolean",
+            "description": "能力开关：true 表示客户端可调用 PATCH /api/mcp/servers/{name} 切换 enabled；false 时仅只读展示 enabled 状态。当前恒为 true。"
+          },
+          "reload_required": {
+            "type": "boolean",
+            "description": "工作流提示：true 表示 PUT/DELETE/PATCH 写入 config 后，需再调用 POST /api/mcp/reload 才能重建 MCP 连接与工具发现。当前恒为 true。"
+          }
+        }
+      },
+      "McpToolSchemaParam": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string", "description": "参数名" },
+          "type": { "type": "string", "description": "JSON Schema 类型" },
+          "required": { "type": "boolean", "description": "是否必需" },
+          "description": { "type": "string", "description": "参数说明（已截断/脱敏）" }
+        }
+      },
+      "McpToolSummary": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string", "description": "工具名称" },
+          "server": { "type": "string", "description": "所属 MCP 服务器名称" },
+          "description": { "type": "string", "description": "工具描述（已截断/脱敏）" },
+          "active": { "type": "boolean", "description": "所属服务器是否已连接" },
+          "enabled": { "type": "boolean", "description": "所属服务器是否启用" },
+          "status": { "type": "string", "description": "所属服务器状态" },
+          "schema_summary": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/McpToolSchemaParam" },
+            "description": "参数结构摘要（不含敏感默认值）"
+          }
+        }
+      },
+      "McpToolsListResponse": {
+        "type": "object",
+        "required": ["tools", "total", "source", "inventory_scope", "unavailable_servers"],
+        "properties": {
+          "tools": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/McpToolSummary" }
+          },
+          "total": { "type": "integer" },
+          "source": { "type": "string", "enum": ["mcp_runtime_status", "tool_registry", "none"] },
+          "inventory_scope": { "type": "string" },
+          "unavailable_servers": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "已启用但未连接的服务器名称列表"
+          }
+        }
+      },
+      "McpServerUpdateRequest": {
+        "type": "object",
+        "properties": {
+          "url": { "type": "string", "description": "HTTP/SSE 传输 URL（与 command 二选一）" },
+          "command": { "type": "string", "description": "stdio 传输命令（与 url 二选一）" },
+          "args": { "type": "array", "items": { "type": "string" }, "description": "命令参数" },
+          "headers": { "type": "object", "description": "HTTP/SSE 请求头", "additionalProperties": { "type": "string" } },
+          "env": { "type": "object", "description": "环境变量", "additionalProperties": { "type": "string" } },
+          "transport": { "type": "string", "enum": ["sse"], "description": "远程传输协议；SSE 需显式传 sse，HTTP Streamable 省略此字段" },
+          "timeout": { "type": "integer", "description": "超时秒数" }
+        }
+      },
+      "McpServerUpdateResponse": {
+        "type": "object",
+        "required": ["ok", "server"],
+        "properties": {
+          "ok": { "type": "boolean", "enum": [true] },
+          "server": { "$ref": "#/components/schemas/McpServerSummary" }
+        }
+      },
+      "McpServerDeleteResponse": {
+        "type": "object",
+        "required": ["ok", "deleted"],
+        "properties": {
+          "ok": { "type": "boolean", "enum": [true] },
+          "deleted": { "type": "string", "description": "被删除的服务器名称" }
+        }
+      },
+      "McpServerToggleResponse": {
+        "type": "object",
+        "required": ["ok", "name", "enabled"],
+        "properties": {
+          "ok": { "type": "boolean", "enum": [true] },
+          "name": { "type": "string" },
+          "enabled": { "type": "boolean" }
+        }
+      },
+      "McpReloadResponse": {
+        "type": "object",
+        "required": ["ok", "summary"],
+        "properties": {
+          "ok": { "type": "boolean", "enum": [true] },
+          "summary": { "type": "string", "description": "重新加载结果描述" }
+        }
+      },
+      "McpServerTestResponse": {
+        "type": "object",
+        "required": ["ok", "name"],
+        "properties": {
+          "ok": { "type": "boolean", "description": "连通性测试是否通过" },
+          "name": { "type": "string" },
+          "transport": { "type": "string", "enum": ["http", "stdio", "sse"], "description": "传输协议类型" },
+          "mcp_tool_available": { "type": "boolean", "description": "MCP 运行时模块是否可导入" },
+          "tool_count": { "type": "integer", "description": "探测到的工具数量（仅 ok=true 时存在）" },
+          "note": { "type": "string", "description": "测试说明（成功时）" },
+          "error": { "type": "string", "description": "错误信息（仅 ok=false 时存在）" }
+        }
+      },
       "GenericObject": {
         "type": "object",
         "additionalProperties": true
@@ -2615,6 +2890,74 @@
         "type": "object",
         "required": ["kbName"],
         "properties": { "kbName": { "type": "string" } }
+      },
+      "KnowledgeBaseShowPdfRequest": {
+        "type": "object",
+        "required": ["kbName", "fileName"],
+        "properties": {
+          "kbName": { "type": "string" },
+          "fileName": { "type": "string" },
+          "flag": { "type": "boolean" }
+        }
+      },
+      "KnowledgeBaseSearchDocsRequest": {
+        "type": "object",
+        "required": ["query", "kbName"],
+        "properties": {
+          "query": { "type": "string", "description": "用户查询关键词" },
+          "kbName": { "type": "string", "description": "知识库名称（如 share46、share20）" },
+          "topK": { "type": "integer", "default": 3, "description": "返回匹配向量数" },
+          "scoreThreshold": { "type": "number", "format": "float", "default": 1.0, "description": "匹配相关度阈值（0-1，越小相关度越高）" }
+        }
+      },
+      "KnowledgeBaseSearchDocChunk": {
+        "type": "object",
+        "properties": {
+          "page_content": { "type": "string" },
+          "metadata": {
+            "type": "object",
+            "properties": {
+              "source": { "type": "string" },
+              "file_name": { "type": "string" }
+            }
+          }
+        }
+      },
+      "KnowledgeBaseSearchDocsXcoreRequest": {
+        "type": "object",
+        "required": ["query", "kbNames"],
+        "properties": {
+          "query": { "type": "string", "description": "用户查询关键词" },
+          "kbNames": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "type": "string" },
+            "description": "知识库名称列表（如 share15、share20）"
+          },
+          "topK": { "type": "integer", "default": 3, "description": "返回匹配向量数" },
+          "scoreThreshold": { "type": "number", "format": "float", "default": 1.0, "description": "匹配相关度阈值（0-1，越小相关度越高）" }
+        }
+      },
+      "KnowledgeBaseSearchDocsXcoreResponse": {
+        "type": "object",
+        "required": ["kbNames", "docNames", "context"],
+        "properties": {
+          "kbNames": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "命中切片所属知识库名称"
+          },
+          "docNames": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "命中切片所属文档名称"
+          },
+          "context": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "命中切片正文；与 kbNames/docNames 同下标对应"
+          }
+        }
       },
       "KnowledgeBaseEditRequest": {
         "type": "object",

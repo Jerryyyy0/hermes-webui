@@ -72,6 +72,42 @@ def test_session_manifest_module_has_extractors():
     assert 'def merge_manifest_delta' in src
 
 
+def test_session_manifest_store_lifecycle_hooks_present():
+    src = (REPO / 'api' / 'routes.py').read_text(encoding='utf-8')
+    assert 'delete_session_manifest_records' in src
+    assert 'delete_session_manifest_turns' in src
+    assert 's.turn_artifacts = {}' in src
+
+
+def test_session_manifest_store_module_contract():
+    src = (REPO / 'api' / 'session_manifest_store.py').read_text(encoding='utf-8')
+    assert 'CREATE TABLE IF NOT EXISTS session_manifest_records' in src
+    assert 'UNIQUE(lineage_key, profile, turn_key, record_kind, path)' in src
+    assert 'def resolve_manifest_lineage_key' in src
+    assert 'def upsert_manifest_records' in src
+    assert 'def load_manifest_records' in src
+    assert 'def delete_session_manifest_records' in src
+    assert 'def delete_session_manifest_turns' in src
+    assert 'ASSISTANT_PROSE_SOURCE_TOOL = "assistant_prose"' in src
+
+
+def test_chat_start_passes_current_turn_key_to_stream_worker():
+    src = (REPO / 'api' / 'routes.py').read_text(encoding='utf-8')
+    block = src.split('_prepare_chat_start_session_for_stream(', 1)[1].split('break', 1)[0]
+    assert 'stream_turn_key = _turn_key_for_pending_user_message(s, msg)' in block
+    assert 'worker_kwargs = {"model_provider": model_provider, "stream_turn_key": stream_turn_key}' in src
+
+
+def test_streaming_manifest_turn_key_fallback_uses_last_user_key_first():
+    src = (REPO / 'api' / 'streaming.py').read_text(encoding='utf-8')
+    fallback_block = src.split("_manifest_turn_key = str(stream_turn_key or '').strip()", 1)[1]
+    last_user_lookup = fallback_block.index("for _m in reversed(getattr(s, 'messages', None) or [])")
+    next_key_lookup = fallback_block.index('_manifest_turn_key = _next_turn_key(')
+    assert last_user_lookup < next_key_lookup
+    assert "_m.get('role') == 'user'" in fallback_block
+    assert "_m.get('_turn_key', '')" in fallback_block
+
+
 def test_session_manifest_doc_defines_sse_contract_and_tool_matrix():
     doc = (REPO / 'docs' / 'session-inspector-manifest.md').read_text(encoding='utf-8')
     assert 'manifest_delta' in doc

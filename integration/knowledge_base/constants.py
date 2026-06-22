@@ -18,9 +18,12 @@ DOWNSTREAM_PATHS: dict[str, str] = {
     "upload-docs": "upload_docs",
     "update-docs": "update_docs",
     "delete-docs": "delete_docs",
+    "show_pdf": "show_pdf",
+    "search_docs": "search_docs",
+    "search_docs_xcore": "search_docs_xcore",
 }
 
-WEBUI_ROUTE_PREFIX = "/api/integration/knowledge-base/"
+WEBUI_ROUTE_PREFIX = "/api/integration/knowledge_base/"
 
 VS_TYPE = "faiss"
 EMBED_MODEL = "bce-base"
@@ -32,3 +35,5 @@ DEFAULT_CHUNK_SIZE = "500"
 DEFAULT_CHUNK_OVERLAP = "50"
 DEFAULT_LOCATION = "101"
 DEFAULT_PAGE_SIZE = 15
+DEFAULT_TOP_K = 3
+DEFAULT_SCORE_THRESHOLD = 1.0

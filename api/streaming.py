@@ -1037,7 +1037,7 @@ def _finalize_cancelled_turn(session, *, ephemeral: bool = False, message: str =
         logger.debug("Failed to persist cancelled turn", exc_info=True)
 
 
-def _persist_turn_artifact_paths(s) -> None:
+def _persist_turn_artifact_paths(s, turn_key: str = '') -> None:
     """Extract and persist artifact paths produced by tools in the current turn.
 
     Called after display/context messages are merged and _turn_key is stamped,
@@ -1047,29 +1047,86 @@ def _persist_turn_artifact_paths(s) -> None:
     """
     if not getattr(s, 'messages', None):
         return
-    # Find the current turn_key from the last user message.
-    _turn_key = ''
-    for _m in reversed(s.messages):
-        if isinstance(_m, dict) and _m.get('role') == 'user':
-            _turn_key = str(_m.get('_turn_key', '') or '')
-            if _turn_key:
-                break
+    _turn_key = str(turn_key or '').strip()
+    if not _turn_key:
+        # Legacy fallback for non-stream callers.
+        for _m in reversed(s.messages):
+            if isinstance(_m, dict) and _m.get('role') == 'user':
+                _turn_key = str(_m.get('_turn_key', '') or '')
+                if _turn_key:
+                    break
     if not _turn_key:
         return
     # Slice the turn's messages and extract tool-produced paths.
     from pathlib import Path as _Path
     from api.session_manifest import (
-        _extract_turn_artifact_paths,
+        _extract_turn_artifact_entries,
+        _message_text,
+        _message_turns,
+        _paths_from_last_assistant_message,
         _turn_message_slice,
+        filter_existing_turn_artifact_paths,
     )
     _slice = _turn_message_slice(s.messages, _turn_key)
     if not _slice:
         return
+    _turn_bounds = next(
+        (
+            (turn.get('start_msg_idx'), turn.get('end_msg_idx'))
+            for turn in _message_turns(s.messages)
+            if str(turn.get('turn_key') or '') == _turn_key
+        ),
+        None,
+    )
     _workspace = _Path(str(getattr(s, 'workspace', '') or '')).expanduser().resolve()
-    _paths = _extract_turn_artifact_paths(_slice, getattr(s, 'tool_calls', None), _workspace)
+    _entries = _extract_turn_artifact_entries(
+        _slice,
+        getattr(s, 'tool_calls', None),
+        _workspace,
+        start_msg_idx=_turn_bounds[0] if _turn_bounds else None,
+        end_msg_idx=_turn_bounds[1] if _turn_bounds else None,
+    )
+
+    # Also scan the last assistant message for relative-path/bare-filename
+    # deliveries (e.g. markdown table cells with `华为官网当季新品摘要.md`).
+    # Only paths that actually exist in the workspace are kept.
+    _last_assistant_text = ''
+    for _m in reversed(_slice):
+        if isinstance(_m, dict) and _m.get('role') == 'assistant':
+            _last_assistant_text = _message_text(_m.get('content'))
+            break
+    if _last_assistant_text:
+        _entry_paths = set(e['path'] for e in _entries)
+        _prose_paths = _paths_from_last_assistant_message(_last_assistant_text, _workspace)
+        for _pp in _prose_paths:
+            # Keep per-turn attribution: dedupe only within the current turn.
+            if _pp not in _entry_paths:
+                _entries.append({'path': _pp, 'source_tool': 'assistant_prose'})
+
+    # Filter to existing workspace files only.
+    _entry_paths_for_filter = [e['path'] for e in _entries]
+    _filtered = filter_existing_turn_artifact_paths(_workspace, _entry_paths_for_filter)
+    _filtered_set = set(_filtered)
+    _entries = [e for e in _entries if e['path'] in _filtered_set]
+
     if not hasattr(s, 'turn_artifacts'):
         s.turn_artifacts = {}
-    s.turn_artifacts[_turn_key] = _paths
+    s.turn_artifacts[_turn_key] = _entries
+    try:
+        from api.session_manifest_store import upsert_manifest_records
+
+        _store_entries = [
+            {
+                'path': entry.get('path'),
+                'source_tool': entry.get('source_tool') or 'assistant_prose',
+                'preview': 'file',
+            }
+            for entry in _entries
+            if isinstance(entry, dict)
+        ]
+        upsert_manifest_records(s, _turn_key, _store_entries)
+    except Exception:
+        logger.debug("Failed to persist turn artifacts to manifest store", exc_info=True)
 
 
 def _aiagent_import_error_detail() -> str:
@@ -5302,7 +5359,14 @@ def _run_agent_streaming(
             _live_tool_event_complete_ids = set()
             _manifest_turn_key = str(stream_turn_key or '').strip()
             if not _manifest_turn_key:
-                _manifest_turn_key = f"turn:{len(getattr(s, 'messages', []) or [])}"
+                for _m in reversed(getattr(s, 'messages', None) or []):
+                    if isinstance(_m, dict) and _m.get('role') == 'user':
+                        _manifest_turn_key = str(_m.get('_turn_key', '') or '').strip()
+                        if _manifest_turn_key:
+                            break
+            if not _manifest_turn_key:
+                from api.session_manifest import _next_turn_key
+                _manifest_turn_key = _next_turn_key(getattr(s, 'messages', None) or [])
             from api.session_manifest import _skills_dir_for_session as _manifest_skills_dir_for_session
             _manifest_skills_dir = _manifest_skills_dir_for_session(s)
             _manifest_default_profile = str(getattr(s, 'profile', None) or '').strip()
@@ -7161,7 +7225,7 @@ def _run_agent_streaming(
                     return
                 # Persist per-turn artifact paths so the manifest can skip the
                 # error-prone prose-reconcile pass (cross-turn contamination).
-                _persist_turn_artifact_paths(s)
+                _persist_turn_artifact_paths(s, _manifest_turn_key)
                 s.save()
                 if cancel_event.is_set():
                     _finalize_cancelled_turn(s, ephemeral=False)

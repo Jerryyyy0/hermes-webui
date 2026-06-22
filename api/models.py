@@ -660,6 +660,8 @@ class Session:
             except (TypeError, ValueError):
                 parsed_message_count = None
         self._metadata_message_count = parsed_message_count if parsed_message_count is not None and parsed_message_count >= 0 else None
+        raw_turn_artifacts = kwargs.get('turn_artifacts')
+        self.turn_artifacts = raw_turn_artifacts if isinstance(raw_turn_artifacts, dict) else {}
 
     @property
     def path(self):
@@ -877,6 +879,7 @@ class Session:
         last_message_at = _last_message_timestamp(self.messages) or self.updated_at
         if has_pending_user_message and self.pending_started_at:
             last_message_at = self.pending_started_at
+        from api.session_manifest import turn_artifacts_for_wire
         return {
             'session_id': self.session_id,
             'title': self.title,
@@ -936,7 +939,7 @@ class Session:
             'read_only': self.read_only,
             'enabled_toolsets': self.enabled_toolsets,
             'composer_draft': self.composer_draft if isinstance(self.composer_draft, dict) else {},
-            'turn_artifacts': getattr(self, 'turn_artifacts', None) or {},
+            'turn_artifacts': turn_artifacts_for_wire(self),
             'is_streaming': _is_streaming_session(
                 self.active_stream_id, active_stream_ids
             ) if include_runtime else False,

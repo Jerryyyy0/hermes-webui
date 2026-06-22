@@ -148,6 +148,38 @@ if not _manifest_turn_key:
 
 如果外部传入的 `stream_turn_key` 为空，则以当前消息数组长度作为 fallback。
 
+### 3.5 消息分页：`turn_align` 与 `msg_limit`
+
+`GET /api/session?messages=1&msg_limit=N` 默认按**原始消息条数**截取尾部窗口，可能在 user / assistant / tool 链中间截断。
+
+查询参数：
+
+| 参数 | 说明 |
+|------|------|
+| `msg_limit=N` | 原始消息条数预算（含 tool 行）。未传时返回全量 transcript。 |
+| `turn_align=1` | 与 `msg_limit` 配合使用：尾部窗口按**完整 user 轮次**对齐（边界与 `_message_turns()` 一致）。 |
+| `expand_renderable=1` | 仅在**未**设置 `turn_align` 时生效：向后扩展窗口直至约 `msg_limit` 条可渲染行（user/assistant）。 |
+
+`turn_align=1` 时的预算规则：
+
+- 末轮消息数 **> N**：只返回末轮（整轮，可超过 N）。
+- 末轮消息数 **≤ N**：从末轮向前累加完整轮次，直到再加一轮会使总条数 **> N**。
+
+示例（`msg_limit=50`）：
+
+- 末轮 60 条 → 返回 60 条（1 轮）。
+- 末轮 20 条、上一轮 25 条、再上一轮 30 条 → 返回 45 条（末轮 + 上一轮）。
+
+推荐调用：
+
+```http
+GET /api/session?session_id=...&messages=1&msg_limit=50&turn_align=1
+```
+
+响应字段 `_messages_truncated` 在 `turn_align=1` 时表示 `_messages_offset > 0`（仍有更早轮次未返回），而非简单的 `len(messages) > msg_limit`。
+
+完整 HTTP 契约、参数组合与分页流程见 [session-message-pagination-api.md](./session-message-pagination-api.md)。
+
 ---
 
 ## 4. `/api/session/manifest` 接口中的 turn_key
@@ -186,6 +218,8 @@ def build_session_manifest(session) -> dict[str, Any]:
         events, workspace, messages, ...)
     # Turn reconcile：从 transcript 中挖掘（MEDIA、交付语句等）
     _apply_turn_reconcile_to_manifest_records(...)
+    # Artifact store：读取 profile-aware session_manifest.db，store 记录优先；
+    # transcript/tool/prose reconcile 只补缺失记录
     return {
         'todos': ...,
         'artifacts': ...,
@@ -193,6 +227,8 @@ def build_session_manifest(session) -> dict[str, Any]:
         'turns': [_turn_to_wire(turn, ...) for turn in turns],
     }
 ```
+
+Artifacts 的长期权威来源是 `api/session_manifest_store.py` 管理的 `session_manifest.db`。身份键为 `lineage_key + profile + turn_key + record_kind + path`；`profile` 只来自 `session.profile`，缺失写空字符串 `""`，不从 parent/workspace/path 推断。`record_kind` 第一版只存 `"artifact"`，todos/references 仍由 transcript/tool events 派生。
 
 ### 4.3 `_message_turns()` — 从消息推导 turns
 
@@ -603,8 +639,8 @@ Head 始终受 `protect_first_n`（默认 3，外加 system prompt）保护，�
 当 Agent 判定上下文**无法继续压缩**时，可能创建 **continuation 会话**（`session_id` 变化，`streaming.py` 第 6414 行起）。此时：
 
 - 旧会话标记为 `pre_compression_snapshot`，完整历史保留在父会话 JSON
-- **当前会话**的 manifest 只覆盖当前 `session_id` 下的 messages
-- 跨 continuation 的历史通过 `parent_session_id` 链拼接展示，但 **per-session manifest 不含父会话轮次**
+- **当前会话**的 artifact manifest 读取同一 compression `lineage_key` 下、同 profile 的 store records；普通 fork 的 parent 不参与合并
+- 跨 continuation 的历史通过 `parent_session_id` 链拼接展示；artifact store 会按 compression lineage 补齐父段 artifacts，普通 fork 不补齐
 - 当前 continuation 内的新 user 消息仍按 `_next_turn_key()` 独立编号
 
 详见 [`docs/multi-turn-conversation.md`](multi-turn-conversation.md) 第 6.2–6.4 节。

@@ -249,11 +249,16 @@ function _mergeManifestRows(existing, incoming){
     const merged = {path, preview, source_tool};
     const profile = String(row.profile||'').trim();
     if(profile) merged.profile = profile;
-    byPath.set(path, merged);
+    const key = `${profile}\u0000${path}`;
+    byPath.set(key, merged);
   };
   (existing||[]).forEach(add);
   (incoming||[]).forEach(add);
-  return [...byPath.values()].sort((a,b)=>String(a.path||'').localeCompare(String(b.path||'')));
+  return [...byPath.values()].sort((a,b)=>{
+    const ap = String(a.profile||'');
+    const bp = String(b.profile||'');
+    return ap===bp ? String(a.path||'').localeCompare(String(b.path||'')) : ap.localeCompare(bp);
+  });
 }
 
 function _normalizeDeltaTurnKey(delta){

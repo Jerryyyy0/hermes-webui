@@ -1,4 +1,4 @@
-"""HTTP handlers for knowledge base BFF proxy (/api/integration/knowledge-base/*)."""
+"""HTTP handlers for knowledge base BFF proxy (/api/integration/knowledge_base/*)."""
 
 from __future__ import annotations
 
@@ -24,6 +24,9 @@ _ROUTE_BUILDERS: dict[str, str] = {
     "documents": "build_documents_payload",
     "update-docs": "build_update_docs_payload",
     "delete-docs": "build_delete_docs_payload",
+    "show_pdf": "build_show_pdf_payload",
+    "search_docs": "build_search_docs_payload",
+    "search_docs_xcore": "build_search_docs_xcore_payload",
 }
 
 _REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
@@ -39,6 +42,9 @@ _REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
     "documents": ("kbName", "page", "size"),
     "update-docs": ("kbName", "fileNames", "fileProperties"),
     "delete-docs": ("kbName", "fileNames"),
+    "show_pdf": ("kbName", "fileName"),
+    "search_docs": ("query", "kbName"),
+    "search_docs_xcore": ("query", "kbNames"),
 }
 
 
@@ -52,6 +58,26 @@ def _route_key(parsed) -> str | None:
 
 def _respond(handler, payload, status: int = 200) -> bool:
     j(handler, payload, status=status)
+    return True
+
+
+def _respond_binary(
+    handler,
+    content: bytes,
+    *,
+    content_type: str,
+    status: int = 200,
+    extra_headers: dict[str, str] | None = None,
+) -> bool:
+    handler.send_response(status)
+    handler.send_header("Content-Type", content_type)
+    handler.send_header("Content-Length", str(len(content)))
+    handler.send_header("Cache-Control", "no-store")
+    handler.send_header("Connection", "close")
+    for key, value in (extra_headers or {}).items():
+        handler.send_header(key, value)
+    handler.end_headers()
+    handler.wfile.write(content)
     return True
 
 
@@ -92,6 +118,10 @@ def _validate_required(body: dict[str, Any], route_key: str) -> str | None:
         file_names = body.get("fileNames")
         if not isinstance(file_names, list) or not file_names:
             return "missing_fileNames"
+    if route_key == "search_docs_xcore":
+        kb_names = body.get("kbNames")
+        if not isinstance(kb_names, list) or not kb_names:
+            return "missing_kbNames"
     return None
 
 
@@ -116,6 +146,29 @@ def _handle_upstream(handler, route_key: str, upstream_body: dict[str, Any]) -> 
             status=502,
         )
     return _respond(handler, payload, status=status)
+
+
+def _handle_show_pdf(handler, upstream_body: dict[str, Any]) -> bool:
+    try:
+        result = client.post_show_pdf(upstream_body)
+    except client.KnowledgeBaseUpstreamError as exc:
+        return _respond(
+            handler,
+            {
+                "error": "knowledge_base_upstream_failed",
+                "message": _sanitize_error(exc),
+            },
+            status=502,
+        )
+    if result.kind == "binary":
+        return _respond_binary(
+            handler,
+            result.content,
+            content_type=result.content_type,
+            status=result.status,
+            extra_headers=result.extra_headers,
+        )
+    return _respond(handler, result.payload, status=result.status)
 
 
 def try_handle_post_early(handler, parsed) -> bool:
@@ -201,8 +254,6 @@ def _handle_upload_docs(handler) -> bool:
             status=502,
         )
 
-    if status == 200 and payload is None:
-        return _respond(handler, {"ok": True})
     return _respond(handler, payload, status=status)
 
 
@@ -219,4 +270,6 @@ def try_handle_post(handler, parsed, body) -> bool:
         return _respond_bad(handler, missing, 400)
 
     upstream_body = _build_upstream_payload(route_key, payload_body)
+    if route_key == "show_pdf":
+        return _handle_show_pdf(handler, upstream_body)
     return _handle_upstream(handler, route_key, upstream_body)

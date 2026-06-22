@@ -446,6 +446,9 @@ class TestMessagePaginationFrontend:
         assert "_INITIAL_MSG_LIMIT" in fn_body, (
             "_ensureMessagesLoaded should use _INITIAL_MSG_LIMIT constant"
         )
+        assert "_TURN_ALIGN_PARAM" in fn_body, (
+            "_ensureMessagesLoaded should request turn-aligned tail windows"
+        )
 
     def test_truncation_tracking(self):
         """_messagesTruncated must be set from the server response."""
@@ -473,15 +476,27 @@ class TestMessagePaginationFrontend:
         fails.
         """
         fn_start = SESSIONS_JS.find("async function _loadOlderMessages")
-        fn_end = SESSIONS_JS.find("\n}", fn_start) + 2
+        brace = SESSIONS_JS.index("{", fn_start)
+        depth = 0
+        fn_end = None
+        for i in range(brace, len(SESSIONS_JS)):
+            if SESSIONS_JS[i] == "{":
+                depth += 1
+            elif SESSIONS_JS[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    fn_end = i + 1
+                    break
         fn_body = SESSIONS_JS[fn_start:fn_end]
 
         assert "requestedLimit" in fn_body
         assert "S.messages || []" in fn_body
         assert "msg_limit=${requestedLimit}" in fn_body
+        assert "_TURN_ALIGN_PARAM" in fn_body
         assert "tailMatches" in fn_body
         # Race fallback still issues the legacy msg_before page request.
         assert "msg_before=${_oldestIdx}" in fn_body
+        assert "next older turn exceeds the budget" in fn_body or "!olderMsgs.length" in fn_body
 
     def test_ensure_all_messages_function_exists(self):
         """_ensureAllMessagesLoaded must exist for operations needing full history."""

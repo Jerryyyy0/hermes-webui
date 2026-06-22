@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import json
 import copy
+import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 ARTIFACT_IGNORE_RE = re.compile(
     r'(^|/)(?:\.git|\.hg|\.svn|node_modules|\.venv|venv|__pycache__|dist|build|\.next|\.cache)(?:/|$)'
@@ -70,6 +73,9 @@ _MEDIA_TOKEN_RE = re.compile(r'MEDIA:([^\s\)\]]+)')
 _CODE_SPAN_RE = re.compile(r'`([^`\n]+)`')
 _MARKDOWN_LINK_LABEL_RE = re.compile(r'\[([^\]]+)\]\([^)]+\)')
 _BROAD_ABSOLUTE_PATH_RE = re.compile(r'(/[^\s`\'"<>|，,；;。：)\]]+\.[A-Za-z0-9][A-Za-z0-9]+)')
+_BROAD_FILENAME_EXT_RE = re.compile(
+    r'([\w\u4e00-\u9fff/._-]{1,240}\.[A-Za-z0-9]{2,8})'
+)
 _REFERENCE_ONLY_TOOLS = (
     REFERENCE_READ_TOOLS
     | REFERENCE_DISCOVERY_TOOLS
@@ -209,6 +215,36 @@ def _paths_from_assistant_prose(text: str, workspace: Path) -> list[str]:
                 continue
             seen.add(candidate.path)
             paths.append(candidate.path)
+    return paths
+
+
+def _paths_from_last_assistant_message(text: str, workspace: Path) -> list[str]:
+    """Extract workspace-relative file paths from the final assistant message.
+
+    This is a narrow, per-turn-only scan designed for the last assistant
+    message of the current turn — typically a delivery summary.  A broad
+    regex accepts relative paths and bare filenames (including CJK), then
+    workspace-existence checking filters out false positives.
+
+    Unlike ``_paths_from_assistant_prose``, this function does **not**
+    require absolute paths — it trusts the downstream ``_artifact_path_is_real``
+    gate to discard casual mentions that do not resolve to real files.
+    """
+    if not text or not isinstance(text, str):
+        return []
+    paths: list[str] = []
+    seen: set[str] = set()
+    for match in _BROAD_FILENAME_EXT_RE.finditer(text):
+        raw = match.group(1)
+        if '://' in raw:
+            continue
+        normalized = _resolve_manifest_path(workspace, raw)
+        if not normalized or normalized in seen:
+            continue
+        if not _artifact_path_is_real(workspace, normalized):
+            continue
+        seen.add(normalized)
+        paths.append(normalized)
     return paths
 
 
@@ -570,14 +606,27 @@ def _extract_turn_artifact_paths(
     turn_messages: list,
     tool_calls: list | None,
     workspace: Path,
+    *,
+    start_msg_idx: int | None = None,
+    end_msg_idx: int | None = None,
 ) -> list[str]:
     """Extract workspace-relative artifact paths from tool events in a turn's message slice.
 
     Only paths produced by ARTIFACT_MUTATION_TOOLS (write_file, edit_file, patch, etc.)
     are included. Paths from assistant prose mentions are NOT included — those are
     handled by the reconcile pass and are not reliable for cross-turn attribution.
+
+    ``start_msg_idx`` / ``end_msg_idx`` are indices in the **full** session messages
+    array. When provided, ``session.tool_calls`` snippets are scoped with
+    ``_tool_calls_for_turn`` so earlier turns' write_file paths are not attributed
+    to the current turn.
     """
-    events = _collect_tool_events(turn_messages, tool_calls)
+    scoped_tool_calls = _tool_calls_for_turn(
+        tool_calls,
+        start_msg_idx=start_msg_idx,
+        end_msg_idx=end_msg_idx,
+    )
+    events = _collect_tool_events(turn_messages, scoped_tool_calls)
     paths: list[str] = []
     seen: set[str] = set()
     for ev in events:
@@ -592,6 +641,43 @@ def _extract_turn_artifact_paths(
                 seen.add(p)
                 paths.append(p)
     return paths
+
+
+def _extract_turn_artifact_entries(
+    turn_messages: list,
+    tool_calls: list | None,
+    workspace: Path,
+    *,
+    start_msg_idx: int | None = None,
+    end_msg_idx: int | None = None,
+) -> list[dict[str, str]]:
+    """Extract workspace-relative artifact (path, source_tool) pairs from tool events.
+
+    Same scoping contract as ``_extract_turn_artifact_paths`` but returns dict
+    entries so the persisted ``turn_artifacts`` retains the original tool name
+    (patch, edit_file, write_file, …) instead of losing it behind a hardcoded
+    ``'write_file'``.
+    """
+    scoped_tool_calls = _tool_calls_for_turn(
+        tool_calls,
+        start_msg_idx=start_msg_idx,
+        end_msg_idx=end_msg_idx,
+    )
+    events = _collect_tool_events(turn_messages, scoped_tool_calls)
+    entries: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for ev in events:
+        if ev.name not in ARTIFACT_MUTATION_TOOLS:
+            continue
+        for p in _paths_from_args(ev.args, workspace):
+            if p and p not in seen:
+                seen.add(p)
+                entries.append({'path': p, 'source_tool': ev.name})
+        for p in _paths_from_diff_text(ev.result or '', workspace):
+            if p and p not in seen:
+                seen.add(p)
+                entries.append({'path': p, 'source_tool': ev.name})
+    return entries
 
 
 def _collect_tool_events(messages: list, session_tool_calls: list | None) -> list[ToolEvent]:
@@ -1188,6 +1274,56 @@ def _artifact_path_is_real(workspace: Path, rel: str) -> bool:
     return _file_preview_path(workspace, rel, 'file') is not None
 
 
+def filter_existing_turn_artifact_paths(
+    workspace: Path,
+    paths: list[str] | None,
+) -> list[str]:
+    """Keep only workspace paths that pass the manifest preview gate."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for path in paths or []:
+        if not isinstance(path, str):
+            continue
+        rel = path.strip()
+        if not rel or rel in seen:
+            continue
+        if not _artifact_path_is_real(workspace, rel):
+            continue
+        seen.add(rel)
+        out.append(rel)
+    return out
+
+
+def turn_artifacts_for_wire(session) -> dict[str, list[str]]:
+    """Return turn_artifacts with only existing previewable workspace files.
+
+    Supports both legacy format (list[str]) and new format (list[dict] with
+    'path' + 'source_tool').  The wire format always returns list[str].
+    """
+    workspace = Path(str(getattr(session, 'workspace', '') or '')).expanduser().resolve()
+    raw = getattr(session, 'turn_artifacts', None) or {}
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, list[str]] = {}
+    for turn_key, entries in raw.items():
+        tk = str(turn_key or '').strip()
+        if not tk:
+            continue
+        if not isinstance(entries, list):
+            continue
+        # Extract plain path strings for the wire.
+        paths: list[str] = []
+        for entry in entries:
+            if isinstance(entry, str):
+                paths.append(entry.strip())
+            elif isinstance(entry, dict):
+                p = str(entry.get('path', '')).strip()
+                if p:
+                    paths.append(p)
+        out[tk] = filter_existing_turn_artifact_paths(workspace, paths)
+    return out
+
+
 def _turn_message_slice(messages: list, turn_key: str) -> list:
     key = str(turn_key or '').strip()
     for turn in _message_turns(messages or []):
@@ -1207,6 +1343,30 @@ def _records_by_path(rows: list[dict] | None) -> dict[str, dict]:
         if path:
             out[path] = row
     return out
+
+
+def _artifact_identity(row: dict, default_profile: str = '') -> str:
+    profile = str(row.get('profile') if 'profile' in row else default_profile or '').strip()
+    path = str(row.get('path') or '').strip()
+    return f'{profile}\0{path}'
+
+
+def _store_artifact_record(row: dict[str, Any]) -> dict[str, Any] | None:
+    path = str(row.get('path') or '').strip()
+    source_tool = str(row.get('source_tool') or '').strip()
+    if not path or not source_tool:
+        return None
+    profile = str(row.get('profile') or '').strip()
+    preview = str(row.get('preview') or MANIFEST_PREVIEW_FILE).strip() or MANIFEST_PREVIEW_FILE
+    return {
+        'path': path,
+        'source_tool': source_tool,
+        'kind': 'artifact',
+        'entry_kind': 'file',
+        'preview': preview,
+        'profile': profile,
+        'turn_key': str(row.get('turn_key') or '').strip(),
+    }
 
 
 def _is_reference_only_tool(name: str) -> bool:
@@ -1474,7 +1634,10 @@ def _row_to_wire(
     source_tool = str(row.get('source_tool') or '').strip()
     if not source_tool:
         return None
-    profile = str(default_profile or '').strip()
+    if 'profile' in row:
+        profile = str(row.get('profile') or '').strip()
+    else:
+        profile = str(default_profile or '').strip()
     if row.get('kind') == 'skill' or row.get('resource_type') == 'skill':
         skill_name = str(row.get('skill_name') or row.get('path') or '').strip()
         if not skill_name or not _skillhub_preview_available():
@@ -1517,11 +1680,13 @@ def _rows_to_wire(
         if wire is None:
             continue
         path = wire['path']
-        if path in seen:
+        profile = str(wire.get('profile') or '').strip()
+        key = f'{profile}\0{path}'
+        if key in seen:
             continue
-        seen.add(path)
+        seen.add(key)
         out.append(wire)
-    return sorted(out, key=lambda item: item['path'])
+    return sorted(out, key=lambda item: (str(item.get('profile') or ''), item['path']))
 
 
 def _turn_to_wire(
@@ -1555,7 +1720,7 @@ def _turn_sort_key(turn_key: str | None) -> tuple[int, str]:
     return (1_000_000_000, key)
 
 
-def _merge_rows_by_path(existing_rows: list | None, incoming_rows: list | None) -> list[dict]:
+def _merge_rows_by_identity(existing_rows: list | None, incoming_rows: list | None) -> list[dict]:
     rows: dict[str, dict] = {}
     for row in list(existing_rows or []) + list(incoming_rows or []):
         if not isinstance(row, dict):
@@ -1566,8 +1731,13 @@ def _merge_rows_by_path(existing_rows: list | None, incoming_rows: list | None) 
         if not path or preview not in (MANIFEST_PREVIEW_FILE, MANIFEST_PREVIEW_SKILL) or not source_tool:
             continue
         profile = str(row.get('profile') or '').strip()
-        rows[path] = _serialize_manifest_row(path, preview, source_tool, profile=profile)
-    return sorted(rows.values(), key=lambda item: item['path'])
+        key = f'{profile}\0{path}'
+        rows[key] = _serialize_manifest_row(path, preview, source_tool, profile=profile)
+    return sorted(rows.values(), key=lambda item: (str(item.get('profile') or ''), item['path']))
+
+
+def _merge_rows_by_path(existing_rows: list | None, incoming_rows: list | None) -> list[dict]:
+    return _merge_rows_by_identity(existing_rows, incoming_rows)
 
 
 def _merge_turn_rows(existing_turns: list | None, incoming_turns: list | None) -> list[dict]:
@@ -1789,6 +1959,7 @@ def build_session_manifest(session) -> dict[str, Any]:
     tool_calls = list(getattr(session, 'tool_calls', None) or [])
     workspace = Path(str(session.workspace)).expanduser().resolve()
     skills_dir = _skills_dir_for_session(session)
+    default_profile = str(getattr(session, 'profile', None) or '').strip()
     events = _collect_tool_events(messages, tool_calls)
     events.extend(_collect_media_artifact_events(messages, workspace))
     todos = _extract_latest_todos(messages)
@@ -1805,6 +1976,20 @@ def build_session_manifest(session) -> dict[str, Any]:
         tool_calls=tool_calls,
     )
 
+    store_rows: list[dict[str, Any]] = []
+    try:
+        from api.session_manifest_store import (
+            backfill_from_session_turn_artifacts,
+            load_manifest_records,
+        )
+
+        store_rows = load_manifest_records(session, include_lineage=True)
+        if not store_rows and isinstance(getattr(session, 'turn_artifacts', None), dict):
+            backfill_from_session_turn_artifacts(session)
+            store_rows = load_manifest_records(session, include_lineage=True)
+    except Exception:
+        logger.debug("failed to read session manifest store", exc_info=True)
+
     # Prefer persisted turn_artifacts over reconcile results.
     # When the streaming pipeline persists artifact paths at turn completion,
     # those paths are more reliable than the reconcile pass (which can suffer
@@ -1816,19 +2001,35 @@ def build_session_manifest(session) -> dict[str, Any]:
             tk = turn.get('turn_key', '')
             if tk not in persisted:
                 continue
-            paths = persisted[tk]
-            if not isinstance(paths, list):
+            entries = persisted[tk]
+            if not isinstance(entries, list):
                 continue
-            # Build artifact record dicts from persisted paths.
+            # Build artifact record dicts from persisted entries.
+            # Supports both legacy format (list[str]) and new format (list[dict]
+            # with 'path' + 'source_tool').
             turn_artifacts: list[dict] = []
-            for p in paths:
-                if not isinstance(p, str) or not p.strip():
+            for entry in entries:
+                if isinstance(entry, str):
+                    p = entry.strip()
+                    source_tool = 'write_file'
+                elif isinstance(entry, dict):
+                    p = str(entry.get('path', '')).strip()
+                    source_tool = str(entry.get('source_tool', '') or '').strip() or ''
+                else:
                     continue
-                if not _artifact_path_is_real(workspace, p):
+                # When source_tool is empty (prose-discovered path), backfill
+                # from global artifact_records.  The reconcile pass already
+                # mined the correct source_tool from tool/media events; we
+                # only rely on persisted data for per-turn path attribution.
+                if not source_tool and p in artifact_records:
+                    source_tool = str(artifact_records[p].get('source_tool', '') or '').strip()
+                if not source_tool:
+                    source_tool = 'write_file'
+                if not p or not _artifact_path_is_real(workspace, p):
                     continue
                 record: dict[str, Any] = {
                     'path': p,
-                    'source_tool': 'write_file',
+                    'source_tool': source_tool,
                     'kind': 'artifact',
                     'entry_kind': 'file',
                     'preview': 'file',
@@ -1839,17 +2040,50 @@ def build_session_manifest(session) -> dict[str, Any]:
                     artifact_records[p] = record
             turn['artifacts'] = turn_artifacts
 
-    artifacts = sorted(artifact_records.values(), key=lambda row: row['path'])
+    turn_rows_by_key: dict[str, dict[str, Any]] = {
+        str(turn.get('turn_key') or ''): turn for turn in turns
+    }
+    profiled_artifact_records: dict[str, dict[str, Any]] = {
+        _artifact_identity(row, default_profile): row for row in artifact_records.values()
+    }
+    for store_row in store_rows:
+        record = _store_artifact_record(store_row)
+        if record is None:
+            continue
+        identity = _artifact_identity(record, default_profile)
+        profiled_artifact_records[identity] = record
+        tk = str(record.get('turn_key') or '').strip()
+        if not tk:
+            continue
+        turn = turn_rows_by_key.get(tk)
+        if turn is None:
+            turn = {'turn_key': tk, 'artifacts': [], 'references': []}
+            turn_rows_by_key[tk] = turn
+            turns.append(turn)
+        turn_records = {
+            _artifact_identity(row, default_profile): row
+            for row in list(turn.get('artifacts') or [])
+            if isinstance(row, dict)
+        }
+        turn_records[identity] = record
+        turn['artifacts'] = sorted(
+            turn_records.values(),
+            key=lambda row: (str(row.get('profile') or ''), str(row.get('path') or '')),
+        )
+
+    artifacts = sorted(
+        profiled_artifact_records.values(),
+        key=lambda row: (str(row.get('profile') or ''), str(row.get('path') or '')),
+    )
     _clean_record_keys(artifacts + references)
-    profile = str(getattr(session, 'profile', None) or '').strip()
     return {
         'todos': _wire_todos(todos),
         'artifacts': _rows_to_wire(
-            artifacts, workspace, skills_dir, default_profile=profile,
+            artifacts, workspace, skills_dir, default_profile=default_profile,
         ),
         'references': _rows_to_wire(references, workspace, skills_dir),
         'turns': [
-            _turn_to_wire(turn, workspace, skills_dir, default_profile=profile)
+            _turn_to_wire(turn, workspace, skills_dir, default_profile=default_profile)
             for turn in turns
         ],
     }

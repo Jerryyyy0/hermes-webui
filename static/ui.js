@@ -388,7 +388,7 @@ function _wireMessageWindowLoadEarlierButton(){
   if(!indicator) return;
   indicator.onclick=()=>{
     if(_messageHiddenBeforeCount()>0) _showEarlierRenderedMessages();
-    else if(typeof _loadOlderMessages==='function') _loadOlderMessages();
+    if(typeof _messagesTruncated!=='undefined' && _messagesTruncated && typeof _loadOlderMessages==='function') _loadOlderMessages();
   };
 }
 function _showEarlierRenderedMessages(){
@@ -7983,8 +7983,10 @@ function renderMessages(options){
         ? `Load earlier messages (${serverOlderCount} older)`
         : (typeof t==='function'?t('load_older_messages'):'Load earlier messages'));
     indicator.onclick=()=>{
-      if(hiddenBeforeCount>0) _showEarlierRenderedMessages();
-      else if(typeof _loadOlderMessages==='function') _loadOlderMessages();
+      const hidden=hiddenBeforeCount>0;
+      const serverOlder=hasServerOlder;
+      if(hidden) _showEarlierRenderedMessages();
+      if(serverOlder && typeof _loadOlderMessages==='function') _loadOlderMessages();
     };
     inner.appendChild(indicator);
     _wireMessageWindowLoadEarlierButton();

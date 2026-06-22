@@ -6,6 +6,9 @@
 ### Added
 - **Browser tool preview SSE.** When `BROWSER_PREVIEW_URL` or `CAMOFOX_URL` is set to a valid `http://` or `https://` remote viewer endpoint, WebUI emits a one-shot `browser_preview` chat-stream event the first time a `browser_*` tool starts in a turn so the UI embeds the preview in the workspace panel (`BROWSER_PREVIEW_URL` overrides `CAMOFOX_URL` when both are set).
 
+### Fixed
+- **Session artifacts now use a profile-aware durable manifest index.** Files produced during a turn are written to a dedicated artifact store keyed by compression lineage, profile, turn, and path, so context-compression continuations keep the same Artifacts/turn-chip view as their preserved parent while ordinary forks stay isolated. Legacy `turn_artifacts` remains as a compatibility fallback during migration.
+
 ## [v0.51.335] — 2026-06-08 — Release KY (normalize inline thinking extraction)
 
 ### Fixed
