@@ -44,7 +44,7 @@ def apply_iptables_rules(rules_content: str, *, rules_path: str) -> ApplyResult:
 
     try:
         proc = subprocess.run(
-            ["iptables-restore", "-f", str(target)],
+            ["iptables-restore", str(target)],
             capture_output=True,
             text=True,
             check=False,
@@ -74,7 +74,8 @@ def apply_iptables_rules(rules_content: str, *, rules_path: str) -> ApplyResult:
 def get_current_iptables_rules() -> ApplyResult:
     try:
         proc = subprocess.run(
-            ["iptables", "-L", "-n"],
+            # -v 用于显示 in/out 网卡列，避免 -o lo 等接口限定规则被误读为“全部放行”
+            ["iptables", "-L", "-n", "-v"],
             capture_output=True,
             text=True,
             check=False,

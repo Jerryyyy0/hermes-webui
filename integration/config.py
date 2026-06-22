@@ -91,3 +91,29 @@ def knowledge_base_url() -> str | None:
 
 def knowledge_base_enabled() -> bool:
     return integration_enabled() and bool(knowledge_base_url())
+
+
+# 出口流量抓包目录，tcpdump 在此写轮转 pcap，读取接口从这里取文件。
+def egress_capture_dir() -> str:
+    return str(os.getenv("HERMES_EGRESS_CAPTURE_DIR", "").strip() or "/var/log/egress")
+
+
+# 从环境变量读取整数，缺省或非法值时回落到默认值。
+def _egress_int_env(name: str, default: int) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+# 放行流量记录使用的 NFLOG group 号（需与容器内 tcpdump -i nflog:N 保持一致）。
+def egress_nflog_group_allowed() -> int:
+    return _egress_int_env("HERMES_EGRESS_NFLOG_GROUP_ALLOWED", 100)
+
+
+# 被拒绝流量记录使用的 NFLOG group 号。
+def egress_nflog_group_denied() -> int:
+    return _egress_int_env("HERMES_EGRESS_NFLOG_GROUP_DENIED", 200)
