@@ -666,8 +666,14 @@
           category: _currentSkillhubItem.category || '',
         }),
       });
+      // Ensure the installed skill is in enabled state (remove from disabled list if present)
+      await api('/api/skills/toggle', {
+        method: 'POST',
+        body: JSON.stringify({ name, enabled: true }),
+      }).catch(() => {});
       _skillhubData = null;
       if (typeof _skillsData !== 'undefined') _skillsData = null;
+      if (typeof _invalidateSkillCommandCache === 'function') _invalidateSkillCommandCache();
       await loadSkillHub(true);
       if (typeof loadSkills === 'function') await loadSkills();
       if (_currentSkillhubItem) {
