@@ -273,6 +273,18 @@ class TestMediaEndpointUnit(unittest.TestCase):
             "_handle_media must be defined in api/routes.py",
         )
 
+    def test_media_session_relative_helpers_exist(self):
+        from api import routes
+        self.assertTrue(hasattr(routes, "_try_serve_session_relative_media"))
+        self.assertTrue(hasattr(routes, "_serve_resolved_file_raw"))
+        self.assertTrue(hasattr(routes, "_is_absolute_serve_path"))
+
+    def test_is_absolute_serve_path(self):
+        from api import routes
+        self.assertTrue(routes._is_absolute_serve_path("/tmp/foo.png"))
+        self.assertFalse(routes._is_absolute_serve_path("docs/foo.png"))
+        self.assertFalse(routes._is_absolute_serve_path("_临床.pdf"))
+
     def test_api_media_route_registered(self):
         """The GET dispatch must include the /api/media path."""
         routes_src = (REPO_ROOT / "api" / "routes.py").read_text(encoding="utf-8")

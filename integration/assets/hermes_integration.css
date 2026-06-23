@@ -186,6 +186,27 @@
   font-size: 11px;
   color: var(--muted);
 }
+.skillhub-list-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px 8px;
+  flex-shrink: 0;
+}
+.skillhub-list-controls .sidebar-search {
+  flex: 1;
+  min-width: 0;
+}
+.skillhub-sort {
+  flex-shrink: 0;
+  font-size: 11px;
+  padding: 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--text);
+  max-width: 42%;
+}
 .skillhub-toolbar {
   display: flex;
   flex-direction: column;

@@ -8,11 +8,20 @@
   const integrationReady = !!cfg.integrationSkills;
   const STORAGE_SCOPE = 'hermes.skillhub.scope';
   const STORAGE_CATEGORY = 'hermes.skillhub.category';
+  const STORAGE_SORT = 'hermes.skillhub.sort';
   const CATEGORY_ALL = '';
   const VALID_SCOPES = new Set(['hub', 'installed', 'not_installed', 'custom']);
+  const SORT_OPTIONS = [
+    { sort: 'name', order: 'asc', i18n: 'skillhub_sort_name_asc', fallback: 'Name A→Z' },
+    { sort: 'name', order: 'desc', i18n: 'skillhub_sort_name_desc', fallback: 'Name Z→A' },
+    { sort: 'mtime', order: 'desc', i18n: 'skillhub_sort_mtime_desc', fallback: 'Modified (newest)' },
+    { sort: 'mtime', order: 'asc', i18n: 'skillhub_sort_mtime_asc', fallback: 'Modified (oldest)' },
+  ];
 
   let _skillhubScope = 'hub';
   let _skillhubCategory = CATEGORY_ALL;
+  let _skillhubSort = 'name';
+  let _skillhubOrder = 'asc';
   let _skillhubCategories = [];
   let _skillhubStats = null;
   let _skillhubData = null;
@@ -56,6 +65,55 @@
       if (saved && categories.includes(saved)) return saved;
     } catch (_) {}
     return CATEGORY_ALL;
+  }
+
+  function readStoredSort() {
+    try {
+      const saved = localStorage.getItem(STORAGE_SORT);
+      if (!saved) return { sort: 'name', order: 'asc' };
+      const [sort, order] = saved.split(':');
+      const valid = SORT_OPTIONS.some(opt => opt.sort === sort && opt.order === order);
+      if (valid) return { sort, order };
+    } catch (_) {}
+    return { sort: 'name', order: 'asc' };
+  }
+
+  function persistSort() {
+    try {
+      localStorage.setItem(STORAGE_SORT, `${_skillhubSort}:${_skillhubOrder}`);
+    } catch (_) {}
+  }
+
+  function sortOptionLabel(opt) {
+    return typeof t === 'function' ? t(opt.i18n) : opt.fallback;
+  }
+
+  function renderSortSelect() {
+    const select = $('skillhubSort');
+    if (!select) return;
+    const current = `${_skillhubSort}:${_skillhubOrder}`;
+    select.innerHTML = '';
+    for (const opt of SORT_OPTIONS) {
+      const el = document.createElement('option');
+      el.value = `${opt.sort}:${opt.order}`;
+      el.textContent = sortOptionLabel(opt);
+      if (el.value === current) el.selected = true;
+      select.appendChild(el);
+    }
+  }
+
+  function setSortFromValue(raw) {
+    const value = String(raw || 'name:asc');
+    const [sort, order] = value.split(':');
+    const valid = SORT_OPTIONS.some(opt => opt.sort === sort && opt.order === order);
+    if (!valid) return;
+    if (_skillhubSort === sort && _skillhubOrder === order) return;
+    _skillhubSort = sort;
+    _skillhubOrder = order;
+    persistSort();
+    _skillhubPage = 1;
+    _skillhubData = null;
+    loadSkillHub(true);
   }
 
   function persistScope() {
@@ -130,7 +188,11 @@
     _skillhubCategories = Array.isArray(data) ? data.filter(Boolean) : [];
     _skillhubScope = readStoredScope();
     _skillhubCategory = readStoredCategory(_skillhubCategories);
+    const storedSort = readStoredSort();
+    _skillhubSort = storedSort.sort;
+    _skillhubOrder = storedSort.order;
     renderCategoryChips();
+    renderSortSelect();
     updateScopeTabs();
   }
 
@@ -163,6 +225,8 @@
       category: _skillhubCategory,
       page: String(_skillhubPage),
       page_size: String(_skillhubPageSize),
+      sort: _skillhubSort,
+      order: _skillhubOrder,
     });
     if (q.trim()) params.set('q', q.trim());
     try {
@@ -232,8 +296,7 @@
       box.innerHTML = `<div style="padding:12px;color:var(--muted);font-size:12px">${esc(typeof t === 'function' ? t('skills_no_match') : 'No skills')}</div>`;
       return;
     }
-    const sorted = skills.slice().sort((a, b) => (a.name || '').localeCompare(b.name || ''));
-    for (const skill of sorted) {
+    for (const skill of skills) {
       const el = document.createElement('div');
       const installed = skill.installed === true;
       const isCustom = _skillhubScope === 'custom' || skill.custom === true;
@@ -773,6 +836,10 @@
     document.querySelectorAll('#skillhubScopeTabs .skillhub-scope-btn').forEach(btn => {
       btn.addEventListener('click', () => setScope(btn.dataset.scope));
     });
+    const storedSort = readStoredSort();
+    _skillhubSort = storedSort.sort;
+    _skillhubOrder = storedSort.order;
+    renderSortSelect();
     const uploadInput = $('skillhubUploadInput');
     if (uploadInput) {
       uploadInput.addEventListener('change', () => {
@@ -782,6 +849,10 @@
       });
     }
     bindUploadDropzone();
+    const sortSelect = $('skillhubSort');
+    if (sortSelect) {
+      sortSelect.addEventListener('change', () => setSortFromValue(sortSelect.value));
+    }
     updateCustomUploadVisibility();
   }
 

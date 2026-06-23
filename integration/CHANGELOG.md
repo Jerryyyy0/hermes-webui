@@ -8,6 +8,8 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Added
 
+- **SkillHub list sorting** — `GET /api/skillhub/skills` accepts `sort` (`name`|`mtime`, default `name`) and `order` (`asc`|`desc`, default `asc`). List items always include aligned fields (`display_name`, `category`, `mtime`, etc.); strings default to `""`, `mtime` defaults to `null`. Hub upstream `updated_at` is normalized into `mtime`. SkillHub sidebar adds a sort dropdown; removes client-side re-sort of the current page.
+
 - **Knowledge base search_docs_xcore** — `POST /api/integration/knowledge_base/search_docs_xcore` proxies downstream `POST /knowledge_base/search_docs_xcore` with `query`, `kbNames` (→ downstream `kbNames`), optional `topK` (default 3), and `scoreThreshold` (default 1.0). Success returns `{kbNames, docNames, context}` from upstream `data`.
 
 - **Knowledge base search_docs** — `POST /api/integration/knowledge_base/search_docs` proxies downstream `POST /knowledge_base/search_docs` with `query`, `kbName` (→ `knowledge_base_name`), optional `topK` (default 3), and `scoreThreshold` (default 1.0). Returns matched document chunks as JSON array.
@@ -21,6 +23,12 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 - **Zhiling identity lookup API doc** — [`docs/integration-login-api.md`](../docs/integration-login-api.md) documents `GET /api/integration/login` request/response contract, auth, and error semantics.
 
 ### Changed
+
+- **Chat stream Chinese apperror UX** — Provider/SSE `apperror` classification, Chinese copy, payload shaping, and persisted error messages live in `integration/chat_provider_errors/` (`messages.py`, `classify.py`, `payload.py`). `api/streaming.py` re-exports thin aliases for existing call sites. User-visible `message`/`hint` come from `CHAT_ERROR_ZH` only; agent/provider raw text is redacted into SSE `details` / persisted `provider_details` (collapsible technical block), not appended to `message`.
+
+- **SkillHub hub list pagination** — `scope=hub` now loads the full upstream catalog locally (same as installed filters), applies local `q` substring search, sorts, then paginates. Upstream `q`/page params are no longer used for hub list.
+
+- **`GET /api/media` session-relative paths** — When `path` is relative and `session_id` is set, resolution matches `GET /api/file/raw` (session workspace, then attachment inbox) with the same inline/disposition rules. Absolute `path` behavior is unchanged. `/api/file/raw` unchanged for existing clients. Swagger updated.
 
 - **Knowledge base BFF passthrough responses** — JSON proxy routes now return downstream HTTP status and body unchanged (no `data` unwrapping or business-error remapping). `show_pdf` binary responses still passthrough bytes; upload-docs no longer maps `data: null` to `{"ok": true}`.
 

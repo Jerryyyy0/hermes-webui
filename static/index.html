@@ -342,7 +342,10 @@
           <button type="button" id="btnSkillhubUpload" class="skillhub-upload-btn" data-i18n="skillhub_upload_browse" onclick="event.stopPropagation();window.HermesSkillHub&&HermesSkillHub.pickUpload()">Browse files</button>
         </div>
       </div>
-      <div class="skills-search sidebar-search"><svg class="sidebar-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg><input id="skillhubSearch" placeholder="Search catalog..." data-i18n-placeholder="search_skillhub" oninput="filterSkillHub()"></div>
+      <div class="skillhub-list-controls">
+        <div class="skills-search sidebar-search"><svg class="sidebar-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg><input id="skillhubSearch" placeholder="Search catalog..." data-i18n-placeholder="search_skillhub" oninput="filterSkillHub()"></div>
+        <select id="skillhubSort" class="skillhub-sort" aria-label="Sort skills"></select>
+      </div>
       <div class="skillhub-list skills-list" id="skillhubList"><div style="padding:12px;color:var(--muted);font-size:12px" data-i18n="loading">Loading...</div></div>
       <div class="skillhub-pager" id="skillhubPager" hidden></div>
     </div>

@@ -54,6 +54,8 @@ def list_skillhub_skills(
     q: str | None = None,
     page: int | None = None,
     page_size: int | None = None,
+    sort: str = "name",
+    order: str = "asc",
 ) -> dict:
     scope_key = _normalize_scope(scope)
     page_num = _normalize_page(page)
@@ -69,17 +71,21 @@ def list_skillhub_skills(
             hub_names=hub_names,
             page=page_num,
             page_size=page_limit,
+            sort=sort,
+            order=order,
         )
         payload["stats"] = stats
         return payload
 
-    if scope_key in ("installed", "not_installed"):
-        skills, total = skillhub.list_hub_skills_filtered(
+    if scope_key in ("hub", "installed", "not_installed"):
+        skills, total = skillhub.list_hub_catalog_paged(
             category=category_key,
             scope=scope_key,
             q=q,
             page=page_num,
             page_size=page_limit,
+            sort=sort,
+            order=order,
         )
         return _envelope(
             scope=scope_key,
@@ -90,21 +96,3 @@ def list_skillhub_skills(
             page_size=page_limit,
             stats=stats,
         )
-
-    cat_param = category_key if category_key else None
-    payload = skillhub.fetch_catalog(
-        q=q,
-        category=cat_param,
-        page=page_num,
-        page_size=page_limit,
-    )
-    skills = skillhub.annotate_installed(payload.get("skills") or [])
-    return _envelope(
-        scope="hub",
-        category=category_key,
-        skills=skills,
-        total=payload.get("total", len(skills)),
-        page=payload.get("page", page_num),
-        page_size=payload.get("page_size", page_limit),
-        stats=stats,
-    )

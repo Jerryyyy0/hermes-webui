@@ -43,6 +43,30 @@ def test_skillhub_skills_all_category():
                 lst.return_value = {"skills": [], "total": 0, "stats": {}}
                 assert try_handle_get(handler, parsed) is True
                 assert lst.call_args.kwargs["category"] == ""
+                assert lst.call_args.kwargs["sort"] == "name"
+                assert lst.call_args.kwargs["order"] == "asc"
+
+
+def test_skillhub_skills_invalid_sort():
+    parsed = urlparse("/api/skillhub/skills?sort=invalid")
+    handler = MagicMock()
+    with patch("integration.skills.handlers.skillhub_enabled", return_value=True):
+        with patch("integration.skills.handlers.bad", return_value=True) as bad_fn:
+            assert try_handle_get(handler, parsed) is True
+            bad_fn.assert_called_once()
+            assert bad_fn.call_args.kwargs.get("status") == 400
+
+
+def test_skillhub_skills_passes_sort_order():
+    parsed = urlparse("/api/skillhub/skills?sort=mtime&order=desc")
+    handler = MagicMock()
+    with patch("integration.skills.handlers.skillhub_enabled", return_value=True):
+        with patch("integration.skills.handlers.listing.list_skillhub_skills") as lst:
+            with patch("integration.skills.handlers.j", return_value=True):
+                lst.return_value = {"skills": [], "total": 0, "stats": {}}
+                assert try_handle_get(handler, parsed) is True
+                assert lst.call_args.kwargs["sort"] == "mtime"
+                assert lst.call_args.kwargs["order"] == "desc"
 
 
 def test_skillhub_content_requires_name():

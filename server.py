@@ -170,7 +170,9 @@ if __name__ == "__main__":
     os.environ["CAMOFOX_ADOPT_EXISTING_TAB"] = os.getenv(
         "CAMOFOX_ADOPT_EXISTING_TAB", "1"
     )
-    
+    os.environ["HERMES_EGRESS_POLICY_ENABLED"] = os.getenv(
+        "HERMES_EGRESS_POLICY_ENABLED", "1"
+    )
 
 from api.auth import check_auth
 from api.config import HOST, PORT, STATE_DIR, SESSION_DIR, DEFAULT_WORKSPACE

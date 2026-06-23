@@ -260,7 +260,6 @@ def _scan_custom_skill_dicts(
         _EXCLUDED_SKILL_DIRS,
         _get_disabled_skill_names,
         _parse_frontmatter,
-        _sort_skills,
         skill_matches_platform,
     )
 
@@ -320,25 +319,28 @@ def _scan_custom_skill_dicts(
                 if query not in haystack:
                     continue
             seen.add(dir_key)
-            all_skills.append(
-                {
-                    "name": name,
-                    "dir_name": dir_key,
-                    "display_name": str(frontmatter.get("display_name", "") or ""),
-                    "description": description,
-                    "category": str(cat or ""),
-                    "version": str(frontmatter.get("version", "") or ""),
-                    "author": str(frontmatter.get("author", "") or ""),
-                    "installed": True,
-                    "hub_installed": False,
-                    "custom": True,
-                    "disabled": name in disabled,
-                }
-            )
+            entry: dict = {
+                "name": name,
+                "dir_name": dir_key,
+                "display_name": str(frontmatter.get("display_name", "") or ""),
+                "description": description,
+                "category": str(cat or ""),
+                "version": str(frontmatter.get("version", "") or ""),
+                "author": str(frontmatter.get("author", "") or ""),
+                "installed": True,
+                "hub_installed": False,
+                "custom": True,
+                "disabled": name in disabled,
+            }
+            try:
+                entry["mtime"] = float(skill_md.stat().st_mtime)
+            except OSError:
+                entry["mtime"] = None
+            all_skills.append(entry)
         except Exception as exc:
             _log.debug("skip skill %s: %s", skill_md, exc)
 
-    return _sort_skills(all_skills)
+    return all_skills
 
 
 def count_custom_skills(category: str, hub_names: set[str]) -> int:
@@ -351,11 +353,17 @@ def list_custom_skills(
     q: str | None = None,
     page: int = 1,
     page_size: int = 20,
+    sort: str = "name",
+    order: str = "asc",
 ) -> dict:
+    from integration.skills.list_item_shape import normalize_skill_list_items
+    from integration.skills.sort_utils import sort_skill_items
+
     all_skills = _scan_custom_skill_dicts(category, hub_names, q=q)
+    all_skills = sort_skill_items(all_skills, sort=sort, order=order)
     total = len(all_skills)
     offset = (page - 1) * page_size
-    page_items = all_skills[offset : offset + page_size]
+    page_items = normalize_skill_list_items(all_skills[offset : offset + page_size])
     return {
         "scope": "custom",
         "category": category,

@@ -16,10 +16,45 @@ _LIST_FIELDS = {
     "hub_installed",
     "custom",
     "disabled",
+    "mtime",
 }
 
 
 def test_custom_list_item_includes_hub_aligned_fields(monkeypatch):
+    item = {
+        "name": "my-skill",
+        "dir_name": "tools/my-skill",
+        "display_name": "",
+        "description": "demo",
+        "category": "tools",
+        "version": "",
+        "author": "",
+        "installed": True,
+        "hub_installed": False,
+        "custom": True,
+        "disabled": False,
+        "mtime": 1234567890.0,
+    }
+    monkeypatch.setattr(
+        local_skills,
+        "_scan_custom_skill_dicts",
+        lambda *args, **kwargs: [item],
+    )
+
+    payload = local_skills.list_custom_skills("", set())
+    result = payload["skills"][0]
+
+    assert set(result) >= _LIST_FIELDS
+    assert result["installed"] is True
+    assert result["hub_installed"] is False
+    assert result["custom"] is True
+    assert result["dir_name"] == "tools/my-skill"
+    assert result["category"] == "tools"
+    assert result["disabled"] is False
+    assert result["mtime"] == 1234567890.0
+
+
+def test_custom_list_item_missing_mtime_normalized_to_null(monkeypatch):
     item = {
         "name": "my-skill",
         "dir_name": "tools/my-skill",
@@ -43,12 +78,7 @@ def test_custom_list_item_includes_hub_aligned_fields(monkeypatch):
     result = payload["skills"][0]
 
     assert set(result) >= _LIST_FIELDS
-    assert result["installed"] is True
-    assert result["hub_installed"] is False
-    assert result["custom"] is True
-    assert result["dir_name"] == "tools/my-skill"
-    assert result["category"] == "tools"
-    assert result["disabled"] is False
+    assert result["mtime"] is None
 
 
 def test_hub_list_item_includes_aligned_fields(tmp_path):

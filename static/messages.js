@@ -3216,20 +3216,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         clearLiveToolCards();if(!assistantText)removeThinking();
         let isRecoveryControlMessage=false;
         try{
-          const isRateLimit=d.type==='rate_limit';
-          const isQuotaExhausted=d.type==='quota_exhausted';
-          const isAuthMismatch=d.type==='auth_mismatch';
-          const isGatewayAuthError=d.type==='gateway_auth_error';
-          const isModelNotFound=d.type==='model_not_found';
-          const isCancelled=d.type==='cancelled';
           const isInterrupted=d.type==='interrupted';
-          const isCompressionExhausted=d.type==='compression_exhausted';
           isRecoveryControlMessage=isInterrupted && (d.recovery_control===true || _streamRecoveryControlMessageText(d.message));
-          const isNoResponse=d.type==='no_response'||d.type==='silent_failure';
-          const label=isCancelled?'Task cancelled':isInterrupted?'Response interrupted':isCompressionExhausted?'Context compression exhausted':isQuotaExhausted?'Out of credits':isRateLimit?'Rate limit reached':isGatewayAuthError?(typeof t==='function'?t('gateway_auth_label'):'Gateway authentication failed'):isAuthMismatch?(typeof t==='function'?t('provider_mismatch_label'):'Provider mismatch'):isModelNotFound?(typeof t==='function'?t('model_not_found_label'):'Model not found'):isNoResponse?'No response from provider':'Error';
+          const label=d.label||'发生错误';
+          const message=d.message||'';
           const hint=d.hint?`\n\n*${d.hint}*`:'';
           const details=d.details?String(d.details).replace(/```/g,'`\u200b``'):'';
-          const detailsLabel=isCancelled?'Cancellation details':isInterrupted?'Interruption details':undefined;
+          const detailsLabel=d.details_label||'技术详情';
           window._compressionUi=null;
           if(typeof clearCompressionUi==='function') clearCompressionUi();
           if(isRecoveryControlMessage){
@@ -3242,10 +3235,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
               if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(S.session.session_id);
             }
           } else {
-            S.messages.push({role:'assistant',content:`**${label}:** ${d.message}${hint}`,provider_details:details,provider_details_label:detailsLabel});
+            S.messages.push({role:'assistant',content:`**${label}:** ${message}${hint}`,provider_details:details,provider_details_label:detailsLabel,_error:true});
           }
         }catch(_){
-          S.messages.push({role:'assistant',content:'**Error:** An error occurred. Check server logs.'});
+          S.messages.push({role:'assistant',content:'**发生错误：** 请求处理失败，请查看服务端日志。',_error:true});
         }
         if(isRecoveryControlMessage){
           (async()=>{
@@ -3368,8 +3361,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           // Fallback to local cancel message if API fails
           if(S.session&&S.session.session_id===activeSid){
             clearLiveToolCards();if(!assistantText)removeThinking();
-            const cancelAgentName=(assistantDisplayName()+'').trim()||'Hermes';
-            S.messages.push({role:'assistant',content:`**Task cancelled:** Task cancelled.\n\n*The run was cancelled by the user before ${cancelAgentName} finished. No provider failure occurred.*`,provider_details:'Task cancelled.',provider_details_label:'Cancellation details',_error:true});renderMessages({preserveScroll:true});
+            S.messages.push({role:'assistant',content:'任务已取消。',provider_details:'Task cancelled.',provider_details_label:'取消详情',_error:true});renderMessages({preserveScroll:true});
             _markSessionViewed(activeSid, S.messages.length);
           }
         }

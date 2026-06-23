@@ -459,8 +459,12 @@
       "get": {
         "tags": ["Workspace"],
         "summary": "获取媒体文件",
+        "description": "绝对路径 `path` 走媒体白名单根目录（与聊天 `MEDIA:` 令牌相同）。相对路径 `path` 需同时传 `session_id`，解析范围与 `GET /api/file/raw` 相同（会话 workspace，再回退到该会话附件目录）。相对路径分支使用 `file/raw` 的 inline/disposition 规则；绝对路径分支默认仅图片 inline，其它类型需 `inline=1`。",
         "parameters": [
-          { "name": "path", "in": "query", "required": true, "schema": { "type": "string" } }
+          { "name": "path", "in": "query", "required": true, "schema": { "type": "string" }, "description": "绝对路径或相对 workspace/附件 的路径" },
+          { "name": "session_id", "in": "query", "required": false, "schema": { "type": "string" }, "description": "相对 path 时必填" },
+          { "name": "inline", "in": "query", "required": false, "schema": { "type": "string", "enum": ["0", "1"] } },
+          { "name": "download", "in": "query", "required": false, "schema": { "type": "string", "enum": ["0", "1"] } }
         ],
         "responses": { "200": { "description": "媒体文件内容" } }
       }
@@ -1832,13 +1836,15 @@
       "get": {
         "tags": ["SkillHub"],
         "summary": "获取 SkillHub 技能列表",
-        "description": "按 scope 返回技能市场目录、已安装/未安装筛选或本地自建技能。无效 scope 回落为 hub。stats 为全库全局计数（不受 category/q 影响）；skills/total 仍受 category 与 q 过滤。",
+        "description": "按 scope 返回技能市场目录、已安装/未安装筛选或本地自建技能。无效 scope 回落为 hub。stats 为全库全局计数（不受 category/q 影响）；skills/total 仍受 category 与 q 过滤。hub/installed/not_installed 在本地全量拉取后排序再分页；q 为本地子串匹配。",
         "parameters": [
           { "name": "scope", "in": "query", "schema": { "type": "string", "enum": ["hub", "installed", "not_installed", "custom"], "default": "hub" }, "description": "hub=市场目录（附 installed 标注）；installed/not_installed=按当前 Cookie profile 的本地安装状态筛选；custom=读取 {HERMES_HOME}/skills 下本地自建（非市场同名），不按 profile 分子目录" },
           { "name": "category", "in": "query", "schema": { "type": "string" }, "description": "分类过滤；空字符串、all 或 * 表示全部分类" },
           { "name": "q", "in": "query", "schema": { "type": "string" }, "description": "关键词搜索（仅列表项，不影响 stats 计数）" },
           { "name": "page", "in": "query", "schema": { "type": "integer", "minimum": 1, "default": 1 }, "description": "页码（从 1 开始）" },
-          { "name": "page_size", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 }, "description": "每页条数（上限 100）" }
+          { "name": "page_size", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 }, "description": "每页条数（上限 100）" },
+          { "name": "sort", "in": "query", "schema": { "type": "string", "enum": ["name", "mtime"], "default": "name" }, "description": "排序字段：name=显示名/名称；mtime=修改时间" },
+          { "name": "order", "in": "query", "schema": { "type": "string", "enum": ["asc", "desc"], "default": "asc" }, "description": "排序方向" }
         ],
         "responses": {
           "200": {
@@ -1849,6 +1855,7 @@
               }
             }
           },
+          "400": { "description": "无效的 sort 或 order 参数" },
           "502": { "description": "上游 SkillHub 请求失败" }
         }
       }
@@ -2553,7 +2560,8 @@
           "installed":      { "type": "boolean", "description": "是否在 shared_skills_dir 已存在" },
           "hub_installed":  { "type": "boolean", "description": "是否通过 SkillHub 安装（含 .hub_installed）" },
           "custom":         { "type": "boolean", "description": "scope=custom 时为 true" },
-          "disabled":       { "type": "boolean" }
+          "disabled":       { "type": "boolean" },
+          "mtime":          { "type": "number", "nullable": true, "description": "修改时间（Unix 秒）。已安装/custom 来自本地 SKILL.md；未安装 hub 项来自上游 mtime 或 updated_at（统一输出为 mtime）；无值时为 null" }
         },
         "additionalProperties": true
       },

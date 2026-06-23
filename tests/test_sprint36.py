@@ -241,13 +241,13 @@ def test_sanitize_strips_error_flagged_assistant_messages():
     messages = [
         {"role": "user", "content": "hello"},
         {"role": "assistant", "content": "hi"},
-        {"role": "assistant", "content": "*Task cancelled.*", "_error": True},
+        {"role": "assistant", "content": "任务已取消。", "_error": True},
         {"role": "user", "content": "next"},
     ]
     sanitized = _sanitize_messages_for_api(messages)
     assert len(sanitized) == 3, (
         f"expected 3 messages (cancel marker stripped), got {len(sanitized)}: {sanitized}"
     )
-    assert all("Task cancelled" not in (m.get("content") or "") for m in sanitized), (
+    assert all("任务已取消" not in (m.get("content") or "") for m in sanitized), (
         "_sanitize_messages_for_api must filter cancel markers from API history"
     )

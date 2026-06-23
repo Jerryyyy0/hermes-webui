@@ -88,20 +88,58 @@ def test_compute_scope_stats_global_not_category_scoped(hub_url):
 def test_list_hub_skills_filtered_installed(hub_url):
     with patch("integration.skills.skillhub.fetch_all_hub_skills") as fetch_all:
         with patch("integration.skills.skillhub.annotate_installed") as annotate:
-            fetch_all.return_value = [{"name": "a"}, {"name": "b"}]
-            annotate.return_value = [
-                {"name": "a", "installed": True, "custom": False},
-                {"name": "b", "installed": False, "custom": False},
-            ]
-            skills, total = skillhub.list_hub_skills_filtered(
-                "",
-                "installed",
-                None,
-                1,
-                20,
-            )
-            assert total == 1
-            assert skills[0]["name"] == "a"
+            with patch("integration.skills.skillhub.enrich_skills_mtime") as enrich:
+                fetch_all.return_value = [{"name": "a"}, {"name": "b"}]
+                annotate.return_value = [
+                    {"name": "a", "installed": True, "custom": False},
+                    {"name": "b", "installed": False, "custom": False},
+                ]
+                enrich.side_effect = lambda skills, _dir: skills
+                skills, total = skillhub.list_hub_skills_filtered(
+                    "",
+                    "installed",
+                    None,
+                    1,
+                    20,
+                )
+                assert total == 1
+                assert skills[0]["name"] == "a"
+
+
+def test_list_hub_catalog_paged_sort_and_pagination(hub_url):
+    with patch("integration.skills.skillhub.fetch_all_hub_skills") as fetch_all:
+        with patch("integration.skills.skillhub.annotate_installed") as annotate:
+            with patch("integration.skills.skillhub.enrich_skills_mtime") as enrich:
+                fetch_all.return_value = [
+                    {"name": "c", "mtime": 1.0},
+                    {"name": "a", "mtime": 3.0},
+                    {"name": "b", "mtime": 2.0},
+                ]
+                annotate.side_effect = lambda skills: skills
+                enrich.side_effect = lambda skills, _dir: skills
+
+                page1, total = skillhub.list_hub_catalog_paged(
+                    "",
+                    "hub",
+                    None,
+                    1,
+                    2,
+                    sort="mtime",
+                    order="desc",
+                )
+                page2, _ = skillhub.list_hub_catalog_paged(
+                    "",
+                    "hub",
+                    None,
+                    2,
+                    2,
+                    sort="mtime",
+                    order="desc",
+                )
+
+                assert total == 3
+                assert [s["name"] for s in page1] == ["a", "b"]
+                assert [s["name"] for s in page2] == ["c"]
 
 
 def test_hub_all_catalog_names_paginates(hub_url):

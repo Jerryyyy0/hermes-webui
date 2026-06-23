@@ -9,6 +9,12 @@ from api.helpers import MAX_BODY_BYTES, bad, j, read_body
 
 from integration.config import integration_enabled, skillhub_enabled
 from integration.skills import listing, local_skills, skillhub
+from integration.skills.sort_utils import (
+    SKILL_LIST_SORT_FIELDS,
+    SKILL_LIST_SORT_ORDERS,
+    normalize_order,
+    normalize_sort,
+)
 from integration.skills.utils import stream_zip_to_handler
 
 
@@ -236,6 +242,18 @@ def _get_skillhub_skills(handler, parsed) -> bool:
     q = (qs.get("q") or [None])[0]
     page = _optional_int((qs.get("page") or [None])[0])
     page_size = _optional_int((qs.get("page_size") or [None])[0])
+    sort_raw = str((qs.get("sort") or ["name"])[0] or "name").strip().lower()
+    order_raw = str((qs.get("order") or ["asc"])[0] or "asc").strip().lower()
+    if sort_raw not in SKILL_LIST_SORT_FIELDS:
+        return _respond_bad(
+            handler,
+            f"sort must be one of: {', '.join(sorted(SKILL_LIST_SORT_FIELDS))}",
+            400,
+        )
+    if order_raw not in SKILL_LIST_SORT_ORDERS:
+        return _respond_bad(handler, "order must be asc or desc", 400)
+    sort = normalize_sort(sort_raw)
+    order = normalize_order(order_raw)
     try:
         payload = listing.list_skillhub_skills(
             scope=scope,
@@ -243,6 +261,8 @@ def _get_skillhub_skills(handler, parsed) -> bool:
             q=q,
             page=page,
             page_size=page_size,
+            sort=sort,
+            order=order,
         )
         return _respond(handler, payload)
     except Exception as exc:

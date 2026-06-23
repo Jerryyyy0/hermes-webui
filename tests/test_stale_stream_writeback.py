@@ -198,7 +198,8 @@ def test_self_heal_retry_success_checks_stream_ownership_before_writeback():
 
 def test_outer_exception_path_checks_stream_ownership_before_error_writeback():
     src = Path("api/streaming.py").read_text(encoding="utf-8")
-    outer_error_payload = src.index("_error_payload = _provider_error_payload(err_str, _exc_type, _exc_hint)")
+    except_idx = src.index("print('[webui] stream error:")
+    outer_error_payload = src.index("_error_payload = _provider_error_payload_from_classification", except_idx)
     start = src.index("# Persist the error so it survives page reload.", outer_error_payload)
     end = src.index("put('apperror', _error_payload)", start)
     block = src[start:end]
@@ -207,4 +208,4 @@ def test_outer_exception_path_checks_stream_ownership_before_error_writeback():
     assert guard in block
     assert block.index(guard) < block.index("_materialize_pending_user_turn_before_error(s)")
     assert block.index(guard) < block.index("s.active_stream_id = None")
-    assert block.index(guard) < block.index("s.messages.append(_error_message)")
+    assert block.index(guard) < block.index("_append_persisted_provider_error_message(")

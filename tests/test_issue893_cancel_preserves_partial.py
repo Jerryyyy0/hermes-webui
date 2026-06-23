@@ -118,7 +118,7 @@ class TestCancelStreamPreservesPartial:
         assert any('Python is a high-level programming language' in c for c in msg_contents), (
             f"Partial text not found in session messages: {msg_contents}"
         )
-        assert any('Task cancelled:' in c for c in msg_contents), (
+        assert any('任务已取消' in c for c in msg_contents), (
             "Cancel marker missing from session messages"
         )
         # Partial message should NOT have _error=True (it's real content)
@@ -127,9 +127,9 @@ class TestCancelStreamPreservesPartial:
         assert partial_msg.get('_partial') is True
         assert not partial_msg.get('_error')
         # Cancel marker should have _error=True
-        cancel_msg = next(m for m in saved.messages if 'Task cancelled:' in m.get('content', ''))
+        cancel_msg = next(m for m in saved.messages if '任务已取消' in m.get('content', ''))
         assert cancel_msg.get('_error') is True
-        assert cancel_msg.get('provider_details_label') == 'Cancellation details'
+        assert cancel_msg.get('provider_details_label') == '取消详情'
 
     def test_cancel_stream_with_no_partial_text_still_saves_cancel_marker(self, tmp_path, monkeypatch):
         """If no tokens were streamed before cancel, only the cancel marker is saved."""
@@ -169,7 +169,7 @@ class TestCancelStreamPreservesPartial:
 
         saved = Session.load('sess_nopartial')
         msg_contents = [m.get('content', '') for m in saved.messages]
-        assert any('Task cancelled:' in c for c in msg_contents)
+        assert any('任务已取消' in c for c in msg_contents)
         # No extra partial message when there was nothing streamed
         assert not any(m.get('_partial') for m in saved.messages), (
             "Should not add partial message when no tokens were streamed"
@@ -268,7 +268,7 @@ class TestCancelStreamPreservesPartial:
             "Unclosed think block with no visible content should not produce a partial message"
         )
         # Cancel marker should still be present
-        assert any('Task cancelled' in m.get('content', '') for m in saved.messages)
+        assert any('任务已取消' in m.get('content', '') for m in saved.messages)
 
 
 class TestPartialMessageInContext:
@@ -280,7 +280,7 @@ class TestPartialMessageInContext:
         messages = [
             {'role': 'user', 'content': 'Tell me about Python'},
             {'role': 'assistant', 'content': 'Python is a high-level', '_partial': True},
-            {'role': 'assistant', 'content': '*Task cancelled.*', '_error': True},
+            {'role': 'assistant', 'content': '任务已取消。', '_error': True},
         ]
         clean = _sanitize_messages_for_api(messages)
         roles = [m['role'] for m in clean]
@@ -292,7 +292,7 @@ class TestPartialMessageInContext:
             "Partial assistant content should be in API context so model can continue from it"
         )
         # Cancel marker (_error=True) should be excluded
-        assert not any('Task cancelled' in c for c in contents), (
+        assert not any('任务已取消' in c for c in contents), (
             "Cancel marker with _error=True must be stripped from API context"
         )
 

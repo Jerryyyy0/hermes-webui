@@ -277,6 +277,10 @@ Query parameters:
 | `category` | `""` (all) | Hub category filter; empty/`all` = all categories |
 | `q` | — | Search (list only; tab stats ignore `q`) |
 | `page` / `page_size` | `1` / `20` | Pagination |
+| `sort` | `name` | `name` or `mtime` |
+| `order` | `asc` | `asc` or `desc` |
+
+List items always include aligned string fields (empty string when unset) and `mtime` (`null` when unset). Hub upstream `updated_at` is normalized into `mtime`. `hub` / `installed` / `not_installed` fetch the full catalog locally, apply `q` as substring match, sort, then paginate.
 
 Response includes global `stats`: `{ hub, installed, not_installed, custom }` across **all** categories (unaffected by list `category` or `q`; only `skills`/`total` follow those filters).
 

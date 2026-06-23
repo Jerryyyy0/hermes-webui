@@ -52,6 +52,15 @@ from api.models import (
     reconciled_state_db_messages_for_session,
 )
 from api.session_ops import mark_session_title_generated, session_has_manual_title
+from integration.chat_provider_errors import (
+    append_persisted_provider_error_message as _append_persisted_provider_error_message,
+    build_user_error_content as _build_user_error_content,
+    cancelled_turn_hint as _cancelled_turn_hint,
+    classify_connection_error_code as _classify_connection_error_code,
+    classify_provider_error as _classify_provider_error,
+    provider_error_payload as _provider_error_payload,
+    provider_error_payload_from_classification as _provider_error_payload_from_classification,
+)
 
 # Global lock for os.environ writes. Per-session locks (_agent_lock) prevent
 # concurrent runs of the SAME session, but two DIFFERENT sessions can still
@@ -300,29 +309,6 @@ def _get_ai_agent():
     return AIAgent
 
 
-def _is_quota_error_text(err_text: str) -> bool:
-    """Return True when provider text looks like quota/usage exhaustion."""
-    _err_lower = str(err_text or '').lower()
-    return (
-        'insufficient credit' in _err_lower
-        or 'credit balance' in _err_lower
-        or 'credits exhausted' in _err_lower
-        or 'more credits' in _err_lower
-        or 'can only afford' in _err_lower
-        or 'fewer max_tokens' in _err_lower
-        or 'quota_exceeded' in _err_lower
-        or 'quota exceeded' in _err_lower
-        or 'exceeded your current quota' in _err_lower
-        # OpenAI Codex OAuth usage-exhaustion shapes (#1765).
-        or 'plan limit reached' in _err_lower
-        or 'usage_limit_exceeded' in _err_lower
-        or 'usage limit exceeded' in _err_lower
-        or 'reached the limit of messages' in _err_lower
-        or 'used up your usage' in _err_lower
-        or ('plan' in _err_lower and 'limit' in _err_lower and 'reached' in _err_lower)
-    )
-
-
 def _clarify_timeout_seconds(default: int = 120) -> int:
     """Resolve clarify timeout from config, with bounded fallback."""
     try:
@@ -336,7 +322,12 @@ def _clarify_timeout_seconds(default: int = 120) -> int:
         return default
 
 
-_CANCEL_MARKER_PATTERNS = ('task cancelled', 'task canceled', 'response interrupted')
+_CANCEL_MARKER_PATTERNS = (
+    'task cancelled',
+    'task canceled',
+    'response interrupted',
+    '任务已取消',
+)
 
 
 _WEBUI_PROGRESS_PROMPT = """
@@ -814,144 +805,6 @@ def _preferred_agent_display_name_for_session(session) -> str:
     return _preferred_agent_display_name()
 
 
-def _cancelled_turn_hint(agent_name: str | None = None) -> str:
-    name = str(agent_name or _preferred_agent_display_name()).strip() or 'Hermes'
-    return f'The run was cancelled by the user before {name} finished. No provider failure occurred.'
-
-
-def _classify_provider_error(err_str: str, exc=None, *, silent_failure: bool = False) -> dict:
-    """Classify provider/agent failure text for WebUI apperror UX.
-
-    Keep this string-based until hermes-agent exposes stable structured
-    provider error classes for Codex OAuth plan limits.
-    """
-    err_str = str(err_str or '')
-    _err_lower = err_str.lower()
-    _exc_name = type(exc).__name__ if exc is not None else ''
-    _is_cancelled = (
-        'cancelled by user' in _err_lower
-        or 'canceled by user' in _err_lower
-        or 'user cancelled' in _err_lower
-        or 'user canceled' in _err_lower
-        or 'task cancelled' in _err_lower
-        or 'task canceled' in _err_lower
-        or 'cancellederror' in _err_lower
-        or (exc is not None and _exc_name in ('CancelledError', 'CanceledError'))
-    )
-    _is_interrupted = (
-        not _is_cancelled
-        and (
-            'interrupted by user' in _err_lower
-            or 'response interrupted' in _err_lower
-            or 'operation interrupted' in _err_lower
-            or 'operation was interrupted' in _err_lower
-            or 'operation aborted' in _err_lower
-            or 'request was aborted' in _err_lower
-            or 'aborterror' in _err_lower
-            or (exc is not None and type(exc).__name__ in ('KeyboardInterrupt', 'AbortError'))
-        )
-    )
-    if _is_cancelled:
-        return {
-            'label': 'Task cancelled',
-            'type': 'cancelled',
-            'hint': _cancelled_turn_hint(),
-        }
-    if _is_interrupted:
-        return {
-            'label': 'Response interrupted',
-            'type': 'interrupted',
-            'hint': 'The run stopped before a provider response completed. If you did not cancel it, try again.',
-        }
-    _is_quota = _is_quota_error_text(err_str)
-    _is_auth = (
-        not _is_quota and (
-            '401' in err_str
-            or (exc is not None and 'AuthenticationError' in _exc_name)
-            or 'authentication' in _err_lower
-            or 'unauthorized' in _err_lower
-            or 'invalid api key' in _err_lower
-            or 'invalid_api_key' in _err_lower
-            or 'no cookie auth credentials' in _err_lower
-        )
-    )
-    _is_not_found = (
-        # model_not_found hints mention Settings / `hermes model` below.
-        '404' in err_str
-        or 'not found' in _err_lower
-        or 'does not exist' in _err_lower
-        or 'model not found' in _err_lower
-        or 'model_not_found' in _err_lower  # hint below points to Settings / `hermes model`
-        or 'invalid model' in _err_lower
-        or 'does not match any known model' in _err_lower
-        or 'unknown model' in _err_lower
-    )
-    _is_rate_limit = (not _is_quota) and (
-        'rate limit' in _err_lower or '429' in err_str or (exc is not None and 'RateLimitError' in _exc_name)
-    )
-    _is_compression_exhausted = (
-        'compression_exhausted' in _err_lower
-        or 'compression exhausted' in _err_lower
-        or ('context length exceeded' in _err_lower and 'cannot compress further' in _err_lower)
-        or ('context compression' in _err_lower and 'max compression attempts' in _err_lower)
-    )
-    if _is_quota:
-        return {
-            'label': 'Out of credits',
-            'type': 'quota_exhausted',
-            'hint': 'Your provider account is out of credits or usage. Top up, wait for the plan window to reset, or switch providers via `hermes model`.',
-        }
-    if _is_rate_limit:
-        return {
-            'label': 'Rate limit reached',
-            'type': 'rate_limit',
-            'hint': 'Rate limit reached. The fallback model (if configured) was also exhausted. Try again in a moment.',
-        }
-    if _is_auth:
-        return {
-            'label': 'Authentication failed',
-            'type': 'auth_mismatch',
-            'hint': 'The selected model may not be supported by your configured provider or your API key is invalid. Run `hermes model` in your terminal to update credentials, then restart the WebUI.',
-        }
-    if _is_not_found:
-        return {
-            'label': 'Model not found',
-            'type': 'model_not_found',
-            'hint': 'The selected model was not found by the provider. Check the model ID in Settings or run `hermes model` to verify it exists for your provider.',
-        }
-    if _is_compression_exhausted:
-        return {
-            'label': 'Context compression exhausted',
-            'type': 'compression_exhausted',
-            'hint': 'The conversation context is too large to compress safely. Start a new conversation or retry with a narrower task.',
-        }
-    if silent_failure:
-        return {
-            'label': 'No response from provider',
-            # Preserve the existing no_response event type (#373) while making
-            # the catch-all silent-failure message more specific for #1765.
-            'type': 'no_response',
-            'hint': 'The provider returned no content and no error. This often means a usage/rate limit was hit silently. Check provider status, switch providers via `hermes model`, or try again in a moment.',
-        }
-    return {'label': 'Error', 'type': 'error', 'hint': ''}
-
-
-def _provider_error_payload(message: str, err_type: str, hint: str = '') -> dict:
-    """Build a bounded, redacted apperror payload with provider details."""
-    _message = str(message or '')
-    _safe_message = _redact_text(_message).strip() if _message else ''
-    payload: dict = {'message': _safe_message or _message, 'type': err_type}
-    if hint:
-        payload['hint'] = hint
-    if _safe_message:
-        _details = _safe_message
-        if len(_details) > 1200:
-            _details = _details[:1197].rstrip() + '…'
-        if _details:
-            payload['details'] = _details
-    return payload
-
-
 def _session_has_cancel_marker(session) -> bool:
     """Return True if a visible cancel/interrupted marker is already persisted."""
     for msg in reversed(getattr(session, 'messages', None) or []):
@@ -978,14 +831,15 @@ def _session_has_cancel_marker(session) -> bool:
 
 
 def _cancelled_turn_content(message: str = 'Task cancelled.', agent_name: str | None = None) -> str:
-    """Return cancelled-turn copy matching the verbose provider-error layout."""
-    _message = str(message or 'Task cancelled.').strip()
-    if not _message.endswith('.'):
-        _message += '.'
-    return (
-        f"**Task cancelled:** {_message}\n\n"
-        f"*{_cancelled_turn_hint(agent_name)}*"
-    )
+    """Return user-visible copy for a cancelled turn."""
+    # _message = str(message or 'Task cancelled.').strip()
+    # if not _message.endswith('.'):
+    #     _message += '.'
+    # return (
+    #     f"**Task cancelled:** {_message}\n\n"
+    #     f"*{_cancelled_turn_hint(agent_name)}*"
+    # )
+    return '任务已取消。'
 
 
 def _persist_cancelled_turn(session, *, message: str = 'Task cancelled.') -> None:
@@ -1007,7 +861,7 @@ def _persist_cancelled_turn(session, *, message: str = 'Task cancelled.') -> Non
             'content': _cancelled_turn_content(message, agent_name),
             '_error': True,
             'provider_details': str(message or 'Task cancelled.').strip(),
-            'provider_details_label': 'Cancellation details',
+            'provider_details_label': '取消详情',
             'timestamp': int(time.time()),
         })
 
@@ -6666,13 +6520,8 @@ def _run_agent_streaming(
                         _last_err,
                         silent_failure=not bool(_err_str),
                     )
-                    _is_quota = _classification['type'] == 'quota_exhausted'
                     _is_auth = _classification['type'] == 'auth_mismatch'
-                    if _is_quota:
-                        _err_label = _classification['label']
-                        _err_type = _classification['type']
-                        _err_hint = _classification['hint']
-                    elif _is_auth and not _self_healed:
+                    if _is_auth and not _self_healed:
                         # ── Credential self-heal on 401 (#1401) ──
                         # Before emitting the error, try re-reading credentials
                         # and retrying once with a fresh agent.
@@ -6763,38 +6612,10 @@ def _run_agent_streaming(
                                 # normal post-result persistence path by
                                 # leaving _assistant_added truthy (set below).
                                 _assistant_added = True  # prevent re-entering guard
-                        if not _assistant_added:
-                            # Self-heal didn't apply or retry failed — emit error
-                            _err_label = 'Authentication failed'
-                            _err_type = 'auth_mismatch'
-                            _err_hint = (
-                                'The selected model may not be supported by your configured provider or '
-                                'your API key is invalid. Run `hermes model` in your terminal to '
-                                'update credentials, then restart the WebUI.'
-                            )
-                    elif _is_auth:
-                        _err_label = 'Authentication failed'
-                        _err_type = 'auth_mismatch'
-                        _err_hint = (
-                            'The selected model may not be supported by your configured provider or '
-                            'your API key is invalid. Run `hermes model` in your terminal to '
-                            'update credentials, then restart the WebUI.'
-                        )
-                    else:
-                        _err_label = _classification['label']
-                        _err_type = _classification['type']
-                        _err_hint = _classification['hint']
-                    # Skip error emission if credential self-heal succeeded
-                    # (#1401) — _assistant_added is set True on successful retry.
-                    if _assistant_added:
-                        # Self-heal succeeded: messages are already merged into s,
-                        # fall through to normal post-result persistence below.
-                        pass
-                    else:
-                        _error_payload = _provider_error_payload(
-                            _err_str or f'{_err_label}.',
-                            _err_type,
-                            _err_hint,
+                    if not _assistant_added:
+                        _error_payload = _provider_error_payload_from_classification(
+                            _err_str or _classification.get('message') or _classification['label'],
+                            _classification,
                         )
                         # Clear stream/pending state so the session does not appear
                         # "agent_running" on reload after a silent failure.
@@ -6806,19 +6627,11 @@ def _run_agent_streaming(
                         s.pending_user_message = None
                         s.pending_attachments = []
                         s.pending_started_at = None
-                        _error_message = {
-                            'role': 'assistant',
-                            'content': f'**{_err_label}:** {_error_payload.get("message") or _err_label}\n\n*{_err_hint}*',
-                            'timestamp': int(time.time()),
-                            '_error': True,
-                        }
-                        if _error_payload.get('details'):
-                            _error_message['provider_details'] = _error_payload['details']
-                        if _err_type == 'cancelled':
-                            _error_message['provider_details_label'] = 'Cancellation details'
-                        elif _err_type == 'interrupted':
-                            _error_message['provider_details_label'] = 'Interruption details'
-                        s.messages.append(_error_message)
+                        _append_persisted_provider_error_message(
+                            s,
+                            _error_payload,
+                            err_type=_classification['type'],
+                        )
                         try:
                             s.save()
                         except Exception:
@@ -7589,7 +7402,6 @@ def _run_agent_streaming(
         _stripped = re.sub(r'\s+', ' ', _stripped).strip()
         if _stripped != err_str:
             err_str = _stripped
-        _exc_lower = err_str.lower()
         _classification = _classify_provider_error(err_str, e)
         if cancel_event.is_set():
             if s is not None:
@@ -7615,129 +7427,99 @@ def _run_agent_streaming(
                             logger.debug("Failed to append cancelled turn journal event", exc_info=True)
             put('cancel', {'message': 'Cancelled by user'})
             return
-        _exc_is_quota = _classification['type'] == 'quota_exhausted'
-        # Exception quota text still includes: 'more credits' in _exc_lower, 'can only afford' in _exc_lower, 'fewer max_tokens' in _exc_lower.
-        # Rate-limit detection remains guarded as: (not _exc_is_quota).
-        _exc_is_rate_limit = (_classification['type'] == 'rate_limit') and (not _exc_is_quota)
-        _exc_is_auth = _classification['type'] == 'auth_mismatch'  # detects '401' and 'unauthorized' via _classify_provider_error.
-        _exc_is_not_found = _classification['type'] == 'model_not_found'  # detects '404', 'not found', 'does not exist', and 'invalid model'.
-        _exc_is_cancelled = _classification['type'] == 'cancelled'
-        _exc_is_interrupted = _classification['type'] == 'interrupted'
+        _exc_is_auth = _classification['type'] == 'auth_mismatch'
 
-        # The user hint still points to Settings / `hermes model` from _classify_provider_error().
-        if _exc_is_quota:
-            _exc_label, _exc_type, _exc_hint = (
-                _classification['label'], _classification['type'], _classification['hint'],
+        if _exc_is_auth and not _self_healed:
+            # ── Credential self-heal on 401 (#1401) ──
+            _heal_rt = _attempt_credential_self_heal(
+                resolved_provider or '', session_id, _agent_lock,
             )
-        elif _exc_is_rate_limit:
-            _exc_label, _exc_type, _exc_hint = (
-                _classification['label'], _classification['type'], _classification['hint'],
-            )
-        elif _exc_is_auth:
-            if not _self_healed:
-                # ── Credential self-heal on 401 (#1401) ──
-                _heal_rt = _attempt_credential_self_heal(
-                    resolved_provider or '', session_id, _agent_lock,
+            if _heal_rt is not None:
+                logger.info('[webui] self-heal (except path): retrying stream after credential refresh')
+                _self_healed = True
+                # Rebuild runtime variables
+                _rt = _heal_rt
+                resolved_api_key = _heal_rt.get('api_key')
+                if not resolved_provider:
+                    resolved_provider = _heal_rt.get('provider')
+                if not resolved_base_url:
+                    resolved_base_url = _heal_rt.get('base_url')
+                resolved_provider, resolved_api_key, resolved_base_url = _resolve_custom_provider_runtime_overrides(
+                    resolved_provider, resolved_api_key, resolved_base_url
                 )
-                if _heal_rt is not None:
-                    logger.info('[webui] self-heal (except path): retrying stream after credential refresh')
-                    _self_healed = True
-                    # Rebuild runtime variables
-                    _rt = _heal_rt
-                    resolved_api_key = _heal_rt.get('api_key')
-                    if not resolved_provider:
-                        resolved_provider = _heal_rt.get('provider')
-                    if not resolved_base_url:
-                        resolved_base_url = _heal_rt.get('base_url')
-                    resolved_provider, resolved_api_key, resolved_base_url = _resolve_custom_provider_runtime_overrides(
-                        resolved_provider, resolved_api_key, resolved_base_url
+                # Build a fresh agent with the new credentials
+                _heal_kwargs = dict(_agent_kwargs) if '_agent_kwargs' in dir() else {}
+                _heal_kwargs['api_key'] = resolved_api_key
+                _heal_kwargs['base_url'] = resolved_base_url
+                _heal_kwargs['model'] = resolved_model
+                _heal_kwargs['provider'] = resolved_provider
+                _replace_session_db_in_kwargs(_heal_kwargs, _state_db_path)
+                if 'credential_pool' in _agent_params:
+                    _heal_kwargs['credential_pool'] = _heal_rt.get('credential_pool')
+                _heal_agent = _AIAgent(**_heal_kwargs)
+                with STREAMS_LOCK:
+                    AGENT_INSTANCES[stream_id] = _heal_agent
+                from api.config import SESSION_AGENT_CACHE as _SAC2, SESSION_AGENT_CACHE_LOCK as _SAC2_L
+                with _SAC2_L:
+                    _SAC2[session_id] = (_heal_agent, _agent_sig)
+                    _SAC2.move_to_end(session_id)
+                # Retry the conversation
+                _token_sent = False
+                try:
+                    _heal_result = _heal_agent.run_conversation(
+                        user_message=user_message,
+                        system_message=workspace_system_msg,
+                        conversation_history=_sanitize_messages_for_api(_previous_context_messages, cfg=_cfg),
+                        task_id=session_id,
+                        persist_user_message=msg_text,
                     )
-                    # Build a fresh agent with the new credentials
-                    _heal_kwargs = dict(_agent_kwargs) if '_agent_kwargs' in dir() else {}
-                    _heal_kwargs['api_key'] = resolved_api_key
-                    _heal_kwargs['base_url'] = resolved_base_url
-                    _heal_kwargs['model'] = resolved_model
-                    _heal_kwargs['provider'] = resolved_provider
-                    _replace_session_db_in_kwargs(_heal_kwargs, _state_db_path)
-                    if 'credential_pool' in _agent_params:
-                        _heal_kwargs['credential_pool'] = _heal_rt.get('credential_pool')
-                    _heal_agent = _AIAgent(**_heal_kwargs)
-                    with STREAMS_LOCK:
-                        AGENT_INSTANCES[stream_id] = _heal_agent
-                    from api.config import SESSION_AGENT_CACHE as _SAC2, SESSION_AGENT_CACHE_LOCK as _SAC2_L
-                    with _SAC2_L:
-                        _SAC2[session_id] = (_heal_agent, _agent_sig)
-                        _SAC2.move_to_end(session_id)
-                    # Retry the conversation
-                    _token_sent = False
-                    try:
-                        _heal_result = _heal_agent.run_conversation(
-                            user_message=user_message,
-                            system_message=workspace_system_msg,
-                            conversation_history=_sanitize_messages_for_api(_previous_context_messages, cfg=_cfg),
-                            task_id=session_id,
-                            persist_user_message=msg_text,
-                        )
-                        # Retry succeeded — persist the result normally
-                        if s is not None:
-                            if _checkpoint_stop is not None:
-                                _checkpoint_stop.set()
-                            if _ckpt_thread is not None:
-                                _ckpt_thread.join(timeout=15)
-                            _lock_ctx = _agent_lock if _agent_lock is not None else contextlib.nullcontext()
-                            with _lock_ctx:
-                                if not ephemeral and not _stream_writeback_is_current(s, stream_id):
-                                    logger.info(
-                                        "Skipping stale stream self-heal writeback for session %s stream %s; active_stream_id=%s",
-                                        getattr(s, 'session_id', session_id),
-                                        stream_id,
-                                        getattr(s, 'active_stream_id', None),
-                                    )
-                                    return
-                                _result_messages = _heal_result.get('messages') or _previous_context_messages
-                                _next_context_messages = _restore_reasoning_metadata(
-                                    _previous_context_messages, _result_messages,
+                    # Retry succeeded — persist the result normally
+                    if s is not None:
+                        if _checkpoint_stop is not None:
+                            _checkpoint_stop.set()
+                        if _ckpt_thread is not None:
+                            _ckpt_thread.join(timeout=15)
+                        _lock_ctx = _agent_lock if _agent_lock is not None else contextlib.nullcontext()
+                        with _lock_ctx:
+                            if not ephemeral and not _stream_writeback_is_current(s, stream_id):
+                                logger.info(
+                                    "Skipping stale stream self-heal writeback for session %s stream %s; active_stream_id=%s",
+                                    getattr(s, 'session_id', session_id),
+                                    stream_id,
+                                    getattr(s, 'active_stream_id', None),
                                 )
-                                _next_context_messages = _dedupe_replayed_context_messages(
-                                    _previous_context_messages,
-                                    _next_context_messages,
-                                )
-                                s.context_messages = _deduplicate_context_messages(_next_context_messages)
-                                s.messages = _merge_display_messages_after_agent_result(
-                                    _previous_messages,
-                                    _previous_context_messages,
-                                    _restore_reasoning_metadata(_previous_messages, _result_messages),
-                                    msg_text,
-                                )
-                                # Stamp _turn_key on user messages missing it (deferred save mode)
-                                from api.session_manifest import _next_turn_key as _ntk3
-                                for _m in s.messages:
-                                    if isinstance(_m, dict) and _m.get('role') == 'user' and not _m.get('_turn_key'):
-                                        _m['_turn_key'] = _ntk3(s.messages)
-                                s.save()
-                        logger.info('[webui] self-heal (except path): retry succeeded')
-                        return  # skip error emission
-                    except Exception as _retry_exc2:
-                        logger.warning('[webui] self-heal (except path): retry failed: %s', _retry_exc2)
-                        # Fall through to emit the original error
-            # Self-heal didn't apply or retry failed — emit the auth error
-            _exc_label, _exc_type, _exc_hint = (
-                'Authentication error', 'auth_mismatch',
-                'The selected model may not be supported by your configured provider. '
-                'Run `hermes model` in your terminal to switch providers, then restart the WebUI.',
-            )
-        elif _exc_is_not_found:
-            _exc_label, _exc_type, _exc_hint = (
-                _classification['label'], _classification['type'], _classification['hint'],
-            )
-        elif _exc_is_cancelled or _exc_is_interrupted:
-            _exc_label, _exc_type, _exc_hint = (
-                _classification['label'], _classification['type'], _classification['hint'],
-            )
-        else:
-            _exc_label, _exc_type, _exc_hint = 'Error', 'error', ''
+                                return
+                            _result_messages = _heal_result.get('messages') or _previous_context_messages
+                            _next_context_messages = _restore_reasoning_metadata(
+                                _previous_context_messages, _result_messages,
+                            )
+                            _next_context_messages = _dedupe_replayed_context_messages(
+                                _previous_context_messages,
+                                _next_context_messages,
+                            )
+                            s.context_messages = _deduplicate_context_messages(_next_context_messages)
+                            s.messages = _merge_display_messages_after_agent_result(
+                                _previous_messages,
+                                _previous_context_messages,
+                                _restore_reasoning_metadata(_previous_messages, _result_messages),
+                                msg_text,
+                            )
+                            # Stamp _turn_key on user messages missing it (deferred save mode)
+                            from api.session_manifest import _next_turn_key as _ntk3
+                            for _m in s.messages:
+                                if isinstance(_m, dict) and _m.get('role') == 'user' and not _m.get('_turn_key'):
+                                    _m['_turn_key'] = _ntk3(s.messages)
+                            s.save()
+                    logger.info('[webui] self-heal (except path): retry succeeded')
+                    return  # skip error emission
+                except Exception as _retry_exc2:
+                    logger.warning('[webui] self-heal (except path): retry failed: %s', _retry_exc2)
+                    # Fall through to emit the original error
 
-        _error_payload = _provider_error_payload(err_str, _exc_type, _exc_hint)
+        _error_payload = _provider_error_payload_from_classification(
+            err_str or _classification.get('message') or _classification['label'],
+            _classification,
+        )
         if s is not None:
             if _checkpoint_stop is not None:
                 _checkpoint_stop.set()
@@ -7761,19 +7543,11 @@ def _run_agent_streaming(
                 s.pending_user_message = None
                 s.pending_attachments = []
                 s.pending_started_at = None
-                _error_message = {
-                    'role': 'assistant',
-                    'content': f'**{_exc_label}:** {_error_payload.get("message") or err_str}' + (f'\n\n*{_exc_hint}*' if _exc_hint else ''),
-                    'timestamp': int(time.time()),
-                    '_error': True,
-                }
-                if _error_payload.get('details'):
-                    _error_message['provider_details'] = _error_payload['details']
-                if _exc_type == 'cancelled':
-                    _error_message['provider_details_label'] = 'Cancellation details'
-                elif _exc_type == 'interrupted':
-                    _error_message['provider_details_label'] = 'Interruption details'
-                s.messages.append(_error_message)
+                _append_persisted_provider_error_message(
+                    s,
+                    _error_payload,
+                    err_type=_classification['type'],
+                )
                 try:
                     s.save()
                 except Exception:
@@ -7786,7 +7560,7 @@ def _run_agent_streaming(
                             {
                                 "event": "interrupted",
                                 "created_at": time.time(),
-                                "reason": _exc_type,
+                                "reason": _classification['type'],
                             },
                         )
                     except Exception:
@@ -8293,7 +8067,7 @@ def cancel_stream(stream_id: str) -> bool:
                         ),
                         '_error': True,
                         'provider_details': 'Task cancelled.',
-                        'provider_details_label': 'Cancellation details',
+                        'provider_details_label': '取消详情',
                         'timestamp': int(time.time()),
                     })
                 _cs.save()

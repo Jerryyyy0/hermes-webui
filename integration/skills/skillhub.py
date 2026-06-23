@@ -11,7 +11,10 @@ import httpx
 
 from integration.config import skillhub_url
 from integration.skills.local_skills import _skill_dir_rel_path, skill_target_dir
+from integration.skills.list_item_shape import normalize_skill_list_items
+from integration.skills.mtime_utils import enrich_skills_mtime
 from integration.skills.paths import shared_skills_dir
+from integration.skills.sort_utils import sort_skill_items
 from integration.skills.utils import extract_zip_and_flatten, find_skill_main_file
 
 _log = logging.getLogger(__name__)
@@ -251,24 +254,53 @@ def compute_scope_stats(hub_names: set[str]) -> dict[str, int]:
     }
 
 
+def list_hub_catalog_paged(
+    category: str,
+    scope: str,
+    q: str | None,
+    page: int,
+    page_size: int,
+    sort: str = "name",
+    order: str = "asc",
+) -> tuple[list[dict], int]:
+    """List hub catalog items with local filter, sort, and pagination."""
+    cat_param = category if category else None
+    skills_dir = shared_skills_dir()
+    skills = enrich_skills_mtime(
+        annotate_installed(fetch_all_hub_skills(cat_param)),
+        skills_dir,
+    )
+    if scope == "installed":
+        skills = [skill for skill in skills if skill.get("installed")]
+    elif scope == "not_installed":
+        skills = [skill for skill in skills if not skill.get("installed")]
+    skills = _filter_skills_by_q(skills, q)
+    skills = sort_skill_items(skills, sort=sort, order=order)
+    skills = normalize_skill_list_items(skills)
+    total = len(skills)
+    offset = (page - 1) * page_size
+    return skills[offset : offset + page_size], total
+
+
 def list_hub_skills_filtered(
     category: str,
     scope: str,
     q: str | None,
     page: int,
     page_size: int,
+    sort: str = "name",
+    order: str = "asc",
 ) -> tuple[list[dict], int]:
-    """List hub catalog items filtered by installed state, with local pagination."""
-    cat_param = category if category else None
-    skills = annotate_installed(fetch_all_hub_skills(cat_param))
-    if scope == "installed":
-        skills = [skill for skill in skills if skill.get("installed")]
-    elif scope == "not_installed":
-        skills = [skill for skill in skills if not skill.get("installed")]
-    skills = _filter_skills_by_q(skills, q)
-    total = len(skills)
-    offset = (page - 1) * page_size
-    return skills[offset : offset + page_size], total
+    """Backward-compatible alias for list_hub_catalog_paged."""
+    return list_hub_catalog_paged(
+        category,
+        scope,
+        q,
+        page,
+        page_size,
+        sort=sort,
+        order=order,
+    )
 
 
 def hub_all_catalog_names() -> set[str]:

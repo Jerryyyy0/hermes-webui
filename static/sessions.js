@@ -2345,6 +2345,195 @@ const NO_PROJECT_FILTER = '__none__';
 let _activeProject = null;  // project_id filter (null = show all, NO_PROJECT_FILTER = unassigned only)
 let _showAllProfiles = false;  // false = filter to active profile only
 let _otherProfileCount = 0;       // count of sessions from other profiles (server-reported)
+const _PROFILE_PREVIEW_LIMIT = 15;
+const _PROFILE_LOAD_MORE_LIMIT = 20;
+let _profileSessionState = new Map(); // profile -> { sessions, totalCount, hasMore, regularOffset, loading }
+let _activeProfileListSessions = [];
+function _normalizeProfileLabel(profile){
+  return (typeof profile==='string'&&profile.trim())?profile.trim():'default';
+}
+
+function _orderedProfileSectionNames(){
+  const activeProfile=_normalizeProfileLabel(S.activeProfile||'default');
+  const names=[activeProfile];
+  const seen=new Set([activeProfile]);
+  for(const name of _profileSessionState.keys()){
+    const normalized=_normalizeProfileLabel(name);
+    if(seen.has(normalized)) continue;
+    seen.add(normalized);
+    names.push(normalized);
+  }
+  return names;
+}
+
+function _sessionsForProfileSection(profileName){
+  const normalized=_normalizeProfileLabel(profileName);
+  const activeProfile=_normalizeProfileLabel(S.activeProfile||'default');
+  if(_profileMatchesActiveProfile(normalized, activeProfile)){
+    return _allSessions.filter(s=>s&&_profileMatchesActiveProfile(s.profile||'default', normalized));
+  }
+  const state=_profileSessionState.get(normalized);
+  return state&&Array.isArray(state.sessions)?state.sessions:[];
+}
+
+function _profileSectionHasMore(profileName){
+  const normalized=_normalizeProfileLabel(profileName);
+  const activeProfile=_normalizeProfileLabel(S.activeProfile||'default');
+  if(_profileMatchesActiveProfile(normalized, activeProfile)) return false;
+  const state=_profileSessionState.get(normalized);
+  return !!(state&&state.hasMore);
+}
+
+function _profileSectionRemainingCount(profileName){
+  const normalized=_normalizeProfileLabel(profileName);
+  const state=_profileSessionState.get(normalized);
+  if(!state) return 0;
+  const total=Number(state.totalCount)||0;
+  const loaded=Number(state.loadedCount)||0;
+  return Math.max(0,total-loaded);
+}
+
+function _rebuildAllSessionsFromProfileState(){
+  if(!_showAllProfiles){
+    return;
+  }
+  const merged=[];
+  const seen=new Set();
+  const pushSession=(session)=>{
+    if(!session||!session.session_id||seen.has(session.session_id)) return;
+    seen.add(session.session_id);
+    merged.push(session);
+  };
+  for(const session of _activeProfileListSessions){ pushSession(session); }
+  for(const state of _profileSessionState.values()){
+    for(const session of (state.sessions||[])){ pushSession(session); }
+  }
+  _allSessions=_mergeOptimisticFirstTurnSessions(merged);
+}
+
+async function _loadOtherProfileSessions(gen){
+  if(!_showAllProfiles) return;
+  try{
+    const profData=await api('/api/profiles',{timeoutToast:false});
+    if(gen!==_renderSessionListGen) return;
+    const activeProfile=_normalizeProfileLabel(profData.active||S.activeProfile||'default');
+    const profileNames=(profData.profiles||[])
+      .map(row=>_normalizeProfileLabel(row&&row.name))
+      .filter(name=>name&&!_profileMatchesActiveProfile(name, activeProfile));
+    await Promise.all(profileNames.map(async(profileName)=>{
+      const existing=_profileSessionState.get(profileName);
+      if(existing&&!existing.loading&&existing.loaded) return;
+      _profileSessionState.set(profileName,{
+        ...(existing||{}),
+        loading:true,
+      });
+      try{
+        const data=await api(
+          `/api/sessions?profile=${encodeURIComponent(profileName)}&limit=${_PROFILE_PREVIEW_LIMIT}`,
+          {timeoutToast:false},
+        );
+        if(gen!==_renderSessionListGen) return;
+        const sessions=data.sessions||[];
+        _profileSessionState.set(profileName,{
+          sessions,
+          totalCount:Number(data.total_count)||sessions.length,
+          hasMore:!!data.has_more,
+          loadedCount:sessions.length,
+          regularOffset:_PROFILE_PREVIEW_LIMIT,
+          loading:false,
+          loaded:true,
+        });
+      }catch(err){
+        console.warn('_loadOtherProfileSessions', profileName, err);
+        _profileSessionState.set(profileName,{
+          sessions:[],
+          totalCount:0,
+          hasMore:false,
+          loadedCount:0,
+          regularOffset:0,
+          loading:false,
+          loaded:true,
+        });
+      }
+    }));
+    if(gen!==_renderSessionListGen) return;
+    _rebuildAllSessionsFromProfileState();
+    renderSessionListFromCache();
+  }catch(e){
+    console.warn('_loadOtherProfileSessions',e);
+  }
+}
+
+async function _loadMoreProfileSessions(profileName){
+  const normalized=_normalizeProfileLabel(profileName);
+  const state=_profileSessionState.get(normalized);
+  if(!state||state.loading||!state.hasMore) return;
+  state.loading=true;
+  renderSessionListFromCache();
+  try{
+    const offset=Number(state.regularOffset)||0;
+    const data=await api(
+      `/api/sessions?profile=${encodeURIComponent(normalized)}&offset=${offset}&limit=${_PROFILE_LOAD_MORE_LIMIT}`,
+      {timeoutToast:false},
+    );
+    const page=data.sessions||[];
+    const seen=new Set((state.sessions||[]).map(s=>s&&s.session_id).filter(Boolean));
+    const merged=[...(state.sessions||[])];
+    for(const session of page){
+      if(session&&session.session_id&&!seen.has(session.session_id)){
+        seen.add(session.session_id);
+        merged.push(session);
+      }
+    }
+    _profileSessionState.set(normalized,{
+      sessions:merged,
+      totalCount:Number(data.total_count)||state.totalCount||merged.length,
+      hasMore:!!data.has_more,
+      loadedCount:merged.length,
+      regularOffset:offset+page.length,
+      loading:false,
+      loaded:true,
+    });
+    _rebuildAllSessionsFromProfileState();
+    renderSessionListFromCache();
+  }catch(e){
+    console.warn('_loadMoreProfileSessions', normalized, e);
+    state.loading=false;
+    renderSessionListFromCache();
+  }
+}
+
+async function _refreshProfileSessionsFromEvent(profileName, gen){
+  const normalized=_normalizeProfileLabel(profileName);
+  const activeProfile=_normalizeProfileLabel(S.activeProfile||'default');
+  if(_profileMatchesActiveProfile(normalized, activeProfile)){
+    return;
+  }
+  const state=_profileSessionState.get(normalized);
+  if(!state||!state.loaded) return;
+  const limit=Math.max(_PROFILE_PREVIEW_LIMIT, Number(state.loadedCount)||_PROFILE_PREVIEW_LIMIT);
+  try{
+    const data=await api(
+      `/api/sessions?profile=${encodeURIComponent(normalized)}&offset=0&limit=${limit}`,
+      {timeoutToast:false},
+    );
+    if(gen!==_renderSessionListGen) return;
+    const sessions=data.sessions||[];
+    _profileSessionState.set(normalized,{
+      sessions,
+      totalCount:Number(data.total_count)||sessions.length,
+      hasMore:!!data.has_more,
+      loadedCount:sessions.length,
+      regularOffset:Math.min(limit, Number(data.total_count)||sessions.length),
+      loading:false,
+      loaded:true,
+    });
+    _rebuildAllSessionsFromProfileState();
+    renderSessionListFromCache();
+  }catch(e){
+    console.warn('_refreshProfileSessionsFromEvent', normalized, e);
+  }
+}
 let _sessionSourceFilter = 'webui';  // 'webui' keeps WebUI chats separate from read-only CLI sessions
 _restoreSessionSourceFilter();
 let _sessionActionMenu = null;
@@ -3261,8 +3450,15 @@ function _applySessionListPayload(sessData, projData){
   const serverSessions=_optimisticallyRemovedSessionIds.size
     ? (sessData.sessions||[]).filter(s=>s&&!_optimisticallyRemovedSessionIds.has(s.session_id))
     : (sessData.sessions||[]);
-  _reconcileActiveSessionIdleStateFromList(serverSessions);
-  _allSessions = _mergeOptimisticFirstTurnSessions(serverSessions);
+  _activeProfileListSessions=serverSessions;
+  if(!_showAllProfiles){
+    _profileSessionState.clear();
+    _reconcileActiveSessionIdleStateFromList(serverSessions);
+    _allSessions = _mergeOptimisticFirstTurnSessions(serverSessions);
+  }else{
+    _reconcileActiveSessionIdleStateFromList(serverSessions);
+    _rebuildAllSessionsFromProfileState();
+  }
   _syncSessionAttentionSoundState(_allSessions);
   _clearLineageReportCache();
   _allProjects = projData.projects||[];
@@ -3297,10 +3493,10 @@ async function _runRenderSessionListRefresh(opts, _gen){
   if(!deferWhileInteracting) _pendingSessionListPayload=null;
   try{
     if(!($('sessionSearch').value||'').trim()) _contentSearchResults = [];
-    const allProfilesQS = _showAllProfiles ? '?all_profiles=1' : '';
+    const projectsQS=_showAllProfiles?'?all_profiles=1':'';
     const [sessData, projData] = await Promise.all([
-      api('/api/sessions' + allProfilesQS,{timeoutToast:false}),
-      api('/api/projects' + allProfilesQS,{timeoutToast:false}),
+      api('/api/sessions',{timeoutToast:false}),
+      api('/api/projects'+projectsQS,{timeoutToast:false}),
     ]);
     // Discard stale response — a newer renderSessionList() call superseded us.
     if (_gen !== _renderSessionListGen) return;
@@ -3310,6 +3506,9 @@ async function _runRenderSessionListRefresh(opts, _gen){
       return;
     }
     _applySessionListPayload(sessData,projData);
+    if(_showAllProfiles){
+      await _loadOtherProfileSessions(_gen);
+    }
   }catch(e){console.warn('renderSessionList',e);}
 }
 
@@ -3509,15 +3708,26 @@ function ensureSessionEventsSSE(){
     };
     _sessionEventsSSE.addEventListener('sessions_changed', (ev) => {
       const activeProfile = S.activeProfile || 'default';
+      let eventProfile = '';
       try {
         const payload = typeof ev?.data === 'string' ? JSON.parse(ev.data) : {};
-        const eventProfile = payload && typeof payload.profile === 'string' ? payload.profile : '';
-        if (!_sessionEventProfilesMatch(eventProfile, activeProfile)) {
+        eventProfile = payload && typeof payload.profile === 'string' ? payload.profile : '';
+        if (!_showAllProfiles && !_sessionEventProfilesMatch(eventProfile, activeProfile)) {
           return;
         }
       } catch (_err) {
         // Non-JSON payload (or transient malformed event). Keep legacy behavior:
         // refresh once event was seen.
+        _scheduleSessionEventsRefresh('event');
+        return;
+      }
+      if (
+        _showAllProfiles &&
+        eventProfile &&
+        !_profileMatchesActiveProfile(eventProfile, activeProfile)
+      ) {
+        void _refreshProfileSessionsFromEvent(eventProfile, _renderSessionListGen);
+        return;
       }
       _scheduleSessionEventsRefresh('event');
     });
@@ -4784,10 +4994,8 @@ function renderSessionListFromCache(){
     list.appendChild(bar);
   }
   // Profile filter toggle (show sessions from other profiles).
-  // Cross-profile rows live SERVER-SIDE behind ?all_profiles=1, so the toggle
-  // must trigger a refetch — there's no client-cached aggregate to slice through.
-  // The server is authoritative for the count (renamed-root cross-alias is
-  // server-side). A naive strict-equality client fallback would mis-count.
+  // Cross-profile rows are loaded per profile via ?profile= pagination, not
+  // ?all_profiles=1 flat aggregate.
   const otherProfileCount = _otherProfileCount;
   if(otherProfileCount>0&&!_showAllProfiles){
     const pfToggle=document.createElement('div');
@@ -4799,7 +5007,7 @@ function renderSessionListFromCache(){
     const pfToggle=document.createElement('div');
     pfToggle.style.cssText='font-size:10px;padding:4px 10px;color:var(--muted);cursor:pointer;text-align:center;opacity:.7;';
     pfToggle.textContent='Show active profile only';
-    pfToggle.onclick=()=>{_showAllProfiles=false;renderSessionList();};
+    pfToggle.onclick=()=>{_showAllProfiles=false;_profileSessionState.clear();renderSessionList();};
     list.appendChild(pfToggle);
   }
   // Show/hide archived toggle if there are archived sessions
@@ -4822,35 +5030,52 @@ function renderSessionListFromCache(){
     empty.textContent=_activeProject===NO_PROJECT_FILTER?'No unassigned sessions.':'No sessions in this project yet.';
     list.appendChild(empty);
   }
-  const orderedSessions=[...sessions].sort((a,b)=>_sessionTimestampMs(b)-_sessionTimestampMs(a));
-  // Separate pinned from unpinned
-  const pinned=orderedSessions.filter(s=>s.pinned);
-  const unpinned=orderedSessions.filter(s=>!s.pinned);
-  // Date grouping: Pinned / Today / Yesterday / This week / Last week / Older
   const now=_serverNowMs();
   // Collapse state persisted in localStorage
   let _groupCollapsed={};
   try{_groupCollapsed=JSON.parse(localStorage.getItem('hermes-date-groups-collapsed')||'{}');}catch(e){}
   const _saveCollapsed=()=>{try{localStorage.setItem('hermes-date-groups-collapsed',JSON.stringify(_groupCollapsed));}catch(e){}};
-  // Group sessions by date
-  const groups=[];
-  let curLabel=null,curItems=[];
-  if(pinned.length) groups.push({label:'\u2605 Pinned',items:pinned,isPinned:true});
-  for(const s of unpinned){
-    const ts=_sessionTimestampMs(s);
-    const label=_sessionTimeBucketLabel(ts, now);
-    if(label!==curLabel){
-      if(curItems.length) groups.push({label:curLabel,items:curItems});
-      curLabel=label;curItems=[s];
-    } else { curItems.push(s); }
-  }
-  if(curItems.length) groups.push({label:curLabel,items:curItems});
+  const _buildDateGroups=(sectionSessions)=>{
+    const ordered=[...sectionSessions].sort((a,b)=>_sessionTimestampMs(b)-_sessionTimestampMs(a));
+    const pinned=ordered.filter(s=>s.pinned);
+    const unpinned=ordered.filter(s=>!s.pinned);
+    const sectionGroups=[];
+    let curLabel=null,curItems=[];
+    if(pinned.length) sectionGroups.push({label:'\u2605 Pinned',items:pinned,isPinned:true});
+    for(const s of unpinned){
+      const ts=_sessionTimestampMs(s);
+      const label=_sessionTimeBucketLabel(ts, now);
+      if(label!==curLabel){
+        if(curItems.length) sectionGroups.push({label:curLabel,items:curItems});
+        curLabel=label;curItems=[s];
+      }else{curItems.push(s);}
+    }
+    if(curItems.length) sectionGroups.push({label:curLabel,items:curItems});
+    return sectionGroups;
+  };
+  const sectionDescriptors=_showAllProfiles
+    ?_orderedProfileSectionNames().map(profileName=>{
+        const sectionMatched=allMatched.filter(s=>s&&_profileMatchesActiveProfile(s.profile||'default', profileName));
+        const partitioned=_partitionSidebarSessionRows(sectionMatched, activeSidForSidebar);
+        const sectionSessions=_attachChildSessionsToSidebarRows(
+          _collapseSessionLineageForSidebar(partitioned.sessionsRaw),
+          partitioned.sessionsRaw,
+        );
+        return {profileName, sessions:sectionSessions};
+      })
+    :[{profileName:null, sessions}];
   const flatSessionRows=[];
-  for(const g of groups){
-    if(_groupCollapsed[g.label]) continue;
-    for(const s of g.items){ flatSessionRows.push({group:g,session:s}); }
+  const renderSections=[];
+  for(const section of sectionDescriptors){
+    const sectionGroups=_buildDateGroups(section.sessions);
+    renderSections.push({...section, groups:sectionGroups});
+    for(const g of sectionGroups){
+      if(_groupCollapsed[g.label]) continue;
+      for(const s of g.items){ flatSessionRows.push({group:g,session:s,profileName:section.profileName}); }
+    }
   }
   _sessionVisibleSidebarIds=flatSessionRows.map(row=>row.session&&row.session.session_id).filter(Boolean);
+  const virtualThreshold=_showAllProfiles?Number.MAX_SAFE_INTEGER:SESSION_VIRTUAL_THRESHOLD_ROWS;
   _ensureSessionVirtualScrollHandler(list);
   const activeIndex=flatSessionRows.findIndex(row=>_sessionLineageContainsSession(row.session,activeSidForSidebar));
   const shouldAnchorActive=activeSidForSidebar&&activeIndex>=0&&(
@@ -4863,7 +5088,7 @@ function renderSessionListFromCache(){
     viewportHeight:list.clientHeight||520,
     itemHeight:SESSION_VIRTUAL_ROW_HEIGHT,
     buffer:SESSION_VIRTUAL_BUFFER_ROWS,
-    threshold:SESSION_VIRTUAL_THRESHOLD_ROWS,
+    threshold:virtualThreshold,
     activeIndex:-1,
   });
   const activeWasAlreadyVisible=activeIndex>=virtualWindowBeforeActiveAnchor.start&&activeIndex<virtualWindowBeforeActiveAnchor.end;
@@ -4874,7 +5099,7 @@ function renderSessionListFromCache(){
     viewportHeight:list.clientHeight||520,
     itemHeight:SESSION_VIRTUAL_ROW_HEIGHT,
     buffer:SESSION_VIRTUAL_BUFFER_ROWS,
-    threshold:SESSION_VIRTUAL_THRESHOLD_ROWS,
+    threshold:virtualThreshold,
     activeIndex:shouldMoveSidebarToActive?activeIndex:-1,
   });
   let virtualAnchorScrollTop=null;
@@ -4894,44 +5119,70 @@ function renderSessionListFromCache(){
   // current session-row window plus top/bottom spacers inside each group body;
   // headers remain real DOM so pin/archive/date grouping and clicks survive.
   let globalSessionRowIndex=0;
-  for(const g of groups){
-    const wrapper=document.createElement('div');
-    wrapper.className='session-date-group';
-    const hdr=document.createElement('div');
-    hdr.className='session-date-header'+(g.isPinned?' pinned':'');
-    const caret=document.createElement('span');
-    caret.className='session-date-caret';
-    caret.textContent='\u25BE'; // down when expanded; rotated right when collapsed
-    const label=document.createElement('span');
-    label.textContent=g.label;
-    hdr.appendChild(caret);hdr.appendChild(label);
-    const body=document.createElement('div');
-    body.className='session-date-body';
-    const isGroupCollapsed=Boolean(_groupCollapsed[g.label]);
-    if(isGroupCollapsed){body.style.display='none';caret.classList.add('collapsed');}
-    hdr.onclick=()=>{
-      const isCollapsed=body.style.display==='none';
-      body.style.display=isCollapsed?'':'none';
-      caret.classList.toggle('collapsed',!isCollapsed);
-      _groupCollapsed[g.label]=!isCollapsed;
-      _saveCollapsed();
-      renderSessionListFromCache();
-    };
-    wrapper.appendChild(hdr);
-    let groupTopPad=0;
-    let groupBottomPad=0;
-    for(const s of g.items){
-      if(isGroupCollapsed) continue;
-      const rowIndex=globalSessionRowIndex++;
-      const inWindow=!virtualWindow.virtualized||(rowIndex>=virtualWindow.start&&rowIndex<virtualWindow.end);
-      if(inWindow){ body.appendChild(_renderOneSession(s, Boolean(g.isPinned))); }
-      else if(rowIndex<virtualWindow.start){ groupTopPad+=virtualWindow.itemHeight; }
-      else { groupBottomPad+=virtualWindow.itemHeight; }
+  const activeProfileLabel=_normalizeProfileLabel(S.activeProfile||'default');
+  for(const section of renderSections){
+    if(section.profileName){
+      const header=document.createElement('div');
+      header.className='session-profile-header';
+      header.style.cssText='font-size:11px;font-weight:600;padding:8px 10px 4px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;';
+      header.textContent=_profileMatchesActiveProfile(section.profileName, activeProfileLabel)
+        ? `${section.profileName} (active)`
+        : section.profileName;
+      list.appendChild(header);
     }
-    if(groupTopPad>0){ body.insertBefore(_sessionVirtualSpacer(groupTopPad,'before'), body.firstChild); }
-    if(groupBottomPad>0){ body.appendChild(_sessionVirtualSpacer(groupBottomPad,'after')); }
-    wrapper.appendChild(body);
-    list.appendChild(wrapper);
+    for(const g of section.groups){
+      const wrapper=document.createElement('div');
+      wrapper.className='session-date-group';
+      const hdr=document.createElement('div');
+      hdr.className='session-date-header'+(g.isPinned?' pinned':'');
+      const caret=document.createElement('span');
+      caret.className='session-date-caret';
+      caret.textContent='\u25BE'; // down when expanded; rotated right when collapsed
+      const label=document.createElement('span');
+      label.textContent=g.label;
+      hdr.appendChild(caret);hdr.appendChild(label);
+      const body=document.createElement('div');
+      body.className='session-date-body';
+      const isGroupCollapsed=Boolean(_groupCollapsed[g.label]);
+      if(isGroupCollapsed){body.style.display='none';caret.classList.add('collapsed');}
+      hdr.onclick=()=>{
+        const isCollapsed=body.style.display==='none';
+        body.style.display=isCollapsed?'':'none';
+        caret.classList.toggle('collapsed',!isCollapsed);
+        _groupCollapsed[g.label]=!isCollapsed;
+        _saveCollapsed();
+        renderSessionListFromCache();
+      };
+      wrapper.appendChild(hdr);
+      let groupTopPad=0;
+      let groupBottomPad=0;
+      for(const s of g.items){
+        if(isGroupCollapsed) continue;
+        const rowIndex=globalSessionRowIndex++;
+        const inWindow=!virtualWindow.virtualized||(rowIndex>=virtualWindow.start&&rowIndex<virtualWindow.end);
+        if(inWindow){ body.appendChild(_renderOneSession(s, Boolean(g.isPinned))); }
+        else if(rowIndex<virtualWindow.start){ groupTopPad+=virtualWindow.itemHeight; }
+        else { groupBottomPad+=virtualWindow.itemHeight; }
+      }
+      if(groupTopPad>0){ body.insertBefore(_sessionVirtualSpacer(groupTopPad,'before'), body.firstChild); }
+      if(groupBottomPad>0){ body.appendChild(_sessionVirtualSpacer(groupBottomPad,'after')); }
+      wrapper.appendChild(body);
+      list.appendChild(wrapper);
+    }
+    if(section.profileName&&_profileSectionHasMore(section.profileName)){
+      const profileState=_profileSessionState.get(_normalizeProfileLabel(section.profileName));
+      const loadMore=document.createElement('div');
+      loadMore.style.cssText='font-size:10px;padding:4px 10px;color:var(--muted);cursor:pointer;text-align:center;opacity:.7;';
+      if(profileState&&profileState.loading){
+        loadMore.textContent='Loading...';
+        loadMore.style.cursor='default';
+      }else{
+        const remaining=_profileSectionRemainingCount(section.profileName);
+        loadMore.textContent=remaining>0?`Show ${remaining} more`:'Show more';
+        loadMore.onclick=()=>{void _loadMoreProfileSessions(section.profileName);};
+      }
+      list.appendChild(loadMore);
+    }
   }
   if(virtualAnchorScrollTop!==null){
     list.scrollTop=virtualAnchorScrollTop;

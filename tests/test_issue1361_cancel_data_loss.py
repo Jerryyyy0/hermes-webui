@@ -492,25 +492,21 @@ def test_materialize_helper_called_immediately_before_error_path_clears():
 
 
 
-def test_cancel_copy_uses_configured_bot_name(monkeypatch):
-    """Cancellation copy should use the configured assistant display name."""
+def test_cancel_copy_is_simple_chinese(monkeypatch):
+    """Cancellation copy should be a simple Chinese message without agent branding."""
     import api.streaming as streaming
 
     monkeypatch.setattr(streaming, 'load_settings', lambda: {'bot_name': 'Obryn'})
 
-    assert streaming._cancelled_turn_hint() == (
-        'The run was cancelled by the user before Obryn finished. '
-        'No provider failure occurred.'
-    )
-    assert 'before Obryn finished' in streaming._cancelled_turn_content()
+    assert streaming._cancelled_turn_hint() == '您已主动停止，并非系统出错。'
+    assert streaming._cancelled_turn_content() == '任务已取消。'
     assert streaming._classify_provider_error('Task cancelled by user')['hint'] == (
-        'The run was cancelled by the user before Obryn finished. '
-        'No provider failure occurred.'
+        '您已主动停止，并非系统出错。'
     )
 
 
-def test_cancel_copy_uses_profile_name_for_non_default_profile(monkeypatch):
-    """Persisted cancellation copy should use profile names outside literal default."""
+def test_cancel_copy_ignores_profile_name(monkeypatch):
+    """Persisted cancellation copy should not mention profile or bot names."""
     import api.streaming as streaming
 
     monkeypatch.setattr(streaming, 'load_settings', lambda: {'bot_name': 'Obryn'})
@@ -518,19 +514,17 @@ def test_cancel_copy_uses_profile_name_for_non_default_profile(monkeypatch):
     session = type('Session', (), {'profile': 'research'})()
     name = streaming._preferred_agent_display_name_for_session(session)
     assert name == 'Research'
-    assert 'before Research finished' in streaming._cancelled_turn_content(agent_name=name)
+    assert streaming._cancelled_turn_content(agent_name=name) == '任务已取消。'
 
 
-def test_cancel_copy_falls_back_to_hermes_for_blank_bot_name(monkeypatch):
-    """Blank or missing bot_name should not leak old persona copy."""
+def test_cancel_copy_has_no_agent_name_for_blank_bot_name(monkeypatch):
+    """Blank or missing bot_name should still use neutral Chinese copy."""
     import api.streaming as streaming
 
     monkeypatch.setattr(streaming, 'load_settings', lambda: {'bot_name': '   '})
 
-    assert streaming._cancelled_turn_hint() == (
-        'The run was cancelled by the user before Hermes finished. '
-        'No provider failure occurred.'
-    )
+    assert streaming._cancelled_turn_hint() == '您已主动停止，并非系统出错。'
+    assert streaming._cancelled_turn_content() == '任务已取消。'
 
 
 class TestCancelStreamIdempotentWithWorkerFinalizer:
@@ -543,7 +537,7 @@ class TestCancelStreamIdempotentWithWorkerFinalizer:
             session_id=sid,
             messages=[
                 {'role': 'user', 'content': 'Help me debug this', 'timestamp': 100},
-                {'role': 'assistant', 'content': '**Task cancelled:** Task cancelled.\n\n*The run was cancelled by the user before Hermes finished. No provider failure occurred.*', '_error': True, 'timestamp': 101},
+                {'role': 'assistant', 'content': '任务已取消。', '_error': True, 'timestamp': 101},
             ],
         )
         _setup_cancel_state(sid, stream_id)
@@ -556,7 +550,10 @@ class TestCancelStreamIdempotentWithWorkerFinalizer:
             m for m in msgs
             if isinstance(m, dict)
             and m.get('role') == 'assistant'
-            and 'task cancelled' in str(m.get('content') or '').lower()
+            and any(
+                pattern in str(m.get('content') or '').lower()
+                for pattern in streaming._CANCEL_MARKER_PATTERNS
+            )
         ]
         partial_idx = next(
             i for i, m in enumerate(msgs)

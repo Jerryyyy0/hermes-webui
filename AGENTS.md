@@ -37,6 +37,7 @@
 本仓库是上游 Hermes WebUI 的 Fork。自定义行为优先放在仓库内的 `integration/` 层，以保持 rebase 和上游拉取的低摩擦。
 
 - 将 Fork 特有逻辑放在 `integration/` 下（处理器、配置、静态资源、`integration/tests/` 下的测试）。当 integration 层可以承载时，不要将自定义代码分散到核心模块中。
+- **大文件改动须解耦到 `integration/`**：若目标文件本身已较大（如 `api/streaming.py`、`api/routes.py`、`static/messages.js` 等上游核心/接缝脚本），且本次改动会新增成块、可独立维护的逻辑（分类器、文案表、专用 helper、Fork 特有 UX 等），**默认把新增实现放在 `integration/`**（可建子包目录，如 `integration/chat_provider_errors/`），上游文件只保留必要的 import、薄封装或单行钩子。不要在大型上游文件里继续堆叠 Fork 专有实现。
 - 尽量减少对 `integration/` 之外的修改。只有在必须新增钩子或引入时才触碰上游**接缝文件**，且每次改动尽可能小：
   - `api/routes.py` — integration 的 GET/POST 分发、profiles 增强、静态映射、功能开关
   - `static/index.html` — integration 的脚本和 CSS
@@ -49,6 +50,10 @@
 
 ### Integration 维护约束
 
+- **大文件解耦检查清单**（与上文「大文件改动须解耦」配合使用）：
+  - 新增模块放在 `integration/<feature>/`（含 `__init__.py` 与子模块拆分），测试放在 `integration/tests/` 或既有 `tests/` 中针对 integration 的用例。
+  - 接缝文件中的改动应可一眼看出边界：import + 调用，而非复制业务逻辑。
+  - 参考先例：聊天流中文 `apperror` 文案与分类在 [`integration/chat_provider_errors/`](integration/chat_provider_errors/)，`api/streaming.py` 仅 re-export。
 - **根目录 `CHANGELOG.md`**：以**上游 Hermes WebUI** 发布说明为主。集成外部服务、新增 `integration/` 内代码或改接缝文件时，**默认不要修改**根目录 `CHANGELOG.md`。Fork 侧说明写在 [`integration/CHANGELOG.md`](integration/CHANGELOG.md)；仅当用户明确要求、或该变更将并入上游 release 时再动根目录文件。
 - **API 与 Swagger 同步**：凡新增或变更 **integration 暴露的 HTTP 接口**（含 `/api/skillhub/*`、integration 注册的其它路由、查询参数、请求/响应体、状态码），须在同一变更中更新 [`integration/swagger/openapi.json`](integration/swagger/openapi.json)，并与 [`integration/README.md`](integration/README.md) 路由表一致。可在本地打开 `/docs` 核对。上游原生 `/api/*` 若未纳入 integration Swagger，按上游惯例处理，不强行写入 integration 规范。
 

@@ -69,15 +69,19 @@ class TestSilentErrorDetection:
         )
 
     def test_messages_js_handles_no_response_apperror_type(self):
-        """messages.js apperror handler must recognise the no_response type."""
-        assert "isNoResponse" in MESSAGES_JS or "no_response" in MESSAGES_JS, (
-            "messages.js apperror handler must handle type='no_response' (#373)"
+        """messages.js apperror handler renders backend-provided apperror payloads."""
+        start = MESSAGES_JS.find("source.addEventListener('apperror'")
+        end = MESSAGES_JS.find("source.addEventListener('warning'", start)
+        assert start != -1 and end != -1
+        block = MESSAGES_JS[start:end]
+        assert "d.label" in block and "d.message" in block, (
+            "messages.js apperror handler must render backend apperror payloads (#373)"
         )
 
     def test_messages_js_no_response_label(self):
-        """messages.js must show a distinct label for no_response errors."""
-        assert "No response received" in MESSAGES_JS, (
-            "messages.js must display 'No response received' label for no_response errors (#373)"
+        """messages.js must render backend error labels in apperror messages."""
+        assert "d.label||'发生错误'" in MESSAGES_JS.replace(' ', ''), (
+            "messages.js must display backend-provided apperror labels (#373)"
         )
 
 

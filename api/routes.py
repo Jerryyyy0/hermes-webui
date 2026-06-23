@@ -3348,6 +3348,140 @@ def _cap_recent_cli_sessions(sessions: list[dict], cli_cap: int = CLI_VISIBLE_SE
     return kept
 
 
+from api.session_listing import (  # noqa: E402
+    parse_profile_pagination_query,
+    paginate_session_rows,
+    session_sidebar_timestamp,
+)
+
+
+def _redact_sidebar_session_rows(rows: list[dict]) -> list[dict]:
+    safe_rows = []
+    for session in rows:
+        item = dict(session)
+        if isinstance(item.get("title"), str):
+            item["title"] = _redact_text(item["title"])
+        item["attention"] = _session_attention_summary(str(item.get("session_id") or ""))
+        safe_rows.append(item)
+    return safe_rows
+
+
+def build_merged_sidebar_sessions(*, diag=None, settings: dict | None = None) -> tuple[list[dict], int]:
+    """Build the merged, sorted sidebar session list shared by /api/sessions modes."""
+    if settings is None:
+        settings = load_settings()
+    diag.stage("all_sessions")
+    webui_sessions = all_sessions(diag=diag)
+    diag.stage("reconcile_stale_stream_state")
+    if _reconcile_stale_stream_state_for_session_rows(webui_sessions):
+        diag.stage("all_sessions_after_stale_stream_reconcile")
+        webui_sessions = all_sessions(diag=diag)
+    show_cli_sessions = bool(settings.get("show_cli_sessions"))
+    webui_sessions = [_normalize_sidebar_source_flags(s) for s in webui_sessions]
+    if show_cli_sessions:
+        diag.stage("get_cli_sessions")
+        cli = get_cli_sessions()
+        diag.stage("merge_cli_sessions")
+        cli_by_id = {s["session_id"]: s for s in cli}
+        _orphan_probe_rows = []
+        _kept_after_orphan_prune = []
+        for s in webui_sessions:
+            _sid = s.get("session_id")
+            if (
+                _sid
+                and is_cli_session_row(s)
+                and not _session_source_is_webui(s)
+                and _sid not in cli_by_id
+            ):
+                _orphan_probe_rows.append(s)
+            else:
+                _kept_after_orphan_prune.append(s)
+        if _orphan_probe_rows:
+            rows_by_profile: dict[object, list[dict]] = defaultdict(list)
+            for row in _orphan_probe_rows:
+                rows_by_profile[row.get("profile")].append(row)
+            missing_orphan_ids: set[str] = set()
+            for profile_key, rows in rows_by_profile.items():
+                probe_ids = [
+                    str(row.get("session_id")).strip()
+                    for row in rows
+                    if str(row.get("session_id") or "").strip()
+                ]
+                existing = agent_session_rows_existing(
+                    probe_ids,
+                    profile=profile_key if isinstance(profile_key, str) and profile_key else None,
+                )
+                for row in rows:
+                    sid = str(row.get("session_id") or "").strip()
+                    if sid and sid not in existing:
+                        missing_orphan_ids.add(sid)
+            for s in _orphan_probe_rows:
+                _sid = str(s.get("session_id") or "").strip()
+                if _sid in missing_orphan_ids:
+                    try:
+                        prune_session_from_index(_sid)
+                    except Exception:
+                        logger.debug(
+                            "Failed to prune orphaned CLI sidecar %s",
+                            _sid,
+                            exc_info=True,
+                        )
+                    diag.stage("prune_orphaned_cli_sidecar")
+                    continue
+                _kept_after_orphan_prune.append(s)
+        webui_sessions = _kept_after_orphan_prune
+        for s in webui_sessions:
+            meta = cli_by_id.get(s.get("session_id"))
+            if not meta:
+                continue
+            if _is_messaging_session_record(meta):
+                s.update(_merge_cli_sidebar_metadata(s, meta))
+                if s.get("session_id") != meta.get("session_id"):
+                    s["session_id"] = meta.get("session_id")
+            else:
+                for key in ("source_tag", "raw_source", "session_source", "source_label"):
+                    if not s.get(key) and meta.get(key):
+                        s[key] = meta[key]
+        webui_sessions = [_normalize_sidebar_source_flags(s) for s in webui_sessions]
+        webui_sessions = [s for s in webui_sessions if is_cli_session_row_visible(s)]
+        represented_webui_ids = set()
+        for s in webui_sessions:
+            represented_webui_ids.update(_session_lineage_ids(s))
+        show_cron_sessions = bool(settings.get("show_cron_sessions"))
+        deduped_cli = _dedupe_cli_sidebar_sessions_for_api(
+            cli,
+            represented_webui_ids,
+            show_cron_sessions=show_cron_sessions,
+        )
+    else:
+        diag.stage("filter_webui_sessions")
+        webui_sessions = [s for s in webui_sessions if not _is_cli_session_for_settings(s)]
+        deduped_cli = []
+    diag.stage("sort_sessions")
+    merged = webui_sessions + deduped_cli
+    merged.sort(key=session_sidebar_timestamp, reverse=True)
+    return merged, len(deduped_cli)
+
+
+def finalize_sessions_for_profile(
+    merged: list[dict],
+    *,
+    settings: dict,
+    profile_name: str,
+) -> list[dict]:
+    """Scope merged rows to one profile and apply per-profile sidebar shaping."""
+    scoped = [s for s in merged if _profiles_match(s.get("profile"), profile_name)]
+    scoped = _keep_latest_messaging_session_per_source(
+        scoped,
+        show_previous_messaging_sessions=bool(
+            settings.get("show_previous_messaging_sessions")
+        ),
+    )
+    if bool(settings.get("show_cli_sessions")):
+        scoped = _cap_recent_cli_sessions(scoped, cli_cap=CLI_VISIBLE_SESSION_CAP)
+    return scoped
+
+
 def _merge_cli_sidebar_metadata(ui_session: dict, cli_meta: dict) -> dict:
     """Merge source-of-truth CLI metadata into a sidebar session row.
 
@@ -5992,112 +6126,39 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/sessions":
         diag = RequestDiagnostics.maybe_start("GET", parsed.path, logger=logger)
         try:
-            diag.stage("all_sessions")
-            webui_sessions = all_sessions(diag=diag)
-            diag.stage("reconcile_stale_stream_state")
-            if _reconcile_stale_stream_state_for_session_rows(webui_sessions):
-                diag.stage("all_sessions_after_stale_stream_reconcile")
-                webui_sessions = all_sessions(diag=diag)
             diag.stage("load_settings")
             settings = load_settings()
-            show_cli_sessions = bool(settings.get("show_cli_sessions"))
-            webui_sessions = [_normalize_sidebar_source_flags(s) for s in webui_sessions]
-            if show_cli_sessions:
-                diag.stage("get_cli_sessions")
-                cli = get_cli_sessions()
-                diag.stage("merge_cli_sessions")
-                cli_by_id = {s["session_id"]: s for s in cli}
-                # #3238: reconcile orphaned imported-CLI sidecars. When a CLI
-                # session was clicked in WebUI it gets a WebUI-owned sidecar that
-                # all_sessions() returns independently of state.db. If the user
-                # later deletes the backing CLI session from the command line,
-                # the sidecar is never pruned and the stale row lingers in the
-                # sidebar forever (there is no WebUI delete affordance for it).
-                # Drop rows whose backing agent row is genuinely gone. We probe
-                # state.db directly (agent_session_rows_existing) rather than trust
-                # cli_by_id absence, because get_cli_sessions() caps at
-                # CLI_VISIBLE_SESSION_LIMIT (20) — an existing session can fall
-                # out of that window and look deleted. Native WebUI sessions
-                # (source == "webui") that merely have a CLI ancestor are never
-                # pruned.
-                _orphan_probe_rows = []
-                _kept_after_orphan_prune = []
-                for s in webui_sessions:
-                    _sid = s.get("session_id")
-                    if (
-                        _sid
-                        and is_cli_session_row(s)
-                        and not _session_source_is_webui(s)
-                        and _sid not in cli_by_id
-                    ):
-                        _orphan_probe_rows.append(s)
-                    else:
-                        _kept_after_orphan_prune.append(s)
-                if _orphan_probe_rows:
-                    rows_by_profile: dict[object, list[dict]] = defaultdict(list)
-                    for row in _orphan_probe_rows:
-                        rows_by_profile[row.get("profile")].append(row)
-                    missing_orphan_ids: set[str] = set()
-                    for profile_key, rows in rows_by_profile.items():
-                        probe_ids = [
-                            str(row.get("session_id")).strip()
-                            for row in rows
-                            if str(row.get("session_id") or "").strip()
-                        ]
-                        existing = agent_session_rows_existing(
-                            probe_ids,
-                            profile=profile_key if isinstance(profile_key, str) and profile_key else None,
-                        )
-                        for row in rows:
-                            sid = str(row.get("session_id") or "").strip()
-                            if sid and sid not in existing:
-                                missing_orphan_ids.add(sid)
-                    for s in _orphan_probe_rows:
-                        _sid = str(s.get("session_id") or "").strip()
-                        if _sid in missing_orphan_ids:
-                            try:
-                                prune_session_from_index(_sid)
-                            except Exception:
-                                logger.debug(
-                                    "Failed to prune orphaned CLI sidecar %s",
-                                    _sid,
-                                    exc_info=True,
-                                )
-                            diag.stage("prune_orphaned_cli_sidecar")
-                            continue
-                        _kept_after_orphan_prune.append(s)
-                webui_sessions = _kept_after_orphan_prune
-                for s in webui_sessions:
-                    meta = cli_by_id.get(s.get("session_id"))
-                    if not meta:
-                        continue
-                    if _is_messaging_session_record(meta):
-                        s.update(_merge_cli_sidebar_metadata(s, meta))
-                        if s.get("session_id") != meta.get("session_id"):
-                            s["session_id"] = meta.get("session_id")
-                    else:
-                        for key in ("source_tag", "raw_source", "session_source", "source_label"):
-                            if not s.get(key) and meta.get(key):
-                                s[key] = meta[key]
-                webui_sessions = [_normalize_sidebar_source_flags(s) for s in webui_sessions]
-                # Apply the same CLI visibility semantics to imported local copies so
-                # low-value imported artifacts do not leak into the sidebar.
-                webui_sessions = [s for s in webui_sessions if is_cli_session_row_visible(s)]
-                represented_webui_ids = set()
-                for s in webui_sessions:
-                    represented_webui_ids.update(_session_lineage_ids(s))
-                show_cron_sessions = bool(settings.get("show_cron_sessions"))
-                deduped_cli = _dedupe_cli_sidebar_sessions_for_api(cli, represented_webui_ids, show_cron_sessions=show_cron_sessions)
-            else:
-                diag.stage("filter_webui_sessions")
-                webui_sessions = [s for s in webui_sessions if not _is_cli_session_for_settings(s)]
-                deduped_cli = []
-            diag.stage("sort_sessions")
-            merged = webui_sessions + deduped_cli
-            merged.sort(
-                key=lambda s: s.get("last_message_at") or s.get("updated_at", 0) or 0,
-                reverse=True,
-            )
+            profile_pagination = parse_profile_pagination_query(parsed)
+            if profile_pagination is not None:
+                profile_name, page_offset, page_limit = profile_pagination
+                merged, _cli_count = build_merged_sidebar_sessions(diag=diag, settings=settings)
+                diag.stage("profile_page_filter")
+                scoped = finalize_sessions_for_profile(
+                    merged,
+                    settings=settings,
+                    profile_name=profile_name,
+                )
+                diag.stage("profile_page_redact")
+                safe_rows = _redact_sidebar_session_rows(scoped)
+                diag.stage("profile_page_paginate")
+                page = paginate_session_rows(
+                    safe_rows,
+                    offset=page_offset,
+                    limit=page_limit,
+                )
+                diag.stage("response_write")
+                return j(handler, {
+                    "profile": profile_name,
+                    "sessions": page["sessions"],
+                    "total_count": page["total_count"],
+                    "offset": page["offset"],
+                    "limit": page["limit"],
+                    "has_more": page["has_more"],
+                    "server_time": time.time(),
+                    "server_tz": time.strftime("%z"),
+                })
+
+            merged, deduped_cli_count = build_merged_sidebar_sessions(diag=diag, settings=settings)
             # ── Profile scoping (#1611) ────────────────────────────────────────
             # Default: filter to the active profile. ?all_profiles=1 opts into
             # the aggregate view used by the "All profiles" sidebar toggle.
@@ -6131,21 +6192,15 @@ def handle_get(handler, parsed) -> bool:
                     settings.get("show_previous_messaging_sessions")
                 ),
             )
-            if show_cli_sessions:
+            if bool(settings.get("show_cli_sessions")):
                 diag.stage("cli_cap")
                 scoped = _cap_recent_cli_sessions(scoped, cli_cap=CLI_VISIBLE_SESSION_CAP)
             diag.stage("redact_sessions")
-            safe_merged = []
-            for s in scoped:
-                item = dict(s)
-                if isinstance(item.get("title"), str):
-                    item["title"] = _redact_text(item["title"])
-                item["attention"] = _session_attention_summary(str(item.get("session_id") or ""))
-                safe_merged.append(item)
+            safe_merged = _redact_sidebar_session_rows(scoped)
             diag.stage("response_write")
             return j(handler, {
                 "sessions": safe_merged,
-                "cli_count": len(deduped_cli),
+                "cli_count": deduped_cli_count,
                 "all_profiles": all_profiles,
                 "active_profile": active_profile,
                 "other_profile_count": other_profile_count,
@@ -10314,14 +10369,16 @@ def _path_is_within_root(child: Path, root: Path) -> bool:
 
 
 def _handle_media(handler, parsed):
-    """Serve a local file by absolute path for inline display in the chat.
+    """Serve a local file for inline display in the chat.
 
     Security:
-    - Path must resolve to an allowed root (hermes home, /tmp, common dirs)
+    - Absolute ``path``: must resolve to an allowed root (hermes home, /tmp, etc.)
+    - Relative ``path`` + ``session_id``: same scope as ``/api/file/raw`` (session
+      workspace, then that session's attachment inbox)
     - Auth-gated when auth is enabled
-    - Only image MIME types are served inline; all others force download
+    - Only image MIME types are served inline by default; others need ``inline=1``
     - SVG always served as attachment (XSS risk)
-    - No path traversal: resolved path must stay within an allowed root
+    - No path traversal: resolved path must stay within the applicable root
     - Additional roots can be added via MEDIA_ALLOWED_ROOTS env var
       (os.pathsep-separated list of absolute paths; ":" on POSIX, ";" on Windows)
     """
@@ -10346,6 +10403,10 @@ def _handle_media(handler, parsed):
     raw_path = qs.get("path", [""])[0].strip()
     if not raw_path:
         return bad(handler, "path parameter required", 400)
+
+    sid = qs.get("session_id", [""])[0].strip()
+    if _try_serve_session_relative_media(handler, qs, raw_path, sid):
+        return
 
     # Resolve the path and check it is within an allowed root
     try:
@@ -10627,6 +10688,49 @@ def _file_raw_target(session, sid: str, rel: str) -> tuple[Path, Path] | None:
     return None
 
 
+def _is_absolute_serve_path(raw_path: str) -> bool:
+    path = str(raw_path or "").strip()
+    return bool(path) and Path(path).is_absolute()
+
+
+def _serve_resolved_file_raw(handler, anchor_root: Path, target: Path, qs: dict):
+    """Stream a resolved file using /api/file/raw disposition and CSP rules."""
+    force_download = qs.get("download", [""])[0] == "1"
+    ext = target.suffix.lower()
+    mime = MIME_MAP.get(ext, "application/octet-stream")
+    inline_preview = qs.get("inline", [""])[0] == "1"
+    dangerous_types = {"text/html", "application/xhtml+xml", "image/svg+xml"}
+    html_inline_ok = inline_preview and mime == "text/html"
+    disposition = "attachment" if force_download or (mime in dangerous_types and not html_inline_ok) else "inline"
+    sandbox_csp = "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox"
+    csp = sandbox_csp if (inline_preview and not force_download and disposition == "inline") else None
+    if html_inline_ok:
+        return _serve_inline_html_preview(handler, target, "no-store", csp=sandbox_csp, anchor_root=anchor_root)
+    return _serve_file_bytes(handler, target, mime, disposition, "no-store", csp=csp, anchor_root=anchor_root)
+
+
+def _try_serve_session_relative_media(handler, qs: dict, raw_path: str, sid: str) -> bool:
+    """Serve session-scoped relative paths; return True when the request is handled."""
+    if _is_absolute_serve_path(raw_path):
+        return False
+    sid = str(sid or "").strip()
+    if not sid:
+        bad(handler, "session_id is required for relative paths", 400)
+        return True
+    try:
+        s = get_session_for_file_ops(sid)
+    except KeyError:
+        bad(handler, "Session not found", 404)
+        return True
+    resolved = _file_raw_target(s, sid, raw_path)
+    if resolved is None:
+        j(handler, {"error": "not found"}, status=404)
+        return True
+    anchor_root, target = resolved
+    _serve_resolved_file_raw(handler, anchor_root, target, qs)
+    return True
+
+
 # ─── /api/folder/download ───────────────────────────────────────────────────
 # Configurable caps. Match the HERMES_WEBUI_MAX_UPLOAD_MB style used elsewhere
 # (api/config.py) so operators have one consistent env-var convention.
@@ -10800,34 +10904,11 @@ def _handle_file_raw(handler, parsed):
     except KeyError:
         return bad(handler, "Session not found", 404)
     rel = qs.get("path", [""])[0]
-    force_download = qs.get("download", [""])[0] == "1"
     resolved = _file_raw_target(s, sid, rel)
     if resolved is None:
         return j(handler, {"error": "not found"}, status=404)
     anchor_root, target = resolved
-    ext = target.suffix.lower()
-    mime = MIME_MAP.get(ext, "application/octet-stream")
-    # Security: force download for dangerous MIME types to prevent XSS.
-    # Exception: ?inline=1 permits text/html to be served inline for the
-    # sandboxed workspace HTML preview iframe (sandbox="allow-scripts" with no
-    # allow-same-origin, so the iframe cannot access parent cookies/storage).
-    inline_preview = qs.get("inline", [""])[0] == "1"
-    dangerous_types = {"text/html", "application/xhtml+xml", "image/svg+xml"}
-    html_inline_ok = inline_preview and mime == "text/html"
-    disposition = "attachment" if force_download or (mime in dangerous_types and not html_inline_ok) else "inline"
-    # Defense-in-depth for ?inline=1 HTML: even though the workspace.js iframe
-    # sets sandbox="allow-scripts", a user could be tricked into opening the
-    # ?inline=1 URL directly in a top-level tab (e.g. via a chat link), which
-    # would render the HTML in the WebUI's origin without iframe sandbox. The
-    # CSP sandbox directive applies the same isolation server-side: without
-    # allow-same-origin, the document is treated as a unique opaque origin and
-    # cannot read WebUI cookies, localStorage, or postMessage to the parent.
-    sandbox_csp = "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox"
-    csp = sandbox_csp if (inline_preview and not force_download and disposition == "inline") else None
-    # _serve_file_bytes sends Content-Security-Policy when csp is set.
-    if html_inline_ok:
-        return _serve_inline_html_preview(handler, target, "no-store", csp=sandbox_csp, anchor_root=anchor_root)
-    return _serve_file_bytes(handler, target, mime, disposition, "no-store", csp=csp, anchor_root=anchor_root)
+    return _serve_resolved_file_raw(handler, anchor_root, target, qs)
 
 
 def _handle_file_read(handler, parsed):

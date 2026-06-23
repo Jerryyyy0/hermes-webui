@@ -120,25 +120,28 @@ def test_static_sessions_js_no_cli_session_bypass():
     )
 
 
-def test_static_sessions_js_uses_all_profiles_query_when_toggle_on():
-    """Frontend must request /api/sessions?all_profiles=1 when _showAllProfiles is true.
+def test_static_sessions_js_uses_profile_pagination_when_toggle_on():
+    """Frontend must load other profiles via ?profile= pagination when expanded.
 
-    Without this, flipping the toggle just re-renders client-cached rows that
-    may not contain cross-profile data (since the server scoped on first fetch).
+    The flat ?all_profiles=1 aggregate remains available for compatibility, but
+    the sidebar toggle should not request it anymore.
     """
     from pathlib import Path
 
     repo_root = Path(__file__).parent.parent
     src = (repo_root / 'static' / 'sessions.js').read_text(encoding='utf-8')
 
-    assert "_showAllProfiles ? '?all_profiles=1' : ''" in src, (
-        "Expected fetch path to flip on the toggle state"
+    assert "_showAllProfiles ? '?all_profiles=1' : ''" not in src, (
+        "Sidebar should not fetch flat all_profiles sessions anymore"
     )
-    assert "api('/api/sessions' + allProfilesQS,{timeoutToast:false})" in src, (
-        "Expected /api/sessions fetch to use the variant query"
+    assert "api('/api/sessions',{timeoutToast:false})" in src, (
+        "Expected default /api/sessions fetch for active profile"
     )
-    assert "api('/api/projects' + allProfilesQS,{timeoutToast:false})" in src, (
-        "Expected /api/projects fetch to use the variant query"
+    assert "/api/sessions?profile=" in src, (
+        "Expected per-profile pagination fetch when cross-profile view is open"
+    )
+    assert "api('/api/projects'+projectsQS,{timeoutToast:false})" in src, (
+        "Expected /api/projects to still opt into all_profiles when needed"
     )
 
 

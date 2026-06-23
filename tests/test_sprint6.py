@@ -105,6 +105,31 @@ def test_file_raw_attachment_fallback_rejects_traversal(cleanup_test_sessions):
     except urllib.error.HTTPError as e:
         assert e.code == 404
 
+def test_media_relative_path_requires_session_id():
+    try:
+        get_raw("/api/media?path=test.png")
+        assert False, "Expected 400"
+    except urllib.error.HTTPError as e:
+        assert e.code == 400
+
+def test_media_serves_session_attachment_inbox(cleanup_test_sessions):
+    from api.upload import _session_attachment_dir
+
+    sid, workspace = make_session_tracked(cleanup_test_sessions)
+    filename = f"media-upload-{uuid.uuid4().hex}.png"
+    attachment_dir = _session_attachment_dir(sid)
+    attachment_dir.mkdir(parents=True, exist_ok=True)
+    payload = b"fake-png-bytes-media"
+    (attachment_dir / filename).write_bytes(payload)
+
+    assert not (workspace / filename).exists()
+    raw, headers, status = get_raw(
+        f"/api/media?session_id={sid}&path={urllib.parse.quote(filename)}"
+    )
+    assert status == 200
+    assert raw == payload
+    assert "image/png" in headers.get("Content-Type", "")
+
 # ── Cron create ──
 
 def test_cron_create_requires_prompt():

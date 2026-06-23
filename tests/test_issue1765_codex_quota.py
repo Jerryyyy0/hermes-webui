@@ -18,26 +18,31 @@ def test_codex_oauth_usage_exhaustion_is_classified_as_quota():
     ]:
         classified = streaming._classify_provider_error(err, Exception(err))
         assert classified['type'] == 'quota_exhausted', err
-        assert classified['label'] == 'Out of credits'
-        assert 'credits' in classified['hint'].lower() or 'usage' in classified['hint'].lower()
+        assert classified['label'] == '额度已用尽'
+        assert '额度' in classified['hint'] or 'Provider' in classified['hint']
 
 
 def test_silent_provider_failure_gets_specific_catch_all_error():
     classified = streaming._classify_provider_error('', None, silent_failure=True)
 
     assert classified['type'] == 'no_response'
-    assert classified['label'] == 'No response from provider'
-    assert 'returned no content and no error' in classified['hint']
+    assert classified['label'] == '模型无响应'
+    assert '模型服务' in classified['message']
 
 
-def test_provider_error_payload_includes_bounded_redacted_details(monkeypatch):
+def test_provider_error_payload_keeps_raw_agent_details_separate_from_message(monkeypatch):
     secret = 'sk-proj-' + ('a' * 80)
     raw_error = CODEX_PLAN_LIMIT_ERROR + ' token=' + secret
 
-    monkeypatch.setattr(streaming, '_redact_text', lambda text: text.replace(secret, '[REDACTED]'))
-    payload = streaming._provider_error_payload(raw_error, 'quota_exhausted', 'Switch providers')
+    monkeypatch.setattr('integration.chat_provider_errors.payload._redact_text', lambda text: text.replace(secret, '[REDACTED]'))
+    payload = streaming._provider_error_payload(
+        raw_error,
+        'quota_exhausted',
+        error_code=None,
+    )
 
     assert payload['message']
+    assert '额度' in payload['message']
     assert secret not in payload['message']
     assert payload['details']
     assert secret not in payload['details']

@@ -145,7 +145,7 @@ def test_compression_exhausted_after_session_rotation_preserves_snapshot_and_err
     assert new_payload["parent_session_id"] == old_sid
     assert new_payload["pre_compression_snapshot"] is False
     assert new_payload["messages"][-1]["_error"] is True
-    assert "Context compression exhausted" in new_payload["messages"][-1]["content"]
+    assert "上下文压缩失败" in new_payload["messages"][-1]["content"]
     assert old_sid not in streaming.SESSIONS
     assert streaming.SESSIONS[new_sid].session_id == new_sid
 
@@ -281,8 +281,8 @@ def test_compression_exhausted_apperror_clears_reference_ui_and_labels_error():
     assert end != -1, "warning listener after apperror not found"
     block = src[start:end]
 
-    assert "const isCompressionExhausted=d.type==='compression_exhausted';" in block
-    assert "isCompressionExhausted?'Context compression exhausted'" in block
+    assert "d.label" in block
+    assert "d.details_label" in block
     assert "if(typeof clearCompressionUi==='function') clearCompressionUi();" in block
     assert "window._compressionUi=null;" in block
     assert "const eventSid=d.old_session_id||d.session_id||'';" in block
@@ -431,7 +431,8 @@ def test_apperror_payload_enriched_before_enqueue(tmp_path, monkeypatch):
 
 def test_exception_apperror_payload_includes_session_id_before_enqueue():
     src = _read("api/streaming.py")
-    start = src.find("_error_payload = _provider_error_payload(err_str, _exc_type, _exc_hint)")
+    except_idx = src.index("print('[webui] stream error:")
+    start = src.index("_error_payload = _provider_error_payload_from_classification", except_idx)
     assert start != -1, "exception apperror payload path not found"
     end = src.find("put('apperror', _error_payload)", start)
     assert end != -1, "exception apperror enqueue not found"

@@ -41,19 +41,19 @@ class TestCancelledTurnClassification:
         result = _classify_provider_error("Cancelled by user", Exception("Cancelled by user"))
 
         assert result["type"] == "cancelled"
-        assert result["label"] == "Task cancelled"
+        assert result["label"] == "任务已取消"
         assert "provider returned no content" not in result.get("hint", "").lower()
         assert "rate limit" not in result.get("hint", "").lower()
-        assert "no provider failure" in result.get("hint", "").lower()
+        assert "并非系统出错" in result.get("hint", "")
 
     def test_string_only_cancelled_error_repr_is_cancelled(self):
         result = _classify_provider_error("<CancelledError>", None, silent_failure=True)
 
         assert result["type"] == "cancelled"
-        assert result["label"] == "Task cancelled"
+        assert result["label"] == "任务已取消"
         assert "provider returned no content" not in result.get("hint", "").lower()
 
-    def test_interrupted_or_aborted_error_is_not_provider_no_response(self):
+    def test_interrupted_error_is_chinese(self):
         for text in (
             "Interrupted by user",
             "Operation aborted before provider response completed",
@@ -61,15 +61,15 @@ class TestCancelledTurnClassification:
         ):
             result = _classify_provider_error(text, RuntimeError(text))
             assert result["type"] == "interrupted", text
-            assert result["label"] == "Response interrupted", text
+            assert result["label"] == "响应被中断", text
             assert "provider returned no content" not in result.get("hint", "").lower()
 
     def test_provider_empty_response_still_uses_no_response(self):
         result = _classify_provider_error("", None, silent_failure=True)
 
         assert result["type"] == "no_response"
-        assert result["label"] == "No response from provider"
-        assert "provider returned no content" in result.get("hint", "").lower()
+        assert result["label"] == "模型无响应"
+        assert "模型服务" in result.get("message", "")
 
 
 class TestCancelledTurnFinalizer:
@@ -84,10 +84,9 @@ class TestCancelledTurnFinalizer:
         assert session.pending_started_at is None
         assert session.saved == 1
         assert session.messages[-1]['content'] == _cancelled_turn_content('Task cancelled.')
-        assert '**Task cancelled:** Task cancelled.' in session.messages[-1]['content']
-        assert 'No provider failure occurred' in session.messages[-1]['content']
+        assert session.messages[-1]['content'] == '任务已取消。'
         assert session.messages[-1]['provider_details'] == 'Task cancelled.'
-        assert session.messages[-1]['provider_details_label'] == 'Cancellation details'
+        assert session.messages[-1]['provider_details_label'] == '取消详情'
         assert session.messages[-1]['_error'] is True
 
     def test_ephemeral_cancel_finalizer_unlinks_temp_session_without_saving_error_marker(self, tmp_path):
@@ -114,7 +113,12 @@ class TestCancelledTurnFinalizer:
 
 class TestCancelledTurnPersistenceGuards:
     def test_cancel_marker_patterns_are_centralized_for_dedupe(self):
-        assert _CANCEL_MARKER_PATTERNS == ('task cancelled', 'task canceled', 'response interrupted')
+        assert _CANCEL_MARKER_PATTERNS == (
+            'task cancelled',
+            'task canceled',
+            'response interrupted',
+            '任务已取消',
+        )
         src = _read("api/streaming.py")
         assert "any(pattern in normalized for pattern in _CANCEL_MARKER_PATTERNS)" in src
         assert "any(pattern in _content for pattern in _CANCEL_MARKER_PATTERNS)" in src
@@ -156,7 +160,7 @@ class TestCancelledTurnPersistenceGuards:
         except_idx = src.find("print('[webui] stream error:")
         assert except_idx != -1, "stream exception handler not found"
         classify_idx = src.find("_classify_provider_error", except_idx)
-        generic_idx = src.find("_exc_label, _exc_type, _exc_hint = 'Error', 'error', ''", except_idx)
+        generic_idx = src.find("_error_payload = _provider_error_payload_from_classification", except_idx)
         assert classify_idx != -1 and generic_idx != -1
         block = src[except_idx:generic_idx]
 
@@ -165,8 +169,10 @@ class TestCancelledTurnPersistenceGuards:
         )
         assert "cancelled" in block.lower() or "interrupted" in block.lower()
         assert "provider_details_label" in src
-        assert "Cancellation details" in src
-        assert "Interruption details" in src
+        integration_src = _read("integration/chat_provider_errors/messages.py")
+        assert "取消详情" in integration_src
+        assert "中断详情" in integration_src
+        assert "技术详情" in integration_src
 
     def test_post_run_cancel_guard_runs_before_normal_success_merge(self):
         src = _read("api/streaming.py")
@@ -185,17 +191,14 @@ class TestCancelledTurnPersistenceGuards:
         )
         assert "return" in block
 
-    def test_frontend_has_cancelled_and_interrupted_labels_for_apperror_fallbacks(self):
+    def test_frontend_apperror_handler_uses_backend_chinese_fields(self):
         src = _read("static/messages.js")
         start = src.find("source.addEventListener('apperror'")
         end = src.find("source.addEventListener('warning'", start)
         assert start != -1 and end != -1, "apperror handler not found"
         block = src[start:end]
 
-        assert "d.type==='cancelled'" in block or 'd.type==="cancelled"' in block
-        assert "d.type==='interrupted'" in block or 'd.type==="interrupted"' in block
-        assert "Task cancelled" in block
-        assert "Response interrupted" in block
-        assert "No response from provider" in block
-        assert "Cancellation details" in block
-        assert "Interruption details" in block
+        assert "d.label" in block
+        assert "d.details_label" in block
+        assert "发生错误" in block
+        assert "技术详情" in block

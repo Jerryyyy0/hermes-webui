@@ -178,13 +178,10 @@ def test_frontend_renders_gateway_auth_error_with_specific_label():
     assert start != -1 and end != -1, "apperror handler not found"
     block = src[start:end]
 
-    assert "d.type==='gateway_auth_error'" in block
-    assert "isGatewayAuthError" in block
-    assert "gateway_auth_label" in block
-    assert "Gateway authentication failed" in block
-    assert "isGatewayAuthError?(typeof t==='function'?t('gateway_auth_label'):'Gateway authentication failed'):isAuthMismatch" in block, (
-        "Gateway API key failures should use their own label before generic provider mismatch handling."
-    )
+    assert "d.label" in block
+    assert "d.message" in block
+    assert "d.details_label" in block
+    assert "发生错误" in block
 
 
 def test_gateway_auth_label_i18n_key_exists_for_every_locale():
