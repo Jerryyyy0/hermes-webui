@@ -611,7 +611,7 @@
         }),
       });
       _skillhubData = null;
-      if (typeof _skillsData !== 'undefined') _skillsData = null;
+      if (typeof _invalidateSkillsDataCache === 'function') _invalidateSkillsDataCache();
       await loadSkillHub(true);
       if (typeof loadSkills === 'function') await loadSkills();
       const item =
@@ -672,7 +672,7 @@
         body: JSON.stringify({ name, enabled: true }),
       }).catch(() => {});
       _skillhubData = null;
-      if (typeof _skillsData !== 'undefined') _skillsData = null;
+      if (typeof _invalidateSkillsDataCache === 'function') _invalidateSkillsDataCache();
       if (typeof _invalidateSkillCommandCache === 'function') _invalidateSkillCommandCache();
       await loadSkillHub(true);
       if (typeof loadSkills === 'function') await loadSkills();
@@ -715,7 +715,7 @@
       });
       _skillhubData = null;
       _currentSkillhubItem = null;
-      if (typeof _skillsData !== 'undefined') _skillsData = null;
+      if (typeof _invalidateSkillsDataCache === 'function') _invalidateSkillsDataCache();
       if (typeof _invalidateSkillCommandCache === 'function') _invalidateSkillCommandCache();
       window.dispatchEvent(new CustomEvent('hermes:skill-delete', { detail: { name } }));
       clearDetail();

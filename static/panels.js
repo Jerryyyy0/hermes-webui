@@ -3733,6 +3733,14 @@ async function clearConversation() {
 }
 
 // ── Skills panel ──
+function _invalidateSkillsDataCache() {
+  _skillsData = null;
+  _cronSkillsCache = null;
+}
+if (typeof window !== 'undefined') {
+  window._invalidateSkillsDataCache = _invalidateSkillsDataCache;
+}
+
 async function loadSkills() {
   if (_skillsData) { renderSkills(_skillsData); return; }
   const box = $('skillsList');
