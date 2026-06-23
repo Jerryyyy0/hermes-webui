@@ -301,7 +301,21 @@
       const installed = skill.installed === true;
       const isCustom = _skillhubScope === 'custom' || skill.custom === true;
       const showCatalogOnly = _skillhubScope === 'hub' && !installed;
-      el.className = 'skill-item' + (showCatalogOnly ? ' catalog-only' : '');
+      const isDisabled = skill.disabled || false;
+      el.className = 'skill-item' + (isDisabled ? ' disabled' : '') + (showCatalogOnly ? ' catalog-only' : '');
+      // Toggle button for installed skills (hub-installed or custom)
+      if (installed || isCustom) {
+        const toggle = document.createElement('span');
+        toggle.className = 'skill-toggle' + (isDisabled ? '' : ' enabled');
+        toggle.title = isDisabled
+          ? (typeof t === 'function' ? t('skill_disabled') : 'Disabled')
+          : (typeof t === 'function' ? t('skill_enabled') : 'Enabled');
+        toggle.addEventListener('click', (ev) => {
+          ev.stopPropagation();
+          _toggleSkillHubSkill(skill.name, !isDisabled);
+        });
+        el.appendChild(toggle);
+      }
       const nameEl = document.createElement('span');
       nameEl.className = 'skill-name';
       nameEl.textContent = skill.display_name || skill.install_name || skill.name;
@@ -311,6 +325,32 @@
       el.append(nameEl, descEl);
       el.onclick = () => openSkillHubItem(skill, el);
       box.appendChild(el);
+    }
+  }
+
+  async function _toggleSkillHubSkill(name, currentlyEnabled) {
+    const newEnabled = !currentlyEnabled;
+    try {
+      const result = await api('/api/skills/toggle', {
+        method: 'POST',
+        body: JSON.stringify({ name, enabled: newEnabled })
+      });
+      if (result && result.ok) {
+        // Update local cache
+        if (_skillhubData) {
+          const skill = _skillhubData.find(s => s.name === name);
+          if (skill) skill.disabled = !newEnabled;
+        }
+        renderSkillHubList(_skillhubData || []);
+        // Notify Skills panel to sync
+        window.dispatchEvent(new CustomEvent('hermes:skill-toggle', {
+          detail: { name, enabled: newEnabled }
+        }));
+      } else {
+        setStatus((result && result.error) || (typeof t === 'function' ? t('skill_toggle_failed') : 'Toggle failed'));
+      }
+    } catch(e) {
+      setStatus((typeof t === 'function' ? t('skill_toggle_failed') : 'Toggle failed') + e.message);
     }
   }
 
@@ -670,6 +710,8 @@
       _skillhubData = null;
       _currentSkillhubItem = null;
       if (typeof _skillsData !== 'undefined') _skillsData = null;
+      if (typeof _invalidateSkillCommandCache === 'function') _invalidateSkillCommandCache();
+      window.dispatchEvent(new CustomEvent('hermes:skill-delete', { detail: { name } }));
       clearDetail();
       await loadSkillHub(true);
       if (typeof loadSkills === 'function') await loadSkills();
@@ -877,4 +919,15 @@
     uploadCustomSkill,
     handleUploadFile,
   };
+
+  // Sync skill toggle state from Skills panel
+  window.addEventListener('hermes:skill-toggle', (ev) => {
+    const { name, enabled } = ev.detail || {};
+    if (!name || !_skillhubData) return;
+    const skill = _skillhubData.find(s => s.name === name);
+    if (skill) {
+      skill.disabled = !enabled;
+      renderSkillHubList(_skillhubData);
+    }
+  });
 })();
