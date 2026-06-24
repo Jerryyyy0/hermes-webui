@@ -8,6 +8,8 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Added
 
+- **Integration workspace file delete** — `POST /api/integration/workspace/file/delete` removes files under `HERMES_WEBUI_DEFAULT_WORKSPACE` (`paths` array). Left-rail Workspace files UI adds per-row delete, multi-select batch delete, and manifest refresh after delete. Session manifest artifacts keep historical rows with `status: "expired"` when the workspace file is gone (references unchanged).
+
 - **SkillHub list sorting** — `GET /api/skillhub/skills` accepts `sort` (`name`|`mtime`, default `name`) and `order` (`asc`|`desc`, default `asc`). List items always include aligned fields (`display_name`, `category`, `mtime`, etc.); strings default to `""`, `mtime` defaults to `null`. Hub upstream `updated_at` is normalized into `mtime`. SkillHub sidebar adds a sort dropdown; removes client-side re-sort of the current page.
 
 - **Knowledge base search_docs_xcore** — `POST /api/integration/knowledge_base/search_docs_xcore` proxies downstream `POST /knowledge_base/search_docs_xcore` with `query`, `kbNames` (→ downstream `kbNames`), optional `topK` (default 3), and `scoreThreshold` (default 1.0). Success returns `{kbNames, docNames, context}` from upstream `data`.
@@ -20,9 +22,19 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 - **Profile pin** — `POST /api/profile/pin` (`name`, `pinned`) stores pin state in each profile's `info.json` (`pinned`, `pin_order`), including `default`. New pins get `pin_order: 1` (topmost) and bump existing pinned orders. `GET /api/profiles` returns `info.pinned` / `info.pin_order` and sorts pinned (by `pin_order`) → unpinned `default` → alphabetical (max 5 pins). Profiles panel and compose dropdown UI in `hermes_profiles.js`.
 
-- **Zhiling identity lookup API doc** — [`docs/integration-login-api.md`](../docs/integration-login-api.md) documents `GET /api/integration/login` request/response contract, auth, and error semantics.
+- **Zhiling identity lookup API doc** — [`docs/integration-login-api.md`](../docs/integration-login-api.md) documents `GET /api/integration/webui_login` request/response contract, auth, and error semantics.
 
 ### Changed
+
+- **Knowledge base BFF route segment names** — WebUI proxy paths `apply-join`, `upload-docs`, `update-docs`, and `delete-docs` are now `apply_join`, `upload_docs`, `update_docs`, and `delete_docs` (underscore only). Hyphenated segments are no longer served. Swagger and [`docs/integration-knowledge-base-api.md`](../docs/integration-knowledge-base-api.md) updated.
+
+- **Zhiling login/logout API paths** — `GET /api/integration/login` → `GET /api/integration/webui_login`; `POST|GET /api/integration/logout` → `POST|GET /api/integration/webui_logout`. Swagger, docs, and tests updated.
+
+- **Zhiling identity in-process cache** — `GET /api/integration/webui_login` now caches successful Control Plane identity lookups in memory. Requests with `Authorization: Bearer` refresh the cache; requests without Bearer return the cached identity JSON (no `access_token` in the response). Cache misses return `401` + `not_registered`; expired cache returns `401` + `session_expired`. TTL defaults to JWT `exp` when present, otherwise `ZHILING_IDENTITY_CACHE_TTL_SECONDS` (default 1800). `POST /api/integration/webui_logout` clears the cache. Process restart clears the cache.
+
+- **`GET /api/integration/webui_login` response timestamp** — All JSON responses include `timestamp` (Unix seconds) indicating when the server generated the response.
+
+- **Cron sessions in `/api/sessions`** — Cron execution sessions (`source_tag: cron` / `cron_*` ids) are removed from `GET /api/sessions` responses when integration is enabled, including `?all_profiles=1` and profile pagination. WebUI setup chats (`source_tag: webui`) are unchanged.
 
 - **Chat stream Chinese apperror UX** — Provider/SSE `apperror` classification, Chinese copy, payload shaping, and persisted error messages live in `integration/chat_provider_errors/` (`messages.py`, `classify.py`, `payload.py`). `api/streaming.py` re-exports thin aliases for existing call sites. User-visible `message`/`hint` come from `CHAT_ERROR_ZH` only; agent/provider raw text is redacted into SSE `details` / persisted `provider_details` (collapsible technical block), not appended to `message`.
 

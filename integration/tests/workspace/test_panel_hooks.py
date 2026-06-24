@@ -13,6 +13,7 @@ def test_index_html_has_integration_workspace_panel():
     assert "integrationWorkspaceTypeFilter" in html
     assert "integrationWorkspaceSort" in html
     assert "integrationWorkspaceOrder" in html
+    assert "integrationWorkspaceDeleteSelectedBtn" in html
     assert "hermes_integration_workspace.js" in html
     assert "hermes_integration_workspace.css" in html
 
@@ -45,6 +46,8 @@ def test_integration_workspace_js_calls_api():
     assert "listQueryParams" in src
     assert "${API_PREFIX}/files" in src
     assert "${API_PREFIX}/file" in src
+    assert "/file/delete" in src
+    assert "confirmDeleteSelected" in src
     assert "has_more" in src
     assert "integrationWorkspaceFiles" in src
 

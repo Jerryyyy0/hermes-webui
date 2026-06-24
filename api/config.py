@@ -631,7 +631,7 @@ def verify_hermes_imports() -> tuple:
 
 # ── Limits ───────────────────────────────────────────────────────────────────
 MAX_FILE_BYTES = _env_mb_bytes("HERMES_WEBUI_MAX_FILE_MB", 10)
-MAX_UPLOAD_BYTES = _env_mb_bytes("HERMES_WEBUI_MAX_UPLOAD_MB", 20)
+MAX_UPLOAD_BYTES = _env_mb_bytes("HERMES_WEBUI_MAX_UPLOAD_MB", 50)
 
 # ── File type maps ───────────────────────────────────────────────────────────
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico", ".bmp"}

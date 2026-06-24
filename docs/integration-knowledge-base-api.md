@@ -26,8 +26,8 @@ http://127.0.0.1:8787
 
 | 接口 | Content-Type |
 |------|--------------|
-| 除 `upload-docs` 外 | `application/json` |
-| `upload-docs` | `multipart/form-data` |
+| 除 `upload_docs` 外 | `application/json` |
+| `upload_docs` | `multipart/form-data` |
 
 ### 响应
 
@@ -67,10 +67,10 @@ http://127.0.0.1:8787
 | `iconType` | `1` | create / edit |
 | `location` | `"101"`（create）/ `101`（edit） | create / edit |
 | `size` | `15` | available / members / documents |
-| `chunkSize` | `"500"` | upload-docs |
-| `chunkOverlap` | `"50"` | upload-docs |
-| `deleteContent` | `true` | delete-docs |
-| `notRefreshVsCache` | `false` | delete-docs |
+| `chunkSize` | `"500"` | upload_docs |
+| `chunkOverlap` | `"50"` | upload_docs |
+| `deleteContent` | `true` | delete_docs |
+| `notRefreshVsCache` | `false` | delete_docs |
 | `topK` | `3` | search_docs / search_docs_xcore |
 | `scoreThreshold` | `1.0` | search_docs / search_docs_xcore |
 
@@ -87,12 +87,12 @@ http://127.0.0.1:8787
 | 5 | `/edit` | 编辑知识库 |
 | 6 | `/delete` | 删除知识库 |
 | 7 | `/available` | 可加入的团队知识库（分页） |
-| 8 | `/apply-join` | 申请加入团队知识库 |
+| 8 | `/apply_join` | 申请加入团队知识库 |
 | 9 | `/members` | 知识库成员列表（分页） |
 | 10 | `/documents` | 文档列表（分页 + 筛选） |
-| 11 | `/upload-docs` | 上传文档（multipart，第一步） |
-| 12 | `/update-docs` | 更新文档元数据（第二步） |
-| 13 | `/delete-docs` | 删除文档 |
+| 11 | `/upload_docs` | 上传文档（multipart，第一步） |
+| 12 | `/update_docs` | 更新文档元数据（第二步） |
+| 13 | `/delete_docs` | 删除文档 |
 | 14 | `/show_pdf` | 预览 PDF / 文档 |
 | 15 | `/search_docs` | 单库检索 |
 | 16 | `/search_docs_xcore` | 跨库检索 |
@@ -214,7 +214,7 @@ http://127.0.0.1:8787
 
 ### 8. 申请加入团队知识库
 
-`POST /api/integration/knowledge_base/apply-join`
+`POST /api/integration/knowledge_base/apply_join`
 
 | 字段 | 必填 |
 |------|------|
@@ -262,7 +262,7 @@ http://127.0.0.1:8787
 
 ### 11. 上传文档（multipart，第一步）
 
-`POST /api/integration/knowledge_base/upload-docs`
+`POST /api/integration/knowledge_base/upload_docs`
 
 **Content-Type：** `multipart/form-data`
 
@@ -292,7 +292,7 @@ http://127.0.0.1:8787
 
 ### 12. 更新文档元数据（第二步）
 
-`POST /api/integration/knowledge_base/update-docs`
+`POST /api/integration/knowledge_base/update_docs`
 
 | 字段 | 必填 | 说明 |
 |------|------|------|
@@ -300,13 +300,13 @@ http://127.0.0.1:8787
 | `fileNames` | 是 | 非空字符串数组 |
 | `fileProperties` | 是 | 非空对象数组 |
 
-须在 `upload-docs` 成功之后调用。
+须在 `upload_docs` 成功之后调用。
 
 ---
 
 ### 13. 删除文档
 
-`POST /api/integration/knowledge_base/delete-docs`
+`POST /api/integration/knowledge_base/delete_docs`
 
 | 字段 | 必填 | 说明 |
 |------|------|------|
@@ -441,9 +441,9 @@ curl -sS -X POST "$BASE/search_docs_xcore" \
 须两步串联：
 
 ```
-upload-docs (multipart 上传文件)
+upload_docs (multipart 上传文件)
        ↓ 成功
-update-docs (JSON 写入 fileProperties)
+update_docs (JSON 写入 fileProperties)
 ```
 
 ---
@@ -478,7 +478,7 @@ curl -sS -X POST "$BASE/show_pdf" \
   -o preview.pdf
 
 # 上传文档
-curl -sS -X POST "$BASE/upload-docs" \
+curl -sS -X POST "$BASE/upload_docs" \
   -F "uuid=$UUID" \
   -F "kbName=$KB" \
   -F 'fileProperties=[{"fileName":"doc.pdf","fileClass":"","fileUploader":"'"$UUID"'","publicationDate":"1"}]' \

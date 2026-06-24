@@ -29,6 +29,7 @@ def lookup_current_identity(access_token: str) -> tuple[int, dict]:
                 url,
                 headers={"Authorization": f"Bearer {access_token}"},
             )
+            print(f"==============/api/identity/lookup响应：{resp.json()}==============")
     except httpx.HTTPError as exc:
         raise IdentityLookupError(str(exc)) from exc
 

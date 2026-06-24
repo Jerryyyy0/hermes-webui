@@ -21,6 +21,102 @@
   let _previewPath = '';
   let _previewMode = '';
   let _reloadTimer = null;
+  let _checkedPaths = new Set();
+
+  function tLabel(key, fallback) {
+    return typeof t === 'function' ? t(key) : fallback;
+  }
+
+  function formatConfirm(template, value) {
+    if (typeof t === 'function') return t(template, value);
+    return String(template).replace('{0}', String(value));
+  }
+
+  function updateDeleteSelectedBtn() {
+    const btn = $('integrationWorkspaceDeleteSelectedBtn');
+    if (!btn) return;
+    const count = _checkedPaths.size;
+    btn.hidden = count < 1;
+    btn.disabled = _loading;
+  }
+
+  function refreshSessionManifestAfterDelete() {
+    if (typeof loadSessionManifest === 'function') void loadSessionManifest();
+    else if (window.HermesSessionInspector && typeof window.HermesSessionInspector.refresh === 'function') {
+      void window.HermesSessionInspector.refresh();
+    }
+  }
+
+  function removeDeletedFromLocalState(deleted) {
+    const deletedSet = new Set(deleted || []);
+    if (!deletedSet.size) return;
+    _index = _index.filter(row => !deletedSet.has(row.path));
+    deletedSet.forEach(path => _checkedPaths.delete(path));
+    if (deletedSet.has(_selectedPath)) {
+      _selectedPath = '';
+      try { localStorage.removeItem('hermes-iws-selected-path'); } catch (_) {}
+    }
+    if (deletedSet.has(_previewPath)) clearIwsPreview();
+    updateDeleteSelectedBtn();
+  }
+
+  async function deletePaths(paths) {
+    const unique = [...new Set((paths || []).map(p => String(p || '').trim()).filter(Boolean))];
+    if (!unique.length) return;
+    const data = await api(`${API_PREFIX}/file/delete`, {
+      method: 'POST',
+      body: JSON.stringify({ paths: unique }),
+    });
+    const deleted = Array.isArray(data.deleted) ? data.deleted : [];
+    const failed = Array.isArray(data.failed) ? data.failed : [];
+    removeDeletedFromLocalState(deleted);
+    renderList();
+    if (deleted.length) {
+      await loadIndex(true, { refresh: true });
+      refreshSessionManifestAfterDelete();
+    }
+    if (failed.length && typeof setStatus === 'function') {
+      const summary = failed.map(row => `${row.path}: ${row.error || 'failed'}`).join('; ');
+      setStatus(summary);
+    } else if (deleted.length && typeof showToast === 'function') {
+      showToast(tLabel('deleted', 'Deleted') + (deleted.length === 1 ? basename(deleted[0]) : String(deleted.length)));
+    }
+    return data;
+  }
+
+  async function confirmDeleteSingle(path) {
+    const name = basename(path);
+    const title = formatConfirm(tLabel('integration_workspace_delete_confirm', 'Permanently delete {0}?'), name);
+    const ok = typeof showConfirmDialog === 'function'
+      ? await showConfirmDialog({ title, message: '', confirmLabel: 'Delete', danger: true, focusCancel: true })
+      : window.confirm(title);
+    if (!ok) return;
+    try {
+      await deletePaths([path]);
+    } catch (e) {
+      if (typeof setStatus === 'function') setStatus(tLabel('delete_failed', 'Delete failed: ') + (e.message || e));
+    }
+  }
+
+  async function confirmDeleteSelected() {
+    const paths = [..._checkedPaths];
+    if (!paths.length) return;
+    const title = formatConfirm(
+      tLabel('integration_workspace_delete_batch_confirm', 'Permanently delete {0} files?'),
+      paths.length,
+    );
+    const ok = typeof showConfirmDialog === 'function'
+      ? await showConfirmDialog({ title, message: '', confirmLabel: 'Delete', danger: true, focusCancel: true })
+      : window.confirm(title);
+    if (!ok) return;
+    try {
+      await deletePaths(paths);
+      _checkedPaths.clear();
+      updateDeleteSelectedBtn();
+    } catch (e) {
+      if (typeof setStatus === 'function') setStatus(tLabel('delete_failed', 'Delete failed: ') + (e.message || e));
+    }
+  }
 
   function $(id) {
     return document.getElementById(id);
@@ -84,6 +180,12 @@
       const blob = await API.fetchBlob(path);
       return blob.text();
     },
+    delete(paths) {
+      return api(`${API_PREFIX}/file/delete`, {
+        method: 'POST',
+        body: JSON.stringify({ paths }),
+      });
+    },
   };
 
   function showNav() {
@@ -122,10 +224,16 @@
         const path = row.path || '';
         const name = basename(path);
         const selected = path === _selectedPath ? ' selected' : '';
+        const checked = _checkedPaths.has(path) ? ' checked' : '';
         const size = formatSize(row.size);
         const typeText = typeLabel(row);
         const profileText = String(row.profile || '').trim();
-        return `<div class="integration-ws-file-item${selected}" role="button" tabindex="0" data-path="${esc(path)}">`
+        return `<div class="integration-ws-file-item${selected}" data-path="${esc(path)}">`
+          + `<div class="integration-ws-file-row">`
+          + `<label class="integration-ws-file-check" onclick="event.stopPropagation()">`
+          + `<input type="checkbox" class="integration-ws-file-checkbox" data-path="${esc(path)}"${checked} aria-label="Select ${esc(name)}">`
+          + `</label>`
+          + `<div class="integration-ws-file-main" role="button" tabindex="0" data-path="${esc(path)}">`
           + `<div class="integration-ws-file-row">`
           + `<span class="integration-ws-file-name">${esc(name)}</span>`
           + `<span class="integration-ws-file-type">${esc(typeText)}</span>`
@@ -133,9 +241,12 @@
           + `<span class="integration-ws-file-path">${esc(path)}</span>`
           + (profileText ? `<span class="integration-ws-file-meta">${esc(profileText)}</span>` : '')
           + (size ? `<span class="integration-ws-file-meta">${esc(size)}</span>` : '')
+          + `</div>`
+          + `<button type="button" class="integration-ws-file-del" data-path="${esc(path)}" title="${esc(tLabel('delete_title', 'Delete'))}" aria-label="${esc(tLabel('delete_title', 'Delete'))}">×</button>`
+          + `</div>`
           + '</div>';
       }).join('');
-      list.querySelectorAll('.integration-ws-file-item').forEach(row => {
+      list.querySelectorAll('.integration-ws-file-main').forEach(row => {
         const activate = () => {
           const path = row.getAttribute('data-path') || '';
           if (path) selectFile(path);
@@ -148,6 +259,22 @@
           }
         });
       });
+      list.querySelectorAll('.integration-ws-file-checkbox').forEach(box => {
+        box.addEventListener('change', () => {
+          const path = box.getAttribute('data-path') || '';
+          if (!path) return;
+          if (box.checked) _checkedPaths.add(path);
+          else _checkedPaths.delete(path);
+          updateDeleteSelectedBtn();
+        });
+      });
+      list.querySelectorAll('.integration-ws-file-del').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const path = btn.getAttribute('data-path') || '';
+          if (path) void confirmDeleteSingle(path);
+        });
+      });
     }
 
     if (loadMore) {
@@ -155,6 +282,7 @@
       loadMore.disabled = _loading;
       loadMore.textContent = _loading ? 'Loading...' : 'Load more';
     }
+    updateDeleteSelectedBtn();
   }
 
   function updateRootHint() {
@@ -410,6 +538,9 @@
   function bindUi() {
     const refresh = $('integrationWorkspaceRefreshBtn');
     if (refresh) refresh.addEventListener('click', () => loadIndex(true, { refresh: true }));
+
+    const deleteSelected = $('integrationWorkspaceDeleteSelectedBtn');
+    if (deleteSelected) deleteSelected.addEventListener('click', () => { void confirmDeleteSelected(); });
 
     const search = $('integrationWorkspaceSearch');
     if (search) {

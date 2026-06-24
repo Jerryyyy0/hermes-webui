@@ -201,6 +201,41 @@ def _handle_file_stream(handler, parsed) -> bool:
     return True
 
 
+def _parse_paths_body(body: dict | None) -> list[str] | None:
+    if not isinstance(body, dict):
+        return None
+    raw = body.get("paths")
+    if not isinstance(raw, list) or not raw:
+        return None
+    paths: list[str] = []
+    for item in raw:
+        if not isinstance(item, str):
+            return None
+        paths.append(item)
+    return paths
+
+
+def _handle_file_delete(handler, body) -> bool:
+    paths = _parse_paths_body(body)
+    if paths is None:
+        bad(handler, "paths must be a non-empty array of strings", status=400)
+        return True
+
+    from integration.workspace.delete import delete_integration_workspace_files
+
+    result = delete_integration_workspace_files(paths)
+    deleted = result.get("deleted") or []
+    payload = {
+        "ok": bool(deleted),
+        "workspace": result.get("workspace", _workspace_str()),
+        "deleted": deleted,
+        "failed": result.get("failed") or [],
+    }
+    status = 200 if deleted else 404
+    j(handler, payload, status=status)
+    return True
+
+
 def try_handle_get(handler, parsed) -> bool:
     if not integration_enabled():
         return False
@@ -209,5 +244,15 @@ def try_handle_get(handler, parsed) -> bool:
         return _handle_files_list(handler, parsed)
     if parsed.path == "/api/integration/workspace/file":
         return _handle_file_stream(handler, parsed)
+
+    return False
+
+
+def try_handle_post(handler, parsed, body) -> bool:
+    if not integration_enabled():
+        return False
+
+    if parsed.path == "/api/integration/workspace/file/delete":
+        return _handle_file_delete(handler, body)
 
     return False

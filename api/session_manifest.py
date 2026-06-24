@@ -65,6 +65,7 @@ SKILL_MANAGE_MUTATION_ACTIONS = frozenset({
 
 MANIFEST_PREVIEW_FILE = 'file'
 MANIFEST_PREVIEW_SKILL = 'skill'
+MANIFEST_STATUS_EXPIRED = 'expired'
 
 MEDIA_ARTIFACT_SOURCE = 'media'
 ASSISTANT_PROSE_ARTIFACT_SOURCE = 'assistant_prose'
@@ -74,7 +75,7 @@ _CODE_SPAN_RE = re.compile(r'`([^`\n]+)`')
 _MARKDOWN_LINK_LABEL_RE = re.compile(r'\[([^\]]+)\]\([^)]+\)')
 _BROAD_ABSOLUTE_PATH_RE = re.compile(r'(/[^\s`\'"<>|，,；;。：)\]]+\.[A-Za-z0-9][A-Za-z0-9]+)')
 _BROAD_FILENAME_EXT_RE = re.compile(
-    r'([\w\u4e00-\u9fff/._-]{1,240}\.[A-Za-z0-9]{2,8})'
+    r'([\w\u4e00-\u9fff/._\-\(\)（）]{1,240}\.[A-Za-z0-9]{2,8})'
 )
 _REFERENCE_ONLY_TOOLS = (
     REFERENCE_READ_TOOLS
@@ -234,6 +235,13 @@ def _paths_from_last_assistant_message(text: str, workspace: Path) -> list[str]:
         return []
     paths: list[str] = []
     seen: set[str] = set()
+    # Keep MEDIA token extraction first so complex filenames (for example CJK
+    # names with full-width parentheses) do not depend on the broad fallback
+    # regex shape.
+    for normalized in _paths_from_assistant_media(text, workspace):
+        if normalized not in seen and _artifact_path_is_real(workspace, normalized):
+            seen.add(normalized)
+            paths.append(normalized)
     for match in _BROAD_FILENAME_EXT_RE.finditer(text):
         raw = match.group(1)
         if '://' in raw:
@@ -1567,6 +1575,7 @@ def _serialize_manifest_row(
     source_tool: str,
     *,
     profile: str = '',
+    status: str = '',
 ) -> dict[str, str]:
     row = {
         'path': path,
@@ -1576,7 +1585,41 @@ def _serialize_manifest_row(
     profile_text = str(profile or '').strip()
     if profile_text:
         row['profile'] = profile_text
+    status_text = str(status or '').strip()
+    if status_text:
+        row['status'] = status_text
     return row
+
+
+def _expired_workspace_file_wire_path(workspace: Path, rel: str, entry_kind: str) -> str | None:
+    if entry_kind == 'dir':
+        return None
+    ws_rel, in_workspace = _workspace_relative_path(workspace, rel)
+    if not in_workspace:
+        return None
+    from api.workspace import is_workspace_cruft_basename
+
+    if is_workspace_cruft_basename(Path(ws_rel).name):
+        return None
+    return ws_rel
+
+
+def _expired_media_file_wire_path(workspace: Path, rel: str, entry_kind: str) -> str | None:
+    if entry_kind == 'dir':
+        return None
+    _ws_rel, in_workspace = _workspace_relative_path(workspace, rel)
+    if in_workspace:
+        return None
+    path_text = str(rel or '').strip()
+    if not path_text:
+        return None
+    try:
+        candidate = Path(path_text).expanduser()
+        if not candidate.is_absolute():
+            return None
+        return candidate.as_posix()
+    except (ValueError, OSError):
+        return None
 
 
 def _session_media_preview_path(workspace: Path, rel: str, entry_kind: str) -> str | None:
@@ -1630,6 +1673,7 @@ def _row_to_wire(
     skills_dir: Path | None = None,
     *,
     default_profile: str = '',
+    allow_expired: bool = False,
 ) -> dict[str, str] | None:
     source_tool = str(row.get('source_tool') or '').strip()
     if not source_tool:
@@ -1651,7 +1695,7 @@ def _row_to_wire(
             skill_name, MANIFEST_PREVIEW_SKILL, source_tool, profile=profile,
         )
     rel = str(row.get('path') or '').strip()
-    entry_kind = str(row.get('kind') or 'file')
+    entry_kind = str(row.get('kind') or row.get('entry_kind') or 'file')
     preview_path = _file_preview_path(workspace, rel, entry_kind)
     if preview_path:
         return _serialize_manifest_row(
@@ -1663,6 +1707,26 @@ def _row_to_wire(
             return _serialize_manifest_row(
                 media_path, MANIFEST_PREVIEW_FILE, source_tool, profile=profile,
             )
+    if allow_expired:
+        # Scheme A: only emit expired rows when the artifact has per-turn
+        # provenance (store/turn_artifacts). This avoids surfacing
+        # unattributed global candidates in session-level artifacts.
+        turn_key = str(row.get('turn_key') or '').strip()
+        if not turn_key:
+            return None
+        expired_path = None
+        if source_tool == MEDIA_ARTIFACT_SOURCE:
+            expired_path = _expired_media_file_wire_path(workspace, rel, entry_kind)
+        else:
+            expired_path = _expired_workspace_file_wire_path(workspace, rel, entry_kind)
+        if expired_path:
+            return _serialize_manifest_row(
+                expired_path,
+                MANIFEST_PREVIEW_FILE,
+                source_tool,
+                profile=profile,
+                status=MANIFEST_STATUS_EXPIRED,
+            )
     return None
 
 
@@ -1672,11 +1736,19 @@ def _rows_to_wire(
     skills_dir: Path | None = None,
     *,
     default_profile: str = '',
+    collection: str = 'references',
 ) -> list[dict[str, str]]:
+    allow_expired = collection == 'artifacts'
     out: list[dict[str, str]] = []
     seen: set[str] = set()
     for row in rows or []:
-        wire = _row_to_wire(row, workspace, skills_dir, default_profile=default_profile)
+        wire = _row_to_wire(
+            row,
+            workspace,
+            skills_dir,
+            default_profile=default_profile,
+            allow_expired=allow_expired,
+        )
         if wire is None:
             continue
         path = wire['path']
@@ -1699,9 +1771,12 @@ def _turn_to_wire(
     return {
         'turn_key': str(turn.get('turn_key') or ''),
         'artifacts': _rows_to_wire(
-            turn.get('artifacts'), workspace, skills_dir, default_profile=default_profile,
+            turn.get('artifacts'), workspace, skills_dir,
+            default_profile=default_profile, collection='artifacts',
         ),
-        'references': _rows_to_wire(turn.get('references'), workspace, skills_dir),
+        'references': _rows_to_wire(
+            turn.get('references'), workspace, skills_dir, collection='references',
+        ),
     }
 
 
@@ -1732,7 +1807,11 @@ def _merge_rows_by_identity(existing_rows: list | None, incoming_rows: list | No
             continue
         profile = str(row.get('profile') or '').strip()
         key = f'{profile}\0{path}'
-        rows[key] = _serialize_manifest_row(path, preview, source_tool, profile=profile)
+        merged = _serialize_manifest_row(path, preview, source_tool, profile=profile)
+        status = str(row.get('status') or '').strip()
+        if status:
+            merged['status'] = status
+        rows[key] = merged
     return sorted(rows.values(), key=lambda item: (str(item.get('profile') or ''), item['path']))
 
 
@@ -1832,9 +1911,12 @@ def extract_manifest_delta_from_tool_event(
             'status': normalized_event.status,
         },
         'artifacts': _rows_to_wire(
-            artifacts, workspace, skills_dir, default_profile=default_profile,
+            artifacts, workspace, skills_dir,
+            default_profile=default_profile, collection='artifacts',
         ),
-        'references': _rows_to_wire(references, workspace, skills_dir),
+        'references': _rows_to_wire(
+            references, workspace, skills_dir, collection='references',
+        ),
     }
     if sequence is not None:
         payload['sequence'] = sequence
@@ -1894,12 +1976,14 @@ def extract_manifest_delta_from_turn_reconcile(
         tool_calls=tool_calls,
     )
     wire_artifacts = _rows_to_wire(
-        session_artifacts, workspace, skills_dir, default_profile=default_profile,
+        session_artifacts, workspace, skills_dir,
+        default_profile=default_profile, collection='artifacts',
     )
     if not wire_artifacts:
         return {}
     turn_wire = _rows_to_wire(
-        turn_artifacts, workspace, skills_dir, default_profile=default_profile,
+        turn_artifacts, workspace, skills_dir,
+        default_profile=default_profile, collection='artifacts',
     )
     payload: dict[str, Any] = {
         'version': 1,
@@ -2025,7 +2109,7 @@ def build_session_manifest(session) -> dict[str, Any]:
                     source_tool = str(artifact_records[p].get('source_tool', '') or '').strip()
                 if not source_tool:
                     source_tool = 'write_file'
-                if not p or not _artifact_path_is_real(workspace, p):
+                if not p:
                     continue
                 record: dict[str, Any] = {
                     'path': p,
@@ -2034,6 +2118,7 @@ def build_session_manifest(session) -> dict[str, Any]:
                     'entry_kind': 'file',
                     'preview': 'file',
                     'profile': default_profile,
+                    'turn_key': str(tk or '').strip(),
                 }
                 turn_artifacts.append(record)
                 if p not in artifact_records:
@@ -2079,9 +2164,12 @@ def build_session_manifest(session) -> dict[str, Any]:
     return {
         'todos': _wire_todos(todos),
         'artifacts': _rows_to_wire(
-            artifacts, workspace, skills_dir, default_profile=default_profile,
+            artifacts, workspace, skills_dir,
+            default_profile=default_profile, collection='artifacts',
         ),
-        'references': _rows_to_wire(references, workspace, skills_dir),
+        'references': _rows_to_wire(
+            references, workspace, skills_dir, collection='references',
+        ),
         'turns': [
             _turn_to_wire(turn, workspace, skills_dir, default_profile=default_profile)
             for turn in turns

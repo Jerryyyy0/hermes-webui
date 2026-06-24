@@ -1,4 +1,4 @@
-"""Import cron agent sessions into WebUI sidecar and expose them in the sidebar."""
+"""Import cron agent sessions into WebUI sidecar (sidebar list excludes cron runs by default)."""
 
 from __future__ import annotations
 
@@ -25,13 +25,28 @@ CRON_ORPHAN_OUTPUT_MAX_DELTA_SECONDS = 600.0
 
 
 def cron_sessions_visible_in_sidebar(session: dict) -> bool:
-    """Materialized cron sessions (WebUI copy) are visible; raw CLI cron rows stay hidden."""
-    if not cron_all_profiles_enabled():
-        return False
+    """Cron sessions are excluded from the default /api/sessions sidebar list."""
+    return False
+
+
+def is_cron_sidebar_session(session: dict) -> bool:
+    """Return True for cron execution sessions (not WebUI setup chats)."""
+    sid = str(session.get("session_id") or "").strip()
     source = session.get("source_tag") or session.get("source")
-    if source != "cron":
-        return False
-    return session.get("is_cli_session") is False
+    if source == "cron":
+        return True
+    return sid.startswith("cron_")
+
+
+def filter_cron_sessions_from_sidebar_rows(rows: list[dict]) -> list[dict]:
+    """Drop cron execution rows from GET /api/sessions payloads when integration is on."""
+    if not cron_all_profiles_enabled():
+        return rows
+    return [
+        row
+        for row in rows
+        if isinstance(row, dict) and not is_cron_sidebar_session(row)
+    ]
 
 
 def delete_materialized_cron_session_source(

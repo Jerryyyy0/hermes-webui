@@ -374,14 +374,16 @@ def test_upload_too_large(cleanup_test_sessions):
     """Uploading a file over MAX_UPLOAD_BYTES is rejected (413 or connection closed)."""
     sid, _ = make_session_tracked(cleanup_test_sessions)
 
-    # 21MB > 20MB limit
-    big = b"x" * (21 * 1024 * 1024)
+    from api.config import MAX_UPLOAD_BYTES
+
+    big = b"x" * (MAX_UPLOAD_BYTES + 1024)
     try:
         result, status = post_multipart("/api/upload", {"session_id": sid}, {
             "file": ("big.bin", big)
         })
         # If we get a response it should be 413
         assert status == 413, f"Expected 413, got {status}: {result}"
+        assert result.get("error") == f"附件大小需控制在{MAX_UPLOAD_BYTES // 1024 // 1024}M以内"
     except (urllib.error.URLError, ConnectionResetError, BrokenPipeError):
         # Server closed connection after reading Content-Length > limit before body
         # This is also valid rejection behavior
@@ -393,6 +395,7 @@ def test_upload_no_file_field(cleanup_test_sessions):
     sid, _ = make_session_tracked(cleanup_test_sessions)
     result, status = post_multipart("/api/upload", {"session_id": sid}, {})
     assert status == 400, f"Expected 400, got {status}: {result}"
+    assert result.get("error") == "缺少上传文件"
 
 
 def test_upload_bad_session():
@@ -401,6 +404,7 @@ def test_upload_bad_session():
         "file": ("x.txt", b"data")
     })
     assert status == 404, f"Expected 404, got {status}: {result}"
+    assert result.get("error") == "会话不存在"
 
 
 # ──────────────────────────────────────────────

@@ -3366,6 +3366,15 @@ def _redact_sidebar_session_rows(rows: list[dict]) -> list[dict]:
     return safe_rows
 
 
+def _apply_integration_sidebar_session_filters(rows: list[dict]) -> list[dict]:
+    try:
+        from integration.crons.session_bridge import filter_cron_sessions_from_sidebar_rows
+
+        return filter_cron_sessions_from_sidebar_rows(rows)
+    except ImportError:
+        return rows
+
+
 def build_merged_sidebar_sessions(*, diag=None, settings: dict | None = None) -> tuple[list[dict], int]:
     """Build the merged, sorted sidebar session list shared by /api/sessions modes."""
     if settings is None:
@@ -6138,6 +6147,8 @@ def handle_get(handler, parsed) -> bool:
                     settings=settings,
                     profile_name=profile_name,
                 )
+                diag.stage("integration_sidebar_filters")
+                scoped = _apply_integration_sidebar_session_filters(scoped)
                 diag.stage("profile_page_redact")
                 safe_rows = _redact_sidebar_session_rows(scoped)
                 diag.stage("profile_page_paginate")
@@ -6195,6 +6206,8 @@ def handle_get(handler, parsed) -> bool:
             if bool(settings.get("show_cli_sessions")):
                 diag.stage("cli_cap")
                 scoped = _cap_recent_cli_sessions(scoped, cli_cap=CLI_VISIBLE_SESSION_CAP)
+            diag.stage("integration_sidebar_filters")
+            scoped = _apply_integration_sidebar_session_filters(scoped)
             diag.stage("redact_sessions")
             safe_merged = _redact_sidebar_session_rows(scoped)
             diag.stage("response_write")
@@ -6563,7 +6576,7 @@ def handle_get(handler, parsed) -> bool:
 
     try:
         from integration.identity.handlers import try_handle_get as _identity_try_get
-
+        
         if _identity_try_get(handler, parsed) is True:
             return True
     except ImportError:
@@ -8227,6 +8240,14 @@ def handle_post(handler, parsed) -> bool:
         from integration.logout.handlers import try_handle_post as _logout_try_post
 
         if _logout_try_post(handler, parsed, body) is True:
+            return True
+    except ImportError:
+        pass
+
+    try:
+        from integration.workspace.handlers import try_handle_post as _workspace_try_post
+
+        if _workspace_try_post(handler, parsed, body) is True:
             return True
     except ImportError:
         pass

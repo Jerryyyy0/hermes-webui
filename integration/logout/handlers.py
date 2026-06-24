@@ -1,4 +1,4 @@
-"""HTTP handlers for Zhiling auth-proxy logout proxy (/api/integration/logout)."""
+"""HTTP handlers for Zhiling auth-proxy logout proxy (/api/integration/webui_logout)."""
 
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ def _logout_extra_headers(handler) -> dict[str, str]:
 def try_handle_get(handler, parsed) -> bool:
     if not zhiling_logout_enabled():
         return False
-    if parsed.path != "/api/integration/logout":
+    if parsed.path != "/api/integration/webui_logout":
         return False
 
     j(
@@ -55,10 +55,14 @@ def try_handle_get(handler, parsed) -> bool:
 def try_handle_post(handler, parsed, body) -> bool:
     if not zhiling_logout_enabled():
         return False
-    if parsed.path != "/api/integration/logout":
+    if parsed.path != "/api/integration/webui_logout":
         return False
 
     extra_headers = _logout_extra_headers(handler)
+
+    from integration.identity.session_store import clear_session
+
+    clear_session()
 
     try:
         status, payload = logout_current_user()

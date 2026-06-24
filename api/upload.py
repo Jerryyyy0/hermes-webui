@@ -45,6 +45,30 @@ def _max_extracted_bytes() -> int:
 _MAX_EXTRACTED_BYTES = 10 * MAX_UPLOAD_BYTES
 
 
+def _upload_too_large_error() -> str:
+    max_mb = MAX_UPLOAD_BYTES // 1024 // 1024
+    return f'附件大小需控制在{max_mb}M以内'
+
+
+def _is_upload_too_large_error(exc: ValueError) -> bool:
+    return str(exc).startswith('Upload too large')
+
+
+_UPLOAD_VALUE_ERRORS: dict[str, str] = {
+    'No boundary in Content-Type': '请求格式无效',
+    'Invalid Content-Length': '请求格式无效',
+    'Invalid Content-Length (negative)': '请求格式无效',
+    'Invalid filename': '文件名无效',
+    'Invalid upload destination': '上传目标无效',
+}
+
+
+def _upload_value_error_message(exc: ValueError) -> str:
+    if _is_upload_too_large_error(exc):
+        return _upload_too_large_error()
+    return _UPLOAD_VALUE_ERRORS.get(str(exc), '上传请求无效')
+
+
 def parse_multipart(rfile, content_type, content_length) -> tuple:
     import re as _re, email.parser as _ep
     # Imported locally (not just module-level) so the function stays
@@ -53,7 +77,7 @@ def parse_multipart(rfile, content_type, content_length) -> tuple:
     try:
         from api.config import MAX_UPLOAD_BYTES as _MAX_UPLOAD_BYTES
     except Exception:
-        _MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+        _MAX_UPLOAD_BYTES = 50 * 1024 * 1024
     m = _re.search(r'boundary=([^;\s]+)', content_type)
     if not m:
         raise ValueError('No boundary in Content-Type')
@@ -156,18 +180,18 @@ def handle_upload(handler):
         content_type = handler.headers.get('Content-Type', '')
         content_length = int(handler.headers.get('Content-Length', 0) or 0)
         if content_length > MAX_UPLOAD_BYTES:
-            return j(handler, {'error': f'File too large (max {MAX_UPLOAD_BYTES//1024//1024}MB)'}, status=413)
+            return j(handler, {'error': _upload_too_large_error()}, status=413)
         fields, files = parse_multipart(handler.rfile, content_type, content_length)
         session_id = fields.get('session_id', '')
         if 'file' not in files:
-            return j(handler, {'error': 'No file field in request'}, status=400)
+            return j(handler, {'error': '缺少上传文件'}, status=400)
         filename, file_bytes = files['file']
         if not filename:
-            return j(handler, {'error': 'No filename in upload'}, status=400)
+            return j(handler, {'error': '文件名无效或缺失'}, status=400)
         try:
             s = get_session(session_id)
         except KeyError:
-            return j(handler, {'error': 'Session not found'}, status=404)
+            return j(handler, {'error': '会话不存在'}, status=404)
         safe_name = _sanitize_upload_name(filename)
         dest = _upload_destination(session_id, safe_name)
         dest.write_bytes(file_bytes)
@@ -180,10 +204,11 @@ def handle_upload(handler):
             'is_image': mime.startswith('image/'),
         })
     except ValueError as e:
-        return j(handler, {'error': str(e)}, status=400)
+        status = 413 if _is_upload_too_large_error(e) else 400
+        return j(handler, {'error': _upload_value_error_message(e)}, status=status)
     except Exception:
         print('[webui] upload error: ' + _tb.format_exc(), flush=True)
-        return j(handler, {'error': 'Upload failed'}, status=500)
+        return j(handler, {'error': '上传失败，请稍后重试'}, status=500)
 
 
 def extract_archive(file_bytes: bytes, filename: str, workspace: Path):

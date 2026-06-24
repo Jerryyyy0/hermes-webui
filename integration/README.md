@@ -110,24 +110,26 @@ Notes:
 
 ### Zhiling 身份（Control Plane 代理）
 
-在用户容器内，调用方从 zhiling 登录回调取得 `access_token`（`#/auth/callback#token=...`）后，可经 WebUI 转发查询当前用户平台身份与 i智库同步信息。完整 HTTP 契约见 [`docs/integration-login-api.md`](../docs/integration-login-api.md)。
+在用户容器内，调用方从 zhiling 登录回调取得 `access_token`（`#/auth/callback#token=...`）后，可经 WebUI 转发查询当前用户平台身份与 i智库同步信息。首次带 Bearer 成功查询后，身份缓存在 WebUI 进程内存，后续可无 Bearer 读取；`access_token` 仅存服务端，读缓存响应不返回 token。完整 HTTP 契约见 [`docs/integration-login-api.md`](../docs/integration-login-api.md)。
 
 启用：
 
 ```bash
 export HERMES_INTEGRATION=1
 export ZHILING_CONTROL_PLANE_URL=http://zhiling-control-plane:13001
+# 可选：非 JWT 或 JWT 无 exp 时的缓存 TTL（秒，默认 1800）
+# export ZHILING_IDENTITY_CACHE_TTL_SECONDS=1800
 ```
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| GET | `/api/integration/login` | 代理 `GET {ZHILING_CONTROL_PLANE_URL}/api/identity/lookup` |
+| GET | `/api/integration/webui_login` | 代理 `GET {ZHILING_CONTROL_PLANE_URL}/api/identity/lookup`；带 Bearer 时刷新内存缓存，无 Bearer 时读缓存 |
 
 请求头：
 
 | Header | 必填 | 说明 |
 |--------|------|------|
-| `Authorization` | 是 | `Bearer <access_token>` |
+| `Authorization` | 条件必填 | 刷新缓存时：`Bearer <access_token>`；读缓存时可省略 |
 
 若 WebUI 启用了密码/Passkey 鉴权，调用方还需携带有效的 `hermes_session` Cookie（`credentials: include`）；`Authorization` 仅用于 zhiling token，不与 WebUI Cookie 混用。
 
@@ -136,12 +138,16 @@ export ZHILING_CONTROL_PLANE_URL=http://zhiling-control-plane:13001
 ```bash
 TOKEN='前端拿到的 access_token'
 
+# 首次 / 刷新
 curl -sS \
   -H "Authorization: Bearer ${TOKEN}" \
-  http://127.0.0.1:8787/api/integration/login
+  http://127.0.0.1:8787/api/integration/webui_login
+
+# 后续读缓存
+curl -sS http://127.0.0.1:8787/api/integration/webui_login
 ```
 
-成功时响应体与 Control Plane 一致（原样透传，含 `username`、`organization`、`ithinktank` 等字段）。无效 token 通常为 HTTP `401` 且 body 含 `detail`；Control Plane 不可达时 WebUI 返回 `502` 且 `error` 为 `identity_lookup_failed`。
+成功时响应体与 Control Plane 一致（原样透传，含 `username`、`organization`、`ithinktank` 等字段）。无缓存时为 HTTP `401` 且 `error` 为 `not_registered` 或 `session_expired`；无效 Bearer token 通常为 HTTP `401` 且 body 含 `detail`；Control Plane 不可达时 WebUI 返回 `502` 且 `error` 为 `identity_lookup_failed`。`POST /api/integration/webui_logout` 会清空身份缓存。
 
 ### Zhiling 用户容器登出（auth-proxy 代理）
 
@@ -156,8 +162,8 @@ export ZHILING_LOGOUT_API_URL=http://auth-proxy:8080
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| POST | `/api/integration/logout` | 清理 WebUI `hermes_session`，POST `{}` 至 auth-proxy，原样返回 JSON（含 `casdoor_logout_url`、`login_url` 等） |
-| GET | `/api/integration/logout` | 返回 `405` + `method_not_allowed` |
+| POST | `/api/integration/webui_logout` | 清理 WebUI `hermes_session`，POST `{}` 至 auth-proxy，原样返回 JSON（含 `casdoor_logout_url`、`login_url` 等） |
+| GET | `/api/integration/webui_logout` | 返回 `405` + `method_not_allowed` |
 
 示例（容器内或经 WebUI 代理）：
 
@@ -165,7 +171,7 @@ export ZHILING_LOGOUT_API_URL=http://auth-proxy:8080
 curl -sS -X POST \
   -H "Content-Type: application/json" \
   -d '{}' \
-  http://127.0.0.1:8787/api/integration/logout
+  http://127.0.0.1:8787/api/integration/webui_logout
 ```
 
 推荐流程：调用方收到 JSON 后由前端或门户跳转 `casdoor_logout_url`；WebUI 内置 Sign Out（`POST /api/auth/logout`）不修改，Zhiling 部署可单独调用本接口或浏览器同源 `POST /api/logout`（auth-proxy）。
@@ -180,6 +186,7 @@ auth-proxy 不可达时 WebUI 返回 `502` 且 `error` 为 `zhiling_logout_faile
 |--------|------|---------|
 | GET | `/api/integration/workspace/files` | 平铺文件索引；`page`（默认 1）、`page_size`（默认 500，上限 5000）；可选子树 `path`（默认 `.`）；`q`（basename 包含搜索）、`type`（扩展名过滤，如 `.md`）、`sort`（`path`/`size`/`mtime`/`ctime`，默认 `path`）、`order`（`asc`/`desc`，默认 `desc`）；可选 `profile`（传入时仅返回该 profile 的 manifest 成果文件；不传则返回全部文件并对成果附加 `profile`）；可选 `refresh=1`（跳过服务端内存索引，强制重扫磁盘） |
 | GET | `/api/integration/workspace/file` | 原始文件字节流（`path` 必填）；`Content-Type` 按扩展名；不设 `Content-Disposition` |
+| POST | `/api/integration/workspace/file/delete` | 删除文件（`paths` 必填，字符串数组，至少 1 项）；仅删文件；响应 `deleted` / `failed`；全部失败 404 |
 
 翻页：递增 `page` 直到响应 `has_more` 为 `false`。条目含 `ext`、`mime`、`mtime_ns`、`ctime_ns`（优先 birthtime，否则为 `st_ctime` 纳秒；`stat` 失败时为 `null`）。manifest 成果文件（会话 write 工具产出）附加可选 `profile`（`session.profile`）；非成果文件无该字段。
 
@@ -192,9 +199,12 @@ curl -sS 'http://127.0.0.1:8787/api/integration/workspace/files?profile=ops'
 curl -sS 'http://127.0.0.1:8787/api/integration/workspace/files?q=report&type=.md&sort=mtime&order=desc'
 curl -sS 'http://127.0.0.1:8787/api/integration/workspace/file?path=README.md'
 curl -sS 'http://127.0.0.1:8787/api/integration/workspace/file?path=assets/logo.png' -o logo.png
+curl -sS -X POST 'http://127.0.0.1:8787/api/integration/workspace/file/delete' \
+  -H 'Content-Type: application/json' \
+  -d '{"paths":["tmp/report.md","old.txt"]}'
 ```
 
-UI（`HERMES_INTEGRATION=1`）：左侧 Rail / 移动顶栏 **Workspace 文件**（`integrationWorkspace`），`hermes_integration_workspace.js` + `hermes_integration_workspace.css`。左栏为平铺列表（服务端搜索/类型过滤/排序、分页「加载更多」、刷新），中间主区只读预览（文本 / Markdown / 图片 / PDF / HTML / 媒体）。与会话绑定的右侧 Workspace 面板（`/api/list` + `session_id`）并存。
+UI（`HERMES_INTEGRATION=1`）：左侧 Rail / 移动顶栏 **Workspace 文件**（`integrationWorkspace`），`hermes_integration_workspace.js` + `hermes_integration_workspace.css`。左栏为平铺列表（服务端搜索/类型过滤/排序、分页「加载更多」、单行删除与多选批量删除、刷新），中间主区只读预览（文本 / Markdown / 图片 / PDF / HTML / 媒体）。删除后会刷新 session manifest，成果 chip 可标为已过期。与会话绑定的右侧 Workspace 面板（`/api/list` + `session_id`）并存。
 
 ### 知识库 BFF 代理（`KNOWLEDGE_BASE_URL`）
 
@@ -216,19 +226,19 @@ export KNOWLEDGE_BASE_URL=http://192.168.1.132:17861
 | POST | `/api/integration/knowledge_base/edit` | `edit_kb_information` | `kbName`, `showName` |
 | POST | `/api/integration/knowledge_base/delete` | `delete_ps_kb` | `account`, `kbName` |
 | POST | `/api/integration/knowledge_base/available` | `available_shkbs` | `account`, `uuid`, `page`, `size` |
-| POST | `/api/integration/knowledge_base/apply-join` | `apply_join_shkb` | `account`, `uuid`, `kbName` |
+| POST | `/api/integration/knowledge_base/apply_join` | `apply_join_shkb` | `account`, `uuid`, `kbName` |
 | POST | `/api/integration/knowledge_base/members` | `get_user_inshkb` | `uuid`, `kbName`, `page`, `size` |
 | POST | `/api/integration/knowledge_base/documents` | `list_knowledge_bases_details` | `kbName`, `page`, `size` |
-| POST | `/api/integration/knowledge_base/upload-docs` | `upload_docs` | multipart：`uuid`, `kbName`, `files`, `fileProperties` |
-| POST | `/api/integration/knowledge_base/update-docs` | `update_docs` | `kbName`, `fileNames`, `fileProperties` |
-| POST | `/api/integration/knowledge_base/delete-docs` | `delete_docs` | `kbName`, `fileNames` |
+| POST | `/api/integration/knowledge_base/upload_docs` | `upload_docs` | multipart：`uuid`, `kbName`, `files`, `fileProperties` |
+| POST | `/api/integration/knowledge_base/update_docs` | `update_docs` | `kbName`, `fileNames`, `fileProperties` |
+| POST | `/api/integration/knowledge_base/delete_docs` | `delete_docs` | `kbName`, `fileNames` |
 | POST | `/api/integration/knowledge_base/show_pdf` | `show_pdf` | `kbName`, `fileName`（可选 `flag`） |
 | POST | `/api/integration/knowledge_base/search_docs` | `search_docs` | `query`, `kbName`（可选 `topK`, `scoreThreshold`） |
 | POST | `/api/integration/knowledge_base/search_docs_xcore` | `search_docs_xcore` | `query`, `kbNames`（非空数组；可选 `topK`, `scoreThreshold`） |
 
 成功时 HTTP 状态码与 JSON body **原样透传**下游响应（含 `code` / `msg` / `data` 包装）。`show_pdf` 在下游返回 PDF 时透传二进制。BFF 自身错误：请求校验失败 HTTP 400；下游不可达 HTTP 502。
 
-文档上传须两步串联：`upload-docs` 成功后再 `update-docs`。
+文档上传须两步串联：`upload_docs` 成功后再 `update_docs`。
 
 ```bash
 curl -sS -X POST http://127.0.0.1:8787/api/integration/knowledge_base/list \
@@ -288,10 +298,10 @@ Response includes global `stats`: `{ hub, installed, not_installed, custom }` ac
 
 | Path | Role |
 |------|------|
-| `config.py` | `HERMES_INTEGRATION`, `SKILLHUB_URL`, `KNOWLEDGE_BASE_URL`, `ZHILING_CONTROL_PLANE_URL`, `ZHILING_LOGOUT_API_URL`, `skillhub_enabled()`, `knowledge_base_enabled()`, `identity_lookup_enabled()`, `zhiling_logout_enabled()` |
+| `config.py` | `HERMES_INTEGRATION`, `SKILLHUB_URL`, `KNOWLEDGE_BASE_URL`, `ZHILING_CONTROL_PLANE_URL`, `ZHILING_LOGOUT_API_URL`, `ZHILING_IDENTITY_CACHE_TTL_SECONDS`, `skillhub_enabled()`, `knowledge_base_enabled()`, `identity_lookup_enabled()`, `zhiling_identity_cache_ttl_seconds()`, `zhiling_logout_enabled()` |
 | `knowledge_base/` | `/api/integration/knowledge_base/*` → `{KNOWLEDGE_BASE_URL}/knowledge_base/*` |
-| `identity/` | `GET /api/integration/login` → Control Plane `/api/identity/lookup` |
-| `logout/` | `POST /api/integration/logout` → `{ZHILING_LOGOUT_API_URL}/api/logout` |
+| `identity/` | `GET /api/integration/webui_login` → Control Plane `/api/identity/lookup`；进程内身份缓存（`session_store.py`） |
+| `logout/` | `POST /api/integration/webui_logout` → `{ZHILING_LOGOUT_API_URL}/api/logout` |
 | `skills/skillhub.py` | Upstream httpx client |
 | `skills/handlers.py` | `/api/skillhub/*` HTTP handlers |
 | `profiles/` | `GET /api/profiles` enrich; `POST /api/profile/info`; `GET /api/profile/logo-presets` |
@@ -306,7 +316,7 @@ Response includes global `stats`: `{ hub, installed, not_installed, custom }` ac
 
 ## Upstream seam files (only these should conflict on rebase)
 
-- `api/routes.py` — integration GET/POST dispatch, profiles enrich, static mapping, `__INTEGRATION_SKILLS__`, `__SKILLHUB_ENABLED__`
+- `api/routes.py` — integration GET/POST dispatch, profiles enrich, static mapping, `__INTEGRATION_SKILLS__`, `__SKILLHUB_ENABLED__`; `GET /api/sessions` calls `_apply_integration_sidebar_session_filters` to drop cron execution rows when `HERMES_INTEGRATION=1`
 - `static/index.html` — integration scripts + SkillHub panel markup
 - `static/panels.js` — `HermesProfiles` guard (`loadProfilesPanel`, `toggleProfileDropdown`, `renderProfileDetail`, `renderProfileForm`, `saveProfileForm`)
 - `requirements.txt` — `httpx`

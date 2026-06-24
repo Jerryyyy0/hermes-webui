@@ -924,12 +924,46 @@
         }
       }
     },
-    "/api/integration/login": {
+    "/api/integration/workspace/file/delete": {
+      "post": {
+        "tags": ["IntegrationWorkspace"],
+        "summary": "删除 workspace 内文件（支持批量）",
+        "description": "根目录为 `HERMES_WEBUI_DEFAULT_WORKSPACE`。请求体 `paths` 为 workspace 相对路径数组，至少 1 项。仅删除文件；目录记入 `failed`。至少删除 1 个文件时 HTTP 200；全部失败时 404。删除后会话 manifest 成果可标为 `status: expired`（见 session manifest API）。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/IntegrationWorkspaceFileDeleteRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "至少删除 1 个文件（可含 failed）",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/IntegrationWorkspaceFileDeleteResponse" }
+              }
+            }
+          },
+          "400": { "description": "paths 缺失或无效" },
+          "404": {
+            "description": "全部 path 删除失败",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/IntegrationWorkspaceFileDeleteResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/integration/webui_login": {
       "get": {
         "tags": ["IntegrationLogin"],
         "summary": "查询当前 zhiling 平台身份（Control Plane 代理）",
-        "description": "将请求头 `Authorization: Bearer <access_token>` 转发至 `{ZHILING_CONTROL_PLANE_URL}/api/identity/lookup`。需要 `HERMES_INTEGRATION=1` 且配置 `ZHILING_CONTROL_PLANE_URL`。成功响应原样透传 Control Plane JSON。若 WebUI 启用了密码/Passkey，调用方还需有效 session Cookie。",
-        "security": [{ "bearerAuth": [] }, { "cookieAuth": [] }],
+        "description": "带 `Authorization: Bearer <access_token>` 时转发至 `{ZHILING_CONTROL_PLANE_URL}/api/identity/lookup`，成功响应写入进程内身份缓存并原样返回。无 Bearer 时返回缓存的身份 JSON（不含 access_token）。需要 `HERMES_INTEGRATION=1` 且配置 `ZHILING_CONTROL_PLANE_URL`。缓存 TTL 优先取 JWT `exp`，否则 `ZHILING_IDENTITY_CACHE_TTL_SECONDS`（默认 1800）。`POST /api/integration/webui_logout` 清空缓存。若 WebUI 启用了密码/Passkey，调用方还需有效 session Cookie。",
+        "security": [{}, { "bearerAuth": [] }, { "cookieAuth": [] }],
         "responses": {
           "200": {
             "description": "平台身份与 i智库同步信息",
@@ -939,23 +973,16 @@
               }
             }
           },
-          "400": {
-            "description": "缺少 Authorization Bearer token",
+          "401": {
+            "description": "无缓存（not_registered）、缓存过期（session_expired），或 Bearer token 无效（透传 Control Plane detail）",
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "properties": { "error": { "type": "string", "enum": ["missing_token"] } },
-                  "required": ["error"]
+                  "oneOf": [
+                    { "$ref": "#/components/schemas/ZhilingIdentityErrorDetail" },
+                    { "$ref": "#/components/schemas/ZhilingIdentityCacheError" }
+                  ]
                 }
-              }
-            }
-          },
-          "401": {
-            "description": "token 无效或会话超时（透传 Control Plane detail）",
-            "content": {
-              "application/json": {
-                "schema": { "$ref": "#/components/schemas/ZhilingIdentityErrorDetail" }
               }
             }
           },
@@ -976,7 +1003,8 @@
                   "required": ["error"],
                   "properties": {
                     "error": { "type": "string", "enum": ["identity_lookup_failed"] },
-                    "message": { "type": "string" }
+                    "message": { "type": "string" },
+                    "timestamp": { "type": "integer", "format": "int64", "description": "服务器响应 Unix 时间戳（秒）" }
                   }
                 }
               }
@@ -1070,7 +1098,7 @@
         }
       }
     },
-    "/api/integration/knowledge_base/apply-join": {
+    "/api/integration/knowledge_base/apply_join": {
       "post": {
         "tags": ["IntegrationKnowledgeBase"],
         "summary": "申请加入团队知识库",
@@ -1106,11 +1134,11 @@
         }
       }
     },
-    "/api/integration/knowledge_base/upload-docs": {
+    "/api/integration/knowledge_base/upload_docs": {
       "post": {
         "tags": ["IntegrationKnowledgeBase"],
         "summary": "上传文档（multipart）",
-        "description": "代理 `upload_docs`。必填表单字段：`uuid`、`kbName`、`files`、`fileProperties`（JSON 字符串）。成功后需再调用 `/update-docs` 触发解析。",
+        "description": "代理 `upload_docs`。必填表单字段：`uuid`、`kbName`、`files`、`fileProperties`（JSON 字符串）。成功后需再调用 `/update_docs` 触发解析。",
         "requestBody": {
           "required": true,
           "content": {
@@ -1137,7 +1165,7 @@
         }
       }
     },
-    "/api/integration/knowledge_base/update-docs": {
+    "/api/integration/knowledge_base/update_docs": {
       "post": {
         "tags": ["IntegrationKnowledgeBase"],
         "summary": "更新文档属性并触发解析",
@@ -1149,7 +1177,7 @@
         }
       }
     },
-    "/api/integration/knowledge_base/delete-docs": {
+    "/api/integration/knowledge_base/delete_docs": {
       "post": {
         "tags": ["IntegrationKnowledgeBase"],
         "summary": "删除文档",
@@ -1223,7 +1251,7 @@
         }
       }
     },
-    "/api/integration/logout": {
+    "/api/integration/webui_logout": {
       "get": {
         "tags": ["IntegrationLogout"],
         "summary": "方法不允许（请使用 POST）",
@@ -3142,12 +3170,57 @@
           }
         }
       },
+      "IntegrationWorkspaceFileDeleteRequest": {
+        "type": "object",
+        "required": ["paths"],
+        "properties": {
+          "paths": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "type": "string" },
+            "description": "workspace 相对路径列表"
+          }
+        }
+      },
+      "IntegrationWorkspaceFileDeleteFailure": {
+        "type": "object",
+        "required": ["path", "error"],
+        "properties": {
+          "path": { "type": "string" },
+          "error": { "type": "string" }
+        }
+      },
+      "IntegrationWorkspaceFileDeleteResponse": {
+        "type": "object",
+        "required": ["ok", "workspace", "deleted", "failed"],
+        "properties": {
+          "ok": { "type": "boolean" },
+          "workspace": { "type": "string" },
+          "deleted": { "type": "array", "items": { "type": "string" } },
+          "failed": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/IntegrationWorkspaceFileDeleteFailure" }
+          }
+        }
+      },
       "ZhilingIdentityErrorDetail": {
         "type": "object",
         "properties": {
-          "detail": { "type": "string" }
+          "detail": { "type": "string" },
+          "timestamp": { "type": "integer", "format": "int64", "description": "服务器响应 Unix 时间戳（秒）" }
         },
         "required": ["detail"]
+      },
+      "ZhilingIdentityCacheError": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string",
+            "enum": ["not_registered", "session_expired"]
+          },
+          "timestamp": { "type": "integer", "format": "int64", "description": "服务器响应 Unix 时间戳（秒）" }
+        },
+        "required": ["error"]
       },
       "ZhilingIthinktankIdentity": {
         "type": "object",
@@ -3205,7 +3278,8 @@
           "is_admin": { "type": "boolean" },
           "ithinktank": { "$ref": "#/components/schemas/ZhilingIthinktankIdentity" },
           "ithinktank_account": { "type": "string" },
-          "ithinktank_user_id": { "type": "string" }
+          "ithinktank_user_id": { "type": "string" },
+          "timestamp": { "type": "integer", "format": "int64", "description": "服务器响应 Unix 时间戳（秒）" }
         },
         "additionalProperties": true
       }

@@ -1,12 +1,13 @@
 import json
 import time
+from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 from urllib.parse import urlparse
 
 import pytest
 
 from api.workspace import safe_resolve_ws, walk_workspace_files_page
-from integration.workspace.handlers import try_handle_get
+from integration.workspace.handlers import try_handle_get, try_handle_post
 
 
 def _patch_ws(ws_root):
@@ -21,6 +22,16 @@ def _patch_resolve(ws_root):
         "integration.workspace.handlers.resolve_integration_rel",
         side_effect=lambda rel: safe_resolve_ws(ws_root, rel),
     )
+
+
+@contextmanager
+def _patch_delete_ws(ws_root):
+    with patch("integration.workspace.delete.integration_workspace_root", return_value=ws_root):
+        with patch(
+            "integration.workspace.delete.resolve_integration_rel",
+            side_effect=lambda rel: safe_resolve_ws(ws_root, rel),
+        ):
+            yield
 
 
 def _json_payload(handler: MagicMock) -> dict:
@@ -362,3 +373,82 @@ def test_files_profile_filter_uses_path_collect(ws_root):
                 ]
                 assert try_handle_get(handler, parsed) is True
                 get_entries.assert_called_once()
+
+
+def test_post_disabled_returns_false():
+    handler = MagicMock()
+    parsed = urlparse("/api/integration/workspace/file/delete")
+    with patch("integration.workspace.handlers.integration_enabled", return_value=False):
+        assert try_handle_post(handler, parsed, {"paths": ["a.txt"]}) is False
+
+
+def test_delete_missing_paths_400():
+    handler = MagicMock()
+    parsed = urlparse("/api/integration/workspace/file/delete")
+    with patch("integration.workspace.handlers.integration_enabled", return_value=True):
+        assert try_handle_post(handler, parsed, {}) is True
+    assert handler.send_response.call_args.args[0] == 400
+
+
+def test_delete_file_success(ws_root):
+    handler = MagicMock()
+    parsed = urlparse("/api/integration/workspace/file/delete")
+    target = ws_root / "a.txt"
+    assert target.exists()
+    with patch("integration.workspace.handlers.integration_enabled", return_value=True):
+        with _patch_delete_ws(ws_root):
+            assert try_handle_post(handler, parsed, {"paths": ["a.txt"]}) is True
+    assert handler.send_response.call_args.args[0] == 200
+    payload = _json_payload(handler)
+    assert payload["ok"] is True
+    assert payload["deleted"] == ["a.txt"]
+    assert not target.exists()
+
+
+def test_delete_file_batch_partial(ws_root):
+    handler = MagicMock()
+    parsed = urlparse("/api/integration/workspace/file/delete")
+    with patch("integration.workspace.handlers.integration_enabled", return_value=True):
+        with _patch_delete_ws(ws_root):
+            assert try_handle_post(
+                handler,
+                parsed,
+                {"paths": ["a.txt", "missing.txt"]},
+            ) is True
+    payload = _json_payload(handler)
+    assert payload["ok"] is True
+    assert payload["deleted"] == ["a.txt"]
+    assert payload["failed"] == [{"path": "missing.txt", "error": "not found"}]
+
+
+def test_delete_all_missing_404(ws_root):
+    handler = MagicMock()
+    parsed = urlparse("/api/integration/workspace/file/delete")
+    with patch("integration.workspace.handlers.integration_enabled", return_value=True):
+        with _patch_delete_ws(ws_root):
+            assert try_handle_post(handler, parsed, {"paths": ["nope.txt"]}) is True
+    assert handler.send_response.call_args.args[0] == 404
+    payload = _json_payload(handler)
+    assert payload["ok"] is False
+
+
+def test_delete_directory_fails(ws_root):
+    handler = MagicMock()
+    parsed = urlparse("/api/integration/workspace/file/delete")
+    with patch("integration.workspace.handlers.integration_enabled", return_value=True):
+        with _patch_delete_ws(ws_root):
+            assert try_handle_post(handler, parsed, {"paths": ["sub"]}) is True
+    payload = _json_payload(handler)
+    assert payload["deleted"] == []
+    assert payload["failed"][0]["error"] == "not a file"
+    assert (ws_root / "sub").is_dir()
+
+
+def test_delete_invalidates_index(ws_root):
+    handler = MagicMock()
+    parsed = urlparse("/api/integration/workspace/file/delete")
+    with patch("integration.workspace.handlers.integration_enabled", return_value=True):
+        with _patch_delete_ws(ws_root):
+            with patch("integration.workspace.delete.invalidate_workspace_file_index") as invalidate:
+                try_handle_post(handler, parsed, {"paths": ["a.txt"]})
+                invalidate.assert_called_once()

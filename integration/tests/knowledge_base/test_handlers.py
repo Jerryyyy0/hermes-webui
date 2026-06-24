@@ -282,7 +282,7 @@ def test_upload_docs_missing_uuid():
         "Content-Length": "10",
     }
     handler.rfile = BytesIO(b"")
-    parsed = urlparse("/api/integration/knowledge_base/upload-docs")
+    parsed = urlparse("/api/integration/knowledge_base/upload_docs")
     with patch("integration.knowledge_base.handlers.knowledge_base_enabled", return_value=True):
         with patch("api.upload.parse_multipart") as mock_parse:
             mock_parse.return_value = (
@@ -301,7 +301,7 @@ def test_upload_docs_success():
         "Content-Length": "100",
     }
     handler.rfile = BytesIO(b"")
-    parsed = urlparse("/api/integration/knowledge_base/upload-docs")
+    parsed = urlparse("/api/integration/knowledge_base/upload_docs")
     file_props = json.dumps(
         [
             {

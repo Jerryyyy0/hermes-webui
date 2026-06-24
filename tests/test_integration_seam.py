@@ -54,7 +54,7 @@ def test_egress_handlers_noop_for_other_paths_even_when_enabled():
 def test_identity_handlers_noop_when_disabled():
     handler = MagicMock()
     with patch("integration.identity.handlers.identity_lookup_enabled", return_value=False):
-        assert try_handle_identity_get(handler, urlparse("/api/integration/login")) is False
+        assert try_handle_identity_get(handler, urlparse("/api/integration/webui_login")) is False
 
 
 def test_identity_handlers_noop_for_other_paths_when_enabled():
@@ -66,8 +66,8 @@ def test_identity_handlers_noop_for_other_paths_when_enabled():
 def test_logout_handlers_noop_when_disabled():
     handler = MagicMock()
     with patch("integration.logout.handlers.zhiling_logout_enabled", return_value=False):
-        assert try_handle_logout_get(handler, urlparse("/api/integration/logout")) is False
-        assert try_handle_logout_post(handler, urlparse("/api/integration/logout"), {}) is False
+        assert try_handle_logout_get(handler, urlparse("/api/integration/webui_logout")) is False
+        assert try_handle_logout_post(handler, urlparse("/api/integration/webui_logout"), {}) is False
 
 
 def test_logout_handlers_noop_for_other_paths_when_enabled():

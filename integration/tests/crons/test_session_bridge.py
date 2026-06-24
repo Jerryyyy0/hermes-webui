@@ -65,11 +65,11 @@ def cron_env(tmp_path, monkeypatch):
     return {"home": home, "db": db}
 
 
-def test_cron_sessions_visible_only_materialized(monkeypatch):
+def test_cron_sessions_never_visible_in_sidebar(monkeypatch):
     monkeypatch.setenv("HERMES_INTEGRATION", "1")
     from integration.crons.session_bridge import cron_sessions_visible_in_sidebar
 
-    assert cron_sessions_visible_in_sidebar({"source_tag": "cron", "is_cli_session": False}) is True
+    assert cron_sessions_visible_in_sidebar({"source_tag": "cron", "is_cli_session": False}) is False
     assert cron_sessions_visible_in_sidebar({"source_tag": "cron", "is_cli_session": True}) is False
 
 
@@ -95,12 +95,36 @@ def test_materialized_cron_session_ids_for_runs_maps_existing_sidecar(cron_env):
     }
 
 
-def test_hide_sidebar_integration_visible(monkeypatch):
+def test_hide_sidebar_cron_sessions_always_hidden(monkeypatch):
     monkeypatch.setenv("HERMES_INTEGRATION", "1")
     from api.models import _hide_from_default_sidebar
 
-    assert _hide_from_default_sidebar({"session_id": "cron_x", "source_tag": "cron", "is_cli_session": False}) is False
+    assert _hide_from_default_sidebar({"session_id": "cron_x", "source_tag": "cron", "is_cli_session": False}) is True
     assert _hide_from_default_sidebar({"session_id": "cron_x", "source_tag": "cron", "is_cli_session": True}) is True
+
+
+def test_filter_cron_sessions_from_sidebar_rows(monkeypatch):
+    monkeypatch.setenv("HERMES_INTEGRATION", "1")
+    from integration.crons.session_bridge import filter_cron_sessions_from_sidebar_rows
+
+    rows = [
+        {"session_id": "cron_job_20260623_111836", "source_tag": "cron", "default_hidden": True},
+        {"session_id": "94b8df15f0e2", "source_tag": "webui"},
+        {"session_id": "cli-1", "source_tag": "cli"},
+    ]
+    filtered = filter_cron_sessions_from_sidebar_rows(rows)
+    assert [row["session_id"] for row in filtered] == ["94b8df15f0e2", "cli-1"]
+
+
+def test_apply_integration_sidebar_session_filters_in_routes(monkeypatch):
+    monkeypatch.setenv("HERMES_INTEGRATION", "1")
+    from api.routes import _apply_integration_sidebar_session_filters
+
+    rows = [
+        {"session_id": "cron_job_20260623_111836", "source_tag": "cron"},
+        {"session_id": "webui-1", "source_tag": "webui"},
+    ]
+    assert [row["session_id"] for row in _apply_integration_sidebar_session_filters(rows)] == ["webui-1"]
 
 
 def test_materialize_imports_session(cron_env, monkeypatch):

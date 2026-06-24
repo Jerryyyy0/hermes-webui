@@ -2,6 +2,7 @@ import json
 from unittest.mock import MagicMock, patch
 from urllib.parse import urlparse
 
+from integration.identity.session_store import clear_session, get_cached_identity, save_session
 from integration.logout.handlers import try_handle_get, try_handle_post
 
 
@@ -19,7 +20,7 @@ def _set_cookie_header(handler: MagicMock) -> str:
 
 def test_handlers_noop_when_disabled():
     handler = MagicMock()
-    parsed = urlparse("/api/integration/logout")
+    parsed = urlparse("/api/integration/webui_logout")
     with patch("integration.logout.handlers.zhiling_logout_enabled", return_value=False):
         assert try_handle_get(handler, parsed) is False
         assert try_handle_post(handler, parsed, {}) is False
@@ -27,7 +28,7 @@ def test_handlers_noop_when_disabled():
 
 def test_get_returns_405_method_not_allowed():
     handler = MagicMock()
-    parsed = urlparse("/api/integration/logout")
+    parsed = urlparse("/api/integration/webui_logout")
     with patch("integration.logout.handlers.zhiling_logout_enabled", return_value=True):
         assert try_handle_get(handler, parsed) is True
     handler.send_response.assert_called_with(405)
@@ -45,7 +46,7 @@ def test_success_passthrough_200_and_clears_webui_cookie():
     }
     handler = MagicMock()
     handler.headers = {"Cookie": "hermes_session=abc.def"}
-    parsed = urlparse("/api/integration/logout")
+    parsed = urlparse("/api/integration/webui_logout")
     with patch("integration.logout.handlers.zhiling_logout_enabled", return_value=True):
         with patch(
             "integration.logout.handlers.logout_current_user",
@@ -65,7 +66,7 @@ def test_success_passthrough_200_and_clears_webui_cookie():
 def test_upstream_non_2xx_passthrough():
     handler = MagicMock()
     handler.headers = {}
-    parsed = urlparse("/api/integration/logout")
+    parsed = urlparse("/api/integration/webui_logout")
     detail = {"status": "error", "error": "method_not_allowed"}
     with patch("integration.logout.handlers.zhiling_logout_enabled", return_value=True):
         with patch(
@@ -80,7 +81,7 @@ def test_upstream_non_2xx_passthrough():
 def test_logout_unreachable_returns_502():
     handler = MagicMock()
     handler.headers = {}
-    parsed = urlparse("/api/integration/logout")
+    parsed = urlparse("/api/integration/webui_logout")
     from integration.logout.client import ZhilingLogoutError
 
     with patch("integration.logout.handlers.zhiling_logout_enabled", return_value=True):
@@ -93,3 +94,20 @@ def test_logout_unreachable_returns_502():
     payload = _json_payload(handler)
     assert payload["error"] == "zhiling_logout_failed"
     assert "connection refused" in payload["message"]
+
+
+def test_logout_clears_zhiling_identity_cache():
+    clear_session()
+    save_session("tok", {"username": "cached"})
+    handler = MagicMock()
+    handler.headers = {}
+    parsed = urlparse("/api/integration/webui_logout")
+    with patch("integration.logout.handlers.zhiling_logout_enabled", return_value=True):
+        with patch(
+            "integration.logout.handlers.logout_current_user",
+            return_value=(200, {"status": "ok"}),
+        ):
+            assert try_handle_post(handler, parsed, {}) is True
+    status, payload = get_cached_identity()
+    assert status == 401
+    assert payload == {"error": "not_registered"}

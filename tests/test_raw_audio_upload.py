@@ -77,7 +77,7 @@ def test_raw_audio_upload_rejects_missing_file():
     handler = _FakeHandler(body, content_type)
     handle_upload(handler)
     assert handler.status == 400
-    assert handler.payload()["error"] == "No file field in request"
+    assert handler.payload()["error"] == "缺少上传文件"
 
 
 def test_raw_audio_vs_transcribe_no_regression(monkeypatch):

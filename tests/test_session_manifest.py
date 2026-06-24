@@ -27,6 +27,7 @@ from api.session_manifest import (
     _next_turn_key,
     _normalize_manifest_path,
     _paths_from_assistant_media,
+    _paths_from_last_assistant_message,
     _paths_from_assistant_prose,
     _public_todo_items,
     _resolve_manifest_path,
@@ -147,6 +148,117 @@ def test_serialize_manifest_row_includes_profile_when_set():
         'source_tool': 'write_file',
         'profile': 'ops',
     }
+
+
+def test_serialize_manifest_row_includes_status_when_set():
+    row = _serialize_manifest_row(
+        'docs/a.md', MANIFEST_PREVIEW_FILE, 'write_file', status='expired',
+    )
+    assert row['status'] == 'expired'
+
+
+def test_build_session_manifest_marks_deleted_artifact_expired(tmp_path, monkeypatch):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    target = workspace / 'notes.txt'
+    target.write_text('hello', encoding='utf-8')
+    session = Session(
+        session_id='manifestexp01',
+        workspace=str(workspace),
+        messages=[
+            {'role': 'user', 'content': 'write notes', '_turn_key': 'turn:0'},
+            {
+                'role': 'assistant',
+                'tool_calls': [{
+                    'id': 'c1',
+                    'function': {'name': 'write_file', 'arguments': '{"path":"notes.txt"}'},
+                }],
+            },
+            {'role': 'tool', 'tool_call_id': 'c1', 'content': 'ok'},
+        ],
+        tool_calls=[],
+        turn_artifacts={
+            'turn:0': [{'path': 'notes.txt', 'source_tool': 'write_file'}],
+        },
+    )
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    target.unlink()
+    manifest = build_session_manifest(session)
+    assert manifest['artifacts'] == [{
+        'path': 'notes.txt',
+        'preview': 'file',
+        'source_tool': 'write_file',
+        'status': 'expired',
+    }]
+    assert manifest['turns'][0]['artifacts'][0]['status'] == 'expired'
+
+
+def test_rows_to_wire_references_still_drop_missing_files(tmp_path):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    rows = [{
+        'path': 'missing.txt',
+        'source_tool': 'read_file',
+        'kind': 'file',
+        'entry_kind': 'file',
+    }]
+    wired = _rows_to_wire(rows, workspace, collection='references')
+    assert wired == []
+
+
+def test_rows_to_wire_artifacts_require_turn_key_for_expired(tmp_path):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    rows = [{
+        'path': 'tmp_fix.py',
+        'source_tool': 'write_file',
+        'kind': 'artifact',
+        'entry_kind': 'file',
+        # no turn_key -> should not emit expired
+    }]
+    wired = _rows_to_wire(rows, workspace, collection='artifacts')
+    assert wired == []
+
+
+def test_build_session_manifest_drops_unattributed_expired_candidate(tmp_path, monkeypatch):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    session = Session(
+        session_id='manifestexp02',
+        workspace=str(workspace),
+        messages=[
+            {'role': 'user', 'content': 'q1', '_turn_key': 'turn:1'},
+            {'role': 'assistant', 'content': 'a1'},
+        ],
+        tool_calls=[],
+    )
+
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+
+    def _fake_extract(events, ws, messages=None, *, skills_dir=None):
+        return (
+            [{
+                'path': 'tmp_fix.py',
+                'source_tool': 'write_file',
+                'kind': 'artifact',
+                'entry_kind': 'file',
+                # deliberately no turn_key/provenance
+            }],
+            [],
+            [{
+                'turn_key': 'turn:1',
+                'user_msg_idx': 0,
+                'start_msg_idx': 0,
+                'end_msg_idx': 1,
+                'artifacts': [],
+                'references': [],
+            }],
+        )
+
+    monkeypatch.setattr('api.session_manifest._extract_manifest_records', _fake_extract)
+    manifest = build_session_manifest(session)
+    assert manifest['artifacts'] == []
+    assert manifest['turns'][0]['artifacts'] == []
 
 
 def test_build_session_manifest_artifacts_include_session_profile(tmp_path, monkeypatch):
@@ -1199,6 +1311,26 @@ def test_paths_from_assistant_media_skips_remote_urls(tmp_path):
     text = f'Here MEDIA:https://cdn.example.com/img.png and MEDIA:{local_file}'
     paths = _paths_from_assistant_media(text, workspace)
     assert paths == [local_file.resolve().as_posix()]
+
+
+def test_paths_from_last_assistant_message_accepts_parenthesized_filename(tmp_path):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    artifact = workspace / '中国共产党纪律处分条例（2018年版）.docx'
+    artifact.write_text('docx-like', encoding='utf-8')
+    text = f'Done.\nMEDIA:{artifact.as_posix()}'
+    paths = _paths_from_last_assistant_message(text, workspace)
+    assert paths == ['中国共产党纪律处分条例（2018年版）.docx']
+
+
+def test_paths_from_last_assistant_message_accepts_ascii_parentheses_filename(tmp_path):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    artifact = workspace / 'report(2018).docx'
+    artifact.write_text('docx-like', encoding='utf-8')
+    text = f'Done.\nMEDIA:{artifact.as_posix()}'
+    paths = _paths_from_last_assistant_message(text, workspace)
+    assert paths == ['report(2018).docx']
 
 
 def test_collect_media_artifact_events_from_assistant_only(tmp_path):
@@ -2532,11 +2664,14 @@ def test_build_session_manifest_turn_artifacts_match_wire(tmp_path, monkeypatch)
         'turn:2': ['deliver.docx'],
     }
     manifest_by_turn = {
-        turn['turn_key']: [row['path'] for row in turn['artifacts']]
+        turn['turn_key']: turn['artifacts']
         for turn in manifest['turns']
     }
-    assert manifest_by_turn['turn:1'] == wired['turn:1']
-    assert manifest_by_turn['turn:2'] == wired['turn:2']
+    assert [row['path'] for row in manifest_by_turn['turn:1']] == ['missing.py', 'report.md']
+    assert manifest_by_turn['turn:1'][0]['status'] == 'expired'
+    assert 'status' not in manifest_by_turn['turn:1'][1]
+    assert [row['path'] for row in manifest_by_turn['turn:2']] == ['deliver.docx', 'make_docx.py']
+    assert manifest_by_turn['turn:2'][1]['status'] == 'expired'
 
 
 def test_filter_existing_turn_artifact_paths_deduplicates(tmp_path):
@@ -2754,12 +2889,14 @@ def test_session_get_turn_artifacts_matches_manifest_via_routes(tmp_path, monkey
 
     wired = session_resp['session']['turn_artifacts']
     manifest_by_turn = {
-        turn['turn_key']: [row['path'] for row in turn['artifacts']]
+        turn['turn_key']: turn['artifacts']
         for turn in manifest_resp['manifest']['turns']
     }
     assert wired == {'turn:1': ['report.md'], 'turn:2': ['deliver.docx']}
-    assert manifest_by_turn['turn:1'] == wired['turn:1']
-    assert manifest_by_turn['turn:2'] == wired['turn:2']
+    assert [row['path'] for row in manifest_by_turn['turn:1']] == ['missing.py', 'report.md']
+    assert manifest_by_turn['turn:1'][0]['status'] == 'expired'
+    assert [row['path'] for row in manifest_by_turn['turn:2']] == ['deliver.docx', 'make_docx.py']
+    assert manifest_by_turn['turn:2'][1]['status'] == 'expired'
 
 
 def test_build_session_manifest_multi_turn_mixed_artifacts_and_references(tmp_path, monkeypatch):
@@ -2813,14 +2950,19 @@ def test_build_session_manifest_multi_turn_mixed_artifacts_and_references(tmp_pa
     manifest = build_session_manifest(session)
     manifest_by_turn = {
         turn['turn_key']: {
-            'artifacts': [row['path'] for row in turn['artifacts']],
-            'references': [row['path'] for row in turn['references']],
+            'artifacts': list(turn['artifacts']),
+            'references': list(turn['references']),
         }
         for turn in manifest['turns']
     }
 
     assert wired == {'turn:1': ['report.md'], 'turn:2': ['deliver.docx']}
-    assert manifest_by_turn['turn:1']['artifacts'] == ['report.md']
+    turn1_paths = [row['path'] for row in manifest_by_turn['turn:1']['artifacts']]
+    assert turn1_paths == ['missing.py', 'report.md']
+    assert manifest_by_turn['turn:1']['artifacts'][0]['status'] == 'expired'
+    assert 'status' not in manifest_by_turn['turn:1']['artifacts'][1]
     assert manifest_by_turn['turn:1']['references'] == []
-    assert manifest_by_turn['turn:2']['artifacts'] == ['deliver.docx']
-    assert manifest_by_turn['turn:2']['references'] == ['docx-generation']
+    turn2_paths = [row['path'] for row in manifest_by_turn['turn:2']['artifacts']]
+    assert turn2_paths == ['deliver.docx', 'make_docx.py']
+    assert manifest_by_turn['turn:2']['artifacts'][1]['status'] == 'expired'
+    assert manifest_by_turn['turn:2']['references'][0]['path'] == 'docx-generation'

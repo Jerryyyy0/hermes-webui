@@ -66,6 +66,11 @@ def identity_lookup_enabled() -> bool:
     return integration_enabled() and bool(zhiling_control_plane_url())
 
 
+def zhiling_identity_cache_ttl_seconds() -> int:
+    """Default TTL for in-process Zhiling identity cache when JWT exp is absent."""
+    return _egress_int_env("ZHILING_IDENTITY_CACHE_TTL_SECONDS", 1800)
+
+
 def zhiling_logout_base_url() -> str | None:
     """auth-proxy origin only (e.g. http://auth-proxy:8080); path is fixed in code."""
     raw = os.getenv("ZHILING_LOGOUT_API_URL", "").strip()

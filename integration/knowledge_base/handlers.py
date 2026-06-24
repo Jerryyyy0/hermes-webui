@@ -19,11 +19,11 @@ _ROUTE_BUILDERS: dict[str, str] = {
     "edit": "build_edit_payload",
     "delete": "build_delete_kb_payload",
     "available": "build_available_payload",
-    "apply-join": "build_apply_join_payload",
+    "apply_join": "build_apply_join_payload",
     "members": "build_members_payload",
     "documents": "build_documents_payload",
-    "update-docs": "build_update_docs_payload",
-    "delete-docs": "build_delete_docs_payload",
+    "update_docs": "build_update_docs_payload",
+    "delete_docs": "build_delete_docs_payload",
     "show_pdf": "build_show_pdf_payload",
     "search_docs": "build_search_docs_payload",
     "search_docs_xcore": "build_search_docs_xcore_payload",
@@ -37,11 +37,11 @@ _REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
     "edit": ("kbName", "showName"),
     "delete": ("account", "kbName"),
     "available": ("account", "uuid", "page", "size"),
-    "apply-join": ("account", "uuid", "kbName"),
+    "apply_join": ("account", "uuid", "kbName"),
     "members": ("uuid", "kbName", "page", "size"),
     "documents": ("kbName", "page", "size"),
-    "update-docs": ("kbName", "fileNames", "fileProperties"),
-    "delete-docs": ("kbName", "fileNames"),
+    "update_docs": ("kbName", "fileNames", "fileProperties"),
+    "delete_docs": ("kbName", "fileNames"),
     "show_pdf": ("kbName", "fileName"),
     "search_docs": ("query", "kbName"),
     "search_docs_xcore": ("query", "kbNames"),
@@ -53,7 +53,7 @@ def _route_key(parsed) -> str | None:
     if not path.startswith(WEBUI_ROUTE_PREFIX):
         return None
     key = path[len(WEBUI_ROUTE_PREFIX) :]
-    return key if key in _ROUTE_BUILDERS or key == "upload-docs" else None
+    return key if key in _ROUTE_BUILDERS or key == "upload_docs" else None
 
 
 def _respond(handler, payload, status: int = 200) -> bool:
@@ -107,14 +107,14 @@ def _validate_required(body: dict[str, Any], route_key: str) -> str | None:
     for field in _REQUIRED_FIELDS.get(route_key, ()):
         if _missing_field(body, field):
             return f"missing_{field}"
-    if route_key == "update-docs":
+    if route_key == "update_docs":
         file_names = body.get("fileNames")
         if not isinstance(file_names, list) or not file_names:
             return "missing_fileNames"
         file_properties = body.get("fileProperties")
         if not isinstance(file_properties, list) or not file_properties:
             return "missing_fileProperties"
-    if route_key == "delete-docs":
+    if route_key == "delete_docs":
         file_names = body.get("fileNames")
         if not isinstance(file_names, list) or not file_names:
             return "missing_fileNames"
@@ -175,7 +175,7 @@ def try_handle_post_early(handler, parsed) -> bool:
     if not knowledge_base_enabled():
         return False
     route_key = _route_key(parsed)
-    if route_key != "upload-docs":
+    if route_key != "upload_docs":
         return False
     return _handle_upload_docs(handler)
 
@@ -243,7 +243,7 @@ def _handle_upload_docs(handler) -> bool:
     )
 
     try:
-        status, payload = client.post_multipart("upload-docs", files=httpx_files, data=form_data)
+        status, payload = client.post_multipart("upload_docs", files=httpx_files, data=form_data)
     except client.KnowledgeBaseUpstreamError as exc:
         return _respond(
             handler,
@@ -261,7 +261,7 @@ def try_handle_post(handler, parsed, body) -> bool:
     if not knowledge_base_enabled():
         return False
     route_key = _route_key(parsed)
-    if not route_key or route_key == "upload-docs":
+    if not route_key or route_key == "upload_docs":
         return False
 
     payload_body = _body_dict(body)

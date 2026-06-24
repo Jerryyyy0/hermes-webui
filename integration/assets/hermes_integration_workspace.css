@@ -31,10 +31,55 @@
 
 .integration-ws-file-row {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 8px;
   min-width: 0;
+}
+
+.integration-ws-file-check {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  padding-top: 2px;
+}
+
+.integration-ws-file-check input {
+  margin: 0;
+  cursor: pointer;
+}
+
+.integration-ws-file-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  cursor: pointer;
+}
+
+.integration-ws-file-del {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.integration-ws-file-del:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.workspace-inspector-item.is-disabled {
+  opacity: 0.65;
+  cursor: default;
 }
 
 .integration-ws-file-type {

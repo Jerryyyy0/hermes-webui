@@ -252,13 +252,16 @@ Skill 成果示例：
   "path": "api/session_manifest.py",
   "preview": "file",
   "source_tool": "write_file",
-  "profile": "ops"
+  "profile": "ops",
+  "status": "expired"
 }
 ```
 
 `profile`（可选）：成果所属 WebUI profile，来自 `session.profile`；无明确值时省略。仅 `artifacts[]` 携带，不在 `references[]` 中。
 
-**只返回可预览项**。不可预览路径（目录、缺失、过大、cruft 等）不出现在列表中。预览接口与路由见 [§4.5 预览逻辑](#45-预览逻辑file--skill)。
+`status`（可选，仅 `artifacts[]` / `turns[].artifacts[]`）：`expired` 表示成果曾入库但 workspace 内文件已不存在或不可预览；省略时表示当前可预览。`references[]` 仍不列出缺失文件。
+
+**成果列表**：可预览文件正常展示；已删除的历史成果保留并标 `status: expired`（不可再预览）。不可预览且从未入库的路径（目录、过大、cruft 等）仍不出现。预览接口与路由见 [§4.5 预览逻辑](#45-预览逻辑file--skill)。
 
 #### 排除
 

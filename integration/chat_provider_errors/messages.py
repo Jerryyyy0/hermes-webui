@@ -4,7 +4,7 @@ from __future__ import annotations
 CHAT_ERROR_ZH: dict[tuple[str, str | None], dict[str, str]] = {
     ('connection_error', 'unreachable'): {
         'label': '无法连接模型服务',
-        'message': '无法连接到配置的模型服务，请检查 Base URL、API Key 和网络。',
+        'message': '无法连接到配置的模型服务，请检查出口网关配置。',
         'hint': '',
     },
     ('connection_error', 'connect_refused'): {

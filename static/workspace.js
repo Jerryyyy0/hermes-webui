@@ -350,8 +350,12 @@ function renderTurnArtifacts(turnKey, root){
       const path = item.path || '';
       const source = item.source_tool || '';
       const profile = item.profile || '';
-      const meta = [source, profile].filter(Boolean).join(' · ');
-      return `<button type="button" class="turn-artifact-chip" data-turn-artifact-idx="${idx}" data-path="${esc(path)}">${esc(path)}${meta?`<span>${esc(meta)}</span>`:''}</button>`;
+      const expired = isManifestExpired(item);
+      const metaParts = [source, profile];
+      if(expired) metaParts.push(_manifestExpiredLabel());
+      const meta = metaParts.filter(Boolean).join(' · ');
+      const disabledCls = expired ? ' is-disabled' : '';
+      return `<button type="button" class="turn-artifact-chip${disabledCls}" data-turn-artifact-idx="${idx}" data-path="${esc(path)}">${esc(path)}${meta?`<span>${esc(meta)}</span>`:''}</button>`;
     }).join('')}</div>`;
   root.querySelectorAll('.turn-artifact-chip').forEach(btn=>{
     const idx = Number(btn.dataset.turnArtifactIdx);
@@ -386,12 +390,22 @@ function _manifestRowByPath(path, collection){
   return rows.find(item=>item && item.path === path) || null;
 }
 
+function isManifestExpired(item){
+  return item?.status === 'expired';
+}
+
 function isManifestPreviewable(item){
+  if(isManifestExpired(item)) return false;
   return item?.preview === 'file' || item?.preview === 'skill';
+}
+
+function _manifestExpiredLabel(){
+  return typeof t === 'function' ? t('manifest_file_expired') : 'File expired';
 }
 
 function _inspectorFileMeta(item){
   if(item && item.preview === 'skill') return _workspaceInspectorLabel('workspace_preview_skill', 'skill');
+  if(isManifestExpired(item)) return _manifestExpiredLabel();
   return '';
 }
 
@@ -407,8 +421,10 @@ function _renderInspectorFileList(root, items, emptyKey, emptyFallback){
   }
   root.innerHTML = items.map((item, idx)=>{
     const path = item.path || '';
+    const expired = isManifestExpired(item);
     const metaBits = [item.source_tool || '', item.profile || '', _inspectorFileMeta(item)].filter(Boolean);
-    return `<button type="button" class="workspace-inspector-item" data-manifest-idx="${idx}" data-path="${esc(path)}"><div class="workspace-inspector-path">${esc(path)}</div><div class="workspace-inspector-meta">${esc(metaBits.join(' · '))}</div></button>`;
+    const disabledCls = expired ? ' is-disabled' : '';
+    return `<button type="button" class="workspace-inspector-item${disabledCls}" data-manifest-idx="${idx}" data-path="${esc(path)}"><div class="workspace-inspector-path">${esc(path)}</div><div class="workspace-inspector-meta">${esc(metaBits.join(' · '))}</div></button>`;
   }).join('');
 }
 
@@ -499,6 +515,10 @@ async function openInspectorReferencePath(path){
 
 async function openManifestPreview(item){
   if(!item || !item.path || !item.preview) return;
+  if(isManifestExpired(item)){
+    if(typeof showToast === 'function') showToast(_manifestExpiredLabel());
+    return;
+  }
   if(item.preview === 'skill') return openSkillContentPreview(item.path, item.profile);
   if(item.preview === 'file') return openIntegrationFilePreview(item.path);
 }
