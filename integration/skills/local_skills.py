@@ -297,6 +297,10 @@ def _scan_custom_skill_dicts(
             dir_key = _skill_dir_rel_path(skill_dir, skills_dir)
             if dir_key in seen:
                 continue
+            # Exclude hub-installed skills: check marker file first (reliable),
+            # then fall back to catalog name matching.
+            if (skill_dir / ".hub_installed").is_file():
+                continue
             if name in hub_names:
                 continue
             description = str(frontmatter.get("description", "") or "")

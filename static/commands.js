@@ -112,11 +112,20 @@ function _invalidateSlashModelCache(){
   _slashModelCache=null;
   _slashModelCachePromise=null;
 }
+function _invalidateSkillCommandCache(){
+  _skillCommandCache=[];
+  _skillCommandCacheReady=false;
+  _skillCommandLoadPromise=null;
+}
 // Expose on window when available. Guarded by typeof so the module is
 // importable in headless test contexts (vm.runInContext) that don't
 // define a window global — see tests/test_cli_only_slash_commands.py.
 if(typeof window!=='undefined'){
   window._invalidateSlashModelCache=_invalidateSlashModelCache;
+  window._invalidateSkillCommandCache=_invalidateSkillCommandCache;
+  // Auto-invalidate skill command cache when a skill is deleted or toggled
+  window.addEventListener('hermes:skill-delete',()=>_invalidateSkillCommandCache());
+  window.addEventListener('hermes:skill-toggle',()=>_invalidateSkillCommandCache());
 }
 
 function _normalizeSlashSubArg(value){
@@ -1504,7 +1513,7 @@ async function loadSkillCommands(force=false){
     try{
       const data=await api('/api/skills');
       const deduped=new Map();
-      for(const skill of (data&&data.skills)||[]){const entry=_buildSkillCommandEntry(skill);if(entry&&!deduped.has(entry.name))deduped.set(entry.name,entry);}
+      for(const skill of (data&&data.skills)||[]){if(skill.disabled)continue;const entry=_buildSkillCommandEntry(skill);if(entry&&!deduped.has(entry.name))deduped.set(entry.name,entry);}
       _skillCommandCache=Array.from(deduped.values()).sort((a,b)=>a.name.localeCompare(b.name));
     }catch(_){_skillCommandCache=[];}
     finally{_skillCommandCacheReady=true;_skillCommandLoadPromise=null;}

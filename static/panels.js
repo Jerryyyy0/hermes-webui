@@ -3733,6 +3733,14 @@ async function clearConversation() {
 }
 
 // ── Skills panel ──
+function _invalidateSkillsDataCache() {
+  _skillsData = null;
+  _cronSkillsCache = null;
+}
+if (typeof window !== 'undefined') {
+  window._invalidateSkillsDataCache = _invalidateSkillsDataCache;
+}
+
 async function loadSkills() {
   if (_skillsData) { renderSkills(_skillsData); return; }
   const box = $('skillsList');
@@ -3746,6 +3754,17 @@ async function loadSkills() {
     renderSkills(_skillsData);
   } catch(e) { box.innerHTML = `<div style="padding:12px;color:var(--accent);font-size:12px">Error: ${esc(e.message)}</div>`; }
 }
+
+// Sync skill toggle state from SkillHub panel
+window.addEventListener('hermes:skill-toggle', (ev) => {
+  const { name, enabled } = ev.detail || {};
+  if (!name || !_skillsData) return;
+  const skill = _skillsData.find(s => s.name === name);
+  if (skill) {
+    skill.disabled = !enabled;
+    renderSkills(_skillsData);
+  }
+});
 
 let _collapsedCats = new Set(); // persisted collapsed state across re-renders
 
@@ -3835,6 +3854,10 @@ async function toggleSkill(name, currentlyEnabled) {
         if (skill) skill.disabled = !newEnabled;
       }
       renderSkills(_skillsData || []);
+      // Notify SkillHub panel to sync
+      window.dispatchEvent(new CustomEvent('hermes:skill-toggle', {
+        detail: { name, enabled: newEnabled }
+      }));
     } else {
       setStatus((result && result.error) || t('skill_toggle_failed'));
     }
@@ -4127,6 +4150,8 @@ async function deleteCurrentSkill() {
     _skillPreFormDetail = null;
     _skillsData = null;
     _cronSkillsCache = null;
+    if (typeof _invalidateSkillCommandCache === 'function') _invalidateSkillCommandCache();
+    window.dispatchEvent(new CustomEvent('hermes:skill-delete', { detail: { name } }));
     _skillMode = 'empty';
     const body = $('skillDetailBody');
     const empty = $('skillDetailEmpty');
