@@ -385,10 +385,11 @@ def backfill_from_session_turn_artifacts(
             else:
                 continue
             if path:
+                preview = str(entry.get("preview") or "").strip() if isinstance(entry, dict) else ""
                 rows.append({
                     "path": path,
                     "source_tool": source_tool,
-                    "preview": MANIFEST_PREVIEW_FILE,
+                    "preview": preview if preview in _VALID_PREVIEWS else MANIFEST_PREVIEW_FILE,
                 })
         if rows:
             rows_by_turn[tk] = rows

@@ -1864,13 +1864,14 @@
       "get": {
         "tags": ["SkillHub"],
         "summary": "获取 SkillHub 技能列表",
-        "description": "按 scope 返回技能市场目录、已安装/未安装筛选或本地自建技能。无效 scope 回落为 hub。stats 为全库全局计数（不受 category/q 影响）；skills/total 仍受 category 与 q 过滤。hub/installed/not_installed 在本地全量拉取后排序再分页；q 为本地子串匹配。",
+        "description": "按 scope 返回技能市场目录、已安装/未安装筛选或本地自建技能。无效 scope 回落为 hub。stats 为全库全局计数（不受 category/q 影响）；skills/total 仍受 category 与 q 过滤。hub/installed/not_installed 在本地全量拉取后排序再分页；q 为本地子串匹配。已安装项的 description 优先取自本地 SKILL.md frontmatter（无则保留上游）。`all=1` 时返回当前筛选下的全量 skills，忽略 page/page_size，响应 page=1、page_size=total。",
         "parameters": [
           { "name": "scope", "in": "query", "schema": { "type": "string", "enum": ["hub", "installed", "not_installed", "custom"], "default": "hub" }, "description": "hub=市场目录（附 installed 标注）；installed/not_installed=按当前 Cookie profile 的本地安装状态筛选；custom=读取 {HERMES_HOME}/skills 下本地自建（非市场同名），不按 profile 分子目录" },
           { "name": "category", "in": "query", "schema": { "type": "string" }, "description": "分类过滤；空字符串、all 或 * 表示全部分类" },
           { "name": "q", "in": "query", "schema": { "type": "string" }, "description": "关键词搜索（仅列表项，不影响 stats 计数）" },
-          { "name": "page", "in": "query", "schema": { "type": "integer", "minimum": 1, "default": 1 }, "description": "页码（从 1 开始）" },
-          { "name": "page_size", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 }, "description": "每页条数（上限 100）" },
+          { "name": "all", "in": "query", "schema": { "type": "string", "enum": ["1"] }, "description": "仅 all=1 时返回全量列表（忽略 page/page_size）；缺省或其它值走分页" },
+          { "name": "page", "in": "query", "schema": { "type": "integer", "minimum": 1, "default": 1 }, "description": "页码（从 1 开始）；all=1 时忽略" },
+          { "name": "page_size", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 }, "description": "每页条数（上限 100）；all=1 时忽略，响应等于 total" },
           { "name": "sort", "in": "query", "schema": { "type": "string", "enum": ["name", "mtime"], "default": "name" }, "description": "排序字段：name=显示名/名称；mtime=修改时间" },
           { "name": "order", "in": "query", "schema": { "type": "string", "enum": ["asc", "desc"], "default": "asc" }, "description": "排序方向" }
         ],
@@ -1885,6 +1886,76 @@
           },
           "400": { "description": "无效的 sort 或 order 参数" },
           "502": { "description": "上游 SkillHub 请求失败" }
+        }
+      }
+    },
+    "/api/skillhub/skills/no_self_improve": {
+      "get": {
+        "tags": ["SkillHub"],
+        "summary": "读取禁止自进化技能名单",
+        "description": "返回 active profile `config.yaml` 中 `skills.no_self_improve` 完整列表。仅需 `HERMES_INTEGRATION=1`；不要求 `SKILLHUB_URL`。",
+        "responses": {
+          "200": {
+            "description": "当前锁定名单",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/NoSelfImproveListResponse" }
+              }
+            }
+          },
+          "404": { "description": "集成未启用" }
+        }
+      },
+      "put": {
+        "tags": ["SkillHub"],
+        "summary": "全量替换禁止自进化名单",
+        "description": "Body `{ \"names\": [\"a\", \"b\"] }`。Hub 技能名会在下次启动 sync 或 install 时自动补回。仅需 `HERMES_INTEGRATION=1`。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/NoSelfImproveReplaceRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "已保存",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/NoSelfImproveListResponse" }
+              }
+            }
+          },
+          "400": { "description": "names 无效" },
+          "404": { "description": "集成未启用" }
+        }
+      }
+    },
+    "/api/skillhub/skills/no_self_improve/toggle": {
+      "post": {
+        "tags": ["SkillHub"],
+        "summary": "Custom 技能加锁/解锁",
+        "description": "Body `{ \"name\": \"my-skill\", \"locked\": true, \"dir_name\": \"optional/path\" }`。Hub 安装（`.hub_installed`）返回 403。仅需 `HERMES_INTEGRATION=1`。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/NoSelfImproveToggleRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "已更新",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/NoSelfImproveToggleResponse" }
+              }
+            }
+          },
+          "403": { "description": "Hub 技能不可解锁" },
+          "404": { "description": "技能未找到或集成未启用" }
         }
       }
     },
@@ -1935,7 +2006,7 @@
         "summary": "获取技能文档内容（SKILL.md）",
         "parameters": [
           { "name": "name", "in": "query", "required": true, "schema": { "type": "string" }, "description": "技能名称" },
-          { "name": "scope", "in": "query", "schema": { "type": "string", "enum": ["auto", "hub", "custom"], "default": "auto" }, "description": "auto（默认）=先在 {HERMES_HOME}/skills 解析本地 SKILL.md，未找到再请求 SkillHub /doc；custom=仅本地；hub=仅上游" }
+          { "name": "scope", "in": "query", "schema": { "type": "string", "enum": ["auto", "hub", "custom"], "default": "auto" }, "description": "auto（默认）与 custom=仅读 {HERMES_HOME}/skills 下已存在的 SKILL.md，未找到 404；hub=本地优先，否则 SkillHub /doc" }
         ],
         "responses": {
           "200": {
@@ -1958,7 +2029,7 @@
         "summary": "获取技能文件结构",
         "parameters": [
           { "name": "name", "in": "query", "required": true, "schema": { "type": "string" }, "description": "技能名称" },
-          { "name": "scope", "in": "query", "schema": { "type": "string", "enum": ["auto", "hub", "custom"], "default": "auto" }, "description": "auto（默认）=本地优先，否则 SkillHub structure；custom=仅本地；hub=仅上游" }
+          { "name": "scope", "in": "query", "schema": { "type": "string", "enum": ["auto", "hub", "custom"], "default": "auto" }, "description": "auto 与 custom=仅本地；hub=本地优先，否则 SkillHub structure" }
         ],
         "responses": {
           "200": {
@@ -1983,7 +2054,7 @@
           { "name": "name", "in": "query", "required": true, "schema": { "type": "string" }, "description": "技能名称" },
           { "name": "path", "in": "query", "schema": { "type": "string" }, "description": "文件相对路径（与 file 二选一）" },
           { "name": "file", "in": "query", "schema": { "type": "string" }, "description": "path 的别名" },
-          { "name": "scope", "in": "query", "schema": { "type": "string", "enum": ["auto", "hub", "custom"], "default": "auto" }, "description": "auto（默认）=本地优先，否则 SkillHub file；custom=仅本地；hub=仅上游" }
+          { "name": "scope", "in": "query", "schema": { "type": "string", "enum": ["auto", "hub", "custom"], "default": "auto" }, "description": "auto 与 custom=仅本地；hub=本地优先，否则 SkillHub file" }
         ],
         "responses": {
           "200": {
@@ -2576,7 +2647,7 @@
       },
       "SkillHubCatalogItem": {
         "type": "object",
-        "description": "技能列表条目；hub/installed/not_installed 含上游字段，WebUI 统一附加 dir_name、installed、hub_installed、custom、disabled",
+        "description": "技能列表条目；hub/installed/not_installed 含上游字段，WebUI 统一附加 dir_name、installed、hub_installed、custom、disabled；已安装项 description 优先取自本地 SKILL.md",
         "properties": {
           "name":           { "type": "string" },
           "dir_name":       { "type": "string", "description": "相对 shared_skills_dir 的路径；未安装 hub 项为空字符串" },
@@ -2589,9 +2660,45 @@
           "hub_installed":  { "type": "boolean", "description": "是否通过 SkillHub 安装（含 .hub_installed）" },
           "custom":         { "type": "boolean", "description": "scope=custom 时为 true" },
           "disabled":       { "type": "boolean" },
+          "no_self_improve": { "type": "boolean", "description": "是否禁止 agent 自进化（Hub 安装恒为 true）" },
+          "can_lock":       { "type": "boolean", "description": "是否允许 UI 切换锁定（custom=true, hub=false）" },
           "mtime":          { "type": "number", "nullable": true, "description": "修改时间（Unix 秒）。已安装/custom 来自本地 SKILL.md；未安装 hub 项来自上游 mtime 或 updated_at（统一输出为 mtime）；无值时为 null" }
         },
         "additionalProperties": true
+      },
+      "NoSelfImproveListResponse": {
+        "type": "object",
+        "properties": {
+          "ok": { "type": "boolean" },
+          "names": { "type": "array", "items": { "type": "string" } },
+          "count": { "type": "integer" }
+        },
+        "required": ["ok", "names", "count"]
+      },
+      "NoSelfImproveReplaceRequest": {
+        "type": "object",
+        "properties": {
+          "names": { "type": "array", "items": { "type": "string" } }
+        },
+        "required": ["names"]
+      },
+      "NoSelfImproveToggleRequest": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string" },
+          "locked": { "type": "boolean" },
+          "dir_name": { "type": "string", "description": "可选；与 edit/delete 相同，用于嵌套路径" }
+        },
+        "required": ["name", "locked"]
+      },
+      "NoSelfImproveToggleResponse": {
+        "type": "object",
+        "properties": {
+          "ok": { "type": "boolean" },
+          "name": { "type": "string" },
+          "locked": { "type": "boolean" }
+        },
+        "required": ["ok", "name", "locked"]
       },
       "SkillHubSkillsListResponse": {
         "type": "object",
@@ -2601,7 +2708,7 @@
           "skills":             { "type": "array", "items": { "$ref": "#/components/schemas/SkillHubCatalogItem" } },
           "total":              { "type": "integer" },
           "page":               { "type": "integer" },
-          "page_size":          { "type": "integer" },
+          "page_size":          { "type": "integer", "description": "每页条数；all=1 全量模式下等于 total" },
           "skillhub_enabled":   { "type": "boolean", "enum": [true] },
           "stats":              { "$ref": "#/components/schemas/SkillHubScopeStats" }
         },

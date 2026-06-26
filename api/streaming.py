@@ -918,8 +918,9 @@ def _persist_turn_artifact_paths(s, turn_key: str = '') -> None:
         _message_text,
         _message_turns,
         _paths_from_last_assistant_message,
+        _skills_dir_for_session,
         _turn_message_slice,
-        filter_existing_turn_artifact_paths,
+        filter_existing_turn_artifact_entries,
     )
     _slice = _turn_message_slice(s.messages, _turn_key)
     if not _slice:
@@ -933,12 +934,14 @@ def _persist_turn_artifact_paths(s, turn_key: str = '') -> None:
         None,
     )
     _workspace = _Path(str(getattr(s, 'workspace', '') or '')).expanduser().resolve()
+    _skills_dir = _skills_dir_for_session(s)
     _entries = _extract_turn_artifact_entries(
         _slice,
         getattr(s, 'tool_calls', None),
         _workspace,
         start_msg_idx=_turn_bounds[0] if _turn_bounds else None,
         end_msg_idx=_turn_bounds[1] if _turn_bounds else None,
+        skills_dir=_skills_dir,
     )
 
     # Also scan the last assistant message for relative-path/bare-filename
@@ -955,17 +958,18 @@ def _persist_turn_artifact_paths(s, turn_key: str = '') -> None:
         for _pp in _prose_paths:
             # Keep per-turn attribution: dedupe only within the current turn.
             if _pp not in _entry_paths:
-                _entries.append({'path': _pp, 'source_tool': 'assistant_prose'})
+                _entries.append({
+                    'path': _pp,
+                    'source_tool': 'assistant_prose',
+                    'preview': 'file',
+                })
 
-    # Filter to existing workspace files only.
-    _entry_paths_for_filter = [e['path'] for e in _entries]
-    _filtered = filter_existing_turn_artifact_paths(_workspace, _entry_paths_for_filter)
-    _filtered_set = set(_filtered)
-    _entries = [e for e in _entries if e['path'] in _filtered_set]
+    _entries = filter_existing_turn_artifact_entries(_workspace, _skills_dir, _entries)
 
     if not hasattr(s, 'turn_artifacts'):
         s.turn_artifacts = {}
-    s.turn_artifacts[_turn_key] = _entries
+    if _entries:
+        s.turn_artifacts[_turn_key] = _entries
     try:
         from api.session_manifest_store import upsert_manifest_records
 
@@ -973,7 +977,7 @@ def _persist_turn_artifact_paths(s, turn_key: str = '') -> None:
             {
                 'path': entry.get('path'),
                 'source_tool': entry.get('source_tool') or 'assistant_prose',
-                'preview': 'file',
+                'preview': entry.get('preview') or 'file',
             }
             for entry in _entries
             if isinstance(entry, dict)

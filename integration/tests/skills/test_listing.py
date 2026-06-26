@@ -2,112 +2,197 @@
 
 from unittest.mock import patch
 
-from integration.skills import listing
+from integration.skills import listing, skillhub
 
 
 _STATS = {"hub": 2, "installed": 1, "not_installed": 1, "custom": 0}
 
 
+def _fake_ctx(*, hub_names: set[str] | None = None) -> skillhub._HubCatalogContext:
+    names = hub_names if hub_names is not None else set()
+    return skillhub._HubCatalogContext(
+        raw_skills=[],
+        hub_names=names,
+        installed_index={},
+        annotated_all=[],
+        locked_names=set(),
+    )
+
+
 def test_list_skillhub_skills_hub_scope_envelope():
-    with patch("integration.skills.listing.skillhub.hub_all_catalog_names", return_value=set()):
-        with patch("integration.skills.listing.skillhub.compute_scope_stats", return_value=_STATS):
-            with patch("integration.skills.listing.skillhub.list_hub_catalog_paged") as paged:
-                paged.return_value = (
-                    [{"name": "a", "installed": True, "hub_installed": True, "custom": False}],
-                    1,
-                )
-                result = listing.list_skillhub_skills(
-                    scope="hub",
-                    category="data-analysis",
-                    q="data",
-                    page=1,
-                    page_size=9,
-                    sort="mtime",
-                    order="desc",
-                )
-                paged.assert_called_once_with(
-                    category="data-analysis",
-                    scope="hub",
-                    q="data",
-                    page=1,
-                    page_size=9,
-                    sort="mtime",
-                    order="desc",
-                )
-                assert result["scope"] == "hub"
-                assert result["category"] == "data-analysis"
-                assert result["stats"] == _STATS
-                assert result["skills"][0]["installed"] is True
+    with patch("integration.skills.listing.skillhub.build_hub_catalog_context", return_value=_fake_ctx()):
+        with patch("integration.skills.listing.skillhub.compute_scope_stats_from", return_value=_STATS):
+            with patch("integration.skills.listing.local_skills.scan_custom_skills_global", return_value=[]):
+                with patch("integration.skills.listing.skillhub.list_hub_catalog_paged_from") as paged:
+                    paged.return_value = (
+                        [{"name": "a", "installed": True, "hub_installed": True, "custom": False}],
+                        1,
+                    )
+                    result = listing.list_skillhub_skills(
+                        scope="hub",
+                        category="data-analysis",
+                        q="data",
+                        page=1,
+                        page_size=9,
+                        sort="mtime",
+                        order="desc",
+                    )
+                    paged.assert_called_once()
+                    assert paged.call_args.kwargs == {
+                        "category": "data-analysis",
+                        "scope": "hub",
+                        "q": "data",
+                        "page": 1,
+                        "page_size": 9,
+                        "sort": "mtime",
+                        "order": "desc",
+                    }
+                    assert result["scope"] == "hub"
+                    assert result["category"] == "data-analysis"
+                    assert result["stats"] == _STATS
+                    assert result["skills"][0]["installed"] is True
 
 
 def test_list_skillhub_skills_hub_all_category():
-    with patch("integration.skills.listing.skillhub.hub_all_catalog_names", return_value=set()):
-        with patch("integration.skills.listing.skillhub.compute_scope_stats", return_value=_STATS):
-            with patch("integration.skills.listing.skillhub.list_hub_catalog_paged") as paged:
-                paged.return_value = ([], 0)
-                listing.list_skillhub_skills(category="")
-                assert paged.call_args.kwargs["category"] == ""
+    with patch("integration.skills.listing.skillhub.build_hub_catalog_context", return_value=_fake_ctx()):
+        with patch("integration.skills.listing.skillhub.compute_scope_stats_from", return_value=_STATS):
+            with patch("integration.skills.listing.local_skills.scan_custom_skills_global", return_value=[]):
+                with patch("integration.skills.listing.skillhub.list_hub_catalog_paged_from") as paged:
+                    paged.return_value = ([], 0)
+                    listing.list_skillhub_skills(category="")
+                    assert paged.call_args.kwargs["category"] == ""
 
 
 def test_list_skillhub_skills_installed_scope():
-    with patch("integration.skills.listing.skillhub.hub_all_catalog_names", return_value=set()):
-        with patch("integration.skills.listing.skillhub.compute_scope_stats", return_value=_STATS):
-            with patch("integration.skills.listing.skillhub.list_hub_catalog_paged") as paged:
-                paged.return_value = ([{"name": "a", "installed": True}], 1)
-                result = listing.list_skillhub_skills(
-                    scope="installed",
-                    category="tools",
-                    sort="name",
-                    order="asc",
-                )
-                paged.assert_called_once()
-                assert paged.call_args.kwargs["scope"] == "installed"
-                assert result["scope"] == "installed"
-                assert result["total"] == 1
-                assert result["stats"] == _STATS
+    with patch("integration.skills.listing.skillhub.build_hub_catalog_context", return_value=_fake_ctx()):
+        with patch("integration.skills.listing.skillhub.compute_scope_stats_from", return_value=_STATS):
+            with patch("integration.skills.listing.local_skills.scan_custom_skills_global", return_value=[]):
+                with patch("integration.skills.listing.skillhub.list_hub_catalog_paged_from") as paged:
+                    paged.return_value = ([{"name": "a", "installed": True}], 1)
+                    result = listing.list_skillhub_skills(
+                        scope="installed",
+                        category="tools",
+                        sort="name",
+                        order="asc",
+                    )
+                    paged.assert_called_once()
+                    assert paged.call_args.kwargs["scope"] == "installed"
+                    assert result["scope"] == "installed"
+                    assert result["total"] == 1
+                    assert result["stats"] == _STATS
 
 
 def test_list_skillhub_skills_custom_scope():
-    with patch("integration.skills.listing.skillhub.hub_all_catalog_names") as names:
-        with patch("integration.skills.listing.skillhub.compute_scope_stats", return_value=_STATS):
-            with patch("integration.skills.listing.local_skills.list_custom_skills") as custom:
-                names.return_value = {"hub-skill"}
-                custom.return_value = {
-                    "scope": "custom",
-                    "category": "tools",
-                    "skills": [{"name": "local-only", "custom": True}],
-                    "total": 1,
-                    "page": 1,
-                    "page_size": 20,
-                    "skillhub_enabled": True,
-                }
-                result = listing.list_skillhub_skills(
-                    scope="custom",
-                    category="tools",
-                    sort="mtime",
-                    order="desc",
-                )
-                custom.assert_called_once_with(
-                    category="tools",
-                    q=None,
-                    hub_names={"hub-skill"},
-                    page=1,
-                    page_size=20,
-                    sort="mtime",
-                    order="desc",
-                )
-                assert result["scope"] == "custom"
-                assert result["stats"] == _STATS
+    ctx = _fake_ctx(hub_names={"hub-skill"})
+    scanned = [{"name": "local-only", "custom": True}]
+    with patch("integration.skills.listing.skillhub.build_hub_catalog_context", return_value=ctx):
+        with patch("integration.skills.listing.skillhub.compute_scope_stats_from", return_value=_STATS):
+            with patch(
+                "integration.skills.listing.local_skills.scan_custom_skills_global",
+                return_value=scanned,
+            ) as scan:
+                with patch("integration.skills.listing.local_skills.list_custom_skills") as custom:
+                    custom.return_value = {
+                        "scope": "custom",
+                        "category": "tools",
+                        "skills": [{"name": "local-only", "custom": True}],
+                        "total": 1,
+                        "page": 1,
+                        "page_size": 20,
+                        "skillhub_enabled": True,
+                    }
+                    result = listing.list_skillhub_skills(
+                        scope="custom",
+                        category="tools",
+                        sort="mtime",
+                        order="desc",
+                    )
+                    scan.assert_called_once_with({"hub-skill"})
+                    custom.assert_called_once_with(
+                        category="tools",
+                        q=None,
+                        hub_names={"hub-skill"},
+                        page=1,
+                        page_size=20,
+                        sort="mtime",
+                        order="desc",
+                        all_records=False,
+                        pre_scanned=scanned,
+                    )
+                    assert result["scope"] == "custom"
+                    assert result["stats"] == _STATS
 
 
 def test_list_skillhub_skills_defaults_invalid_scope_to_hub():
-    with patch("integration.skills.listing.skillhub.hub_all_catalog_names", return_value=set()):
-        with patch("integration.skills.listing.skillhub.compute_scope_stats", return_value=_STATS):
-            with patch("integration.skills.listing.skillhub.list_hub_catalog_paged") as paged:
-                paged.return_value = ([], 0)
-                listing.list_skillhub_skills(
-                    scope="store",
-                    category="tools",
-                )
-                paged.assert_called_once()
-                assert paged.call_args.kwargs["scope"] == "hub"
+    with patch("integration.skills.listing.skillhub.build_hub_catalog_context", return_value=_fake_ctx()):
+        with patch("integration.skills.listing.skillhub.compute_scope_stats_from", return_value=_STATS):
+            with patch("integration.skills.listing.local_skills.scan_custom_skills_global", return_value=[]):
+                with patch("integration.skills.listing.skillhub.list_hub_catalog_paged_from") as paged:
+                    paged.return_value = ([], 0)
+                    listing.list_skillhub_skills(
+                        scope="store",
+                        category="tools",
+                    )
+                    paged.assert_called_once()
+                    assert paged.call_args.kwargs["scope"] == "hub"
+
+
+def test_list_skillhub_skills_hub_all_records():
+    with patch("integration.skills.listing.skillhub.build_hub_catalog_context", return_value=_fake_ctx()):
+        with patch("integration.skills.listing.skillhub.compute_scope_stats_from", return_value=_STATS):
+            with patch("integration.skills.listing.local_skills.scan_custom_skills_global", return_value=[]):
+                with patch("integration.skills.listing.skillhub.list_hub_catalog_filtered_from") as filtered:
+                    filtered.return_value = (
+                        [
+                            {"name": "a"},
+                            {"name": "b"},
+                        ],
+                        2,
+                    )
+                    result = listing.list_skillhub_skills(
+                        scope="hub",
+                        category="tools",
+                        all_records=True,
+                    )
+                    filtered.assert_called_once()
+                    assert filtered.call_args.kwargs == {
+                        "category": "tools",
+                        "scope": "hub",
+                        "q": None,
+                        "sort": "name",
+                        "order": "asc",
+                    }
+                    assert len(result["skills"]) == 2
+                    assert result["total"] == 2
+                    assert result["page"] == 1
+                    assert result["page_size"] == 2
+
+
+def test_list_skillhub_skills_custom_all_records():
+    with patch("integration.skills.listing.skillhub.build_hub_catalog_context", return_value=_fake_ctx()):
+        with patch("integration.skills.listing.skillhub.compute_scope_stats_from", return_value=_STATS):
+            with patch("integration.skills.listing.local_skills.scan_custom_skills_global", return_value=[]):
+                with patch("integration.skills.listing.local_skills.list_custom_skills") as custom:
+                    custom.return_value = {
+                        "scope": "custom",
+                        "category": "",
+                        "skills": [{"name": "x"}, {"name": "y"}],
+                        "total": 2,
+                        "page": 1,
+                        "page_size": 2,
+                        "skillhub_enabled": True,
+                    }
+                    result = listing.list_skillhub_skills(scope="custom", all_records=True)
+                    custom.assert_called_once_with(
+                        category="",
+                        q=None,
+                        hub_names=set(),
+                        page=1,
+                        page_size=20,
+                        sort="name",
+                        order="asc",
+                        all_records=True,
+                        pre_scanned=[],
+                    )
+                    assert result["total"] == 2
+                    assert result["page_size"] == 2

@@ -5150,7 +5150,6 @@ _SETTINGS_DEFAULTS = {
     "session_jump_buttons": False,  # show Start/End transcript jump pills
     "session_endless_scroll": False,  # auto-load older transcript pages while scrolling upward
     "activity_feed_expanded_default": False,  # expand Activity disclosures by default for new turns
-    "pinned_sessions_limit": 3,  # maximum active pinned sessions shown in the sidebar
     "inflight_state_max_sessions": 8,  # max active-stream recovery snapshots kept in browser localStorage
     "inflight_state_max_messages": 24,  # max recent messages kept per recovery snapshot
     "inflight_state_max_tool_calls": 48,  # max recent tool-call records kept per recovery snapshot
@@ -5291,7 +5290,6 @@ _SETTINGS_ENUM_VALUES = {
     "busy_input_mode": {"queue", "interrupt", "steer"},
 }
 _SETTINGS_INT_RANGES = {
-    "pinned_sessions_limit": (1, 99),
     "inflight_state_max_sessions": (1, 25),
     "inflight_state_max_messages": (1, 100),
     "inflight_state_max_tool_calls": (1, 200),

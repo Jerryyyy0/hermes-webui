@@ -102,69 +102,6 @@ def _session_field(session, field, default=None):
     return getattr(session, field, default)
 
 
-def _session_counts_toward_pin_quota(session) -> bool:
-    """Return True when a pinned session should consume visible pin quota."""
-    if not _session_field(session, "pinned", False):
-        return False
-    if _session_field(session, "archived", False):
-        return False
-    if isinstance(session, dict):
-        row = session
-    elif hasattr(session, "compact"):
-        row = session.compact()
-    else:
-        row = {
-            "pre_compression_snapshot": _session_field(session, "pre_compression_snapshot", False),
-            "source_tag": _session_field(session, "source_tag", None),
-            "default_hidden": _session_field(session, "default_hidden", False),
-        }
-    return not _hide_from_default_sidebar(row)
-
-
-def _session_row_lineage_root_id(session, sessions_by_id) -> str:
-    sid = str(_session_field(session, "session_id", "") or "")
-    explicit = _session_field(session, "_lineage_root_id", None)
-    if explicit:
-        return str(explicit)
-    # A branch/fork is an independent, separately-visible session (it carries a
-    # parent_session_id purely for provenance), so it must count as its OWN pin
-    # lineage — only compression/continuation rows should collapse to a shared
-    # root. Without this, two pinned forks of the same parent would collapse to a
-    # single quota lineage and let the user exceed pinned_sessions_limit (#3288).
-    if _session_field(session, "session_source", None) == "fork":
-        return sid
-    current = sid
-    seen = {sid} if sid else set()
-    parent = _session_field(session, "parent_session_id", None)
-    while parent:
-        parent = str(parent)
-        if parent in seen:
-            break
-        current = parent
-        seen.add(parent)
-        parent_row = sessions_by_id.get(parent)
-        if not parent_row:
-            break
-        parent = _session_field(parent_row, "parent_session_id", None)
-    return current or sid
-
-
-def _visible_pinned_lineage_ids(session_rows) -> set[str]:
-    sessions_by_id = {}
-    for row in session_rows:
-        sid = str(_session_field(row, "session_id", "") or "")
-        if sid:
-            sessions_by_id[sid] = row
-    roots: set[str] = set()
-    for row in session_rows:
-        if not _session_counts_toward_pin_quota(row):
-            continue
-        root = _session_row_lineage_root_id(row, sessions_by_id)
-        if root:
-            roots.add(root)
-    return roots
-
-
 # ── Profile-scoped session/project filtering (#1611, #1614) ────────────────
 #
 # Sessions and projects are stored in the WebUI sidecar without per-row
@@ -387,14 +324,22 @@ def _skills_list_from_dir(skills_dir: Path, category: str | None = None) -> dict
                 if len(description) > MAX_DESCRIPTION_LENGTH:
                     description = description[: MAX_DESCRIPTION_LENGTH - 3] + "..."
                 seen_names.add(name)
-                all_skills.append(
-                    {
-                        "name": name,
-                        "description": description,
-                        "category": _skill_category_from_path(skill_md, search_dirs),
-                        "disabled": name in disabled,
-                    }
-                )
+                hub_installed = (skill_dir / ".hub_installed").is_file()
+                entry = {
+                    "name": name,
+                    "description": description,
+                    "category": _skill_category_from_path(skill_md, search_dirs),
+                    "disabled": name in disabled,
+                    "hub_installed": hub_installed,
+                }
+                try:
+                    from integration.skills.no_self_improve import apply_lock_fields
+
+                    apply_lock_fields(entry)
+                except Exception:
+                    entry["no_self_improve"] = hub_installed
+                    entry["can_lock"] = not hub_installed
+                all_skills.append(entry)
             except (UnicodeDecodeError, PermissionError) as e:
                 logger.debug("Failed to read skill file %s: %s", skill_md, e)
             except Exception as e:
@@ -8507,57 +8452,11 @@ def handle_post(handler, parsed) -> bool:
         except KeyError:
             return bad(handler, "Session not found", 404)
         pin_requested = bool(body.get("pinned", True))
-        # TOCTOU guard (Opus stage-389): the count check and the pin write
-        # must happen under the same lock, otherwise two parallel pin
-        # requests can both pass `len(pinned_ids) >= 3` against the same
-        # snapshot and both succeed, leaving the user with 4 pins. The check
-        # must be careful not to nest `all_sessions()` (which acquires LOCK
-        # internally) inside a `with LOCK:` block — that's a deadlock since
-        # LOCK is a non-reentrant `threading.Lock`. We snapshot the
-        # persisted index outside the lock, then re-check the in-memory
-        # mutation set inside the lock and commit the pin atomically.
-        if pin_requested and not getattr(s, "pinned", False):
-            # Pre-snapshot from persisted index (acquires LOCK internally,
-            # so must run outside our own LOCK acquire below).
-            persisted_rows = [
-                existing for existing in all_sessions()
-                if _session_counts_toward_pin_quota(existing)
-            ]
-            with LOCK:
-                # Final authoritative count: merge persisted pinned rows with the
-                # in-memory SESSIONS snapshot. Count logical sidebar-visible pin
-                # lineages rather than raw session rows so continuation siblings
-                # in the same visible lineage do not consume extra pin quota.
-                candidate_rows = list(persisted_rows)
-                candidate_rows.extend(
-                    existing.compact() for existing in SESSIONS.values()
-                    if _session_counts_toward_pin_quota(existing)
-                )
-                target_row = s.compact()
-                candidate_rows.append(target_row)
-                pinned_lineage_ids = _visible_pinned_lineage_ids(candidate_rows)
-                target_lineage = _session_row_lineage_root_id(
-                    target_row,
-                    {
-                        str(_session_field(row, "session_id", "") or ""): row
-                        for row in candidate_rows
-                        if _session_field(row, "session_id", None)
-                    },
-                )
-                pinned_lineage_ids.discard(target_lineage)
-                pinned_sessions_limit = int(load_settings().get("pinned_sessions_limit", 3) or 3)
-                if len(pinned_lineage_ids) >= pinned_sessions_limit:
-                    return bad(handler, f"Up to {pinned_sessions_limit} sessions can be pinned. Unpin one before pinning another.", 400)
-                # Mark in-memory pin state under LOCK so concurrent pin
-                # requests see the increment immediately, even before
-                # save() finishes flushing to disk.
-                s.pinned = True
-            with _get_session_agent_lock(body["session_id"]):
-                s.save()
-        else:
-            with _get_session_agent_lock(body["session_id"]):
-                s.pinned = pin_requested
-                s.save()
+        with LOCK:
+            s.pinned = pin_requested
+            s.pinned_at = time.time() if pin_requested else None
+        with _get_session_agent_lock(body["session_id"]):
+            s.save()
         publish_session_list_changed("session_pin", profile=getattr(s, "profile", None))
         return j(handler, {"ok": True, "session": s.compact()})
 
@@ -9109,6 +9008,13 @@ def handle_put(handler, parsed) -> bool:
     if not _check_csrf(handler):
         return j(handler, {"error": "Cross-origin request rejected"}, status=403)
     body = read_body(handler)
+    try:
+        from integration.skills.handlers import try_handle_put as _integration_try_put
+
+        if _integration_try_put(handler, parsed, body):
+            return True
+    except Exception:
+        logger.debug("integration PUT handler failed", exc_info=True)
     if parsed.path.startswith("/api/mcp/servers/"):
         name = parsed.path[len("/api/mcp/servers/"):]
         return _handle_mcp_server_update(handler, name, body)

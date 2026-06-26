@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -15,7 +16,11 @@ from integration.skills.list_item_shape import normalize_skill_list_items
 from integration.skills.mtime_utils import enrich_skills_mtime
 from integration.skills.paths import shared_skills_dir
 from integration.skills.sort_utils import sort_skill_items
-from integration.skills.utils import extract_zip_and_flatten, find_skill_main_file
+from integration.skills.utils import (
+    extract_zip_and_flatten,
+    find_skill_main_file,
+    skill_path_within,
+)
 
 _log = logging.getLogger(__name__)
 _TIMEOUT = 30.0
@@ -136,6 +141,39 @@ def download_bytes(name: str) -> bytes:
         return resp.content
 
 
+def _read_local_skill_description(skills_dir: Path, dir_name: str) -> str:
+    """Read description from local SKILL.md when installed under dir_name."""
+    rel = str(dir_name or "").strip()
+    if not rel:
+        return ""
+    candidate = (skills_dir / rel).resolve()
+    if not skill_path_within(skills_dir, candidate) or not candidate.is_dir():
+        return ""
+    skill_md = find_skill_main_file(candidate)
+    if not skill_md or not skill_md.is_file():
+        return ""
+    try:
+        from tools.skills_tool import MAX_DESCRIPTION_LENGTH, _parse_frontmatter
+
+        content = skill_md.read_text(encoding="utf-8")[:4000]
+        frontmatter, body = _parse_frontmatter(content)
+        description = str(frontmatter.get("description", "") or "").strip()
+        if not description:
+            for line in body.strip().split("\n"):
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    description = line
+                    break
+        description = str(description or "").strip()
+        if not description:
+            return ""
+        if len(description) > MAX_DESCRIPTION_LENGTH:
+            description = description[: MAX_DESCRIPTION_LENGTH - 3] + "..."
+        return description
+    except Exception:
+        return ""
+
+
 def _read_skill_catalog_name(skill_dir: Path, leaf: str) -> str:
     skill_md = find_skill_main_file(skill_dir)
     if not skill_md:
@@ -181,15 +219,31 @@ def _hub_installed_index(skills_dir: Path) -> dict[str, str]:
     return index
 
 
-def annotate_installed(skills: list[dict]) -> list[dict]:
+def annotate_installed(
+    skills: list[dict],
+    *,
+    installed_index: dict[str, str] | None = None,
+    locked_names: set[str] | None = None,
+) -> list[dict]:
     """Mark hub catalog items with local install state under shared_skills_dir."""
-    installed_index: dict[str, str] = {}
-    try:
-        installed_index = _hub_installed_index(shared_skills_dir())
-    except Exception as exc:
-        _log.debug("annotate_installed failed: %s", exc)
+    skills_dir = shared_skills_dir()
+    if installed_index is None:
+        try:
+            installed_index = _hub_installed_index(skills_dir)
+        except Exception as exc:
+            _log.debug("annotate_installed failed: %s", exc)
+            installed_index = {}
 
     disabled = _disabled_skill_names()
+    lock_fields_ok = True
+    if locked_names is None:
+        try:
+            from integration.skills.no_self_improve import get_no_self_improve_names
+
+            locked_names = get_no_self_improve_names()
+        except Exception:
+            lock_fields_ok = False
+            locked_names = set()
 
     for skill in skills:
         skill_name = str(skill.get("name") or "").strip()
@@ -200,7 +254,22 @@ def annotate_installed(skills: list[dict]) -> list[dict]:
         skill["custom"] = False
         skill["dir_name"] = dir_name
         skill["disabled"] = skill_name in disabled
+        if is_installed and dir_name:
+            local_description = _read_local_skill_description(skills_dir, dir_name)
+            if local_description:
+                skill["description"] = local_description
         skill.pop("catalog_only", None)
+        if lock_fields_ok:
+            try:
+                from integration.skills.no_self_improve import apply_lock_fields
+
+                apply_lock_fields(skill, locked_names)
+            except Exception:
+                skill["no_self_improve"] = is_installed
+                skill["can_lock"] = False
+        else:
+            skill["no_self_improve"] = is_installed
+            skill["can_lock"] = False
     return skills
 
 
@@ -219,6 +288,119 @@ def fetch_all_hub_skills(category: str | None = None) -> list[dict]:
             break
         page += 1
     return all_skills
+
+
+@dataclass
+class _HubCatalogContext:
+    raw_skills: list[dict]
+    hub_names: set[str]
+    installed_index: dict[str, str]
+    annotated_all: list[dict]
+    locked_names: set[str]
+
+
+def _hub_names_from_skills(skills: list[dict]) -> set[str]:
+    names: set[str] = set()
+    for skill in skills:
+        name = str(skill.get("name") or "").strip()
+        if name:
+            names.add(name)
+    return names
+
+
+def build_hub_catalog_context() -> _HubCatalogContext:
+    """Fetch hub catalog once per request and precompute install annotations."""
+    raw_skills = fetch_all_hub_skills(category=None)
+    hub_names = _hub_names_from_skills(raw_skills)
+    skills_dir = shared_skills_dir()
+    try:
+        installed_index = _hub_installed_index(skills_dir)
+    except Exception as exc:
+        _log.debug("build_hub_catalog_context installed index failed: %s", exc)
+        installed_index = {}
+    try:
+        from integration.skills.no_self_improve import get_no_self_improve_names
+
+        locked_names = get_no_self_improve_names()
+    except Exception:
+        locked_names = set()
+    annotated = [dict(skill) for skill in raw_skills]
+    annotate_installed(
+        annotated,
+        installed_index=installed_index,
+        locked_names=locked_names,
+    )
+    return _HubCatalogContext(
+        raw_skills=raw_skills,
+        hub_names=hub_names,
+        installed_index=installed_index,
+        annotated_all=annotated,
+        locked_names=locked_names,
+    )
+
+
+def compute_scope_stats_from(ctx: _HubCatalogContext, *, custom_count: int) -> dict[str, int]:
+    """Global scope tab counts from a prebuilt hub catalog context."""
+    hub_count = len(ctx.annotated_all)
+    installed_count = sum(1 for skill in ctx.annotated_all if skill.get("installed"))
+    return {
+        "hub": hub_count,
+        "installed": installed_count,
+        "not_installed": hub_count - installed_count,
+        "custom": custom_count,
+    }
+
+
+def _filter_skills_by_category(skills: list[dict], category: str) -> list[dict]:
+    category_key = str(category or "").strip()
+    if not category_key:
+        return skills
+    return [skill for skill in skills if str(skill.get("category") or "") == category_key]
+
+
+def list_hub_catalog_filtered_from(
+    ctx: _HubCatalogContext,
+    category: str,
+    scope: str,
+    q: str | None,
+    sort: str = "name",
+    order: str = "asc",
+) -> tuple[list[dict], int]:
+    """List hub catalog items from a prebuilt context (no extra upstream fetch)."""
+    skills = _filter_skills_by_category(ctx.annotated_all, category)
+    if scope == "installed":
+        skills = [skill for skill in skills if skill.get("installed")]
+    elif scope == "not_installed":
+        skills = [skill for skill in skills if not skill.get("installed")]
+    skills = _filter_skills_by_q(skills, q)
+    if sort == "mtime":
+        skills = enrich_skills_mtime([dict(skill) for skill in skills], shared_skills_dir())
+    skills = sort_skill_items(skills, sort=sort, order=order)
+    skills = normalize_skill_list_items(skills)
+    total = len(skills)
+    return skills, total
+
+
+def list_hub_catalog_paged_from(
+    ctx: _HubCatalogContext,
+    category: str,
+    scope: str,
+    q: str | None,
+    page: int,
+    page_size: int,
+    sort: str = "name",
+    order: str = "asc",
+) -> tuple[list[dict], int]:
+    skills, total = list_hub_catalog_filtered_from(
+        ctx,
+        category,
+        scope,
+        q,
+        sort=sort,
+        order=order,
+    )
+    offset = (page - 1) * page_size
+    return skills[offset : offset + page_size], total
 
 
 def _filter_skills_by_q(skills: list[dict], q: str | None) -> list[dict]:
@@ -243,15 +425,28 @@ def compute_scope_stats(hub_names: set[str]) -> dict[str, int]:
     """Global scope tab counts (all categories; ignores list q/category filters)."""
     from integration.skills import local_skills
 
-    hub_skills = annotate_installed(fetch_all_hub_skills(category=None))
-    hub_count = len(hub_skills)
-    installed_count = sum(1 for skill in hub_skills if skill.get("installed"))
-    return {
-        "hub": hub_count,
-        "installed": installed_count,
-        "not_installed": hub_count - installed_count,
-        "custom": local_skills.count_custom_skills("", hub_names),
-    }
+    ctx = build_hub_catalog_context()
+    custom_count = local_skills.count_custom_skills("", hub_names)
+    return compute_scope_stats_from(ctx, custom_count=custom_count)
+
+
+def list_hub_catalog_filtered(
+    category: str,
+    scope: str,
+    q: str | None,
+    sort: str = "name",
+    order: str = "asc",
+) -> tuple[list[dict], int]:
+    """List hub catalog items with local filter and sort (no pagination)."""
+    ctx = build_hub_catalog_context()
+    return list_hub_catalog_filtered_from(
+        ctx,
+        category,
+        scope,
+        q,
+        sort=sort,
+        order=order,
+    )
 
 
 def list_hub_catalog_paged(
@@ -264,20 +459,13 @@ def list_hub_catalog_paged(
     order: str = "asc",
 ) -> tuple[list[dict], int]:
     """List hub catalog items with local filter, sort, and pagination."""
-    cat_param = category if category else None
-    skills_dir = shared_skills_dir()
-    skills = enrich_skills_mtime(
-        annotate_installed(fetch_all_hub_skills(cat_param)),
-        skills_dir,
+    skills, total = list_hub_catalog_filtered(
+        category,
+        scope,
+        q,
+        sort=sort,
+        order=order,
     )
-    if scope == "installed":
-        skills = [skill for skill in skills if skill.get("installed")]
-    elif scope == "not_installed":
-        skills = [skill for skill in skills if not skill.get("installed")]
-    skills = _filter_skills_by_q(skills, q)
-    skills = sort_skill_items(skills, sort=sort, order=order)
-    skills = normalize_skill_list_items(skills)
-    total = len(skills)
     offset = (page - 1) * page_size
     return skills[offset : offset + page_size], total
 
@@ -305,23 +493,7 @@ def list_hub_skills_filtered(
 
 def hub_all_catalog_names() -> set[str]:
     """Aggregate every skill name from the upstream catalog (all categories)."""
-    names: set[str] = set()
-    page = 1
-    page_size = 100
-    while True:
-        payload = fetch_catalog(page=page, page_size=page_size)
-        skills = payload.get("skills") or []
-        for skill in skills:
-            if not isinstance(skill, dict):
-                continue
-            name = str(skill.get("name") or "").strip()
-            if name:
-                names.add(name)
-        total = int(payload.get("total") or 0)
-        if not skills or len(names) >= total:
-            break
-        page += 1
-    return names
+    return build_hub_catalog_context().hub_names
 
 
 def install_skill(name: str, display_name: str = "", category: str = "") -> dict:
@@ -357,6 +529,12 @@ def install_skill(name: str, display_name: str = "", category: str = "") -> dict
         (target / ".category").write_text(cat_seg, encoding="utf-8")
     (target / ".hub_installed").write_text("1", encoding="utf-8")
     (target / ".install_name").write_text(label, encoding="utf-8")
+    try:
+        from integration.skills.no_self_improve import add_names
+
+        add_names([name])
+    except Exception as exc:
+        _log.exception("failed to add hub skill to no_self_improve: %s", exc)
     return {
         "ok": True,
         "name": name,

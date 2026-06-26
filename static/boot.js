@@ -1799,7 +1799,6 @@ function applyBotName(){
     window._terminalAutoExpandOnOutput=!!s.terminal_auto_expand_on_output;
     window._activityFeedExpandedDefault=!!s.activity_feed_expanded_default;
     window._sidebarDensity=(s.sidebar_density==='detailed'?'detailed':'compact');
-    window._pinnedSessionsLimit=parseInt(s.pinned_sessions_limit||3,10)||3;
     window._inflightStateLimits={
       maxSessions:parseInt(s.inflight_state_max_sessions||8,10)||8,
       messages:parseInt(s.inflight_state_max_messages||24,10)||24,
@@ -1897,7 +1896,6 @@ function applyBotName(){
     window._terminalAutoExpandOnOutput=false;
     window._sessionJumpButtonsEnabled=false;
     window._sidebarDensity='compact';
-    window._pinnedSessionsLimit=3;
     window._busyInputMode='queue';
     window._sessionEndlessScrollEnabled=false;
     window._botName='Hermes';

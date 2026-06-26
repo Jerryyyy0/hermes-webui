@@ -3755,6 +3755,17 @@ async function loadSkills() {
   } catch(e) { box.innerHTML = `<div style="padding:12px;color:var(--accent);font-size:12px">Error: ${esc(e.message)}</div>`; }
 }
 
+// Sync skill lock state from SkillHub panel
+window.addEventListener('hermes:skill-lock-toggle', (ev) => {
+  const { name, locked } = ev.detail || {};
+  if (!name || !_skillsData) return;
+  const skill = _skillsData.find(s => s.name === name);
+  if (skill) {
+    skill.no_self_improve = !!locked;
+    renderSkills(_skillsData);
+  }
+});
+
 // Sync skill toggle state from SkillHub panel
 window.addEventListener('hermes:skill-toggle', (ev) => {
   const { name, enabled } = ev.detail || {};
@@ -3815,20 +3826,36 @@ function renderSkills(skills) {
       el.className = 'skill-item' + (skill.disabled ? ' disabled' : '');
       el.style.display = collapsed ? 'none' : '';
       const isDisabled = skill.disabled || false;
+      const enableWrap = document.createElement('div');
+      enableWrap.className = 'skill-item-enable';
       const toggle = document.createElement('span');
       toggle.className = 'skill-toggle' + (isDisabled ? '' : ' enabled');
       toggle.title = isDisabled ? t('skill_disabled') : t('skill_enabled');
+      toggle.setAttribute('role', 'switch');
+      toggle.setAttribute('aria-checked', isDisabled ? 'false' : 'true');
+      toggle.setAttribute('aria-label', toggle.title);
       toggle.addEventListener('click', (ev) => {
         ev.stopPropagation();
         toggleSkill(skill.name, !isDisabled);
       });
+      enableWrap.appendChild(toggle);
+      const body = document.createElement('div');
+      body.className = 'skill-item-body';
       const nameEl = document.createElement('span');
       nameEl.className = 'skill-name';
       nameEl.textContent = skill.name;
       const descEl = document.createElement('span');
       descEl.className = 'skill-desc';
       descEl.textContent = skill.description || '';
-      el.append(toggle, nameEl, descEl);
+      body.append(nameEl, descEl);
+      el.append(enableWrap, body);
+      const lockEl = buildSkillLockEl(skill, toggleSkillLock);
+      if (lockEl) {
+        const lockSlot = document.createElement('div');
+        lockSlot.className = 'skill-item-lock-slot';
+        lockSlot.appendChild(lockEl);
+        el.appendChild(lockSlot);
+      }
       el.onclick = () => openSkill(skill.name, el);
       sec.appendChild(el);
     }
@@ -3863,6 +3890,33 @@ async function toggleSkill(name, currentlyEnabled) {
     }
   } catch(e) {
     setStatus(t('skill_toggle_failed') + e.message);
+  }
+}
+
+async function toggleSkillLock(skill) {
+  if (!skill || !skill.can_lock) return;
+  const newLocked = !skill.no_self_improve;
+  try {
+    const body = { name: skill.name, locked: newLocked };
+    if (skill.dir_name) body.dir_name = skill.dir_name;
+    const result = await api('/api/skillhub/skills/no_self_improve/toggle', {
+      method: 'POST',
+      body: JSON.stringify(body)
+    });
+    if (result && result.ok) {
+      if (_skillsData) {
+        const row = _skillsData.find(s => s.name === skill.name);
+        if (row) row.no_self_improve = newLocked;
+      }
+      renderSkills(_skillsData || []);
+      window.dispatchEvent(new CustomEvent('hermes:skill-lock-toggle', {
+        detail: { name: skill.name, locked: newLocked }
+      }));
+    } else {
+      setStatus((result && result.error) || t('skill_lock_failed'));
+    }
+  } catch (e) {
+    setStatus(t('skill_lock_failed') + e.message);
   }
 }
 
@@ -6335,8 +6389,6 @@ function _preferencesPayloadFromUi(){
   if(notifCb) payload.notifications_enabled=notifCb.checked;
   const sidebarDensitySel=$('settingsSidebarDensity');
   if(sidebarDensitySel) payload.sidebar_density=sidebarDensitySel.value;
-  const pinnedLimitField=$('settingsPinnedSessionsLimit');
-  if(pinnedLimitField) payload.pinned_sessions_limit=parseInt(pinnedLimitField.value,10);
   const autoTitleRefreshSel=$('settingsAutoTitleRefresh');
   if(autoTitleRefreshSel) payload.auto_title_refresh_every=parseInt(autoTitleRefreshSel.value,10);
   const busyInputModeSel=$('settingsBusyInputMode');
@@ -6391,7 +6443,6 @@ async function _autosavePreferencesSettings(payload){
       window._terminalAutoExpandOnOutput=!!(saved&&saved.terminal_auto_expand_on_output);
     }
     if(payload&&Object.prototype.hasOwnProperty.call(payload,'fade_text_effect')) window._fadeTextEffect=!!payload.fade_text_effect;
-    if(saved&&Object.prototype.hasOwnProperty.call(saved,'pinned_sessions_limit')) window._pinnedSessionsLimit=parseInt(saved.pinned_sessions_limit,10)||3;
     if(payload&&payload.show_tps!==undefined){
       window._showTps=!!(saved&&saved.show_tps);
       if(typeof clearMessageRenderCache==='function') clearMessageRenderCache();
@@ -6620,13 +6671,6 @@ async function loadSettingsPanel(){
     }
     const showTpsCb=$('settingsShowTps');
     if(showTpsCb){showTpsCb.checked=!!settings.show_tps;showTpsCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
-    const pinnedLimitField=$('settingsPinnedSessionsLimit');
-    if(pinnedLimitField){
-      pinnedLimitField.value=parseInt(settings.pinned_sessions_limit||3,10)||3;
-      window._pinnedSessionsLimit=parseInt(pinnedLimitField.value,10)||3;
-      pinnedLimitField.addEventListener('change',_schedulePreferencesAutosave,{once:false});
-      pinnedLimitField.addEventListener('input',()=>{window._pinnedSessionsLimit=parseInt(pinnedLimitField.value,10)||3;_schedulePreferencesAutosave();},{once:false});
-    }
     const fadeTextCb=$('settingsFadeTextEffect');
     if(fadeTextCb){fadeTextCb.checked=!!settings.fade_text_effect;window._fadeTextEffect=fadeTextCb.checked;fadeTextCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const simplifiedToolCb=$('settingsSimplifiedToolCalling');
@@ -8062,7 +8106,6 @@ async function saveSettings(andClose){
   const showCliSessions=!!($('settingsShowCliSessions')||{}).checked;
   const showCronSessions=!!($('settingsShowCronSessions')||{}).checked;
   const showPreviousMessagingSessions=!!($('settingsShowPreviousMessagingSessions')||{}).checked;
-  const pinnedSessionsLimit=parseInt(($('settingsPinnedSessionsLimit')||{}).value,10)||3;
   const pw=($('settingsPassword')||{}).value;
   const theme=($('settingsTheme')||{}).value||'dark';
   const skin=($('settingsSkin')||{}).value||'default';
@@ -8091,7 +8134,6 @@ async function saveSettings(andClose){
   // mirror the autosave path so the explicit Save Settings button persists it too. (#3514)
   body.show_cron_sessions=showCliSessions&&showCronSessions;
   body.show_previous_messaging_sessions=showPreviousMessagingSessions;
-  body.pinned_sessions_limit=pinnedSessionsLimit;
   body.sync_to_insights=!!($('settingsSyncInsights')||{}).checked;
   body.check_for_updates=!!($('settingsCheckUpdates')||{}).checked;
   body.ignore_agent_updates=!!($('settingsIgnoreAgentUpdates')||{}).checked;

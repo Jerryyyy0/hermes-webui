@@ -19,6 +19,20 @@ def session_sidebar_timestamp(session: dict) -> float:
         return 0.0
 
 
+def session_pinned_sort_timestamp(session: dict) -> float:
+    raw = session.get("pinned_at")
+    if raw is not None:
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            pass
+    return 0.0
+
+
+def _sort_pinned_rows(rows: list[dict]) -> list[dict]:
+    return sorted(rows, key=session_pinned_sort_timestamp, reverse=True)
+
+
 def parse_profile_pagination_query(parsed) -> tuple[str, int, int] | None:
     """Return (profile, offset, limit) when ``profile`` is set, else None."""
     qs = parse_qs(parsed.query)
@@ -57,6 +71,41 @@ def session_row_must_show(session: dict, *, active_session_id: str | None = None
     return False
 
 
+def _sort_by_sidebar_timestamp(rows: list[dict]) -> list[dict]:
+    return sorted(rows, key=session_sidebar_timestamp, reverse=True)
+
+
+def _partition_virtual_session_rows(
+    rows: list[dict],
+    *,
+    active_session_id: str | None = None,
+) -> list[dict]:
+    """Build virtual sidebar list: priority prefix (must-show) then regular rows."""
+    sorted_rows = _sort_by_sidebar_timestamp(rows)
+    priority_pinned: list[dict] = []
+    priority_other: list[dict] = []
+    priority_ids: set[str] = set()
+    for session in sorted_rows:
+        if not session_row_must_show(session, active_session_id=active_session_id):
+            continue
+        sid = str(session.get("session_id") or "").strip()
+        if sid and sid in priority_ids:
+            continue
+        if sid:
+            priority_ids.add(sid)
+        if session.get("pinned"):
+            priority_pinned.append(session)
+        else:
+            priority_other.append(session)
+    priority_pinned = _sort_pinned_rows(priority_pinned)
+    regular_rows = [
+        session
+        for session in sorted_rows
+        if str(session.get("session_id") or "").strip() not in priority_ids
+    ]
+    return priority_pinned + priority_other + regular_rows
+
+
 def paginate_session_rows(
     rows: list[dict],
     *,
@@ -64,33 +113,13 @@ def paginate_session_rows(
     limit: int,
     active_session_id: str | None = None,
 ) -> dict:
-    """Paginate sidebar rows with must-show extras on the first page only."""
-    sorted_rows = sorted(rows, key=session_sidebar_timestamp, reverse=True)
-    must_show: list[dict] = []
-    must_show_ids: set[str] = set()
-    if offset == 0:
-        for session in sorted_rows:
-            if session_row_must_show(session, active_session_id=active_session_id):
-                must_show.append(session)
-                sid = str(session.get("session_id") or "").strip()
-                if sid:
-                    must_show_ids.add(sid)
-    regular_rows = [
-        session
-        for session in sorted_rows
-        if str(session.get("session_id") or "").strip() not in must_show_ids
-    ]
-    if offset == 0:
-        page_regular = regular_rows[:limit]
-        page = must_show + page_regular
-        has_more = len(page) < len(sorted_rows)
-    else:
-        page = regular_rows[offset:offset + limit]
-        has_more = (offset + len(page)) < len(regular_rows)
+    """Paginate sidebar rows on a virtual list: must-show prefix, then regular rows."""
+    virtual = _partition_virtual_session_rows(rows, active_session_id=active_session_id)
+    page = virtual[offset:offset + limit]
     return {
         "sessions": page,
-        "total_count": len(sorted_rows),
+        "total_count": len(virtual),
         "offset": offset,
         "limit": limit,
-        "has_more": has_more,
+        "has_more": (offset + len(page)) < len(virtual),
     }

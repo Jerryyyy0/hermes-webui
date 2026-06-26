@@ -6,7 +6,15 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ## [Unreleased]
 
+### Changed
+
+- **SkillHub list performance (Phase 1)** — `GET /api/skillhub/skills` deduplicates work within each request: one upstream hub catalog fetch, one custom local scan, and one install-index/config read for annotate. `scope=installed|custom` with `all=1` benefits most; response shape and stats semantics unchanged.
+
 ### Added
+
+- **Skill no-self-improve lock** — `skills.no_self_improve` in active profile `config.yaml` blocks agent self-evolution for listed skills (enforced by Hermes Agent `skill-policy` plugin). `GET/POST/PUT /api/skillhub/skills/no_self_improve*` for config read, custom toggle, and bulk replace (requires `HERMES_INTEGRATION=1` only). Hub-installed skills (`.hub_installed`) are permanently locked: startup sync reconciles hub names and removes stale entries; install/delete hooks update config. Skill list APIs add `no_self_improve` and `can_lock`; Skills and SkillHub panels show lock icons (custom toggleable, hub read-only).
+
+- **SkillHub list all mode** — `GET /api/skillhub/skills` accepts `all=1` (only the literal `1`) to return the full filtered list for any `scope`/`category`/`q`/`sort`/`order` without pagination. Response keeps the same envelope with `page=1` and `page_size=total`. Other `all` values (including `true`) use default pagination.
 
 - **Integration workspace file delete** — `POST /api/integration/workspace/file/delete` removes files under `HERMES_WEBUI_DEFAULT_WORKSPACE` (`paths` array). Left-rail Workspace files UI adds per-row delete, multi-select batch delete, and manifest refresh after delete. Session manifest artifacts keep historical rows with `status: "expired"` when the workspace file is gone (references unchanged).
 
@@ -25,6 +33,12 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 - **Zhiling identity lookup API doc** — [`docs/integration-login-api.md`](../docs/integration-login-api.md) documents `GET /api/integration/webui_login` request/response contract, auth, and error semantics.
 
 ### Changed
+
+- **SkillHub installed list description** — `GET /api/skillhub/skills` (`scope=installed` and other hub-catalog scopes) prefers each installed skill's `description` from local `SKILL.md` frontmatter under `shared_skills_dir`; when local description is absent, upstream catalog value is kept.
+
+- **SkillHub preview `scope=auto`** — `GET /api/skillhub/content|structure|file` with `scope=auto` (default) reads only from `{HERMES_HOME}/skills`; missing local `SKILL.md` returns 404 (no SkillHub fallback). `scope=hub` keeps local-first then upstream; `scope=custom` remains local-only. SkillHub panel passes `scope=hub` for catalog items not yet installed.
+
+- **SkillHub preview `scope=hub`** — `GET /api/skillhub/content|structure|file` with `scope=hub` resolves `{HERMES_HOME}/skills` first, then falls back to SkillHub upstream when no local `SKILL.md` exists. `scope=custom` remains local-only.
 
 - **Knowledge base BFF route segment names** — WebUI proxy paths `apply-join`, `upload-docs`, `update-docs`, and `delete-docs` are now `apply_join`, `upload_docs`, `update_docs`, and `delete_docs` (underscore only). Hyphenated segments are no longer served. Swagger and [`docs/integration-knowledge-base-api.md`](../docs/integration-knowledge-base-api.md) updated.
 

@@ -268,7 +268,7 @@ curl -sS -X POST http://127.0.0.1:8787/api/integration/knowledge_base/list \
 | `GET /api/skillhub/skills` | `GET /api/skills` (`scope`, `q`, `category`, `page`, `page_size` — no `profile` upstream) |
 | `GET /api/skillhub/categories` | `GET /api/skills/categories` |
 | `GET /api/skillhub/detail?name=` | `GET /api/skills/{name}` |
-| `GET /api/skillhub/content?name=` | 默认 `scope=auto`：本地 `{HERMES_HOME}/skills` 优先，否则 `GET /api/skills/{name}/doc` |
+| `GET /api/skillhub/content?name=` | 默认 `scope=auto`：仅本地 `{HERMES_HOME}/skills`（无则 404）；`scope=hub` 本地优先否则 `GET /api/skills/{name}/doc` |
 | `GET /api/skillhub/structure?name=` | 同上（`structure`） |
 | `GET /api/skillhub/file?name=&path=` | 同上（`file`） |
 | `POST /api/skillhub/install` | download/doc → `shared_skills_dir`；有 `category` 时 `skills/<category>/<name>/`，否则平铺 `skills/<name>/` |
@@ -276,6 +276,9 @@ curl -sS -X POST http://127.0.0.1:8787/api/integration/knowledge_base/list \
 | `GET /api/skillhub/download` | **仅本地**：zip 内 `{leaf}/` 目录 + `.skill-origin.json` sidecar；排除 `.hub_installed` 等元数据；`name` + 可选 `dir_name`；仅需 `HERMES_INTEGRATION=1` |
 | `POST /api/skillhub/edit` | **仅本地** custom：更新已有技能的 `SKILL.md`（`name` + `content`，可选 `dir_name`）；市场安装不可编辑；仅需 `HERMES_INTEGRATION=1` |
 | `POST /api/skillhub/upload` | **仅本地** custom：`.md` / 多技能 `.zip` 或 JSON → `shared_skills_dir`；可选 `category`、`dir_name`、`overwrite`（按 frontmatter `name` 覆盖全部 custom 副本）；响应 `{ skill_count, file_count, skills[] }` |
+| `GET /api/skillhub/skills/no_self_improve` | 读取 `config.yaml` → `skills.no_self_improve` 名单（仅需 `HERMES_INTEGRATION=1`） |
+| `POST /api/skillhub/skills/no_self_improve/toggle` | Custom 技能加锁/解锁 `{ name, locked, dir_name? }`；Hub 技能返回 403（仅需 `HERMES_INTEGRATION=1`） |
+| `PUT /api/skillhub/skills/no_self_improve` | 全量替换 `skills.no_self_improve`（`{ names: string[] }`；Hub 名会在启动/install sync 补回） |
 
 `GET /api/skillhub/skills` annotates `installed` from `shared_skills_dir`. SkillHub routes do not use WebUI profile cookies or `profile` query/body parameters.
 
@@ -286,7 +289,8 @@ Query parameters:
 | `scope` | `hub` | `hub` (market), `installed`, `not_installed` (`shared_skills_dir`), `custom` (`shared_skills_dir`) |
 | `category` | `""` (all) | Hub category filter; empty/`all` = all categories |
 | `q` | — | Search (list only; tab stats ignore `q`) |
-| `page` / `page_size` | `1` / `20` | Pagination |
+| `all` | — | Only `all=1` returns the full filtered list (ignores `page`/`page_size`; response `page=1`, `page_size=total`) |
+| `page` / `page_size` | `1` / `20` | Pagination (ignored when `all=1`) |
 | `sort` | `name` | `name` or `mtime` |
 | `order` | `asc` | `asc` or `desc` |
 

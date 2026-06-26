@@ -259,7 +259,7 @@ Skill 成果示例：
 
 `profile`（可选）：成果所属 WebUI profile，来自 `session.profile`；无明确值时省略。仅 `artifacts[]` 携带，不在 `references[]` 中。
 
-`status`（可选，仅 `artifacts[]` / `turns[].artifacts[]`）：`expired` 表示成果曾入库但 workspace 内文件已不存在或不可预览；省略时表示当前可预览。`references[]` 仍不列出缺失文件。
+`status`（可选，`artifacts[]` / `references[]` / `turns[]` 对应子数组）：`expired` 表示该路径曾由明确工具活动记录，但当前 workspace / skills 目录内已不存在或不可预览；省略时表示当前可预览。文件类 artifact 的 `expired` 仍要求 per-turn 归属（`turn_key` / store）；reference 与 skill 行以 `source_tool` 白名单作为 provenance，不要求 `turn_key`。
 
 **成果列表**：可预览文件正常展示；已删除的历史成果保留并标 `status: expired`（不可再预览）。不可预览且从未入库的路径（目录、过大、cruft 等）仍不出现。预览接口与路由见 [§4.5 预览逻辑](#45-预览逻辑file--skill)。
 
@@ -274,7 +274,11 @@ assistant 消息持久化后、`done` 前可发送 `manifest_delta`：`source.ki
 #### 展示
 
 - 右侧 **Artifacts** tab：全会话按 `path` 聚合；
-- 聊天区：每轮 `done` 后展示 `turns[].artifacts` chips。
+- 聊天区：每轮 `done` 后展示 `turns[].artifacts` chips（含 `preview: "skill"` 的 skill 成果）。
+
+#### Turn 持久化（`session.turn_artifacts`）
+
+Turn 完成时（`api/streaming.py` `_persist_turn_artifact_paths`），除 workspace 写入工具外，**`skill_manage` mutation** 与写入 profile skills 目录 `SKILL.md` 的 mutation 工具也会写入 `session.turn_artifacts[turn_key]`，条目含 `{path, source_tool, preview}`（skill 为 `preview: "skill"`）。空 turn 不写入 key。`build_session_manifest` 合并 persisted 与 transcript 推导的 skill 行；path 统一为 skills 根相对路径（如 `research/ai-news-top10`）。
 
 ---
 
@@ -290,11 +294,13 @@ assistant 消息持久化后、`done` 前可发送 `manifest_delta`：`source.ki
 
 #### 单条结构
 
-与 artifacts **相同三字段**。读文件工具**不保存**文件正文。`skill_view` 条目 `preview` 为 `"skill"`，预览见 [§4.5](#45-预览逻辑file--skill)。
+与 artifacts **相同三字段**（可选 `status: "expired"`）。读文件工具**不保存**文件正文。`skill_view` 条目 `preview` 为 `"skill"`，预览见 [§4.5](#45-预览逻辑file--skill)。
+
+**存在性**：wire 阶段校验 workspace 内文件或 profile skills 目录下 `SKILL.md`；存在则正常列出，缺失则保留行并标 `status: expired`（`in_progress` 工具事件仍不 wire）。
 
 #### 排除
 
-已写入路径（归 artifacts）、搜索命中未读、list 目录、助手提到的路径、workspace 外路径。
+已写入路径（归 artifacts）、**已在 artifacts 中的 skill（含 `skill_view` 验证刚创建的技能，按 canonical path 去重）**、搜索命中未读、list 目录、助手提到的路径、workspace 外路径。
 
 #### 展示
 
@@ -365,13 +371,14 @@ Integration 文件接口根目录为 **`HERMES_WEBUI_DEFAULT_WORKSPACE`**，**�
 
 #### 服务端：何时写入 `preview`
 
-| `preview` | 写入条件（全部满足才出现在 manifest） |
+| `preview` | 写入条件 |
 | --- | --- |
-| `"file"` | 写入/读取/MEDIA 命中路径；workspace 内相对路径 **或** `source_tool=media` 的 workspace 外绝对路径；目标为**文件**、存在、非 cruft、未超 `MAX_FILE_BYTES` |
-| `"skill"`（References） | 工具为 `skill_view`；`HERMES_INTEGRATION=1` 且 SkillHub 可用；技能名（写入 `path`）非空 |
-| `"skill"`（Artifacts） | （1）`skill_manage` 且 `action` 为写入类；或（2）写入类工具路径为 profile `{HERMES_HOME}/skills/.../SKILL.md`；integration 可用；对应 `SKILL.md` 存在；非 `in_progress` |
+| `"file"`（References） | 读取白名单工具（`read_file` 等）命中 workspace 内相对路径；存在且可预览 → 正常行；曾读取但已缺失 → `status: expired` |
+| `"file"`（Artifacts） | 写入/MEDIA 命中路径；存在且可预览 → 正常行；曾入库（`turn_key`）但已缺失 → `status: expired` |
+| `"skill"`（References） | `skill_view` + integration 可用；`SKILL.md` 存在 → 正常行；曾查看但已缺失 → `status: expired` |
+| `"skill"`（Artifacts） | `skill_manage` 写入类或 `SKILL.md` 写入工具；`SKILL.md` 存在且非 `in_progress` → 正常行；曾生成但已缺失 → `status: expired` |
 
-**不写入、不出现在列表**：目录、`list_dir` 路径、缺失文件、非 MEDIA 的 workspace 外路径、profile 记忆文件（`MEMORY.md` 等）、过大文件、SkillHub 不可用时的 `skill_view`、远程 `MEDIA:` URL。
+**不写入、不出现在列表**：目录、`list_dir` 路径、无明确工具来源的候选、非 MEDIA 的 workspace 外路径、profile 记忆文件（`MEMORY.md` 等）、过大文件、integration 不可用时的 skill 行、`in_progress` 工具事件、远程 `MEDIA:` URL。
 
 #### `preview: "file"` — workspace 文件
 

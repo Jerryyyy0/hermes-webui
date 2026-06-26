@@ -69,6 +69,29 @@ def test_skillhub_skills_passes_sort_order():
                 assert lst.call_args.kwargs["order"] == "desc"
 
 
+def test_skillhub_skills_all_records_flag():
+    handler = MagicMock()
+    with patch("integration.skills.handlers.skillhub_enabled", return_value=True):
+        with patch("integration.skills.handlers.listing.list_skillhub_skills") as lst:
+            with patch("integration.skills.handlers.j", return_value=True):
+                lst.return_value = {"skills": [], "total": 0, "stats": {}}
+                parsed = urlparse("/api/skillhub/skills?all=1")
+                assert try_handle_get(handler, parsed) is True
+                assert lst.call_args.kwargs["all_records"] is True
+
+
+def test_skillhub_skills_all_records_not_true_string():
+    handler = MagicMock()
+    with patch("integration.skills.handlers.skillhub_enabled", return_value=True):
+        with patch("integration.skills.handlers.listing.list_skillhub_skills") as lst:
+            with patch("integration.skills.handlers.j", return_value=True):
+                lst.return_value = {"skills": [], "total": 0, "stats": {}}
+                for query in ("", "?all=true", "?all=0"):
+                    parsed = urlparse(f"/api/skillhub/skills{query}")
+                    assert try_handle_get(handler, parsed) is True
+                    assert lst.call_args.kwargs["all_records"] is False
+
+
 def test_skillhub_content_requires_name():
     parsed = urlparse("/api/skillhub/content")
     handler = MagicMock()
@@ -119,7 +142,7 @@ def test_try_handle_post_early_noop_for_other_paths():
 
 
 def test_skillhub_file_accepts_path_alias():
-    parsed = urlparse("/api/skillhub/file?name=x&file=README.md")
+    parsed = urlparse("/api/skillhub/file?name=x&file=README.md&scope=hub")
     handler = MagicMock()
     with patch("integration.skills.handlers.skillhub_enabled", return_value=True):
         with patch("integration.skills.handlers.local_skills.has_local_skill", return_value=False):
@@ -134,31 +157,29 @@ def test_skillhub_content_auto_prefers_local():
     parsed = urlparse("/api/skillhub/content?name=hermes-agent")
     handler = MagicMock()
     with patch("integration.skills.handlers.skillhub_enabled", return_value=True):
-        with patch("integration.skills.handlers.local_skills.has_local_skill", return_value=True):
-            with patch("integration.skills.handlers.local_skills.get_custom_doc") as get_doc:
-                with patch("integration.skills.handlers.skillhub.fetch_doc") as fetch_doc:
-                    with patch("integration.skills.handlers.j", return_value=True):
-                        get_doc.return_value = {"name": "hermes-agent", "content": "# local", "linked_files": {}}
-                        assert try_handle_get(handler, parsed) is True
-                        get_doc.assert_called_once_with("hermes-agent")
-                        fetch_doc.assert_not_called()
+        with patch("integration.skills.handlers.local_skills.get_custom_doc") as get_doc:
+            with patch("integration.skills.handlers.skillhub.fetch_doc") as fetch_doc:
+                with patch("integration.skills.handlers.j", return_value=True):
+                    get_doc.return_value = {"name": "hermes-agent", "content": "# local", "linked_files": {}}
+                    assert try_handle_get(handler, parsed) is True
+                    get_doc.assert_called_once_with("hermes-agent")
+                    fetch_doc.assert_not_called()
 
 
-def test_skillhub_content_auto_falls_back_to_hub():
+def test_skillhub_content_auto_local_only_when_missing():
     parsed = urlparse("/api/skillhub/content?name=remote-only")
     handler = MagicMock()
     with patch("integration.skills.handlers.skillhub_enabled", return_value=True):
-        with patch("integration.skills.handlers.local_skills.has_local_skill", return_value=False):
-            with patch("integration.skills.handlers.local_skills.get_custom_doc") as get_doc:
-                with patch("integration.skills.handlers.skillhub.fetch_doc") as fetch_doc:
-                    with patch("integration.skills.handlers.j", return_value=True):
-                        fetch_doc.return_value = {"name": "remote-only", "content": "# hub", "linked_files": {}}
-                        assert try_handle_get(handler, parsed) is True
-                        get_doc.assert_not_called()
-                        fetch_doc.assert_called_once_with("remote-only")
+        with patch("integration.skills.handlers.local_skills.get_custom_doc") as get_doc:
+            with patch("integration.skills.handlers.skillhub.fetch_doc") as fetch_doc:
+                with patch("integration.skills.handlers.bad", return_value=True):
+                    get_doc.return_value = {"error": "Skill not found", "status": 404}
+                    assert try_handle_get(handler, parsed) is True
+                    get_doc.assert_called_once_with("remote-only")
+                    fetch_doc.assert_not_called()
 
 
-def test_skillhub_content_hub_scope_skips_local():
+def test_skillhub_content_hub_scope_prefers_local():
     parsed = urlparse("/api/skillhub/content?name=local-skill&scope=hub")
     handler = MagicMock()
     with patch("integration.skills.handlers.skillhub_enabled", return_value=True):
@@ -166,7 +187,29 @@ def test_skillhub_content_hub_scope_skips_local():
             with patch("integration.skills.handlers.local_skills.get_custom_doc") as get_doc:
                 with patch("integration.skills.handlers.skillhub.fetch_doc") as fetch_doc:
                     with patch("integration.skills.handlers.j", return_value=True):
-                        fetch_doc.return_value = {"name": "local-skill", "content": "# hub", "linked_files": {}}
+                        get_doc.return_value = {
+                            "name": "local-skill",
+                            "content": "# local",
+                            "linked_files": {},
+                        }
+                        assert try_handle_get(handler, parsed) is True
+                        get_doc.assert_called_once_with("local-skill")
+                        fetch_doc.assert_not_called()
+
+
+def test_skillhub_content_hub_scope_falls_back_to_hub():
+    parsed = urlparse("/api/skillhub/content?name=remote-only&scope=hub")
+    handler = MagicMock()
+    with patch("integration.skills.handlers.skillhub_enabled", return_value=True):
+        with patch("integration.skills.handlers.local_skills.has_local_skill", return_value=False):
+            with patch("integration.skills.handlers.local_skills.get_custom_doc") as get_doc:
+                with patch("integration.skills.handlers.skillhub.fetch_doc") as fetch_doc:
+                    with patch("integration.skills.handlers.j", return_value=True):
+                        fetch_doc.return_value = {
+                            "name": "remote-only",
+                            "content": "# hub",
+                            "linked_files": {},
+                        }
                         assert try_handle_get(handler, parsed) is True
                         get_doc.assert_not_called()
-                        fetch_doc.assert_called_once_with("local-skill")
+                        fetch_doc.assert_called_once_with("remote-only")

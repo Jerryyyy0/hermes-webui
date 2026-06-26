@@ -401,6 +401,29 @@ def _session_sort_timestamp(session):
     return _last_message_timestamp(getattr(session, 'messages', None)) or getattr(session, 'updated_at', 0) or 0
 
 
+def _session_pinned_sort_timestamp(session):
+    if isinstance(session, dict):
+        raw = session.get('pinned_at')
+    else:
+        raw = getattr(session, 'pinned_at', None)
+    if raw is not None:
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            pass
+    return 0.0
+
+
+def _session_sidebar_sort_key(session):
+    if isinstance(session, dict):
+        pinned = bool(session.get('pinned'))
+    else:
+        pinned = bool(getattr(session, 'pinned', False))
+    if pinned:
+        return (True, _session_pinned_sort_timestamp(session))
+    return (False, _session_sort_timestamp(session))
+
+
 def _message_timestamp(message):
     if not isinstance(message, dict):
         return None
@@ -565,7 +588,7 @@ class Session:
                  workspace=str(DEFAULT_WORKSPACE), model=DEFAULT_MODEL,
                  model_provider=None,
                  messages=None, created_at=None, updated_at=None,
-                 tool_calls=None, pinned: bool=False, archived: bool=False,
+                 tool_calls=None, pinned: bool=False, pinned_at=None, archived: bool=False,
                  project_id: str=None, profile=None,
                  input_tokens: int=0, output_tokens: int=0, estimated_cost=None,
                  cache_read_tokens: int=0, cache_write_tokens: int=0,
@@ -608,6 +631,13 @@ class Session:
         self.created_at = created_at or time.time()
         self.updated_at = updated_at or time.time()
         self.pinned = bool(pinned)
+        if pinned_at is not None:
+            try:
+                self.pinned_at = float(pinned_at)
+            except (TypeError, ValueError):
+                self.pinned_at = None
+        else:
+            self.pinned_at = None
         self.archived = bool(archived)
         self.project_id = project_id or None
         self.profile = profile
@@ -694,7 +724,7 @@ class Session:
         # Fields are listed in the order they should appear in the JSON file.
         METADATA_FIELDS = [
             'session_id', 'title', 'workspace', 'model', 'model_provider', 'created_at', 'updated_at',
-            'pinned', 'archived', 'project_id', 'profile',
+            'pinned', 'pinned_at', 'archived', 'project_id', 'profile',
             'input_tokens', 'output_tokens', 'estimated_cost',
             'cache_read_tokens', 'cache_write_tokens',
             'personality', 'active_stream_id',
@@ -891,6 +921,7 @@ class Session:
             'updated_at': self.updated_at,
             'last_message_at': last_message_at,
             'pinned': self.pinned,
+            'pinned_at': self.pinned_at,
             'archived': self.archived,
             'project_id': self.project_id,
             'profile': self.profile,
@@ -2570,7 +2601,7 @@ def _preserve_messageful_sidebar_discoverability(
         return visible
     rescued_rows = sorted(
         rescue_by_root.values(),
-        key=lambda session: (session.get('pinned', False), _session_sort_timestamp(session)),
+        key=lambda session: _session_sidebar_sort_key(session),
         reverse=True,
     )
     return visible + rescued_rows
@@ -2728,7 +2759,7 @@ def _refresh_index_rows_from_sidecar_metadata(
         refreshed = dict(session)
         for key in (
             'message_count', 'updated_at', 'last_message_at', 'title', 'workspace',
-            'model', 'model_provider', 'created_at', 'pinned', 'archived', 'project_id',
+            'model', 'model_provider', 'created_at', 'pinned', 'pinned_at', 'archived', 'project_id',
             'profile', 'pre_compression_snapshot', 'parent_session_id', 'source_tag',
             'raw_source', 'session_source', 'source_label', 'active_stream_id',
             'has_pending_user_message', 'pending_user_message', 'pending_started_at',
@@ -3033,7 +3064,7 @@ def all_sessions(diag=None):
                 if row.get('session_id')
             }
             _diag_stage(diag, "all_sessions.sort_filter")
-            result = sorted(index_map.values(), key=lambda s: (s.get('pinned', False), _session_sort_timestamp(s)), reverse=True)
+            result = sorted(index_map.values(), key=_session_sidebar_sort_key, reverse=True)
             # Hide empty Untitled sessions from the UI entirely — they are ephemeral
             # scratch pads that only become real once the first message is sent (#1171).
             # No grace window: a 0-message Untitled session is never shown in the list
@@ -3082,7 +3113,7 @@ def all_sessions(diag=None):
     for s in SESSIONS.values():
         if all(s.session_id != x.session_id for x in out): out.append(s)
     _diag_stage(diag, "all_sessions.full_scan_sort_filter")
-    out.sort(key=lambda s: (getattr(s, 'pinned', False), _session_sort_timestamp(s)), reverse=True)
+    out.sort(key=_session_sidebar_sort_key, reverse=True)
     # Hide empty Untitled sessions from the UI entirely — kept consistent with the
     # index-path filter above. No grace window: a 0-message Untitled session is
     # never shown regardless of age (#1171).  Same streaming exemption as above (#1327).

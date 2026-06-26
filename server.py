@@ -138,7 +138,7 @@ logger = logging.getLogger(__name__)
 # Must run before `api.config` is imported so HOST/PORT pick up the values.
 if __name__ == "__main__":
     os.environ["HERMES_WEBUI_HOST"] = os.getenv("HERMES_WEBUI_HOST", "0.0.0.0")
-    os.environ["SKILLHUB_URL"] = os.getenv("SKILLHUB_URL", "http://192.168.1.139:18702/")
+    os.environ["SKILLHUB_URL"] = os.getenv("SKILLHUB_URL", "http://192.168.1.137:18702/")
     os.environ["HERMES_INTEGRATION"] = os.getenv("HERMES_INTEGRATION", "1")
     os.environ["ZHILING_CONTROL_PLANE_URL"] = os.getenv(
         "ZHILING_CONTROL_PLANE_URL", "http://192.168.1.139:23001/"
@@ -634,6 +634,29 @@ def main() -> None:
         load_plugins()
     except Exception as e:
         print(f'[!!] WARNING: Plugin loading failed: {e}', flush=True)
+
+    def _bootstrap_no_self_improve_hub_sync() -> None:
+        try:
+            from integration.config import integration_enabled
+            if not integration_enabled():
+                return
+            from integration.skills.no_self_improve import sync_hub_skills_to_config
+
+            result = sync_hub_skills_to_config()
+            if result.get("added") or result.get("removed_stale"):
+                print(
+                    f"[ok] no_self_improve hub sync: added={result.get('added')}, "
+                    f"removed_stale={result.get('removed_stale')}",
+                    flush=True,
+                )
+        except Exception:
+            logger.exception("hub no_self_improve sync failed")
+
+    threading.Thread(
+        target=_bootstrap_no_self_improve_hub_sync,
+        name="no-self-improve-hub-sync",
+        daemon=True,
+    ).start()
 
     _abort_if_already_serving(HOST, PORT)
     httpd = QuietHTTPServer((HOST, PORT), Handler)

@@ -99,6 +99,7 @@ def test_pin_session():
         assert status == 200
         assert d['ok'] is True
         assert d['session']['pinned'] is True
+        assert d['session'].get('pinned_at')
     finally:
         for sid in created:
             post("/api/session/delete", {"session_id": sid})
@@ -112,9 +113,28 @@ def test_unpin_session():
         d, status = post("/api/session/pin", {"session_id": sid, "pinned": False})
         assert status == 200
         assert d['session']['pinned'] is False
+        assert d['session'].get('pinned_at') in (None, 0)
     finally:
         for sid in created:
             post("/api/session/delete", {"session_id": sid})
+
+def test_most_recent_pin_sorts_first():
+    """Newer pin actions appear above older pinned sessions."""
+    created = []
+    try:
+        first = make_session(created)
+        second = make_session(created)
+        post("/api/session/rename", {"session_id": first, "title": "First pinned"})
+        post("/api/session/rename", {"session_id": second, "title": "Second pinned"})
+        post("/api/session/pin", {"session_id": first, "pinned": True})
+        post("/api/session/pin", {"session_id": second, "pinned": True})
+        d, _ = get("/api/sessions")
+        pinned = [s for s in d["sessions"] if s.get("pinned")]
+        assert [s["session_id"] for s in pinned[:2]] == [second, first]
+    finally:
+        for sid in created:
+            post("/api/session/delete", {"session_id": sid})
+
 
 def test_pinned_in_session_list():
     """Pinned sessions include pinned field in session list."""

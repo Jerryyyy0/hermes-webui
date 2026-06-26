@@ -28,6 +28,7 @@ const LI_PATHS = {
   'undo':            '<path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 5.5 5.5v0a5.5 5.5 0 0 1-5.5 5.5H11"/>',
   'check':           '<polyline points="20 6 9 17 4 12"/>',
   'lock':            '<rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
+  'unlock':          '<rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/>',
   'star':            '<polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>',
   'x':               '<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>',
   'square':          '<rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>',
@@ -89,4 +90,39 @@ function li(name, size = 16) {
        + `stroke="currentColor" stroke-width="2" stroke-linecap="round" `
        + `stroke-linejoin="round" aria-hidden="true" `
        + `style="display:inline-block;vertical-align:-0.15em;flex-shrink:0">${p}</svg>`;
+}
+
+/**
+ * Build a no-self-improve lock/unlock control for skill list rows.
+ * @param {object} skill - needs no_self_improve, can_lock, hub_installed
+ * @param {(skill: object) => void} onToggle - called when user toggles (custom only)
+ * @param {(key: string) => string} [labelFn] - i18n lookup, defaults to identity
+ */
+function buildSkillLockEl(skill, onToggle, labelFn) {
+  const isLocked = !!skill.no_self_improve;
+  const canLock = !!skill.can_lock;
+  const hubLocked = isLocked && !canLock;
+  const showLock = !!(skill.hub_installed || canLock || isLocked);
+  if (!showLock) return null;
+
+  const tFn = labelFn || (typeof t === 'function' ? t : (k) => k);
+  const lock = document.createElement('button');
+  lock.type = 'button';
+  lock.className = 'skill-lock'
+    + (isLocked ? ' active' : ' unlocked')
+    + (hubLocked ? ' hub-readonly readonly' : (canLock ? '' : ' readonly'));
+  lock.innerHTML = li(isLocked ? 'lock' : 'unlock', 14);
+  lock.title = hubLocked
+    ? tFn('skill_hub_locked_readonly')
+    : (isLocked ? tFn('skill_locked') : tFn('skill_unlocked'));
+  lock.setAttribute('aria-label', lock.title);
+  if (canLock) {
+    lock.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      onToggle(skill);
+    });
+  } else {
+    lock.disabled = true;
+  }
+  return lock;
 }

@@ -56,29 +56,52 @@ def list_skillhub_skills(
     page_size: int | None = None,
     sort: str = "name",
     order: str = "asc",
+    all_records: bool = False,
 ) -> dict:
     scope_key = _normalize_scope(scope)
     page_num = _normalize_page(page)
     page_limit = _normalize_page_size(page_size)
     category_key = str(category or "").strip()
-    hub_names = skillhub.hub_all_catalog_names()
-    stats = skillhub.compute_scope_stats(hub_names)
+    ctx = skillhub.build_hub_catalog_context()
+    custom_all = local_skills.scan_custom_skills_global(ctx.hub_names)
+    stats = skillhub.compute_scope_stats_from(ctx, custom_count=len(custom_all))
 
     if scope_key == "custom":
         payload = local_skills.list_custom_skills(
             category=category_key,
             q=q,
-            hub_names=hub_names,
+            hub_names=ctx.hub_names,
             page=page_num,
             page_size=page_limit,
             sort=sort,
             order=order,
+            all_records=all_records,
+            pre_scanned=custom_all,
         )
         payload["stats"] = stats
         return payload
 
     if scope_key in ("hub", "installed", "not_installed"):
-        skills, total = skillhub.list_hub_catalog_paged(
+        if all_records:
+            skills, total = skillhub.list_hub_catalog_filtered_from(
+                ctx,
+                category=category_key,
+                scope=scope_key,
+                q=q,
+                sort=sort,
+                order=order,
+            )
+            return _envelope(
+                scope=scope_key,
+                category=category_key,
+                skills=skills,
+                total=total,
+                page=1,
+                page_size=total,
+                stats=stats,
+            )
+        skills, total = skillhub.list_hub_catalog_paged_from(
+            ctx,
             category=category_key,
             scope=scope_key,
             q=q,

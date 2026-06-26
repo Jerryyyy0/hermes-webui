@@ -305,16 +305,22 @@
       el.className = 'skill-item' + (isDisabled ? ' disabled' : '') + (showCatalogOnly ? ' catalog-only' : '');
       // Toggle button for installed skills (hub-installed or custom)
       if (installed || isCustom) {
+        const enableWrap = document.createElement('div');
+        enableWrap.className = 'skill-item-enable';
         const toggle = document.createElement('span');
         toggle.className = 'skill-toggle' + (isDisabled ? '' : ' enabled');
         toggle.title = isDisabled
           ? (typeof t === 'function' ? t('skill_disabled') : 'Disabled')
           : (typeof t === 'function' ? t('skill_enabled') : 'Enabled');
+        toggle.setAttribute('role', 'switch');
+        toggle.setAttribute('aria-checked', isDisabled ? 'false' : 'true');
+        toggle.setAttribute('aria-label', toggle.title);
         toggle.addEventListener('click', (ev) => {
           ev.stopPropagation();
           _toggleSkillHubSkill(skill.name, !isDisabled);
         });
-        el.appendChild(toggle);
+        enableWrap.appendChild(toggle);
+        el.appendChild(enableWrap);
       }
       const nameEl = document.createElement('span');
       nameEl.className = 'skill-name';
@@ -322,7 +328,22 @@
       const descEl = document.createElement('span');
       descEl.className = 'skill-desc';
       descEl.textContent = skill.description || '';
-      el.append(nameEl, descEl);
+      const body = document.createElement('div');
+      body.className = 'skill-item-body';
+      body.append(nameEl, descEl);
+      el.appendChild(body);
+      if (installed || isCustom) {
+        const labelFn = typeof t === 'function' ? t : (k) => k;
+        const lockEl = typeof buildSkillLockEl === 'function'
+          ? buildSkillLockEl(skill, _toggleSkillLock, labelFn)
+          : null;
+        if (lockEl) {
+          const lockSlot = document.createElement('div');
+          lockSlot.className = 'skill-item-lock-slot';
+          lockSlot.appendChild(lockEl);
+          el.appendChild(lockSlot);
+        }
+      }
       el.onclick = () => openSkillHubItem(skill, el);
       box.appendChild(el);
     }
@@ -351,6 +372,33 @@
       }
     } catch(e) {
       setStatus((typeof t === 'function' ? t('skill_toggle_failed') : 'Toggle failed') + e.message);
+    }
+  }
+
+  async function _toggleSkillLock(skill) {
+    if (!skill || !skill.can_lock) return;
+    const newLocked = !skill.no_self_improve;
+    try {
+      const body = { name: skill.name, locked: newLocked };
+      if (skill.dir_name) body.dir_name = skill.dir_name;
+      const result = await api('/api/skillhub/skills/no_self_improve/toggle', {
+        method: 'POST',
+        body: JSON.stringify(body)
+      });
+      if (result && result.ok) {
+        if (_skillhubData) {
+          const row = _skillhubData.find(s => s.name === skill.name);
+          if (row) row.no_self_improve = newLocked;
+        }
+        renderSkillHubList(_skillhubData || []);
+        window.dispatchEvent(new CustomEvent('hermes:skill-lock-toggle', {
+          detail: { name: skill.name, locked: newLocked }
+        }));
+      } else {
+        setStatus((result && result.error) || (typeof t === 'function' ? t('skill_lock_failed') : 'Lock toggle failed'));
+      }
+    } catch (e) {
+      setStatus((typeof t === 'function' ? t('skill_lock_failed') : 'Lock toggle failed') + e.message);
     }
   }
 
@@ -490,6 +538,13 @@
     if (focusEl) focusEl.focus();
   }
 
+  function _skillhubPreviewScopeParam(skill) {
+    const isCustom = _skillhubScope === 'custom' || (skill && skill.custom === true);
+    if (isCustom) return '&scope=custom';
+    if (skill && skill.installed) return '';
+    return '&scope=hub';
+  }
+
   async function openSkillHubItem(skill, el) {
     document.querySelectorAll('#skillhubList .skill-item').forEach(e => e.classList.remove('active'));
     if (el) el.classList.add('active');
@@ -502,7 +557,7 @@
     if (title) title.textContent = skill.display_name || skill.name;
     const isCustom = _skillhubScope === 'custom' || skill.custom === true;
     const actions = _skillhubReadActions(skill);
-    const scopeParam = isCustom ? '&scope=custom' : '';
+    const scopeParam = _skillhubPreviewScopeParam(skill);
     try {
       const [doc, structure] = await Promise.all([
         api(`/api/skillhub/content?name=${encodeURIComponent(name)}${scopeParam}`),
@@ -632,7 +687,7 @@
 
   async function openSkillHubFile(name, path) {
     const body = $('skillhubDetailBody');
-    const scopeParam = _skillhubScope === 'custom' ? '&scope=custom' : '';
+    const scopeParam = _skillhubPreviewScopeParam(_currentSkillhubItem);
     try {
       const data = await api(
         `/api/skillhub/file?name=${encodeURIComponent(name)}&path=${encodeURIComponent(path)}${scopeParam}`
@@ -925,6 +980,17 @@
     uploadCustomSkill,
     handleUploadFile,
   };
+
+  // Sync skill lock state from Skills panel
+  window.addEventListener('hermes:skill-lock-toggle', (ev) => {
+    const { name, locked } = ev.detail || {};
+    if (!name || !_skillhubData) return;
+    const skill = _skillhubData.find(s => s.name === name);
+    if (skill) {
+      skill.no_self_improve = !!locked;
+      renderSkillHubList(_skillhubData);
+    }
+  });
 
   // Sync skill toggle state from Skills panel
   window.addEventListener('hermes:skill-toggle', (ev) => {

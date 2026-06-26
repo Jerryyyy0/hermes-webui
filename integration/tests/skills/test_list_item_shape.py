@@ -110,3 +110,51 @@ def test_hub_list_item_includes_aligned_fields(tmp_path):
     assert items[0]["dir_name"] == "flat-skill"
     assert items[1]["installed"] is False
     assert items[1]["dir_name"] == ""
+
+
+def test_hub_installed_list_prefers_local_description(tmp_path):
+    skills_dir = tmp_path / "skills"
+    installed = skills_dir / "data-analysis"
+    installed.mkdir(parents=True)
+    (installed / "SKILL.md").write_text(
+        "---\nname: data-analysis\ndescription: local description\n---\n",
+        encoding="utf-8",
+    )
+    (installed / ".hub_installed").write_text("1", encoding="utf-8")
+
+    with patch("integration.skills.skillhub.shared_skills_dir", return_value=skills_dir):
+        items = skillhub.annotate_installed(
+            [
+                {
+                    "name": "data-analysis",
+                    "description": "upstream description",
+                    "category": "tools",
+                },
+            ]
+        )
+
+    assert items[0]["description"] == "local description"
+
+
+def test_hub_installed_list_keeps_upstream_when_local_description_missing(tmp_path):
+    skills_dir = tmp_path / "skills"
+    installed = skills_dir / "data-analysis"
+    installed.mkdir(parents=True)
+    (installed / "SKILL.md").write_text(
+        "---\nname: data-analysis\n---\n",
+        encoding="utf-8",
+    )
+    (installed / ".hub_installed").write_text("1", encoding="utf-8")
+
+    with patch("integration.skills.skillhub.shared_skills_dir", return_value=skills_dir):
+        items = skillhub.annotate_installed(
+            [
+                {
+                    "name": "data-analysis",
+                    "description": "upstream description",
+                    "category": "tools",
+                },
+            ]
+        )
+
+    assert items[0]["description"] == "upstream description"

@@ -40,32 +40,11 @@ def test_session_field_helper_reads_dicts_and_objects():
     assert _session_field(SessionLike(), "missing", "fallback") == "fallback"
 
 
-def test_pin_limit_snapshot_counts_index_dict_entries():
-    assert "def _session_counts_toward_pin_quota(session)" in ROUTES_PY
-    assert "_session_counts_toward_pin_quota(existing)" in ROUTES_PY
-    assert "_hide_from_default_sidebar(row)" in ROUTES_PY
-    # #3288 replaced the set-of-ids snapshot with a visible-lineage row snapshot.
-    # The load-bearing invariant this test guards is unchanged: the persisted pin
-    # snapshot is computed BEFORE acquiring LOCK (all_sessions() acquires LOCK
-    # internally, so snapshotting inside `with LOCK:` would deadlock).
-    start = ROUTES_PY.find("persisted_rows = [")
-    assert start != -1, "persisted pin snapshot not found"
-    end = ROUTES_PY.find("with LOCK:", start)
-    assert end != -1, "persisted pin snapshot should be computed before LOCK"
-    persisted_snapshot = ROUTES_PY[start:end]
-    # The snapshot must filter via the shared quota helper, not raw getattr checks.
-    assert "_session_counts_toward_pin_quota(existing)" in persisted_snapshot
-    assert 'getattr(existing, "pinned", False)' not in persisted_snapshot
-    assert 'getattr(existing, "archived", False)' not in persisted_snapshot
-    # The authoritative count collapses continuation siblings to visible lineages.
-    assert "_visible_pinned_lineage_ids(" in ROUTES_PY
-
-
 def test_pin_action_does_not_short_circuit_on_stale_client_count():
     body = _function_block(SESSIONS_JS, "_openSessionActionMenu")
     assert "const pinLimitReached=" not in body
     assert "if(pinLimitReached)" not in body
-    assert "_pinnedSessionCount()>=_getPinnedSessionsLimit()" not in body
+    assert "function _getPinnedSessionsLimit()" not in SESSIONS_JS
     assert "await api('/api/session/pin'" in body
 
 

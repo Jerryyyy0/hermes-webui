@@ -8,7 +8,7 @@ from urllib.parse import parse_qs
 from api.helpers import MAX_BODY_BYTES, bad, j, read_body
 
 from integration.config import integration_enabled, skillhub_enabled
-from integration.skills import listing, local_skills, skillhub
+from integration.skills import listing, local_skills, no_self_improve, skillhub
 from integration.skills.sort_utils import (
     SKILL_LIST_SORT_FIELDS,
     SKILL_LIST_SORT_ORDERS,
@@ -34,6 +34,10 @@ def try_handle_get(handler, parsed) -> bool:
         if not integration_enabled():
             return False
         return _get_skillhub_download(handler, parsed)
+    if path == "/api/skillhub/skills/no_self_improve":
+        if not integration_enabled():
+            return False
+        return _get_no_self_improve(handler)
     if not skillhub_enabled():
         return False
     if path == "/api/skillhub/skills":
@@ -169,10 +173,23 @@ def try_handle_post(handler, parsed, body: dict | None) -> bool:
         if not integration_enabled():
             return False
         return _post_skillhub_edit(handler, body)
+    if path == "/api/skillhub/skills/no_self_improve/toggle":
+        if not integration_enabled():
+            return False
+        return _post_no_self_improve_toggle(handler, body)
     if not skillhub_enabled():
         return False
     if path == "/api/skillhub/install":
         return _post_skillhub_install(handler, parsed, body)
+    return False
+
+
+def try_handle_put(handler, parsed, body: dict | None) -> bool:
+    body = body if isinstance(body, dict) else {}
+    if parsed.path == "/api/skillhub/skills/no_self_improve":
+        if not integration_enabled():
+            return False
+        return _put_no_self_improve(handler, body)
     return False
 
 
@@ -206,6 +223,11 @@ def _skillhub_preview_scope(qs: dict) -> str:
 
 def _is_custom_scope(qs: dict) -> bool:
     return _skillhub_preview_scope(qs) == "custom"
+
+
+def _preview_local_only(scope: str) -> bool:
+    """custom/auto: read shared_skills_dir only (404 when missing)."""
+    return scope in ("custom", "auto")
 
 
 def _local_custom_result(handler, payload: dict) -> bool:
@@ -242,6 +264,7 @@ def _get_skillhub_skills(handler, parsed) -> bool:
     q = (qs.get("q") or [None])[0]
     page = _optional_int((qs.get("page") or [None])[0])
     page_size = _optional_int((qs.get("page_size") or [None])[0])
+    all_records = (qs.get("all", [""])[0] or "").strip() == "1"
     sort_raw = str((qs.get("sort") or ["name"])[0] or "name").strip().lower()
     order_raw = str((qs.get("order") or ["asc"])[0] or "asc").strip().lower()
     if sort_raw not in SKILL_LIST_SORT_FIELDS:
@@ -263,6 +286,7 @@ def _get_skillhub_skills(handler, parsed) -> bool:
             page_size=page_size,
             sort=sort,
             order=order,
+            all_records=all_records,
         )
         return _respond(handler, payload)
     except Exception as exc:
@@ -293,10 +317,10 @@ def _get_skillhub_content(handler, parsed) -> bool:
     if not name:
         return _respond_bad(handler, "name required", 400)
     scope = _skillhub_preview_scope(qs)
-    if scope == "custom" or (scope == "auto" and local_skills.has_local_skill(name)):
+    if _preview_local_only(scope):
         return _local_custom_result(handler, local_skills.get_custom_doc(name))
-    if scope == "auto" and not skillhub_enabled():
-        return _local_custom_result(handler, {"error": "Skill not found", "status": 404})
+    if local_skills.has_local_skill(name):
+        return _local_custom_result(handler, local_skills.get_custom_doc(name))
     try:
         return _respond(handler, skillhub.fetch_doc(name))
     except Exception as exc:
@@ -309,10 +333,10 @@ def _get_skillhub_structure(handler, parsed) -> bool:
     if not name:
         return _respond_bad(handler, "name required", 400)
     scope = _skillhub_preview_scope(qs)
-    if scope == "custom" or (scope == "auto" and local_skills.has_local_skill(name)):
+    if _preview_local_only(scope):
         return _local_custom_result(handler, local_skills.get_custom_structure(name))
-    if scope == "auto" and not skillhub_enabled():
-        return _local_custom_result(handler, {"error": "Skill not found", "status": 404})
+    if local_skills.has_local_skill(name):
+        return _local_custom_result(handler, local_skills.get_custom_structure(name))
     try:
         return _respond(handler, skillhub.fetch_structure(name))
     except Exception as exc:
@@ -328,10 +352,10 @@ def _get_skillhub_file(handler, parsed) -> bool:
     if not file_path:
         return _respond_bad(handler, "path required", 400)
     scope = _skillhub_preview_scope(qs)
-    if scope == "custom" or (scope == "auto" and local_skills.has_local_skill(name)):
+    if _preview_local_only(scope):
         return _local_custom_result(handler, local_skills.get_custom_file(name, file_path))
-    if scope == "auto" and not skillhub_enabled():
-        return _local_custom_result(handler, {"error": "Skill not found", "status": 404})
+    if local_skills.has_local_skill(name):
+        return _local_custom_result(handler, local_skills.get_custom_file(name, file_path))
     try:
         return _respond(handler, skillhub.fetch_file(name, file_path))
     except Exception as exc:
@@ -390,3 +414,48 @@ def _post_skillhub_delete(handler, body: dict) -> bool:
     if status:
         return _respond_bad(handler, result.get("error", "error"), status)
     return _respond(handler, result)
+
+
+def _get_no_self_improve(handler) -> bool:
+    names = sorted(no_self_improve.get_no_self_improve_names())
+    return _respond(
+        handler,
+        {"ok": True, "names": names, "count": len(names)},
+    )
+
+
+def _post_no_self_improve_toggle(handler, body: dict) -> bool:
+    name = str(body.get("name", "")).strip()
+    if not name:
+        return _respond_bad(handler, "name required", 400)
+    if "locked" not in body:
+        return _respond_bad(handler, "locked required", 400)
+    locked = bool(body["locked"])
+    dir_name = str(body.get("dir_name", "") or "").strip()
+
+    from integration.skills.paths import shared_skills_dir
+
+    skills_dir = shared_skills_dir()
+    skill_dir = local_skills._resolve_skill_dir(skills_dir, name, dir_name)
+    if not skill_dir or not skill_dir.is_dir():
+        return _respond_bad(handler, f"Skill '{name}' not found", 404)
+    if (skill_dir / ".hub_installed").is_file():
+        return _respond_bad(handler, "Hub skills are permanently locked", 403)
+
+    if locked:
+        no_self_improve.add_names([name])
+    else:
+        no_self_improve.remove_names([name])
+    return _respond(handler, {"ok": True, "name": name, "locked": locked})
+
+
+def _put_no_self_improve(handler, body: dict) -> bool:
+    raw_names = body.get("names")
+    if not isinstance(raw_names, list):
+        return _respond_bad(handler, "names must be an array", 400)
+    names = no_self_improve.normalize_names(raw_names)
+    saved = no_self_improve.save_no_self_improve(names)
+    return _respond(
+        handler,
+        {"ok": True, "names": saved, "count": len(saved)},
+    )

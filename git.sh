@@ -20,6 +20,6 @@ git log --oneline master..upstream/master
 
 
 
-git remote add gitlab ssh://git@192.168.1.139:2222/sgitg_x/hermes-webui.git
+git remote add gitlab ssh://git@192.168.1.137:2222/sgitg_x/hermes-webui.git
 
 git push -u gitlab HEAD:main

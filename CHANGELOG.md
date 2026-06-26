@@ -7,8 +7,15 @@
 - **`GET /api/sessions?profile=<name>&offset=&limit=` for per-profile sidebar pagination.** Cross-profile sidebar expansion now loads other profiles in pages instead of relying on the flat `?all_profiles=1` aggregate. The `all_profiles=1` response shape is unchanged for compatibility.
 - **Browser tool preview SSE.** When `BROWSER_PREVIEW_URL` or `CAMOFOX_URL` is set to a valid `http://` or `https://` remote viewer endpoint, WebUI emits a one-shot `browser_preview` chat-stream event the first time a `browser_*` tool starts in a turn so the UI embeds the preview in the workspace panel (`BROWSER_PREVIEW_URL` overrides `CAMOFOX_URL` when both are set).
 
+### Changed
+- **`GET /api/sessions?profile=&offset=&limit=` now paginates a linear virtual list.** Must-show rows (pinned, streaming, pending, attention) form a stable prefix; regular sessions follow. Each page returns at most `limit` rows, `offset` advances through the combined list, and pinned sessions no longer reappear on later pages.
+- **Session pinning is no longer capped.** `POST /api/session/pin` no longer enforces `pinned_sessions_limit`, and the Settings control for pin count has been removed.
+- **Pinned sessions sort by most recent pin.** `POST /api/session/pin` now writes `pinned_at`; the newest pin appears at the top of the pinned group in sidebar and paginated session lists.
+
 ### Fixed
+- **Skill artifacts from `skill_manage` absolute result paths now canonicalize correctly.** Session manifests collapse `/.../skills/<category>/<skill>` and legacy stripped `Users/.../skills/<category>/<skill>` records to the same SkillHub path, preventing duplicate artifact chips and false `expired` states.
 - **Session artifacts now use a profile-aware durable manifest index.** Files produced during a turn are written to a dedicated artifact store keyed by compression lineage, profile, turn, and path, so context-compression continuations keep the same Artifacts/turn-chip view as their preserved parent while ordinary forks stay isolated. Legacy `turn_artifacts` remains as a compatibility fallback during migration.
+- **Skill artifacts appear in per-turn chips and no longer duplicate in References.** `skill_manage` (and profile `SKILL.md` writes) now persist into `turns[].artifacts` with `preview: "skill"`; empty persisted turns no longer wipe transcript-derived skill rows; `skill_view` of a skill already listed in Artifacts is omitted from References (canonical path match).
 
 ## [v0.51.335] — 2026-06-08 — Release KY (normalize inline thinking extraction)
 

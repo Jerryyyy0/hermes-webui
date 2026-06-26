@@ -261,11 +261,11 @@ session.turn_artifacts[turn_key] = paths
 
 | `preview` | 条件 |
 |-----------|------|
-| `"file"` | `_file_preview_path` 成功（workspace 内相对路径） |
+| `"file"` | `_file_preview_path` 成功 → 正常行；读取白名单 `source_tool` 且文件缺失 → `status: expired`（references）；artifact 且有 `turn_key` 且缺失 → `status: expired` |
 | `"file"` | 或 `source_tool=media` 且 `_session_media_preview_path` 成功（workspace **外**绝对路径） |
-| `"skill"` | integration 启用 + skills 目录存在对应 `SKILL.md`；`skill_manage` 类变更须 `status != in_progress` |
+| `"skill"` | `_skill_exists_in_dir` 成功 → 正常行；`skill_view` / `skill_manage` 等 provenance 且缺失 → `status: expired`；`in_progress` 不 wire |
 
-**任一条件不满足 → 该行不出现在 `artifacts[]`。**
+**无 provenance 的候选**（目录、cruft、integration 不可用等）仍不出现在 manifest 列表。
 
 ### 8.2 去重
 
@@ -302,7 +302,7 @@ SSE 事件名：`manifest_delta`。客户端经 `merge_manifest_delta` 合并；
 | 来源 | `source_tool` | 阶段 | 须文件存在（reconcile 前） | 须可预览（wire） |
 |------|---------------|------|---------------------------|------------------|
 | 写入类工具 args/diff | `write_file` 等 | 1 | 否 | 是 |
-| `skill_manage` 变更 | `skill_manage` | 1 | 否（skill 须存在） | 是 |
+| `skill_manage` 变更 | `skill_manage` | 1 | 否 | 存在 → 是；缺失 + provenance → `expired` |
 | skills 下 `SKILL.md` 写入 | 原工具名 | 1 | 否 | 是 |
 | Assistant `MEDIA:`（workspace 内） | `media` | 1 + 2 | 阶段 2 是 | 是 |
 | Assistant `MEDIA:`（workspace 外） | `media` | 1 + 2 | 阶段 2 是（内） / wire 用 media 预览 | 是 |

@@ -60,7 +60,7 @@ def test_paginate_session_rows_first_page_and_load_more():
     assert last["has_more"] is False
 
 
-def test_paginate_session_rows_must_show_on_first_page_only():
+def test_paginate_session_rows_must_show_prefix_without_duplicates():
     from api.session_listing import paginate_session_rows
 
     rows = [
@@ -71,13 +71,103 @@ def test_paginate_session_rows_must_show_on_first_page_only():
     ]
     first = paginate_session_rows(rows, offset=0, limit=1)
     ids = [s["session_id"] for s in first["sessions"]]
-    assert "pinned" in ids
-    assert len(first["sessions"]) == 2  # must_show + 1 regular
+    assert ids == ["pinned"]
+    assert len(first["sessions"]) == 1
     assert first["has_more"] is True
 
     second = paginate_session_rows(rows, offset=1, limit=2)
     ids = [s["session_id"] for s in second["sessions"]]
+    assert ids == ["s0", "s1"]
     assert "pinned" not in ids
+
+    third = paginate_session_rows(rows, offset=3, limit=2)
+    ids = [s["session_id"] for s in third["sessions"]]
+    assert ids == ["s2"]
+    assert "pinned" not in ids
+
+
+def test_paginate_strict_limit_with_must_show():
+    from api.session_listing import paginate_session_rows
+
+    rows = [
+        _row("pin-a", ts=90.0, pinned=True),
+        _row("pin-b", ts=80.0, pinned=True),
+        _row("stream", ts=70.0, is_streaming=True),
+        *[_row(f"s{i}", ts=float(60 - i)) for i in range(10)],
+    ]
+    first = paginate_session_rows(rows, offset=0, limit=5)
+    assert len(first["sessions"]) == 5
+    assert [s["session_id"] for s in first["sessions"]] == [
+        "pin-a", "pin-b", "stream", "s0", "s1",
+    ]
+    assert first["has_more"] is True
+
+    second = paginate_session_rows(rows, offset=5, limit=5)
+    assert len(second["sessions"]) == 5
+    assert [s["session_id"] for s in second["sessions"]] == ["s2", "s3", "s4", "s5", "s6"]
+
+
+def test_paginate_many_pinned_span_pages():
+    from api.session_listing import paginate_session_rows
+
+    rows = [
+        *[_row(f"pin{i}", ts=float(200 - i), pinned=True) for i in range(8)],
+        *[_row(f"s{i}", ts=float(100 - i)) for i in range(20)],
+    ]
+    first = paginate_session_rows(rows, offset=0, limit=5)
+    assert [s["session_id"] for s in first["sessions"]] == [
+        "pin0", "pin1", "pin2", "pin3", "pin4",
+    ]
+
+    second = paginate_session_rows(rows, offset=5, limit=5)
+    assert [s["session_id"] for s in second["sessions"]] == [
+        "pin5", "pin6", "pin7", "s0", "s1",
+    ]
+
+    third = paginate_session_rows(rows, offset=8, limit=5)
+    ids = [s["session_id"] for s in third["sessions"]]
+    assert ids == ["s0", "s1", "s2", "s3", "s4"]
+    assert not any(s.get("pinned") for s in third["sessions"])
+
+
+def test_paginate_no_pinned_duplicate_across_pages():
+    from api.session_listing import paginate_session_rows
+
+    rows = [_row("pinned", ts=1.0, pinned=True)]
+    rows.extend(_row(f"s{i}", ts=float(200 - i)) for i in range(30))
+    seen_pinned = 0
+    offset = 0
+    limit = 10
+    while True:
+        page = paginate_session_rows(rows, offset=offset, limit=limit)
+        for session in page["sessions"]:
+            if session.get("pinned"):
+                seen_pinned += 1
+        if not page["has_more"]:
+            break
+        offset += len(page["sessions"])
+    assert seen_pinned == 1
+
+
+def test_paginate_has_more_boundary():
+    from api.session_listing import paginate_session_rows
+
+    rows = [_row(f"s{i}", ts=float(10 - i)) for i in range(7)]
+    page = paginate_session_rows(rows, offset=6, limit=3)
+    assert len(page["sessions"]) == 1
+    assert page["has_more"] is False
+
+
+def test_paginate_pinned_rows_sort_by_pinned_at():
+    from api.session_listing import paginate_session_rows
+
+    rows = [
+        _row("old-pin", ts=100.0, pinned=True, pinned_at=10.0),
+        _row("new-pin", ts=1.0, pinned=True, pinned_at=90.0),
+        _row("s0", ts=50.0),
+    ]
+    first = paginate_session_rows(rows, offset=0, limit=3)
+    assert [s["session_id"] for s in first["sessions"]] == ["new-pin", "old-pin", "s0"]
 
 
 def test_finalize_sessions_for_profile_filters_rows():
@@ -146,3 +236,4 @@ def test_static_sessions_js_uses_profile_pagination_for_cross_profile_view():
     assert "/api/sessions?profile=" in src
     assert "_loadMoreProfileSessions" in src
     assert "_profileSessionState" in src
+    assert "regularOffset:sessions.length" in src

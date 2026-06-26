@@ -77,6 +77,9 @@ _BROAD_ABSOLUTE_PATH_RE = re.compile(r'(/[^\s`\'"<>|，,；;。：)\]]+\.[A-Za-z
 _BROAD_FILENAME_EXT_RE = re.compile(
     r'([\w\u4e00-\u9fff/._\-\(\)（）]{1,240}\.[A-Za-z0-9]{2,8})'
 )
+_LAST_ASSISTANT_TILDE_PATH_RE = re.compile(
+    r'(~/[^\s`\'"<>|，,；;。：)\]]{1,240}\.[A-Za-z0-9]{2,8})'
+)
 _REFERENCE_ONLY_TOOLS = (
     REFERENCE_READ_TOOLS
     | REFERENCE_DISCOVERY_TOOLS
@@ -246,6 +249,17 @@ def _paths_from_last_assistant_message(text: str, workspace: Path) -> list[str]:
         raw = match.group(1)
         if '://' in raw:
             continue
+        normalized = _resolve_manifest_path(workspace, raw)
+        if not normalized or normalized in seen:
+            continue
+        if not _artifact_path_is_real(workspace, normalized):
+            continue
+        seen.add(normalized)
+        paths.append(normalized)
+    # Keep this scoped to the "last assistant message" pipeline only:
+    # support ~/... paths without broadening global prose extraction.
+    for match in _LAST_ASSISTANT_TILDE_PATH_RE.finditer(text):
+        raw = match.group(1)
         normalized = _resolve_manifest_path(workspace, raw)
         if not normalized or normalized in seen:
             continue
@@ -610,6 +624,55 @@ def _paths_from_diff_text(text: str, workspace: Path) -> list[str]:
     return paths
 
 
+def _collect_turn_artifact_entries_from_events(
+    events: list[ToolEvent],
+    workspace: Path,
+    skills_dir: Path | None = None,
+) -> list[dict[str, str]]:
+    """Extract file and skill artifact entries from scoped tool events."""
+    entries: list[dict[str, str]] = []
+    seen: set[str] = set()
+
+    def add_file(path: str, source_tool: str) -> None:
+        if not path or path in seen:
+            return
+        seen.add(path)
+        entries.append({
+            'path': path,
+            'source_tool': source_tool,
+            'preview': MANIFEST_PREVIEW_FILE,
+        })
+
+    def add_skill(raw_name: str, source_tool: str) -> None:
+        canonical = _canonical_skill_manifest_path(raw_name, skills_dir)
+        if not canonical or canonical in seen:
+            return
+        seen.add(canonical)
+        entries.append({
+            'path': canonical,
+            'source_tool': source_tool,
+            'preview': MANIFEST_PREVIEW_SKILL,
+        })
+
+    for ev in events:
+        if ev.name in ARTIFACT_MUTATION_TOOLS:
+            candidate_paths: list[str] = []
+            candidate_paths.extend(_paths_from_args(ev.args, workspace))
+            candidate_paths.extend(_paths_from_diff_text(ev.result or '', workspace))
+            for raw_path in candidate_paths:
+                skill_name = _skill_manifest_name_from_skills_path(raw_path, skills_dir)
+                if skill_name:
+                    add_skill(skill_name, ev.name)
+                else:
+                    add_file(raw_path, ev.name)
+            continue
+        if _is_skill_manage_mutation_event(ev):
+            skill_name = _skill_manifest_name_from_manage_event(ev, skills_dir)
+            if skill_name:
+                add_skill(skill_name, SKILL_MANAGE_TOOL)
+    return entries
+
+
 def _extract_turn_artifact_paths(
     turn_messages: list,
     tool_calls: list | None,
@@ -617,6 +680,7 @@ def _extract_turn_artifact_paths(
     *,
     start_msg_idx: int | None = None,
     end_msg_idx: int | None = None,
+    skills_dir: Path | None = None,
 ) -> list[str]:
     """Extract workspace-relative artifact paths from tool events in a turn's message slice.
 
@@ -629,26 +693,19 @@ def _extract_turn_artifact_paths(
     ``_tool_calls_for_turn`` so earlier turns' write_file paths are not attributed
     to the current turn.
     """
-    scoped_tool_calls = _tool_calls_for_turn(
+    entries = _extract_turn_artifact_entries(
+        turn_messages,
         tool_calls,
+        workspace,
         start_msg_idx=start_msg_idx,
         end_msg_idx=end_msg_idx,
+        skills_dir=skills_dir,
     )
-    events = _collect_tool_events(turn_messages, scoped_tool_calls)
-    paths: list[str] = []
-    seen: set[str] = set()
-    for ev in events:
-        if ev.name not in ARTIFACT_MUTATION_TOOLS:
-            continue
-        for p in _paths_from_args(ev.args, workspace):
-            if p and p not in seen:
-                seen.add(p)
-                paths.append(p)
-        for p in _paths_from_diff_text(ev.result or '', workspace):
-            if p and p not in seen:
-                seen.add(p)
-                paths.append(p)
-    return paths
+    return [
+        entry['path']
+        for entry in entries
+        if str(entry.get('preview') or MANIFEST_PREVIEW_FILE) != MANIFEST_PREVIEW_SKILL
+    ]
 
 
 def _extract_turn_artifact_entries(
@@ -658,13 +715,14 @@ def _extract_turn_artifact_entries(
     *,
     start_msg_idx: int | None = None,
     end_msg_idx: int | None = None,
+    skills_dir: Path | None = None,
 ) -> list[dict[str, str]]:
-    """Extract workspace-relative artifact (path, source_tool) pairs from tool events.
+    """Extract artifact entries (path, source_tool, preview) from tool events in a turn.
 
     Same scoping contract as ``_extract_turn_artifact_paths`` but returns dict
     entries so the persisted ``turn_artifacts`` retains the original tool name
-    (patch, edit_file, write_file, …) instead of losing it behind a hardcoded
-    ``'write_file'``.
+    (patch, edit_file, write_file, skill_manage, …) instead of losing it behind a
+    hardcoded ``'write_file'``.
     """
     scoped_tool_calls = _tool_calls_for_turn(
         tool_calls,
@@ -672,20 +730,7 @@ def _extract_turn_artifact_entries(
         end_msg_idx=end_msg_idx,
     )
     events = _collect_tool_events(turn_messages, scoped_tool_calls)
-    entries: list[dict[str, str]] = []
-    seen: set[str] = set()
-    for ev in events:
-        if ev.name not in ARTIFACT_MUTATION_TOOLS:
-            continue
-        for p in _paths_from_args(ev.args, workspace):
-            if p and p not in seen:
-                seen.add(p)
-                entries.append({'path': p, 'source_tool': ev.name})
-        for p in _paths_from_diff_text(ev.result or '', workspace):
-            if p and p not in seen:
-                seen.add(p)
-                entries.append({'path': p, 'source_tool': ev.name})
-    return entries
+    return _collect_turn_artifact_entries_from_events(events, workspace, skills_dir=skills_dir)
 
 
 def _collect_tool_events(messages: list, session_tool_calls: list | None) -> list[ToolEvent]:
@@ -854,19 +899,56 @@ def _is_skill_manage_mutation_event(event: ToolEvent) -> bool:
     return _skill_manage_action(event.args if isinstance(event.args, dict) else None) in SKILL_MANAGE_MUTATION_ACTIONS
 
 
-def _skill_path_from_manage_result(result: str) -> str:
+def _skill_path_from_manage_result(result: str, skills_dir: Path | None = None) -> str:
     payload = _parse_json_object(result)
     if not isinstance(payload, dict) or not payload.get('success'):
         return ''
-    return str(payload.get('path') or '').strip().strip('/')
+    raw_path = str(payload.get('path') or '').strip()
+    if not raw_path:
+        return ''
+    canonical = _skill_manifest_name_from_skill_dir_path(raw_path, skills_dir)
+    return canonical or raw_path.strip('/')
 
 
-def _skill_manifest_name_from_manage_event(event: ToolEvent) -> str:
+def _skill_manifest_name_from_manage_event(event: ToolEvent, skills_dir: Path | None = None) -> str:
     if str(event.status or '').strip().lower() == 'completed':
-        from_result = _skill_path_from_manage_result(str(event.result or ''))
+        from_result = _skill_path_from_manage_result(str(event.result or ''), skills_dir)
         if from_result:
             return from_result
     return _skill_name_from_args(event.args if isinstance(event.args, dict) else None)
+
+
+def _skill_manifest_name_from_skill_dir_path(raw_path: str, skills_dir: Path | None) -> str:
+    """Return skills_dir-relative name for a skill directory or its SKILL.md."""
+    if skills_dir is None:
+        return ''
+    path_text = str(raw_path or '').strip()
+    if not path_text:
+        return ''
+    try:
+        from integration.skills.utils import skill_path_within
+
+        root = Path(skills_dir).expanduser().resolve()
+        raw_candidate = Path(path_text).expanduser()
+        candidates = [raw_candidate]
+        if not raw_candidate.is_absolute():
+            candidates.append(root / path_text)
+            if path_text.startswith(('Users/', 'private/', 'tmp/', 'var/')):
+                candidates.append(Path('/' + path_text).expanduser())
+        for candidate in candidates:
+            resolved = candidate.resolve()
+            skill_dir = resolved.parent if resolved.name == 'SKILL.md' else resolved
+            if not skill_path_within(root, skill_dir):
+                continue
+            if not (skill_dir / 'SKILL.md').is_file():
+                continue
+            rel = skill_dir.relative_to(root)
+            rel_str = rel.as_posix()
+            if rel_str not in ('', '.'):
+                return rel_str
+    except (ImportError, OSError, ValueError):
+        return ''
+    return ''
 
 
 def _skill_manifest_name_from_skills_path(raw_path: str, skills_dir: Path | None) -> str:
@@ -893,13 +975,30 @@ def _skill_manifest_name_from_skills_path(raw_path: str, skills_dir: Path | None
         return ''
 
 
+def _is_skill_manifest_row(row: dict) -> bool:
+    if row.get('kind') == 'skill' or row.get('resource_type') == 'skill':
+        return True
+    return str(row.get('preview') or '').strip() == MANIFEST_PREVIEW_SKILL
+
+
 def _skill_artifact_needs_wire_gate(source_tool: str, row: dict) -> bool:
-    if row.get('kind') != 'skill' and row.get('resource_type') != 'skill':
+    if not _is_skill_manifest_row(row):
         return False
     tool = _normalize_tool_name(source_tool)
     if tool == SKILL_MANAGE_TOOL:
         return True
     return tool in ARTIFACT_MUTATION_TOOLS
+
+
+def _skill_row_has_provenance(row: dict, collection: str) -> bool:
+    source_tool = _normalize_tool_name(str(row.get('source_tool') or '').strip())
+    if collection == 'references':
+        return source_tool in REFERENCE_SKILL_TOOLS
+    if collection == 'artifacts':
+        if _skill_artifact_needs_wire_gate(source_tool, row):
+            return True
+        return str(row.get('preview') or '').strip() == MANIFEST_PREVIEW_SKILL
+    return False
 
 
 def _skillhub_preview_available() -> bool:
@@ -937,6 +1036,32 @@ def _skill_exists_in_dir(skills_dir: Path | None, name: str) -> bool:
         return skill_md is not None and skill_md.is_file()
     except ImportError:
         return (root / raw / 'SKILL.md').is_file()
+
+
+def _canonical_skill_manifest_path(name: str, skills_dir: Path | None) -> str:
+    """Resolve bare name or category/name to skills_dir-relative manifest path."""
+    raw_text = str(name or '').strip()
+    raw = raw_text.strip('/')
+    if not raw:
+        return ''
+    if skills_dir is None:
+        return raw
+    from_path = _skill_manifest_name_from_skill_dir_path(raw_text, skills_dir)
+    if from_path:
+        return from_path
+    try:
+        from integration.skills.local_skills import _find_skill
+
+        root = Path(skills_dir).expanduser().resolve()
+        skill_dir, skill_md = _find_skill(raw, root)
+        if skill_md is not None and skill_dir is not None:
+            rel = skill_dir.relative_to(root)
+            rel_str = rel.as_posix()
+            if rel_str not in ('', '.'):
+                return rel_str
+    except (ImportError, OSError, ValueError):
+        pass
+    return raw
 
 
 def _merge_file_records(
@@ -1221,15 +1346,33 @@ def _extract_manifest_records(
             for path in args_paths:
                 add_artifact(path)
 
+        if name in REFERENCE_READ_TOOLS and name not in REFERENCE_DIR_TOOLS:
+            for path in args_paths:
+                add_reference(path, 'file')
+
         if name in REFERENCE_SKILL_TOOLS:
             skill_name = _skill_name_from_args(event.args)
             if skill_name:
+                canonical = _canonical_skill_manifest_path(skill_name, skills_dir)
+                if canonical:
+                    session_skill_keys = {
+                        _canonical_skill_manifest_path(str(key), skills_dir)
+                        for key in artifacts.keys()
+                    }
+                    turn_skill_keys = set()
+                    if turn is not None:
+                        turn_skill_keys = {
+                            _canonical_skill_manifest_path(str(key), skills_dir)
+                            for key in turn.get('artifacts', {}).keys()
+                        }
+                    if canonical in session_skill_keys or canonical in turn_skill_keys:
+                        continue
                 _merge_skill_records(references, skill_name=skill_name, event=event)
                 if turn is not None:
                     _merge_skill_records(turn['references'], skill_name=skill_name, event=event)
 
         if _is_skill_manage_mutation_event(event):
-            skill_name = _skill_manifest_name_from_manage_event(event)
+            skill_name = _skill_manifest_name_from_manage_event(event, skills_dir)
             if skill_name:
                 _merge_skill_records(artifacts, skill_name=skill_name, event=event)
                 if turn is not None:
@@ -1282,53 +1425,234 @@ def _artifact_path_is_real(workspace: Path, rel: str) -> bool:
     return _file_preview_path(workspace, rel, 'file') is not None
 
 
+def filter_existing_turn_artifact_entries(
+    workspace: Path,
+    skills_dir: Path | None,
+    entries: list[dict[str, str]] | None,
+) -> list[dict[str, str]]:
+    """Keep only previewable file and skill artifact entries."""
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for entry in entries or []:
+        if not isinstance(entry, dict):
+            continue
+        path = str(entry.get('path') or '').strip()
+        if not path or path in seen:
+            continue
+        preview = str(entry.get('preview') or MANIFEST_PREVIEW_FILE).strip()
+        source_tool = str(entry.get('source_tool') or '').strip()
+        if preview == MANIFEST_PREVIEW_SKILL:
+            if not _skillhub_preview_available():
+                continue
+            canonical = _canonical_skill_manifest_path(path, skills_dir)
+            if not canonical or not _skill_exists_in_dir(skills_dir, canonical):
+                continue
+            path = canonical
+        elif not _artifact_path_is_real(workspace, path):
+            continue
+        seen.add(path)
+        out.append({
+            'path': path,
+            'source_tool': source_tool,
+            'preview': preview if preview == MANIFEST_PREVIEW_SKILL else MANIFEST_PREVIEW_FILE,
+        })
+    return out
+
+
 def filter_existing_turn_artifact_paths(
     workspace: Path,
     paths: list[str] | None,
 ) -> list[str]:
     """Keep only workspace paths that pass the manifest preview gate."""
-    out: list[str] = []
-    seen: set[str] = set()
-    for path in paths or []:
-        if not isinstance(path, str):
-            continue
-        rel = path.strip()
-        if not rel or rel in seen:
-            continue
-        if not _artifact_path_is_real(workspace, rel):
-            continue
-        seen.add(rel)
-        out.append(rel)
-    return out
+    entries = [
+        {'path': path, 'source_tool': 'write_file', 'preview': MANIFEST_PREVIEW_FILE}
+        for path in (paths or [])
+        if isinstance(path, str) and path.strip()
+    ]
+    filtered = filter_existing_turn_artifact_entries(workspace, None, entries)
+    return [entry['path'] for entry in filtered]
 
 
-def turn_artifacts_for_wire(session) -> dict[str, list[str]]:
-    """Return turn_artifacts with only existing previewable workspace files.
+def _normalize_persisted_turn_artifact_entry(entry: Any) -> dict[str, str] | None:
+    if isinstance(entry, str):
+        path = entry.strip()
+        if not path:
+            return None
+        return {
+            'path': path,
+            'source_tool': 'write_file',
+            'preview': MANIFEST_PREVIEW_FILE,
+        }
+    if isinstance(entry, dict):
+        path = str(entry.get('path') or '').strip()
+        if not path:
+            return None
+        preview = str(entry.get('preview') or MANIFEST_PREVIEW_FILE).strip()
+        source_tool = str(entry.get('source_tool') or '').strip()
+        if preview != MANIFEST_PREVIEW_SKILL:
+            preview = MANIFEST_PREVIEW_FILE
+        if not source_tool:
+            source_tool = 'write_file'
+        return {'path': path, 'source_tool': source_tool, 'preview': preview}
+    return None
 
-    Supports both legacy format (list[str]) and new format (list[dict] with
-    'path' + 'source_tool').  The wire format always returns list[str].
+
+def _artifact_record_from_persisted_entry(
+    entry: dict[str, str],
+    *,
+    turn_key: str,
+    default_profile: str,
+    artifact_records: dict[str, dict],
+    skills_dir: Path | None,
+) -> dict[str, Any] | None:
+    path = str(entry.get('path') or '').strip()
+    source_tool = str(entry.get('source_tool') or '').strip() or 'write_file'
+    preview = str(entry.get('preview') or MANIFEST_PREVIEW_FILE).strip()
+    if not path:
+        return None
+    if preview == MANIFEST_PREVIEW_SKILL:
+        path = _canonical_skill_manifest_path(path, skills_dir)
+        if not path:
+            return None
+        if not source_tool and path in artifact_records:
+            source_tool = str(artifact_records[path].get('source_tool') or '').strip() or SKILL_MANAGE_TOOL
+        record: dict[str, Any] = {
+            'path': path,
+            'source_tool': source_tool,
+            'kind': 'skill',
+            'entry_kind': 'skill',
+            'resource_type': 'skill',
+            'skill_name': path,
+            'preview': MANIFEST_PREVIEW_SKILL,
+            'profile': default_profile,
+            'turn_key': str(turn_key or '').strip(),
+        }
+        return record
+    if not source_tool and path in artifact_records:
+        source_tool = str(artifact_records[path].get('source_tool') or '').strip()
+    if not source_tool:
+        source_tool = 'write_file'
+    return {
+        'path': path,
+        'source_tool': source_tool,
+        'kind': 'artifact',
+        'entry_kind': 'file',
+        'preview': MANIFEST_PREVIEW_FILE,
+        'profile': default_profile,
+        'turn_key': str(turn_key or '').strip(),
+    }
+
+
+def _merge_persisted_turn_artifact_records(
+    turn: dict[str, Any],
+    entries: list,
+    *,
+    default_profile: str,
+    artifact_records: dict[str, dict],
+    skills_dir: Path | None,
+) -> None:
+    turn_key = str(turn.get('turn_key') or '').strip()
+    transcript_skills = [
+        row for row in list(turn.get('artifacts') or [])
+        if isinstance(row, dict) and _is_skill_manifest_row(row)
+    ]
+    persisted_rows: list[dict[str, Any]] = []
+    for raw_entry in entries:
+        normalized = _normalize_persisted_turn_artifact_entry(raw_entry)
+        if normalized is None:
+            continue
+        record = _artifact_record_from_persisted_entry(
+            normalized,
+            turn_key=turn_key,
+            default_profile=default_profile,
+            artifact_records=artifact_records,
+            skills_dir=skills_dir,
+        )
+        if record is not None:
+            persisted_rows.append(record)
+
+    merged: dict[str, dict[str, Any]] = {}
+    for row in persisted_rows:
+        merged[str(row.get('path') or '')] = row
+    for row in transcript_skills:
+        canonical = _canonical_skill_manifest_path(str(row.get('path') or ''), skills_dir)
+        if canonical and canonical not in merged:
+            merged[canonical] = {**row, 'path': canonical}
+    turn['artifacts'] = sorted(merged.values(), key=lambda row: str(row.get('path') or ''))
+    for row in turn['artifacts']:
+        path = str(row.get('path') or '').strip()
+        if path and path not in artifact_records:
+            artifact_records[path] = row
+
+
+def _skill_canonical_keys_from_rows(
+    rows: list[dict] | None,
+    skills_dir: Path | None,
+) -> set[str]:
+    keys: set[str] = set()
+    for row in rows or []:
+        if not isinstance(row, dict) or not _is_skill_manifest_row(row):
+            continue
+        path = str(row.get('path') or row.get('skill_name') or '').strip()
+        if not path:
+            continue
+        canonical = _canonical_skill_manifest_path(path, skills_dir)
+        if canonical:
+            keys.add(canonical)
+    return keys
+
+
+def _drop_reference_skills_in_artifacts(
+    artifacts: list[dict],
+    references: list[dict],
+    turns: list[dict],
+    skills_dir: Path | None,
+) -> None:
+    artifact_skill_keys = _skill_canonical_keys_from_rows(artifacts, skills_dir)
+    for turn in turns:
+        artifact_skill_keys |= _skill_canonical_keys_from_rows(turn.get('artifacts'), skills_dir)
+    if not artifact_skill_keys:
+        return
+
+    def should_drop(row: dict) -> bool:
+        if not isinstance(row, dict) or not _is_skill_manifest_row(row):
+            return False
+        path = str(row.get('path') or '').strip()
+        if not path:
+            return False
+        return _canonical_skill_manifest_path(path, skills_dir) in artifact_skill_keys
+
+    references[:] = [row for row in references if not should_drop(row)]
+    for turn in turns:
+        turn_refs = turn.get('references')
+        if isinstance(turn_refs, list):
+            turn['references'] = [row for row in turn_refs if not should_drop(row)]
+
+
+def turn_artifacts_for_wire(session) -> dict[str, list[dict[str, str]]]:
+    """Return turn_artifacts with only existing previewable file and skill entries.
+
+    Supports legacy format (list[str]) and new format (list[dict] with
+    ``path``, ``source_tool``, and optional ``preview``).
     """
     workspace = Path(str(getattr(session, 'workspace', '') or '')).expanduser().resolve()
+    skills_dir = _skills_dir_for_session(session)
     raw = getattr(session, 'turn_artifacts', None) or {}
     if not isinstance(raw, dict):
         return {}
-    out: dict[str, list[str]] = {}
+    out: dict[str, list[dict[str, str]]] = {}
     for turn_key, entries in raw.items():
         tk = str(turn_key or '').strip()
-        if not tk:
+        if not tk or not isinstance(entries, list):
             continue
-        if not isinstance(entries, list):
-            continue
-        # Extract plain path strings for the wire.
-        paths: list[str] = []
+        normalized: list[dict[str, str]] = []
         for entry in entries:
-            if isinstance(entry, str):
-                paths.append(entry.strip())
-            elif isinstance(entry, dict):
-                p = str(entry.get('path', '')).strip()
-                if p:
-                    paths.append(p)
-        out[tk] = filter_existing_turn_artifact_paths(workspace, paths)
+            row = _normalize_persisted_turn_artifact_entry(entry)
+            if row is not None:
+                normalized.append(row)
+        filtered = filter_existing_turn_artifact_entries(workspace, skills_dir, normalized)
+        if filtered:
+            out[tk] = filtered
     return out
 
 
@@ -1366,15 +1690,20 @@ def _store_artifact_record(row: dict[str, Any]) -> dict[str, Any] | None:
         return None
     profile = str(row.get('profile') or '').strip()
     preview = str(row.get('preview') or MANIFEST_PREVIEW_FILE).strip() or MANIFEST_PREVIEW_FILE
-    return {
+    is_skill = preview == MANIFEST_PREVIEW_SKILL
+    record: dict[str, Any] = {
         'path': path,
         'source_tool': source_tool,
-        'kind': 'artifact',
-        'entry_kind': 'file',
+        'kind': 'skill' if is_skill else 'artifact',
+        'entry_kind': 'skill' if is_skill else 'file',
         'preview': preview,
         'profile': profile,
         'turn_key': str(row.get('turn_key') or '').strip(),
     }
+    if is_skill:
+        record['resource_type'] = 'skill'
+        record['skill_name'] = path
+    return record
 
 
 def _is_reference_only_tool(name: str) -> bool:
@@ -1673,7 +2002,7 @@ def _row_to_wire(
     skills_dir: Path | None = None,
     *,
     default_profile: str = '',
-    allow_expired: bool = False,
+    collection: str = 'references',
 ) -> dict[str, str] | None:
     source_tool = str(row.get('source_tool') or '').strip()
     if not source_tool:
@@ -1682,18 +2011,25 @@ def _row_to_wire(
         profile = str(row.get('profile') or '').strip()
     else:
         profile = str(default_profile or '').strip()
-    if row.get('kind') == 'skill' or row.get('resource_type') == 'skill':
+    if _is_skill_manifest_row(row):
         skill_name = str(row.get('skill_name') or row.get('path') or '').strip()
         if not skill_name or not _skillhub_preview_available():
             return None
-        if _skill_artifact_needs_wire_gate(source_tool, row):
-            if str(row.get('status') or '').strip().lower() == 'in_progress':
-                return None
-            if not _skill_exists_in_dir(skills_dir, skill_name):
-                return None
-        return _serialize_manifest_row(
-            skill_name, MANIFEST_PREVIEW_SKILL, source_tool, profile=profile,
-        )
+        if str(row.get('status') or '').strip().lower() == 'in_progress':
+            return None
+        if _skill_exists_in_dir(skills_dir, skill_name):
+            return _serialize_manifest_row(
+                skill_name, MANIFEST_PREVIEW_SKILL, source_tool, profile=profile,
+            )
+        if _skill_row_has_provenance(row, collection):
+            return _serialize_manifest_row(
+                skill_name,
+                MANIFEST_PREVIEW_SKILL,
+                source_tool,
+                profile=profile,
+                status=MANIFEST_STATUS_EXPIRED,
+            )
+        return None
     rel = str(row.get('path') or '').strip()
     entry_kind = str(row.get('kind') or row.get('entry_kind') or 'file')
     preview_path = _file_preview_path(workspace, rel, entry_kind)
@@ -1707,7 +2043,19 @@ def _row_to_wire(
             return _serialize_manifest_row(
                 media_path, MANIFEST_PREVIEW_FILE, source_tool, profile=profile,
             )
-    if allow_expired:
+    normalized_tool = _normalize_tool_name(source_tool)
+    if collection == 'references' and normalized_tool in REFERENCE_READ_TOOLS:
+        expired_path = _expired_workspace_file_wire_path(workspace, rel, entry_kind)
+        if expired_path:
+            return _serialize_manifest_row(
+                expired_path,
+                MANIFEST_PREVIEW_FILE,
+                source_tool,
+                profile=profile,
+                status=MANIFEST_STATUS_EXPIRED,
+            )
+        return None
+    if collection == 'artifacts':
         # Scheme A: only emit expired rows when the artifact has per-turn
         # provenance (store/turn_artifacts). This avoids surfacing
         # unattributed global candidates in session-level artifacts.
@@ -1738,7 +2086,6 @@ def _rows_to_wire(
     default_profile: str = '',
     collection: str = 'references',
 ) -> list[dict[str, str]]:
-    allow_expired = collection == 'artifacts'
     out: list[dict[str, str]] = []
     seen: set[str] = set()
     for row in rows or []:
@@ -1747,7 +2094,7 @@ def _rows_to_wire(
             workspace,
             skills_dir,
             default_profile=default_profile,
-            allow_expired=allow_expired,
+            collection=collection,
         )
         if wire is None:
             continue
@@ -2088,42 +2435,13 @@ def build_session_manifest(session) -> dict[str, Any]:
             entries = persisted[tk]
             if not isinstance(entries, list):
                 continue
-            # Build artifact record dicts from persisted entries.
-            # Supports both legacy format (list[str]) and new format (list[dict]
-            # with 'path' + 'source_tool').
-            turn_artifacts: list[dict] = []
-            for entry in entries:
-                if isinstance(entry, str):
-                    p = entry.strip()
-                    source_tool = 'write_file'
-                elif isinstance(entry, dict):
-                    p = str(entry.get('path', '')).strip()
-                    source_tool = str(entry.get('source_tool', '') or '').strip() or ''
-                else:
-                    continue
-                # When source_tool is empty (prose-discovered path), backfill
-                # from global artifact_records.  The reconcile pass already
-                # mined the correct source_tool from tool/media events; we
-                # only rely on persisted data for per-turn path attribution.
-                if not source_tool and p in artifact_records:
-                    source_tool = str(artifact_records[p].get('source_tool', '') or '').strip()
-                if not source_tool:
-                    source_tool = 'write_file'
-                if not p:
-                    continue
-                record: dict[str, Any] = {
-                    'path': p,
-                    'source_tool': source_tool,
-                    'kind': 'artifact',
-                    'entry_kind': 'file',
-                    'preview': 'file',
-                    'profile': default_profile,
-                    'turn_key': str(tk or '').strip(),
-                }
-                turn_artifacts.append(record)
-                if p not in artifact_records:
-                    artifact_records[p] = record
-            turn['artifacts'] = turn_artifacts
+            _merge_persisted_turn_artifact_records(
+                turn,
+                entries,
+                default_profile=default_profile,
+                artifact_records=artifact_records,
+                skills_dir=skills_dir,
+            )
 
     turn_rows_by_key: dict[str, dict[str, Any]] = {
         str(turn.get('turn_key') or ''): turn for turn in turns
@@ -2135,6 +2453,11 @@ def build_session_manifest(session) -> dict[str, Any]:
         record = _store_artifact_record(store_row)
         if record is None:
             continue
+        if _is_skill_manifest_row(record):
+            canonical = _canonical_skill_manifest_path(str(record.get('path') or ''), skills_dir)
+            if canonical:
+                record['path'] = canonical
+                record['skill_name'] = canonical
         identity = _artifact_identity(record, default_profile)
         profiled_artifact_records[identity] = record
         tk = str(record.get('turn_key') or '').strip()
@@ -2160,6 +2483,7 @@ def build_session_manifest(session) -> dict[str, Any]:
         profiled_artifact_records.values(),
         key=lambda row: (str(row.get('profile') or ''), str(row.get('path') or '')),
     )
+    _drop_reference_skills_in_artifacts(artifacts, references, turns, skills_dir)
     _clean_record_keys(artifacts + references)
     return {
         'todos': _wire_todos(todos),

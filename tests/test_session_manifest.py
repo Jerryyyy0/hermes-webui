@@ -126,7 +126,7 @@ def test_extract_artifacts_and_references(tmp_path):
     ]
     artifacts, references = _extract_artifacts_and_references(events, workspace)
     assert [row['path'] for row in artifacts] == ['src/new.py']
-    assert references == []
+    assert [row['path'] for row in references] == ['README.md']
 
 
 def test_serialize_manifest_row_shape():
@@ -193,7 +193,7 @@ def test_build_session_manifest_marks_deleted_artifact_expired(tmp_path, monkeyp
     assert manifest['turns'][0]['artifacts'][0]['status'] == 'expired'
 
 
-def test_rows_to_wire_references_still_drop_missing_files(tmp_path):
+def test_rows_to_wire_references_missing_marked_expired(tmp_path):
     workspace = tmp_path / 'ws'
     workspace.mkdir()
     rows = [{
@@ -203,7 +203,31 @@ def test_rows_to_wire_references_still_drop_missing_files(tmp_path):
         'entry_kind': 'file',
     }]
     wired = _rows_to_wire(rows, workspace, collection='references')
-    assert wired == []
+    assert wired == [{
+        'path': 'missing.txt',
+        'preview': MANIFEST_PREVIEW_FILE,
+        'source_tool': 'read_file',
+        'status': 'expired',
+    }]
+
+
+def test_read_file_reference_exists_no_status(tmp_path):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    target = workspace / 'notes.txt'
+    target.write_text('hello', encoding='utf-8')
+    rows = [{
+        'path': 'notes.txt',
+        'source_tool': 'read_file',
+        'kind': 'file',
+        'entry_kind': 'file',
+    }]
+    wired = _rows_to_wire(rows, workspace, collection='references')
+    assert wired == [{
+        'path': 'notes.txt',
+        'preview': MANIFEST_PREVIEW_FILE,
+        'source_tool': 'read_file',
+    }]
 
 
 def test_rows_to_wire_artifacts_require_turn_key_for_expired(tmp_path):
@@ -433,12 +457,17 @@ def test_build_session_manifest_persists_workspace_files(tmp_path, monkeypatch):
     assert 'session_id' not in manifest
     assert 'counts' not in manifest
     assert len(manifest['artifacts']) == 1
-    assert len(manifest['references']) == 0
+    assert len(manifest['references']) == 1
     artifact = manifest['artifacts'][0]
     assert artifact == {
         'path': 'notes.txt',
         'preview': 'file',
         'source_tool': 'write_file',
+    }
+    assert manifest['references'][0] == {
+        'path': 'notes.txt',
+        'preview': 'file',
+        'source_tool': 'read_file',
     }
 
 
@@ -602,18 +631,41 @@ def test_profile_memory_files_are_excluded_from_manifest(tmp_path, monkeypatch):
 def test_skill_view_becomes_skill_reference(tmp_path, monkeypatch):
     workspace = tmp_path / 'ws'
     workspace.mkdir()
+    skills_dir = tmp_path / 'profile-home' / 'skills'
+    _write_local_skill(skills_dir, 'my-skill')
     events = [
         ToolEvent(name='skill_view', args={'name': 'my-skill'}, assistant_msg_idx=1),
     ]
     monkeypatch.setattr('api.session_manifest._skillhub_preview_available', lambda: True)
 
-    _artifacts, references = _extract_artifacts_and_references(events, workspace)
-    wire = _rows_to_wire(references, workspace)
+    _artifacts, references = _extract_artifacts_and_references(events, workspace, skills_dir=skills_dir)
+    wire = _rows_to_wire(references, workspace, skills_dir, collection='references')
 
     assert wire == [{
         'path': 'my-skill',
         'preview': MANIFEST_PREVIEW_SKILL,
         'source_tool': 'skill_view',
+    }]
+
+
+def test_skill_view_reference_missing_marked_expired(tmp_path, monkeypatch):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    skills_dir = tmp_path / 'profile-home' / 'skills'
+    skills_dir.mkdir(parents=True)
+    events = [
+        ToolEvent(name='skill_view', args={'name': 'missing-skill'}, assistant_msg_idx=1),
+    ]
+    monkeypatch.setattr('api.session_manifest._skillhub_preview_available', lambda: True)
+
+    _artifacts, references = _extract_artifacts_and_references(events, workspace, skills_dir=skills_dir)
+    wire = _rows_to_wire(references, workspace, skills_dir, collection='references')
+
+    assert wire == [{
+        'path': 'missing-skill',
+        'preview': MANIFEST_PREVIEW_SKILL,
+        'source_tool': 'skill_view',
+        'status': 'expired',
     }]
 
 
@@ -650,13 +702,150 @@ def test_skill_manage_create_becomes_skill_artifact(tmp_path, monkeypatch):
     monkeypatch.setattr('api.session_manifest._skillhub_preview_available', lambda: True)
 
     artifacts, references = _extract_artifacts_and_references(events, workspace, skills_dir=skills_dir)
-    wire = _rows_to_wire(artifacts, workspace, skills_dir)
+    wire = _rows_to_wire(artifacts, workspace, skills_dir, collection='artifacts')
 
     assert references == []
     assert wire == [{
         'path': 'foo',
         'preview': MANIFEST_PREVIEW_SKILL,
         'source_tool': 'skill_manage',
+    }]
+
+
+def test_skill_manage_artifact_deleted_marked_expired(tmp_path, monkeypatch):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    skills_dir = tmp_path / 'profile-home' / 'skills'
+    _write_local_skill(skills_dir, 'gone-skill')
+    events = [
+        ToolEvent(
+            name='skill_manage',
+            args={'action': 'create', 'name': 'gone-skill', 'content': '# Skill'},
+            assistant_msg_idx=1,
+            status='completed',
+            result='{"success": true, "path": "gone-skill"}',
+        ),
+    ]
+    monkeypatch.setattr('api.session_manifest._skillhub_preview_available', lambda: True)
+
+    artifacts, _references = _extract_artifacts_and_references(events, workspace, skills_dir=skills_dir)
+    shutil = __import__('shutil')
+    shutil.rmtree(skills_dir / 'gone-skill')
+    wire = _rows_to_wire(artifacts, workspace, skills_dir, collection='artifacts')
+
+    assert wire == [{
+        'path': 'gone-skill',
+        'preview': MANIFEST_PREVIEW_SKILL,
+        'source_tool': 'skill_manage',
+        'status': 'expired',
+    }]
+
+
+def test_extract_manifest_delta_file_reference_expired(tmp_path, monkeypatch):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    event = ToolEvent(
+        name='read_file',
+        args={'path': 'missing.txt'},
+        assistant_msg_idx=1,
+        status='completed',
+    )
+    delta = extract_manifest_delta_from_tool_event(
+        event,
+        workspace,
+        session_id='sess01',
+        stream_id='stream01',
+        turn_key='turn:0',
+        sequence=1,
+    )
+    assert delta['references'] == [{
+        'path': 'missing.txt',
+        'preview': MANIFEST_PREVIEW_FILE,
+        'source_tool': 'read_file',
+        'status': 'expired',
+    }]
+
+
+def test_extract_manifest_delta_skill_reference_expired(tmp_path, monkeypatch):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    skills_dir = tmp_path / 'profile-home' / 'skills'
+    skills_dir.mkdir(parents=True)
+    monkeypatch.setattr('api.session_manifest._skillhub_preview_available', lambda: True)
+    event = ToolEvent(
+        name='skill_view',
+        args={'name': 'missing-skill'},
+        assistant_msg_idx=1,
+        status='completed',
+    )
+    delta = extract_manifest_delta_from_tool_event(
+        event,
+        workspace,
+        session_id='sess01',
+        stream_id='stream01',
+        turn_key='turn:0',
+        sequence=1,
+        skills_dir=skills_dir,
+    )
+    assert delta['references'] == [{
+        'path': 'missing-skill',
+        'preview': MANIFEST_PREVIEW_SKILL,
+        'source_tool': 'skill_view',
+        'status': 'expired',
+    }]
+
+
+def test_build_session_manifest_prefers_store_skill_artifact(tmp_path, monkeypatch):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    skills_dir = tmp_path / 'profile-home' / 'skills'
+    _write_local_skill(skills_dir, 'stored-skill')
+    session = Session(
+        session_id='manifestskillstore01',
+        workspace=str(workspace),
+        profile='ops',
+        messages=[
+            {'role': 'user', 'content': 'create skill', '_turn_key': 'turn:1'},
+        ],
+        tool_calls=[],
+    )
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('api.session_manifest._skillhub_preview_available', lambda: True)
+    monkeypatch.setattr(
+        'api.session_manifest._skills_dir_for_session',
+        lambda s: skills_dir,
+    )
+    monkeypatch.setattr(
+        'api.session_manifest_store.load_manifest_records',
+        lambda s, include_lineage=True: [{
+            'session_id': s.session_id,
+            'lineage_key': s.session_id,
+            'profile': 'ops',
+            'turn_key': 'turn:1',
+            'record_kind': 'artifact',
+            'path': 'stored-skill',
+            'preview': 'skill',
+            'source_tool': 'skill_manage',
+        }],
+    )
+
+    manifest = build_session_manifest(session)
+    assert manifest['artifacts'] == [{
+        'path': 'stored-skill',
+        'preview': MANIFEST_PREVIEW_SKILL,
+        'source_tool': 'skill_manage',
+        'profile': 'ops',
+    }]
+
+    shutil = __import__('shutil')
+    shutil.rmtree(skills_dir / 'stored-skill')
+    manifest = build_session_manifest(session)
+    assert manifest['artifacts'] == [{
+        'path': 'stored-skill',
+        'preview': MANIFEST_PREVIEW_SKILL,
+        'source_tool': 'skill_manage',
+        'profile': 'ops',
+        'status': 'expired',
     }]
 
 
@@ -719,6 +908,98 @@ def test_skill_manage_create_uses_result_path_for_category(tmp_path, monkeypatch
         'preview': MANIFEST_PREVIEW_SKILL,
         'source_tool': 'skill_manage',
     }]
+
+
+def test_skill_manage_create_canonicalizes_absolute_result_path(tmp_path, monkeypatch):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    skills_dir = tmp_path / 'profile-home' / 'skills'
+    skill_rel = '数据分析/data-analysis'
+    _write_local_skill(skills_dir, 'data-analysis', rel_path=skill_rel)
+    result = json.dumps({
+        'success': True,
+        'path': str(skills_dir / skill_rel),
+    })
+    events = [
+        ToolEvent(
+            name='skill_manage',
+            args={'action': 'edit', 'name': 'data-analysis', 'content': '# Skill'},
+            assistant_msg_idx=1,
+            status='completed',
+            result=result,
+        ),
+    ]
+    monkeypatch.setattr('api.session_manifest._skillhub_preview_available', lambda: True)
+
+    artifacts, _references = _extract_artifacts_and_references(events, workspace, skills_dir=skills_dir)
+    wire = _rows_to_wire(artifacts, workspace, skills_dir)
+
+    assert wire == [{
+        'path': skill_rel,
+        'preview': MANIFEST_PREVIEW_SKILL,
+        'source_tool': 'skill_manage',
+    }]
+
+
+def test_build_session_manifest_dedupes_legacy_stripped_skill_store_path(tmp_path, monkeypatch):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    skills_dir = tmp_path / 'profile-home' / 'skills'
+    skill_rel = '数据分析/data-analysis'
+    _write_local_skill(skills_dir, 'data-analysis', rel_path=skill_rel)
+    skill_md = skills_dir / skill_rel / 'SKILL.md'
+    legacy_path = str(skills_dir / skill_rel).lstrip('/')
+    session = Session(
+        session_id='manifestlegacyabspath01',
+        workspace=str(workspace),
+        profile='test-profile',
+        messages=[
+            {'role': 'user', 'content': 'patch skill', '_turn_key': 'turn:1'},
+            {
+                'role': 'assistant',
+                'tool_calls': [{
+                    'id': 'c1',
+                    'function': {
+                        'name': 'patch',
+                        'arguments': json.dumps({'path': str(skill_md)}),
+                    },
+                }],
+            },
+            {'role': 'tool', 'tool_call_id': 'c1', 'content': 'updated'},
+        ],
+        tool_calls=[],
+    )
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('api.session_manifest._skills_dir_for_session', lambda s: skills_dir)
+    monkeypatch.setattr('api.session_manifest._skillhub_preview_available', lambda: True)
+    monkeypatch.setattr(
+        'api.session_manifest_store.load_manifest_records',
+        lambda s, include_lineage=True: [{
+            'session_id': s.session_id,
+            'lineage_key': s.session_id,
+            'profile': 'test-profile',
+            'turn_key': 'turn:2',
+            'record_kind': 'artifact',
+            'path': legacy_path,
+            'preview': 'skill',
+            'source_tool': 'skill_manage',
+        }],
+    )
+
+    manifest = build_session_manifest(session)
+
+    assert manifest['artifacts'] == [{
+        'path': skill_rel,
+        'preview': MANIFEST_PREVIEW_SKILL,
+        'source_tool': 'skill_manage',
+        'profile': 'test-profile',
+    }]
+    assert all(row.get('status') != 'expired' for row in manifest['artifacts'])
+    assert {
+        artifact['path']
+        for turn in manifest['turns']
+        for artifact in turn['artifacts']
+    } == {skill_rel}
 
 
 def test_skill_manage_delete_is_not_artifact(tmp_path, monkeypatch):
@@ -1333,6 +1614,18 @@ def test_paths_from_last_assistant_message_accepts_ascii_parentheses_filename(tm
     assert paths == ['report(2018).docx']
 
 
+def test_paths_from_last_assistant_message_accepts_tilde_workspace_path(tmp_path, monkeypatch):
+    fake_home = tmp_path / 'home'
+    workspace = fake_home / 'workspace'
+    workspace.mkdir(parents=True)
+    artifact = workspace / 'OpenAI最新模型定价.docx'
+    artifact.write_text('docx-like', encoding='utf-8')
+    monkeypatch.setenv('HOME', str(fake_home))
+    text = '结果如下：~/workspace/OpenAI最新模型定价.docx'
+    paths = _paths_from_last_assistant_message(text, workspace)
+    assert paths == ['OpenAI最新模型定价.docx']
+
+
 def test_collect_media_artifact_events_from_assistant_only(tmp_path):
     workspace = tmp_path / 'ws'
     workspace.mkdir()
@@ -1646,7 +1939,11 @@ def test_build_session_manifest_reconcile_excludes_read_file_path(tmp_path, monk
     monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
     manifest = build_session_manifest(session)
     assert manifest['artifacts'] == []
-    assert len(manifest['references']) == 0
+    assert manifest['references'] == [{
+        'path': 'readme.md',
+        'preview': MANIFEST_PREVIEW_FILE,
+        'source_tool': 'read_file',
+    }]
 
 
 def test_extract_manifest_delta_from_turn_reconcile_turn_scope(tmp_path):
@@ -2392,20 +2689,20 @@ def test_build_session_manifest_path_missing_file_not_artifact(tmp_path, monkeyp
     assert manifest['artifacts'] == []
 
 
-# ── 改动二：read_file 等读取类工具不再产出 references ──
+# ── read_file 等读取类工具产出 references（缺失标 expired）──
 
 
-def test_build_session_manifest_read_file_no_reference_nor_artifact(tmp_path, monkeypatch):
-    """read_file 读取存在的文件 → 不出现 references 和 artifacts"""
+def test_build_session_manifest_read_file_becomes_reference(tmp_path, monkeypatch):
+    """read_file 读取存在的文件 → references，不进 artifacts"""
     workspace = tmp_path / 'ws'
     workspace.mkdir()
     (workspace / 'config.yaml').write_text('key: val', encoding='utf-8')
-    sid = 'read_file_no_ref01'
+    sid = 'read_file_ref01'
     session = Session(
         session_id=sid,
         workspace=str(workspace),
         messages=[
-            {'role': 'user', 'content': '读取配置'},
+            {'role': 'user', 'content': '读取配置', '_turn_key': 'turn:0'},
             {
                 'role': 'assistant',
                 'tool_calls': [{
@@ -2426,9 +2723,49 @@ def test_build_session_manifest_read_file_no_reference_nor_artifact(tmp_path, mo
     monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
     manifest = build_session_manifest(session)
     assert manifest['artifacts'] == []
-    assert manifest['references'] == []
+    assert manifest['references'] == [{
+        'path': 'config.yaml',
+        'preview': MANIFEST_PREVIEW_FILE,
+        'source_tool': 'read_file',
+    }]
     assert manifest['turns'][0]['artifacts'] == []
-    assert manifest['turns'][0]['references'] == []
+    assert manifest['turns'][0]['references'] == manifest['references']
+
+
+def test_build_session_manifest_read_file_missing_marked_expired(tmp_path, monkeypatch):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    sid = 'read_file_expired01'
+    session = Session(
+        session_id=sid,
+        workspace=str(workspace),
+        messages=[
+            {'role': 'user', 'content': '读取配置', '_turn_key': 'turn:0'},
+            {
+                'role': 'assistant',
+                'tool_calls': [{
+                    'id': 'c1',
+                    'function': {
+                        'name': 'read_file',
+                        'arguments': json.dumps({'path': 'gone.yaml'}),
+                    },
+                }],
+            },
+            {'role': 'tool', 'tool_call_id': 'c1', 'content': 'error'},
+        ],
+        tool_calls=[],
+    )
+    session.save()
+    monkeypatch.setattr('api.models.SESSION_DIR', tmp_path)
+    monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    manifest = build_session_manifest(session)
+    assert manifest['references'] == [{
+        'path': 'gone.yaml',
+        'preview': MANIFEST_PREVIEW_FILE,
+        'source_tool': 'read_file',
+        'status': 'expired',
+    }]
 
 
 def test_build_session_manifest_list_dir_no_reference(tmp_path, monkeypatch):
@@ -2628,8 +2965,8 @@ def test_turn_artifacts_for_wire_filters_missing_files(tmp_path):
 
     wired = turn_artifacts_for_wire(session)
     assert wired == {
-        'turn:1': ['report.md'],
-        'turn:2': ['report.md'],
+        'turn:1': [{'path': 'report.md', 'source_tool': 'write_file', 'preview': MANIFEST_PREVIEW_FILE}],
+        'turn:2': [{'path': 'report.md', 'source_tool': 'write_file', 'preview': MANIFEST_PREVIEW_FILE}],
     }
     assert session.compact()['turn_artifacts'] == wired
 
@@ -2660,8 +2997,8 @@ def test_build_session_manifest_turn_artifacts_match_wire(tmp_path, monkeypatch)
     manifest = build_session_manifest(session)
 
     assert wired == {
-        'turn:1': ['report.md'],
-        'turn:2': ['deliver.docx'],
+        'turn:1': [{'path': 'report.md', 'source_tool': 'write_file', 'preview': MANIFEST_PREVIEW_FILE}],
+        'turn:2': [{'path': 'deliver.docx', 'source_tool': 'write_file', 'preview': MANIFEST_PREVIEW_FILE}],
     }
     manifest_by_turn = {
         turn['turn_key']: turn['artifacts']
@@ -2777,7 +3114,11 @@ def test_persist_turn_artifact_paths_filters_missing_files(tmp_path):
 
     _persist_turn_artifact_paths(session)
 
-    assert session.turn_artifacts['turn:2'] == [{'path': 'deliver.docx', 'source_tool': 'write_file'}]
+    assert session.turn_artifacts['turn:2'] == [{
+        'path': 'deliver.docx',
+        'source_tool': 'write_file',
+        'preview': MANIFEST_PREVIEW_FILE,
+    }]
     assert 'turn:1' not in session.turn_artifacts
 
 
@@ -2815,7 +3156,11 @@ def test_persist_turn_artifact_paths_scopes_session_tool_calls(tmp_path):
 
     _persist_turn_artifact_paths(session)
 
-    assert session.turn_artifacts == {'turn:2': [{'path': 'deliver.docx', 'source_tool': 'write_file'}]}
+    assert session.turn_artifacts == {'turn:2': [{
+        'path': 'deliver.docx',
+        'source_tool': 'write_file',
+        'preview': MANIFEST_PREVIEW_FILE,
+    }]}
 
 
 def test_persist_turn_artifact_paths_keeps_same_path_across_turns(tmp_path):
@@ -2841,7 +3186,11 @@ def test_persist_turn_artifact_paths_keeps_same_path_across_turns(tmp_path):
     _persist_turn_artifact_paths(session, 'turn:1')
     _persist_turn_artifact_paths(session, 'turn:2')
 
-    expected = [{'path': 'worldcup-poster.png', 'source_tool': 'assistant_prose'}]
+    expected = [{
+        'path': 'worldcup-poster.png',
+        'source_tool': 'assistant_prose',
+        'preview': MANIFEST_PREVIEW_FILE,
+    }]
     assert session.turn_artifacts['turn:1'] == expected
     assert session.turn_artifacts['turn:2'] == expected
 
@@ -2892,7 +3241,10 @@ def test_session_get_turn_artifacts_matches_manifest_via_routes(tmp_path, monkey
         turn['turn_key']: turn['artifacts']
         for turn in manifest_resp['manifest']['turns']
     }
-    assert wired == {'turn:1': ['report.md'], 'turn:2': ['deliver.docx']}
+    assert wired == {
+        'turn:1': [{'path': 'report.md', 'source_tool': 'write_file', 'preview': MANIFEST_PREVIEW_FILE}],
+        'turn:2': [{'path': 'deliver.docx', 'source_tool': 'write_file', 'preview': MANIFEST_PREVIEW_FILE}],
+    }
     assert [row['path'] for row in manifest_by_turn['turn:1']] == ['missing.py', 'report.md']
     assert manifest_by_turn['turn:1'][0]['status'] == 'expired'
     assert [row['path'] for row in manifest_by_turn['turn:2']] == ['deliver.docx', 'make_docx.py']
@@ -2956,7 +3308,10 @@ def test_build_session_manifest_multi_turn_mixed_artifacts_and_references(tmp_pa
         for turn in manifest['turns']
     }
 
-    assert wired == {'turn:1': ['report.md'], 'turn:2': ['deliver.docx']}
+    assert wired == {
+        'turn:1': [{'path': 'report.md', 'source_tool': 'write_file', 'preview': MANIFEST_PREVIEW_FILE}],
+        'turn:2': [{'path': 'deliver.docx', 'source_tool': 'write_file', 'preview': MANIFEST_PREVIEW_FILE}],
+    }
     turn1_paths = [row['path'] for row in manifest_by_turn['turn:1']['artifacts']]
     assert turn1_paths == ['missing.py', 'report.md']
     assert manifest_by_turn['turn:1']['artifacts'][0]['status'] == 'expired'
@@ -2966,3 +3321,195 @@ def test_build_session_manifest_multi_turn_mixed_artifacts_and_references(tmp_pa
     assert turn2_paths == ['deliver.docx', 'make_docx.py']
     assert manifest_by_turn['turn:2']['artifacts'][1]['status'] == 'expired'
     assert manifest_by_turn['turn:2']['references'][0]['path'] == 'docx-generation'
+
+
+def test_persist_turn_artifact_paths_includes_skill_manage(tmp_path, monkeypatch):
+    from api.streaming import _persist_turn_artifact_paths
+
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    skills_dir = tmp_path / 'profile-home' / 'skills'
+    _write_local_skill(skills_dir, 'foo', rel_path='research/foo')
+    session = Session(
+        session_id='persist_skill01',
+        workspace=str(workspace),
+        profile='test-profile',
+        messages=[
+            {'role': 'user', 'content': 'create skill', '_turn_key': 'turn:1'},
+            {
+                'role': 'assistant',
+                'tool_calls': [{
+                    'id': 'c1',
+                    'function': {
+                        'name': 'skill_manage',
+                        'arguments': json.dumps({
+                            'action': 'create',
+                            'name': 'foo',
+                            'content': '# Skill',
+                        }),
+                    },
+                }],
+            },
+            {
+                'role': 'tool',
+                'tool_call_id': 'c1',
+                'content': json.dumps({'success': True, 'path': 'research/foo'}),
+            },
+        ],
+        tool_calls=[],
+    )
+    monkeypatch.setattr('api.session_manifest._skills_dir_for_session', lambda s: skills_dir)
+    monkeypatch.setattr('api.session_manifest._skillhub_preview_available', lambda: True)
+
+    _persist_turn_artifact_paths(session, 'turn:1')
+
+    assert session.turn_artifacts['turn:1'] == [{
+        'path': 'research/foo',
+        'source_tool': 'skill_manage',
+        'preview': MANIFEST_PREVIEW_SKILL,
+    }]
+
+
+def test_persist_turn_artifact_paths_empty_turn_not_stored(tmp_path, monkeypatch):
+    from api.streaming import _persist_turn_artifact_paths
+
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    session = Session(
+        session_id='persist_empty01',
+        workspace=str(workspace),
+        messages=[
+            {'role': 'user', 'content': 'hello', '_turn_key': 'turn:1'},
+            {'role': 'assistant', 'content': 'hi'},
+        ],
+        tool_calls=[],
+    )
+    monkeypatch.setattr('api.session_manifest._skills_dir_for_session', lambda s: tmp_path / 'skills')
+
+    _persist_turn_artifact_paths(session, 'turn:1')
+
+    assert session.turn_artifacts == {}
+
+
+def test_build_session_manifest_skill_manage_with_empty_persisted_turn_artifacts(tmp_path, monkeypatch):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    skills_dir = tmp_path / 'profile-home' / 'skills'
+    _write_local_skill(skills_dir, 'turn-skill', rel_path='research/turn-skill')
+    session = Session(
+        session_id='manifestskill_empty_persist01',
+        workspace=str(workspace),
+        profile='test-profile',
+        messages=[
+            {'role': 'user', 'content': 'create skill', '_turn_key': 'turn:1'},
+            {
+                'role': 'assistant',
+                'tool_calls': [{
+                    'id': 'c1',
+                    'function': {
+                        'name': 'skill_manage',
+                        'arguments': json.dumps({
+                            'action': 'create',
+                            'name': 'turn-skill',
+                            'content': '# Skill',
+                        }),
+                    },
+                }],
+            },
+            {
+                'role': 'tool',
+                'tool_call_id': 'c1',
+                'content': json.dumps({'success': True, 'path': 'research/turn-skill'}),
+            },
+        ],
+        turn_artifacts={'turn:1': []},
+        tool_calls=[],
+    )
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('api.session_manifest._skills_dir_for_session', lambda s: skills_dir)
+    monkeypatch.setattr('api.session_manifest._skillhub_preview_available', lambda: True)
+
+    manifest = build_session_manifest(session)
+
+    assert manifest['turns'][0]['artifacts'] == [{
+        'path': 'research/turn-skill',
+        'preview': MANIFEST_PREVIEW_SKILL,
+        'source_tool': 'skill_manage',
+        'profile': 'test-profile',
+    }]
+
+
+def test_build_session_manifest_skill_view_deduped_when_artifact(tmp_path, monkeypatch):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    skills_dir = tmp_path / 'profile-home' / 'skills'
+    _write_local_skill(skills_dir, 'ai-news-top10', rel_path='research/ai-news-top10')
+    _write_local_skill(skills_dir, 'hermes-agent-skill-authoring')
+    session = Session(
+        session_id='manifestskill_dedup01',
+        workspace=str(workspace),
+        profile='default',
+        messages=[
+            {'role': 'user', 'content': 'create skill', '_turn_key': 'turn:1'},
+            {
+                'role': 'assistant',
+                'tool_calls': [
+                    {
+                        'id': 'c1',
+                        'function': {
+                            'name': 'skill_view',
+                            'arguments': json.dumps({'name': 'hermes-agent-skill-authoring'}),
+                        },
+                    },
+                    {
+                        'id': 'c2',
+                        'function': {
+                            'name': 'skill_manage',
+                            'arguments': json.dumps({
+                                'action': 'create',
+                                'name': 'ai-news-top10',
+                                'content': '# Skill',
+                            }),
+                        },
+                    },
+                    {
+                        'id': 'c3',
+                        'function': {
+                            'name': 'skill_view',
+                            'arguments': json.dumps({'name': 'ai-news-top10'}),
+                        },
+                    },
+                ],
+            },
+            {'role': 'tool', 'tool_call_id': 'c1', 'content': 'ok'},
+            {
+                'role': 'tool',
+                'tool_call_id': 'c2',
+                'content': json.dumps({'success': True, 'path': 'research/ai-news-top10'}),
+            },
+            {'role': 'tool', 'tool_call_id': 'c3', 'content': 'ok'},
+        ],
+        tool_calls=[],
+    )
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('api.session_manifest._skills_dir_for_session', lambda s: skills_dir)
+    monkeypatch.setattr('api.session_manifest._skillhub_preview_available', lambda: True)
+
+    manifest = build_session_manifest(session)
+
+    artifact_paths = {row['path'] for row in manifest['artifacts']}
+    reference_paths = {row['path'] for row in manifest['references']}
+    assert 'research/ai-news-top10' in artifact_paths
+    assert 'ai-news-top10' not in reference_paths
+    assert 'research/ai-news-top10' not in reference_paths
+    assert 'hermes-agent-skill-authoring' in reference_paths
+
+
+def test_canonical_skill_path_normalization(tmp_path, monkeypatch):
+    from api.session_manifest import _canonical_skill_manifest_path
+
+    skills_dir = tmp_path / 'profile-home' / 'skills'
+    _write_local_skill(skills_dir, 'ai-news-top10', rel_path='research/ai-news-top10')
+
+    assert _canonical_skill_manifest_path('ai-news-top10', skills_dir) == 'research/ai-news-top10'
+    assert _canonical_skill_manifest_path('research/ai-news-top10', skills_dir) == 'research/ai-news-top10'

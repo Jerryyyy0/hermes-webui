@@ -57,89 +57,113 @@ def test_fetch_categories(hub_url):
 
 
 def test_compute_scope_stats(hub_url):
-    with patch("integration.skills.skillhub.fetch_all_hub_skills") as fetch_all:
-        with patch("integration.skills.skillhub.annotate_installed") as annotate:
-            with patch("integration.skills.local_skills.count_custom_skills", return_value=2):
-                fetch_all.return_value = [{"name": "a"}, {"name": "b"}]
-                annotate.return_value = [
-                    {"name": "a", "installed": True},
-                    {"name": "b", "installed": False},
-                ]
-                stats = skillhub.compute_scope_stats(set())
-                assert stats == {
-                    "hub": 2,
-                    "installed": 1,
-                    "not_installed": 1,
-                    "custom": 2,
-                }
+    ctx = skillhub._HubCatalogContext(
+        raw_skills=[],
+        hub_names=set(),
+        installed_index={},
+        annotated_all=[
+            {"name": "a", "installed": True},
+            {"name": "b", "installed": False},
+        ],
+        locked_names=set(),
+    )
+    with patch("integration.skills.skillhub.build_hub_catalog_context", return_value=ctx):
+        with patch("integration.skills.local_skills.count_custom_skills", return_value=2):
+            stats = skillhub.compute_scope_stats(set())
+            assert stats == {
+                "hub": 2,
+                "installed": 1,
+                "not_installed": 1,
+                "custom": 2,
+            }
 
 
 def test_compute_scope_stats_global_not_category_scoped(hub_url):
-    with patch("integration.skills.skillhub.fetch_all_hub_skills") as fetch_all:
-        with patch("integration.skills.skillhub.annotate_installed") as annotate:
-            with patch("integration.skills.local_skills.count_custom_skills", return_value=0) as count_custom:
-                fetch_all.return_value = [{"name": "a"}]
-                annotate.side_effect = lambda skills: skills
-                skillhub.compute_scope_stats(set())
-                fetch_all.assert_called_once_with(category=None)
-                count_custom.assert_called_once_with("", set())
+    ctx = skillhub._HubCatalogContext(
+        raw_skills=[{"name": "a"}],
+        hub_names={"a"},
+        installed_index={},
+        annotated_all=[{"name": "a", "installed": False}],
+        locked_names=set(),
+    )
+    with patch("integration.skills.skillhub.build_hub_catalog_context", return_value=ctx):
+        with patch("integration.skills.local_skills.count_custom_skills", return_value=0) as count_custom:
+            skillhub.compute_scope_stats(set())
+            count_custom.assert_called_once_with("", set())
 
 
 def test_list_hub_skills_filtered_installed(hub_url):
-    with patch("integration.skills.skillhub.fetch_all_hub_skills") as fetch_all:
-        with patch("integration.skills.skillhub.annotate_installed") as annotate:
-            with patch("integration.skills.skillhub.enrich_skills_mtime") as enrich:
-                fetch_all.return_value = [{"name": "a"}, {"name": "b"}]
-                annotate.return_value = [
-                    {"name": "a", "installed": True, "custom": False},
-                    {"name": "b", "installed": False, "custom": False},
-                ]
-                enrich.side_effect = lambda skills, _dir: skills
-                skills, total = skillhub.list_hub_skills_filtered(
-                    "",
-                    "installed",
-                    None,
-                    1,
-                    20,
-                )
-                assert total == 1
-                assert skills[0]["name"] == "a"
+    ctx = skillhub._HubCatalogContext(
+        raw_skills=[],
+        hub_names=set(),
+        installed_index={},
+        annotated_all=[
+            {"name": "a", "installed": True, "custom": False},
+            {"name": "b", "installed": False, "custom": False},
+        ],
+        locked_names=set(),
+    )
+    with patch("integration.skills.skillhub.build_hub_catalog_context", return_value=ctx):
+        skills, total = skillhub.list_hub_skills_filtered(
+            "",
+            "installed",
+            None,
+            1,
+            20,
+        )
+        assert total == 1
+        assert skills[0]["name"] == "a"
 
 
 def test_list_hub_catalog_paged_sort_and_pagination(hub_url):
-    with patch("integration.skills.skillhub.fetch_all_hub_skills") as fetch_all:
-        with patch("integration.skills.skillhub.annotate_installed") as annotate:
-            with patch("integration.skills.skillhub.enrich_skills_mtime") as enrich:
-                fetch_all.return_value = [
-                    {"name": "c", "mtime": 1.0},
-                    {"name": "a", "mtime": 3.0},
-                    {"name": "b", "mtime": 2.0},
-                ]
-                annotate.side_effect = lambda skills: skills
-                enrich.side_effect = lambda skills, _dir: skills
+    annotated = [
+        {"name": "c", "mtime": 1.0, "installed": False},
+        {"name": "a", "mtime": 3.0, "installed": False},
+        {"name": "b", "mtime": 2.0, "installed": False},
+    ]
+    ctx = skillhub._HubCatalogContext(
+        raw_skills=list(annotated),
+        hub_names=skillhub._hub_names_from_skills(annotated),
+        installed_index={},
+        annotated_all=[dict(skill) for skill in annotated],
+        locked_names=set(),
+    )
+    with patch("integration.skills.skillhub.build_hub_catalog_context", return_value=ctx):
+        with patch("integration.skills.skillhub.enrich_skills_mtime") as enrich:
+            enrich.side_effect = lambda skills, _dir: skills
 
-                page1, total = skillhub.list_hub_catalog_paged(
-                    "",
-                    "hub",
-                    None,
-                    1,
-                    2,
-                    sort="mtime",
-                    order="desc",
-                )
-                page2, _ = skillhub.list_hub_catalog_paged(
-                    "",
-                    "hub",
-                    None,
-                    2,
-                    2,
-                    sort="mtime",
-                    order="desc",
-                )
+            page1, total = skillhub.list_hub_catalog_paged(
+                "",
+                "hub",
+                None,
+                1,
+                2,
+                sort="mtime",
+                order="desc",
+            )
+            page2, _ = skillhub.list_hub_catalog_paged(
+                "",
+                "hub",
+                None,
+                2,
+                2,
+                sort="mtime",
+                order="desc",
+            )
 
-                assert total == 3
-                assert [s["name"] for s in page1] == ["a", "b"]
-                assert [s["name"] for s in page2] == ["c"]
+            assert total == 3
+            assert [s["name"] for s in page1] == ["a", "b"]
+            assert [s["name"] for s in page2] == ["c"]
+
+            full, full_total = skillhub.list_hub_catalog_filtered(
+                "",
+                "hub",
+                None,
+                sort="mtime",
+                order="desc",
+            )
+            assert full_total == 3
+            assert [s["name"] for s in full] == ["a", "b", "c"]
 
 
 def test_hub_all_catalog_names_paginates(hub_url):
@@ -170,6 +194,55 @@ def test_hub_all_catalog_names_paginates(hub_url):
     assert names == {"a", "b", "c"}
     assert mock_client.get.call_count == 2
     assert "category" not in mock_client.get.call_args_list[0][1]["params"]
+
+
+def test_build_hub_catalog_context_single_fetch(hub_url):
+    page1 = MagicMock()
+    page1.json.return_value = {
+        "skills": [{"name": "a"}, {"name": "b"}],
+        "total": 3,
+        "page": 1,
+        "page_size": 100,
+    }
+    page1.raise_for_status = MagicMock()
+    page2 = MagicMock()
+    page2.json.return_value = {
+        "skills": [{"name": "c"}],
+        "total": 3,
+        "page": 2,
+        "page_size": 100,
+    }
+    page2.raise_for_status = MagicMock()
+    mock_client = MagicMock()
+    mock_client.__enter__ = MagicMock(return_value=mock_client)
+    mock_client.__exit__ = MagicMock(return_value=False)
+    mock_client.get.side_effect = [page1, page2]
+
+    with patch("integration.skills.skillhub._client", return_value=mock_client):
+        with patch("integration.skills.skillhub._hub_installed_index", return_value={}):
+            with patch(
+                "integration.skills.no_self_improve.get_no_self_improve_names",
+                return_value=set(),
+            ):
+                ctx = skillhub.build_hub_catalog_context()
+
+    assert ctx.hub_names == {"a", "b", "c"}
+    assert mock_client.get.call_count == 2
+
+
+def test_annotate_installed_reads_config_once(hub_url, tmp_path):
+    skills_dir = tmp_path / "skills"
+    skills_dir.mkdir()
+    skills = [{"name": f"skill-{index}"} for index in range(500)]
+
+    with patch("integration.skills.skillhub.shared_skills_dir", return_value=skills_dir):
+        with patch(
+            "integration.skills.no_self_improve.get_no_self_improve_names",
+        ) as get_names:
+            get_names.return_value = {"locked-one"}
+            skillhub.annotate_installed(skills)
+
+    get_names.assert_called_once()
 
 
 def test_annotate_installed_sets_hub_fields(hub_url, tmp_path):

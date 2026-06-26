@@ -21,6 +21,14 @@
 
 涉及 UI 或 UX 工作时，请在修改布局、交互流程、主题、聊天渲染或编辑器外壳前，先阅读 `docs/UIUX-GUIDE.md` 和 `DESIGN.md`。
 
+## 关联代码库（Hermes Agent）
+
+Hermes WebUI 依赖并与 **Hermes Agent** 协同运行。当任务涉及 Agent 运行时、CLI 行为、工具调用协议、状态目录结构、流式事件格式，或需在 Agent 侧排查/实现时，到本机关联仓库查阅：
+
+- 路径：`/Users/wzq/Downloads/NLP-PyProject/hermes-agent`
+- 默认以只读方式参考其实现与契约；除非用户明确要求，否则不在该仓库内提交变更。
+- 跨仓库改动须分别说明 WebUI 与 Agent 两侧的影响与验证步骤。
+
 ## 引导与重装支持
 
 若任务涉及安装、重装、bootstrap、首次运行引导、Provider 配置、本地模型服务器搭建、Docker 引导、WSL 引导或首次运行失败的修复，请在执行命令或查看日志前，先阅读 `docs/onboarding-agent-checklist.md`。
@@ -56,6 +64,7 @@
   - 参考先例：聊天流中文 `apperror` 文案与分类在 [`integration/chat_provider_errors/`](integration/chat_provider_errors/)，`api/streaming.py` 仅 re-export。
 - **根目录 `CHANGELOG.md`**：以**上游 Hermes WebUI** 发布说明为主。集成外部服务、新增 `integration/` 内代码或改接缝文件时，**默认不要修改**根目录 `CHANGELOG.md`。Fork 侧说明写在 [`integration/CHANGELOG.md`](integration/CHANGELOG.md)；仅当用户明确要求、或该变更将并入上游 release 时再动根目录文件。
 - **API 与 Swagger 同步**：凡新增或变更 **integration 暴露的 HTTP 接口**（含 `/api/skillhub/*`、integration 注册的其它路由、查询参数、请求/响应体、状态码），须在同一变更中更新 [`integration/swagger/openapi.json`](integration/swagger/openapi.json)，并与 [`integration/README.md`](integration/README.md) 路由表一致。可在本地打开 `/docs` 核对。上游原生 `/api/*` 若未纳入 integration Swagger，按上游惯例处理，不强行写入 integration 规范。
+- **Integration API 路径命名**：`integration/` 新增或变更的 HTTP **路径段**使用 **snake_case（下划线 `_`）**，不使用 kebab-case（连字符 `-`）。示例：`/api/skillhub/skills/no_self_improve`，而非 `no-self-improve`。JSON 字段名、YAML config 键、Python 模块名沿用各自惯例（可与路径不同）。
 
 ## 贡献风格
 

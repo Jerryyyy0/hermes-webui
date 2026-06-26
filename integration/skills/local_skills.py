@@ -240,6 +240,15 @@ def list_installed(
     if category:
         all_skills = [s for s in all_skills if s.get("category") == category]
     all_skills = _sort_skills(all_skills)
+    try:
+        from integration.skills.no_self_improve import apply_lock_fields_batch
+
+        apply_lock_fields_batch(all_skills)
+    except Exception:
+        for skill in all_skills:
+            hub = bool(skill.get("hub_installed"))
+            skill.setdefault("no_self_improve", hub)
+            skill.setdefault("can_lock", not hub)
     categories = sorted({s.get("category") for s in all_skills if s.get("category")})
     return {
         "skills": all_skills,
@@ -344,7 +353,46 @@ def _scan_custom_skill_dicts(
         except Exception as exc:
             _log.debug("skip skill %s: %s", skill_md, exc)
 
+    try:
+        from integration.skills.no_self_improve import apply_lock_fields_batch
+
+        apply_lock_fields_batch(all_skills)
+    except Exception:
+        for skill in all_skills:
+            skill.setdefault("no_self_improve", False)
+            skill.setdefault("can_lock", True)
     return all_skills
+
+
+def scan_custom_skills_global(hub_names: set[str], q: str | None = None) -> list[dict]:
+    """Scan all custom skills under shared_skills_dir (no category filter)."""
+    return _scan_custom_skill_dicts("", hub_names, q=q)
+
+
+def _filter_custom_skills_in_memory(
+    skills: list[dict],
+    category: str,
+    q: str | None,
+) -> list[dict]:
+    category_key = str(category or "").strip()
+    filtered = skills
+    if category_key:
+        filtered = [skill for skill in filtered if str(skill.get("category") or "") == category_key]
+    query = str(q or "").strip().lower()
+    if not query:
+        return filtered
+    result: list[dict] = []
+    for skill in filtered:
+        haystack = " ".join(
+            [
+                str(skill.get("name") or ""),
+                str(skill.get("display_name") or ""),
+                str(skill.get("description") or ""),
+            ]
+        ).lower()
+        if query in haystack:
+            result.append(skill)
+    return result
 
 
 def count_custom_skills(category: str, hub_names: set[str]) -> int:
@@ -359,22 +407,34 @@ def list_custom_skills(
     page_size: int = 20,
     sort: str = "name",
     order: str = "asc",
+    all_records: bool = False,
+    pre_scanned: list[dict] | None = None,
 ) -> dict:
     from integration.skills.list_item_shape import normalize_skill_list_items
     from integration.skills.sort_utils import sort_skill_items
 
-    all_skills = _scan_custom_skill_dicts(category, hub_names, q=q)
+    if pre_scanned is not None:
+        all_skills = _filter_custom_skills_in_memory(pre_scanned, category, q)
+    else:
+        all_skills = _scan_custom_skill_dicts(category, hub_names, q=q)
     all_skills = sort_skill_items(all_skills, sort=sort, order=order)
     total = len(all_skills)
-    offset = (page - 1) * page_size
-    page_items = normalize_skill_list_items(all_skills[offset : offset + page_size])
+    if all_records:
+        page_items = normalize_skill_list_items(all_skills)
+        page_num = 1
+        page_limit = total
+    else:
+        offset = (page - 1) * page_size
+        page_items = normalize_skill_list_items(all_skills[offset : offset + page_size])
+        page_num = page
+        page_limit = page_size
     return {
         "scope": "custom",
         "category": category,
         "skills": page_items,
         "total": total,
-        "page": page,
-        "page_size": page_size,
+        "page": page_num,
+        "page_size": page_limit,
         "skillhub_enabled": True,
     }
 
@@ -1165,11 +1225,20 @@ def delete_local_skill(name: str, dir_name: str = "") -> dict:
     if not skill_dir:
         return {"error": "Skill not found", "status": 404}
     hub_installed = (skill_dir / ".hub_installed").is_file()
-    removed_name = str(name or "").strip() or skill_dir.name
+    skill_md = find_skill_main_file(skill_dir)
+    logical_name = (
+        parse_logical_name_from_skill_md(skill_md) if skill_md else None
+    ) or str(name or "").strip() or skill_dir.name
     shutil.rmtree(skill_dir)
+    try:
+        from integration.skills.no_self_improve import remove_names
+
+        remove_names([logical_name])
+    except Exception as exc:
+        _log.exception("failed to remove skill from no_self_improve: %s", exc)
     return {
         "ok": True,
-        "name": removed_name,
+        "name": logical_name,
         "dir_name": _skill_dir_rel_path(skill_dir, skills_dir),
         "hub_installed": hub_installed,
     }

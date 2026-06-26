@@ -16,6 +16,8 @@ _LIST_BOOL_FIELDS = (
     "hub_installed",
     "custom",
     "disabled",
+    "no_self_improve",
+    "can_lock",
 )
 
 

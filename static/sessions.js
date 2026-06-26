@@ -2439,7 +2439,7 @@ async function _loadOtherProfileSessions(gen){
           totalCount:Number(data.total_count)||sessions.length,
           hasMore:!!data.has_more,
           loadedCount:sessions.length,
-          regularOffset:_PROFILE_PREVIEW_LIMIT,
+          regularOffset:sessions.length,
           loading:false,
           loaded:true,
         });
@@ -2524,7 +2524,7 @@ async function _refreshProfileSessionsFromEvent(profileName, gen){
       totalCount:Number(data.total_count)||sessions.length,
       hasMore:!!data.has_more,
       loadedCount:sessions.length,
-      regularOffset:Math.min(limit, Number(data.total_count)||sessions.length),
+      regularOffset:sessions.length,
       loading:false,
       loaded:true,
     });
@@ -2638,17 +2638,6 @@ function _sessionSnapshotById(sid){
   if(!sid)return null;
   if(S.session&&S.session.session_id===sid) return S.session;
   return (_allSessions||[]).find(s=>s&&s.session_id===sid)||null;
-}
-function _pinnedSessionCount(){
-  return (_allSessions||[]).filter(s=>s&&s.pinned&&!s.archived).length;
-}
-function _getPinnedSessionsLimit(){
-  const limit=parseInt(window._pinnedSessionsLimit||3,10);
-  return (Number.isFinite(limit)&&limit>0)?limit:3;
-}
-function _pinnedSessionsLimitMessage(){
-  const limit=_getPinnedSessionsLimit();
-  return `Only ${limit} conversations can be pinned. Unpin one before pinning another.`;
 }
 function _worktreeSessionCount(ids){
   return (ids||[]).reduce((count,sid)=>{
@@ -3133,9 +3122,14 @@ function _openSessionActionMenu(session, anchorEl){
       closeSessionActionMenu();
       const newPinned=!session.pinned;
       try{
-        await api('/api/session/pin',{method:'POST',body:JSON.stringify({session_id:session.session_id,pinned:newPinned})});
-        session.pinned=newPinned;
-        if(S.session&&S.session.session_id===session.session_id) S.session.pinned=newPinned;
+        const resp=await api('/api/session/pin',{method:'POST',body:JSON.stringify({session_id:session.session_id,pinned:newPinned})});
+        const pinnedSession=resp&&resp.session;
+        session.pinned=!!(pinnedSession&&pinnedSession.pinned);
+        session.pinned_at=pinnedSession?pinnedSession.pinned_at:null;
+        if(S.session&&S.session.session_id===session.session_id){
+          S.session.pinned=session.pinned;
+          S.session.pinned_at=session.pinned_at;
+        }
         renderSessionList();
       }catch(err){
         showToast(t('session_pin_failed')+err.message);
@@ -4094,6 +4088,11 @@ function filterSessions(){
   }, 350);
 }
 
+function _sessionPinnedTimestampMs(session) {
+  const raw = Number(session && session.pinned_at);
+  return Number.isFinite(raw) ? raw * 1000 : 0;
+}
+
 function _sessionTimestampMs(session) {
   const raw = Number(session && (session.last_message_at || session.updated_at || session.created_at || 0));
   return Number.isFinite(raw) ? raw * 1000 : 0;
@@ -5037,7 +5036,7 @@ function renderSessionListFromCache(){
   const _saveCollapsed=()=>{try{localStorage.setItem('hermes-date-groups-collapsed',JSON.stringify(_groupCollapsed));}catch(e){}};
   const _buildDateGroups=(sectionSessions)=>{
     const ordered=[...sectionSessions].sort((a,b)=>_sessionTimestampMs(b)-_sessionTimestampMs(a));
-    const pinned=ordered.filter(s=>s.pinned);
+    const pinned=ordered.filter(s=>s.pinned).sort((a,b)=>_sessionPinnedTimestampMs(b)-_sessionPinnedTimestampMs(a));
     const unpinned=ordered.filter(s=>!s.pinned);
     const sectionGroups=[];
     let curLabel=null,curItems=[];
