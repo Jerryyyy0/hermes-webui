@@ -173,6 +173,7 @@ if __name__ == "__main__":
     os.environ["HERMES_EGRESS_POLICY_ENABLED"] = os.getenv(
         "HERMES_EGRESS_POLICY_ENABLED", "1"
     )
+    os.environ["HERMES_WEBUI_AGENT_DIR"] = os.getenv("HERMES_WEBUI_AGENT_DIR", "/Users/wzq/Downloads/NLP-PyProject/hermes-agent")
 
 from api.auth import check_auth
 from api.config import HOST, PORT, STATE_DIR, SESSION_DIR, DEFAULT_WORKSPACE

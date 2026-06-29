@@ -6,11 +6,13 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ## [Unreleased]
 
-### Changed
-
-- **SkillHub list performance (Phase 1)** — `GET /api/skillhub/skills` deduplicates work within each request: one upstream hub catalog fetch, one custom local scan, and one install-index/config read for annotate. `scope=installed|custom` with `all=1` benefits most; response shape and stats semantics unchanged.
-
 ### Added
+
+- **Cron session turn_artifacts persistence** — cron sessions now have `turn_artifacts` persisted to the sidecar JSON and `session_manifest_records` SQLite table, mirroring the WebUI streaming pipeline (`_persist_turn_artifact_paths`). Previously cron sessions left `turn_artifacts` empty, so the manifest relied on re-extracting artifacts from messages every request — fragile and lost entirely after conversation compression. After each cron run materializes the sidecar, `_persist_cron_turn_artifacts` stamps stable `_turn_key`s on user messages (state.db messages don't carry them) and calls `_persist_turn_artifact_paths` per turn.
+
+- **Cron session materialization unconditional** — cron session sidecar creation (materialize from `state.db`) no longer requires `HERMES_INTEGRATION=1`. The materialize hook (`_install_run_job_materialize_hook`) installs unconditionally in `install_cron_integration_hooks()`, so cron runs always get a WebUI sidecar when `state.db` data exists. This fixes `/api/session/manifest?session_id=cron_*` returning 404 and `turn_artifacts` being empty when integration mode was off. The preserve-once cron hook (keeping repeat-limited jobs as completed/disabled instead of deleting) remains gated on `HERMES_INTEGRATION=1` since it alters cron job lifecycle behavior only relevant to the Cron Hub UI.
+
+- **SkillHub local_all scope** — `GET /api/skillhub/skills?scope=local_all` aggregates installed hub skills and local self-built custom skills into a single list. Custom wins on duplicate `name` (hub installed item dropped). Reuses the same `category`/`q`/`sort`/`order`/`page`/`page_size`/`all` query parameters and the unified response envelope; `stats` keeps the original four fields (`hub`/`installed`/`not_installed`/`custom`).
 
 - **Skill no-self-improve lock** — `skills.no_self_improve` in active profile `config.yaml` blocks agent self-evolution for listed skills (enforced by Hermes Agent `skill-policy` plugin). `GET/POST/PUT /api/skillhub/skills/no_self_improve*` for config read, custom toggle, and bulk replace (requires `HERMES_INTEGRATION=1` only). Hub-installed skills (`.hub_installed`) are permanently locked: startup sync reconciles hub names and removes stale entries; install/delete hooks update config. Skill list APIs add `no_self_improve` and `can_lock`; Skills and SkillHub panels show lock icons (custom toggleable, hub read-only).
 
@@ -33,6 +35,8 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 - **Zhiling identity lookup API doc** — [`docs/integration-login-api.md`](../docs/integration-login-api.md) documents `GET /api/integration/webui_login` request/response contract, auth, and error semantics.
 
 ### Changed
+
+- **SkillHub list performance (Phase 1)** — `GET /api/skillhub/skills` deduplicates work within each request: one upstream hub catalog fetch, one custom local scan, and one install-index/config read for annotate. `scope=installed|custom` with `all=1` benefits most; response shape and stats semantics unchanged.
 
 - **SkillHub installed list description** — `GET /api/skillhub/skills` (`scope=installed` and other hub-catalog scopes) prefers each installed skill's `description` from local `SKILL.md` frontmatter under `shared_skills_dir`; when local description is absent, upstream catalog value is kept.
 

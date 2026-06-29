@@ -16,10 +16,6 @@ def materialize_after_cron_run(
     owner_profile: str | None = None,
     execution_home=None,
 ) -> str | None:
-    from integration.config import cron_all_profiles_enabled
-
-    if not cron_all_profiles_enabled():
-        return None
     from integration.crons.listing import resolve_owner_profile_for_job
     from integration.crons.session_bridge import (
         materialize_cron_session,
@@ -40,13 +36,76 @@ def materialize_after_cron_run(
         execution_home = _profile_home_for_cron_job(job)
 
     fallback_output, fallback_filename = read_cron_output_for_run(job_id)
-    return materialize_cron_session(
+    sid = materialize_cron_session(
         job,
         owner_profile=owner,
         execution_home=execution_home,
         fallback_output=fallback_output,
         fallback_filename=fallback_filename,
     )
+    # After materializing the sidecar, persist turn_artifacts so the manifest
+    # can read from the store/table instead of re-extracting every time and
+    # survives context compression. Mirrors what _run_agent_streaming does at
+    # api/streaming.py:7043-7046 for WebUI-origin sessions.
+    if sid:
+        _persist_cron_turn_artifacts(sid)
+    return sid
+
+
+def _persist_cron_turn_artifacts(sid: str) -> None:
+    """Persist turn_artifacts for a materialized cron session.
+
+    Cron sessions originate from hermes-agent's scheduler, which does not call
+    _persist_turn_artifact_paths (that's a WebUI streaming-pipeline function).
+    Without this step, cron session manifests rely entirely on real-time
+    extraction from messages, which is lost after context compression.
+
+    This function loads the materialized sidecar, stamps _turn_key on user
+    messages that lack one, then calls _persist_turn_artifact_paths for each
+    turn — the same function the streaming pipeline uses — to write both
+    s.turn_artifacts (sidecar JSON) and session_manifest_records (SQLite table).
+    """
+    from api.models import Session
+
+    s = Session.load(sid)
+    if s is None or not getattr(s, "messages", None):
+        return
+
+    from api.session_manifest import _ensure_turn_keys, _message_turns
+    from api.streaming import _persist_turn_artifact_paths
+
+    # state.db messages don't carry _turn_key. _ensure_turn_keys won't stamp
+    # anything when NO message has one (it treats all-or-none as a compatibility
+    # contract). _message_turns falls back to index-based keys (turn:0, turn:1,
+    # …) in that case, which is fine for artifact persistence.
+    has_any_turn_key = any(
+        isinstance(m, dict)
+        and m.get("role") == "user"
+        and str(m.get("_turn_key", "") or "").strip()
+        for m in s.messages
+    )
+    if not has_any_turn_key:
+        # Stamp _turn_key ourselves so persisted records have stable keys that
+        # survive future message insertions (index-based keys would shift).
+        from api.session_manifest import _next_turn_key
+
+        seen: list = []
+        for m in s.messages:
+            if isinstance(m, dict) and m.get("role") == "user":
+                m["_turn_key"] = _next_turn_key(seen)
+            seen.append(m)
+    else:
+        _ensure_turn_keys(s.messages)
+
+    for turn in _message_turns(s.messages):
+        tk = str(turn.get("turn_key") or "").strip()
+        if tk:
+            _persist_turn_artifact_paths(s, tk)
+
+    try:
+        s.save()
+    except Exception:
+        logger.debug("Failed to save cron session %s after artifact persist", sid, exc_info=True)
 
 
 def _cron_repeat_limit_will_delete(job: dict) -> bool:
@@ -246,11 +305,27 @@ def _install_run_job_materialize_hook() -> None:
 
 
 def install_cron_integration_hooks() -> None:
-    """Patch cron.jobs.mark_job_run and cron.scheduler.run_job for integration."""
+    """Patch cron.jobs.mark_job_run and cron.scheduler.run_job for integration.
+
+    The materialize hook (session import + turn_artifacts persistence) is
+    installed unconditionally — it is a read-only import from state.db into
+    the WebUI sidecar and has no dependency on cross-profile integration
+    features. Without it, cron sessions never get a sidecar, so
+    /api/session/manifest returns 404 and turn_artifacts are never persisted.
+
+    The preserve-once hook (keeping repeat-limited jobs in jobs.json as
+    completed/disabled) remains gated on cron_all_profiles_enabled() because
+    it alters cron job lifecycle behavior that only matters when the Cron Hub
+    UI is active.
+    """
     global _installed
     if _installed:
         return
     _installed = True
+
+    # Always install the materialize hook — cron sessions need sidecars +
+    # turn_artifacts persistence regardless of integration mode.
+    _install_run_job_materialize_hook()
 
     from integration.config import cron_all_profiles_enabled
 
@@ -258,4 +333,3 @@ def install_cron_integration_hooks() -> None:
         return
 
     _install_preserve_once_cron_hook()
-    _install_run_job_materialize_hook()

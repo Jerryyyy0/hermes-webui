@@ -272,3 +272,42 @@ def test_materialize_hook_uses_owner_resolved_before_run(monkeypatch):
         ("run", "deleted-during-run"),
         ("materialize", "deleted-during-run", "default"),
     ]
+
+
+def test_install_hooks_materialize_unconditional_without_integration(monkeypatch):
+    """install_cron_integration_hooks() must install the materialize hook even
+    when HERMES_INTEGRATION is off — cron sessions need sidecars + turn_artifacts
+    persistence regardless of integration mode. Only preserve-once stays gated."""
+    monkeypatch.delenv("HERMES_INTEGRATION", raising=False)
+
+    import integration.crons.hooks as hooks
+
+    monkeypatch.setattr(hooks, "_installed", False)
+
+    scheduler = types.ModuleType("cron.scheduler")
+    scheduler.run_job = lambda job: (True, "out", "done", None)
+    monkeypatch.setitem(sys.modules, "cron.scheduler", scheduler)
+    cron_parent = sys.modules.get("cron") or types.ModuleType("cron")
+    cron_parent.scheduler = scheduler
+    monkeypatch.setitem(sys.modules, "cron", cron_parent)
+
+    materialize_installed = {"called": False}
+    orig_install_materialize = hooks._install_run_job_materialize_hook
+
+    def _spy_materialize():
+        materialize_installed["called"] = True
+        orig_install_materialize()
+
+    monkeypatch.setattr(hooks, "_install_run_job_materialize_hook", _spy_materialize)
+
+    preserve_installed = {"called": False}
+    monkeypatch.setattr(
+        hooks,
+        "_install_preserve_once_cron_hook",
+        lambda: preserve_installed.__setitem__("called", True),
+    )
+
+    hooks.install_cron_integration_hooks()
+
+    assert materialize_installed["called"] is True
+    assert preserve_installed["called"] is False

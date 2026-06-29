@@ -908,8 +908,6 @@ def materialize_cron_session(
     fallback_filename: str | None = None,
 ) -> str | None:
     """Import the latest cron session from execution state.db into target_profile."""
-    if not cron_all_profiles_enabled():
-        return None
     job_id = str((job or {}).get("id") or "").strip()
     if not job_id:
         return None
@@ -961,8 +959,6 @@ def materialize_cron_sessions_for_runs(
     History endpoints call this to avoid opening ``state.db`` and scanning all
     candidate cron sessions once per output file.
     """
-    if not cron_all_profiles_enabled():
-        return {}
     job_id = str((job or {}).get("id") or "").strip()
     if not job_id or not runs:
         return {}
