@@ -3294,10 +3294,18 @@ def _cap_recent_cli_sessions(sessions: list[dict], cli_cap: int = CLI_VISIBLE_SE
 
 
 from api.session_listing import (  # noqa: E402
+    filter_sessions_by_date_range,
+    parse_date_range_query,
     parse_profile_pagination_query,
     paginate_session_rows,
     session_sidebar_timestamp,
 )
+
+_SESSION_DATE_RANGE_ERRORS = {
+    "invalid_start_at": "Invalid start_at",
+    "invalid_end_at": "Invalid end_at",
+    "start_after_end": "start_at must be <= end_at",
+}
 
 
 def _redact_sidebar_session_rows(rows: list[dict]) -> list[dict]:
@@ -3318,6 +3326,18 @@ def _apply_integration_sidebar_session_filters(rows: list[dict]) -> list[dict]:
         return filter_cron_sessions_from_sidebar_rows(rows)
     except ImportError:
         return rows
+
+
+def _sessions_date_range_payload(date_range) -> dict:
+    if date_range is None:
+        return {}
+    start_at, end_at = date_range
+    payload = {}
+    if start_at is not None:
+        payload["start_at"] = start_at
+    if end_at is not None:
+        payload["end_at"] = end_at
+    return payload
 
 
 def build_merged_sidebar_sessions(*, diag=None, settings: dict | None = None) -> tuple[list[dict], int]:
@@ -6082,6 +6102,10 @@ def handle_get(handler, parsed) -> bool:
         try:
             diag.stage("load_settings")
             settings = load_settings()
+            date_range = parse_date_range_query(parsed)
+            if isinstance(date_range, str):
+                return bad(handler, _SESSION_DATE_RANGE_ERRORS[date_range], 400)
+
             profile_pagination = parse_profile_pagination_query(parsed)
             if profile_pagination is not None:
                 profile_name, page_offset, page_limit = profile_pagination
@@ -6094,6 +6118,12 @@ def handle_get(handler, parsed) -> bool:
                 )
                 diag.stage("integration_sidebar_filters")
                 scoped = _apply_integration_sidebar_session_filters(scoped)
+                diag.stage("profile_page_date_filter")
+                if date_range is not None:
+                    start_at, end_at = date_range
+                    scoped = filter_sessions_by_date_range(
+                        scoped, start_at=start_at, end_at=end_at,
+                    )
                 diag.stage("profile_page_redact")
                 safe_rows = _redact_sidebar_session_rows(scoped)
                 diag.stage("profile_page_paginate")
@@ -6110,6 +6140,7 @@ def handle_get(handler, parsed) -> bool:
                     "offset": page["offset"],
                     "limit": page["limit"],
                     "has_more": page["has_more"],
+                    **_sessions_date_range_payload(date_range),
                     "server_time": time.time(),
                     "server_tz": time.strftime("%z"),
                 })
@@ -6153,6 +6184,12 @@ def handle_get(handler, parsed) -> bool:
                 scoped = _cap_recent_cli_sessions(scoped, cli_cap=CLI_VISIBLE_SESSION_CAP)
             diag.stage("integration_sidebar_filters")
             scoped = _apply_integration_sidebar_session_filters(scoped)
+            diag.stage("date_filter")
+            if date_range is not None:
+                start_at, end_at = date_range
+                scoped = filter_sessions_by_date_range(
+                    scoped, start_at=start_at, end_at=end_at,
+                )
             diag.stage("redact_sessions")
             safe_merged = _redact_sidebar_session_rows(scoped)
             diag.stage("response_write")
@@ -6162,6 +6199,7 @@ def handle_get(handler, parsed) -> bool:
                 "all_profiles": all_profiles,
                 "active_profile": active_profile,
                 "other_profile_count": other_profile_count,
+                **_sessions_date_range_payload(date_range),
                 "server_time": time.time(),
                 "server_tz": time.strftime("%z"),
             })
@@ -6507,6 +6545,14 @@ def handle_get(handler, parsed) -> bool:
         from integration.crons.handlers import try_handle_get as _crons_try_get
 
         if _crons_try_get(handler, parsed) is True:
+            return True
+    except ImportError:
+        pass
+
+    try:
+        from integration.notifications.handlers import try_handle_get as _notifications_try_get
+
+        if _notifications_try_get(handler, parsed) is True:
             return True
     except ImportError:
         pass
@@ -8169,6 +8215,14 @@ def handle_post(handler, parsed) -> bool:
         from integration.crons.handlers import try_handle_post as _crons_try_post
 
         if _crons_try_post(handler, parsed, body) is True:
+            return True
+    except ImportError:
+        pass
+
+    try:
+        from integration.notifications.handlers import try_handle_post as _notifications_try_post
+
+        if _notifications_try_post(handler, parsed, body) is True:
             return True
     except ImportError:
         pass

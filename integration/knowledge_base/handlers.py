@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from api.helpers import MAX_BODY_BYTES, _sanitize_error, bad, j, read_body
 
 from integration.config import knowledge_base_enabled
-from integration.knowledge_base.constants import DEFAULT_PAGE_SIZE
+from integration.knowledge_base.constants import (
+    BINARY_PASSTHROUGH_ROUTES,
+    DEFAULT_PAGE_SIZE,
+    PASSTHROUGH_ROUTES,
+)
 from integration.knowledge_base import client
 from integration.knowledge_base.constants import WEBUI_ROUTE_PREFIX
 
@@ -45,7 +50,20 @@ _REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
     "show_pdf": ("kbName", "fileName"),
     "search_docs": ("query", "kbName"),
     "search_docs_xcore": ("query", "kbNames"),
+    "upload_artifacts": ("uuid", "kbName", "fileProperties", "paths"),
 }
+
+_UPLOAD_ARTIFACTS_ERROR_CN: dict[str, str] = {
+    "missing_uuid": "缺少用户 UUID",
+    "missing_kbName": "缺少知识库名称",
+    "missing_fileProperties": "缺少文件属性",
+    "missing_paths": "缺少路径",
+    "count_mismatch": "文件属性与路径数量不一致",
+}
+
+
+def _upload_artifacts_error_cn(code: str) -> str:
+    return _UPLOAD_ARTIFACTS_ERROR_CN.get(code, code)
 
 
 def _route_key(parsed) -> str | None:
@@ -53,7 +71,9 @@ def _route_key(parsed) -> str | None:
     if not path.startswith(WEBUI_ROUTE_PREFIX):
         return None
     key = path[len(WEBUI_ROUTE_PREFIX) :]
-    return key if key in _ROUTE_BUILDERS or key == "upload_docs" else None
+    if key in _ROUTE_BUILDERS or key == "upload_docs" or key == "upload_artifacts" or key in PASSTHROUGH_ROUTES:
+        return key
+    return None
 
 
 def _respond(handler, payload, status: int = 200) -> bool:
@@ -122,6 +142,15 @@ def _validate_required(body: dict[str, Any], route_key: str) -> str | None:
         kb_names = body.get("kbNames")
         if not isinstance(kb_names, list) or not kb_names:
             return "missing_kbNames"
+    if route_key == "upload_artifacts":
+        file_properties = body.get("fileProperties")
+        if not isinstance(file_properties, list) or not file_properties:
+            return "missing_fileProperties"
+        paths = body.get("paths")
+        if not isinstance(paths, list) or not paths:
+            return "missing_paths"
+        if len(file_properties) != len(paths):
+            return "count_mismatch"
     return None
 
 
@@ -148,9 +177,9 @@ def _handle_upstream(handler, route_key: str, upstream_body: dict[str, Any]) -> 
     return _respond(handler, payload, status=status)
 
 
-def _handle_show_pdf(handler, upstream_body: dict[str, Any]) -> bool:
+def _handle_binary_passthrough(handler, route_key: str, upstream_body: dict[str, Any]) -> bool:
     try:
-        result = client.post_show_pdf(upstream_body)
+        result = client.post_binary_or_json(route_key, upstream_body)
     except client.KnowledgeBaseUpstreamError as exc:
         return _respond(
             handler,
@@ -169,6 +198,10 @@ def _handle_show_pdf(handler, upstream_body: dict[str, Any]) -> bool:
             extra_headers=result.extra_headers,
         )
     return _respond(handler, result.payload, status=result.status)
+
+
+def _handle_show_pdf(handler, upstream_body: dict[str, Any]) -> bool:
+    return _handle_binary_passthrough(handler, "show_pdf", upstream_body)
 
 
 def try_handle_post_early(handler, parsed) -> bool:
@@ -265,11 +298,82 @@ def try_handle_post(handler, parsed, body) -> bool:
         return False
 
     payload_body = _body_dict(body)
+
+    if route_key in PASSTHROUGH_ROUTES:
+        if route_key in BINARY_PASSTHROUGH_ROUTES:
+            return _handle_binary_passthrough(handler, route_key, payload_body)
+        return _handle_upstream(handler, route_key, payload_body)
+
     missing = _validate_required(payload_body, route_key)
     if missing:
+        if route_key == "upload_artifacts":
+            missing = _upload_artifacts_error_cn(missing)
         return _respond_bad(handler, missing, 400)
+
+    if route_key == "upload_artifacts":
+        return _handle_upload_artifacts(handler, payload_body)
 
     upstream_body = _build_upstream_payload(route_key, payload_body)
     if route_key == "show_pdf":
         return _handle_show_pdf(handler, upstream_body)
     return _handle_upstream(handler, route_key, upstream_body)
+
+
+def _handle_upload_artifacts(handler, body: dict[str, Any]) -> bool:
+    from api.workspace import resolve_trusted_workspace, safe_resolve_ws
+    from integration.knowledge_base.constants import (
+        MAX_ARTIFACT_FILE_BYTES,
+        MAX_ARTIFACT_TOTAL_BYTES,
+        MAX_ARTIFACT_COUNT,
+    )
+
+    uuid = str(body.get("uuid", "") or "").strip()
+    kb_name = str(body.get("kbName", "") or "").strip()
+    file_properties = body.get("fileProperties") or []
+    paths = body.get("paths") or []
+    chunk_size = str(body.get("chunkSize", "") or "").strip() or None
+    chunk_overlap = str(body.get("chunkOverlap", "") or "").strip() or None
+
+    if len(paths) > MAX_ARTIFACT_COUNT:
+        return _respond_bad(handler, "文件数量过多", 400)
+
+    workspace = resolve_trusted_workspace(None)
+    httpx_files: list[tuple[str, tuple[str, bytes, str | None]]] = []
+    total = 0
+    for rel in paths:
+        rel = str(rel or "").strip()
+        if not rel:
+            return _respond_bad(handler, "缺少路径", 400)
+        try:
+            resolved = safe_resolve_ws(workspace, rel)
+        except ValueError:
+            return _respond_bad(handler, "路径越界", 400)
+        if not resolved.is_file():
+            return _respond_bad(handler, "文件不存在", 400)
+        size = resolved.stat().st_size
+        if size > MAX_ARTIFACT_FILE_BYTES:
+            return _respond_bad(handler, "文件过大", 400)
+        total += size
+        if total > MAX_ARTIFACT_TOTAL_BYTES:
+            return _respond_bad(handler, "请求体过大", 413)
+        file_bytes = resolved.read_bytes()
+        basename = resolved.name
+        httpx_files.append(("files", (basename, file_bytes, "application/octet-stream")))
+
+    file_properties_raw = json.dumps(file_properties, ensure_ascii=False)
+
+    form_data = client.build_upload_form_data(
+        kb_name=kb_name,
+        file_properties_raw=file_properties_raw,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+    )
+    try:
+        status, payload = client.post_multipart("upload_docs", files=httpx_files, data=form_data)
+    except client.KnowledgeBaseUpstreamError as exc:
+        return _respond(
+            handler,
+            {"error": "知识库服务不可用", "message": _sanitize_error(exc)},
+            status=502,
+        )
+    return _respond(handler, payload, status=status)

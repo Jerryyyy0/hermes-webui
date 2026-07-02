@@ -8,6 +8,62 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Added
 
+- **Knowledge base get_joinkb_applications passthrough** — `POST /api/integration/knowledge_base/get_joinkb_applications` proxies downstream `POST /knowledge_base/get_joinkb_applications` verbatim (no field validation). Typical body: `userId`, `uuid`, `kbName`.
+- **Knowledge base mark_message_read passthrough** — `POST /api/integration/knowledge_base/mark_message_read` proxies downstream `POST /knowledge_base/mark_message_read` verbatim (no field validation). Typical body: `messageId` (integer array).
+- **Knowledge base remove_from_myshkb passthrough** — `POST /api/integration/knowledge_base/remove_from_myshkb` proxies downstream `POST /knowledge_base/remove_from_myshkb` verbatim (no field validation). Typical body: `account`, `uuid`, `kbName`.
+- **Knowledge base user_exit_shkb passthrough** — `POST /api/integration/knowledge_base/user_exit_shkb` proxies downstream `POST /knowledge_base/user_exit_shkb` verbatim (no field validation). Typical body: `account`, `uuid`, `kbName`.
+- **Knowledge base delete_readed_message passthrough** — `POST /api/integration/knowledge_base/delete_readed_message` proxies downstream `POST /knowledge_base/delete_readed_message` verbatim. Typical body: `messageId` (integer array).
+- **Knowledge base download_doc passthrough** — `POST /api/integration/knowledge_base/download_doc` proxies downstream `POST /knowledge_base/download_doc` verbatim (no field validation). Typical body: `knowledge_base_name`, `file_name`. Binary file passthrough when upstream returns non-JSON content. Document list filtering continues to use existing `POST /api/integration/knowledge_base/documents` (same downstream endpoint).
+
+### Fixed
+
+- **Notification status read mapping** — 列表项 `status` 由 `read_type` 推导：`unread`/`seen` 恒为对应值；`all` 时额外拉取下游 `readType=seen` 的 ID 集合判断 `read`/`unread`。
+- **Notification delete uses delete_readed_message** — `POST /api/integration/notifications/delete` 批量转发下游 `delete_readed_message`，不再走 `creater_handle_application`（`action: delete`）。
+- **Notification read uses mark_message_read** — `POST /api/integration/notifications/read` 将 `kb:` 前缀 ID 批量转发到下游 `mark_message_read`（`messageId` 整数数组），不再逐条调用 `creater_handle_application`（`action: read`）。
+
+- **Notification read/delete request body** — `POST /read` 与 `POST /delete` 仅接受 `ids`（`string[]`）；移除单条 `id` 字段别名。单条操作传 `ids: ["kb:…"]`。
+
+- **Notification list excludes apply-result pending** — `GET /api/integration/notifications` 与 `/summary` 永久排除 `massType=3` 且 `state=2` 的申请人「结果待处理」消息；其余类型照常返回。实现：`integration/notifications/filters.py`（`exclude_apply_result_pending`）。
+
+- **Interrupted-turn user-visible copy (zh)** — 会话中断恢复 marker、SSE 断连提示、压缩后无响应错误、run journal 恢复控制消息改为中文。文案集中在 `integration/chat_provider_errors/interruption_copy.py`；`api/models.py` / `api/run_journal.py` 仅薄 import。`static/messages.js` 与 `static/ui.js` 同步更新。
+
+- **Notification action_status state mapping** — 下游 `state` 与 `action_status` 对齐文档 §6.1：`0`→`rejected`、`1`→`approved`、`2`→`pending`（此前错误映射为 `0`→`pending` 等）。
+- **Notification API massType documentation** — [`docs/integration-notifications-api.md`](../docs/integration-notifications-api.md) 补充下游 `massType` 四种类型（`1` 加入申请 / `2` 退出 / `3` 申请结果 / `4` 被踢出）及与 `actionable`、`action_status` 的对应关系。
+
+- **Workspace artifact profile backfill on startup** — 服务启动时后台扫描补全 `session_manifest.db` 的 artifact profile。先跑 B 类：对 store 中无 artifact 记录、且 `session.profile` 非空的老会话（在流式落库特性 `_persist_turn_artifact_paths` 上线前创建），逐 turn 复用同一套提取逻辑（`_extract_turn_artifact_entries`）从 messages 抽取 path/source_tool/preview 并 upsert，path 格式与 turn_key 与流式落库一致，避免与 `/api/session/manifest` 的懒回填（`backfill_from_session_turn_artifacts`）冲突。再跑 A 类：修补 DB 已有记录中 `profile=''` 但 session 实际有 profile 的行。session 本身无 profile 的记录保持空（不从其他字段推断）。流式写入仍以 `session.profile` 为权威。
+- **Notification actionable by massType** — `actionable` 改为按下游 `massType` 判断：`1`（入群申请）为 `1`（可打开详情，含已审批历史）；`2`/`3` 等通知类为 `0`。`action_status` 与审批按钮仅对 `massType=1` 映射。
+- **Notification summary simplified** — `GET /api/integration/notifications/summary` 移除 `recent_limit` 参数与 `recent_unread` 预览，仅返回 `total` / `unread` / `by_category` 计数。
+- **Notification actions field removed** — 列表响应移除 `actions[]`；按钮由前端按 `actionable` / `action_status` / `metadata.massType` 推导。
+
+### Added
+
+- **Browser preview for terminal agent-browser** — `browser_preview` SSE 现也在 `terminal` 工具执行 `agent-browser` CLI（含 `connect` / `snapshot` / `click` 等）时触发，与 `browser_*` 工具共用每 stream 一次性 `BrowserPreviewEmitter` 去重，不重复打开 VNC 面板。实现：`api/browser_preview.py`；`api/streaming.py` / `api/gateway_chat.py` 传入 `tool_args`。文档：`docs/browser-preview-sse.md`。
+
+- **Notification API documentation** — [`docs/integration-notifications-api.md`](../docs/integration-notifications-api.md)：知识库通知接口说明（参数、响应字段、curl 示例、KB BFF 审批对照）。
+
+- **Notification Phase 1 (KB-only)** — 通知 HTTP 层收窄为仅知识库 `kb_apply`：
+  - 列表/摘要新增 `read_type`、`action_status` 查询；响应新增 `actions[]`、`actionable`、字符串 `action_status`
+  - 下游 `state` 映射：`0=rejected, 1=approved, 2=pending`（`integration/notifications/constants.py`，见 `docs/integration-notifications-api.md` §6.1）
+  - 新增 `normalize.py`、`filters.py`；handlers 不再读写 `store`
+  - 删除 `GET /api/integration/notifications/{id}`；read/delete 仅处理 `kb:` ID
+  - 审批仍走 `POST /api/integration/knowledge_base/creater_handle_application`
+  - `store.py` / `notifications.db` 表结构**保留**作未来本地通知预留
+  - Swagger、README、handlers 测试（11 用例）同步更新
+
+- **Notification system** — `integration/notifications/` 通知模块（见上文 Phase 1）。`integration/tests/notifications/test_store.py` 保留 store 单测（7 用例）。
+
+### Fixed
+
+- **SkillHub installed detection for long catalog names** — Hub catalog `name` 可超过 64 字符，但安装目录 leaf 经 `normalize_dir_name` 截断；`annotate_installed` 用完整 catalog `name` 查索引导致 `installed: false` 与安装 409 矛盾。修复：安装时写入 `.hub_catalog_name` sidecar；索引与列表查找对截断 leaf 做 fallback。
+- **Notification KB user identity passthrough** — `GET /api/integration/notifications` 和 `GET /api/integration/notifications/summary` 调用下游 `get_user_messages` 时缺少 `account`/`uuid` 参数，导致知识库消息无法按用户过滤。修复：从请求 query params 读取 `account`/`uuid` 并透传到下游（与知识库 BFF 的调用方传参模式一致）。
+- **Notification read/delete KB forwarding** — `POST /api/integration/notifications/read` 和 `POST /api/integration/notifications/delete` 对 `kb:` 前缀的知识库通知此前只留了 TODO，未实际转发下游。修复：从请求 body 读取 `account`/`uuid`，将 `kb:` 前缀 ID 剥离后逐个转发到下游 `creater_handle_application`（`action` 分别为 `read`/`delete`）。Swagger 同步补充 4 个接口的 `account`/`uuid` 参数文档。新增 handlers 测试：`integration/tests/notifications/test_handlers.py`（8 个用例）。
+- **Notification response Content-Length** — 通知 handlers 手动写响应未设置 `Content-Length`，HTTP/1.1 keep-alive 下 curl/浏览器会挂起约 30s 直到超时。改为统一使用 `api.helpers.j()` 写 JSON 响应。
+- **Notification KB field mapping** — 下游 `get_user_messages` 必填 `readType`；消息字段为 `massage`/`createTime`/`showName`/`state`，非此前假设的 `messages`/`createdAt`/`kbName`。列表请求补 `readType: all`，归一化层按下游实际字段映射。
+
+- **Knowledge base upload_artifacts** — `POST /api/integration/knowledge_base/upload_artifacts` orchestrates workspace artifact upload to the knowledge base. Parameters align with `upload_docs`: `uuid`, `kbName`, `fileProperties` (passthrough, `fileClass` = 直属库类型), `chunkSize`, `chunkOverlap`, plus new `paths` array (workspace-relative paths, parallel to `fileProperties`). WebUI reads workspace file bytes, forwards multipart to downstream `upload_docs` without constructing or mutating `fileProperties`. Per-file 50MB / total 200MB / 20 file caps. Path traversal blocked by `safe_resolve_ws`. Only performs `upload_docs`; `update_docs` remains a separate caller responsibility.
+
+- **Knowledge base passthrough routes** — `POST /api/integration/knowledge_base/creater_handle_application` and `POST /api/integration/knowledge_base/get_user_messages` proxy downstream `creater_handle_application` (approve/reject/ignore join requests) and `get_user_messages` (user notification list). Request and response bodies are forwarded verbatim with no field validation or payload building. New `PASSTHROUGH_ROUTES` set in `integration/knowledge_base/constants.py` marks routes that skip the `_ROUTE_BUILDERS`/`_REQUIRED_FIELDS` machinery in `handlers.py`.
+
 - **Cron session turn_artifacts persistence** — cron sessions now have `turn_artifacts` persisted to the sidecar JSON and `session_manifest_records` SQLite table, mirroring the WebUI streaming pipeline (`_persist_turn_artifact_paths`). Previously cron sessions left `turn_artifacts` empty, so the manifest relied on re-extracting artifacts from messages every request — fragile and lost entirely after conversation compression. After each cron run materializes the sidecar, `_persist_cron_turn_artifacts` stamps stable `_turn_key`s on user messages (state.db messages don't carry them) and calls `_persist_turn_artifact_paths` per turn.
 
 - **Cron session materialization unconditional** — cron session sidecar creation (materialize from `state.db`) no longer requires `HERMES_INTEGRATION=1`. The materialize hook (`_install_run_job_materialize_hook`) installs unconditionally in `install_cron_integration_hooks()`, so cron runs always get a WebUI sidecar when `state.db` data exists. This fixes `/api/session/manifest?session_id=cron_*` returning 404 and `turn_artifacts` being empty when integration mode was off. The preserve-once cron hook (keeping repeat-limited jobs as completed/disabled instead of deleting) remains gated on `HERMES_INTEGRATION=1` since it alters cron job lifecycle behavior only relevant to the Cron Hub UI.
@@ -68,7 +124,7 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 - **Knowledge base BFF route prefix** — WebUI proxy paths use `/api/integration/knowledge_base/*` (underscore), aligned with downstream `/knowledge_base/*`. Hyphenated `/api/integration/knowledge-base/*` is no longer served.
 
-- **Integration workspace files profile (temporarily disabled)** — `GET /api/integration/workspace/files` no longer builds the cross-session artifact profile index, ignores `?profile=`, and omits `profile` on file rows. Session-save hook no longer incrementally updates `artifact_profiles.py`. Restore by uncommenting scheme C blocks in `integration/workspace/handlers.py` and `hooks.py`.
+- **Integration workspace files profile (restored via DB)** — `GET /api/integration/workspace/files` 恢复 `?profile=` 过滤与 `profile` 标注，改由直查 `session_manifest.db`（`api/session_manifest_store.py` 新增 `get_artifact_profile_index` / `get_artifact_paths_for_profile`）实现，取代旧的 `artifact_profiles.py` 跨会话索引（已删除）。传入 `profile` 时仅返回该 profile 的 manifest 成果文件（走 stat-only 快路径）；不传则返回全部文件并对成果附加 `profile`。session-save hook 不再增量维护 profile 索引——store 在流式 turn 结束时写入，为权威来源。
 
 - **Integration workspace files performance** — `GET /api/integration/workspace/files` keeps an in-memory workspace file index (invalidated on session save and optional `refresh=1`); pagination/filter/sort reuse the cached index instead of re-walking the tree on every request. Collection uses `os.scandir`; `?profile=` stat-only fast path skips full walk. Artifact profile index skips unrelated sessions by workspace, merges incrementally on session save, and left-rail UI reloads on SSE `manifest_delta` file artifacts. Set `HERMES_DEBUG_TIMING=1` for `X-Hermes-Timing-*` response headers.
 
@@ -80,7 +136,7 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Added
 
-- **Manifest artifact profile** — `GET /api/session/manifest` and SSE `manifest_delta` include optional `profile` on `artifacts[]` rows (from `session.profile`). `GET /api/integration/workspace/files` annotates manifest file artifacts with `profile`; optional `?profile=` returns only that profile's artifacts (default still lists all workspace files). Cross-session index cached in `integration/workspace/artifact_profiles.py`.
+- **Manifest artifact profile** — `GET /api/session/manifest` and SSE `manifest_delta` include optional `profile` on `artifacts[]` rows (from `session.profile`). `GET /api/integration/workspace/files` annotates manifest file artifacts with `profile`; optional `?profile=` returns only that profile's artifacts (default still lists all workspace files). 跨会话索引现由直查 `session_manifest.db`（`api/session_manifest_store.py`）实现。
 
 - **Session workspace inspector** — `GET /api/session/manifest` returns structured todos, artifacts, and referenced files parsed from tool activity; the right panel adds **Tasks**, **Artifacts**, and **Refs** tabs with file preview via the existing workspace preview path. Artifacts outside the session workspace are listed with absolute paths and file metadata, while previews remain scoped to workspace files.
 

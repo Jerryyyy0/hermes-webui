@@ -309,12 +309,16 @@ def test_files_annotate_profile_from_index(ws_root):
     parsed = urlparse("/api/integration/workspace/files?sort=path&order=asc")
     with patch("integration.workspace.handlers.integration_enabled", return_value=True):
         with _patch_ws(ws_root):
-            assert try_handle_get(handler, parsed) is True
+            with patch(
+                "integration.workspace.handlers.get_artifact_profile_index",
+                return_value={"sub/b.txt": "ops"},
+            ):
+                assert try_handle_get(handler, parsed) is True
     payload = _json_payload(handler)
     by_path = {f["path"]: f for f in payload["files"]}
-    assert "profile" not in by_path["a.txt"]
-    assert "profile" not in by_path["sub/b.txt"]
-    assert "profile" not in by_path["sub/c.txt"]
+    assert by_path["a.txt"].get("profile") is None
+    assert by_path["sub/b.txt"].get("profile") == "ops"
+    assert by_path["sub/c.txt"].get("profile") is None
 
 
 def test_files_profile_filter_returns_only_matching_artifacts(ws_root):
@@ -322,14 +326,32 @@ def test_files_profile_filter_returns_only_matching_artifacts(ws_root):
     parsed = urlparse("/api/integration/workspace/files?profile=ops&sort=path&order=asc")
     with patch("integration.workspace.handlers.integration_enabled", return_value=True):
         with _patch_ws(ws_root):
-            assert try_handle_get(handler, parsed) is True
+            with patch(
+                "integration.workspace.handlers.get_artifact_paths_for_profile",
+                return_value=frozenset({"sub/b.txt"}),
+            ):
+                assert try_handle_get(handler, parsed) is True
     payload = _json_payload(handler)
-    assert payload["profile"] == ""
+    assert payload["profile"] == "ops"
     paths = [f["path"] for f in payload["files"]]
-    assert "a.txt" in paths
-    assert "sub/b.txt" in paths
-    assert "sub/c.txt" in paths
-    assert all("profile" not in f for f in payload["files"])
+    assert paths == ["sub/b.txt"]
+    assert all(f.get("profile") == "ops" for f in payload["files"])
+
+
+def test_files_profile_filter_empty_returns_no_files(ws_root):
+    handler = MagicMock()
+    parsed = urlparse("/api/integration/workspace/files?profile=ops&sort=path&order=asc")
+    with patch("integration.workspace.handlers.integration_enabled", return_value=True):
+        with _patch_ws(ws_root):
+            with patch(
+                "integration.workspace.handlers.get_artifact_paths_for_profile",
+                return_value=frozenset(),
+            ):
+                assert try_handle_get(handler, parsed) is True
+    payload = _json_payload(handler)
+    assert payload["profile"] == "ops"
+    assert payload["files"] == []
+    assert payload["total"] == 0
 
 
 def test_walk_allowed_paths_filter(ws_root):
@@ -366,13 +388,30 @@ def test_files_profile_filter_uses_path_collect(ws_root):
     with patch("integration.workspace.handlers.integration_enabled", return_value=True):
         with _patch_ws(ws_root):
             with patch(
-                "integration.workspace.handlers.get_workspace_file_entries",
-            ) as get_entries:
-                get_entries.return_value = [
-                    {"path": "a.txt", "size": 3, "ext": ".txt", "mime": "text/plain"},
-                ]
+                "integration.workspace.handlers.get_artifact_paths_for_profile",
+                return_value=frozenset({"a.txt"}),
+            ) as get_paths:
+                with patch(
+                    "integration.workspace.handlers.collect_workspace_file_entries_for_paths",
+                    return_value=[{"path": "a.txt", "size": 3, "ext": ".txt", "mime": "text/plain"}],
+                ) as collect:
+                    assert try_handle_get(handler, parsed) is True
+                    get_paths.assert_called_once_with("ops")
+                    collect.assert_called_once()
+                    args, _ = collect.call_args
+                    assert args[1] == frozenset({"a.txt"})
+
+
+def test_files_no_profile_skips_path_collect(ws_root):
+    handler = MagicMock()
+    parsed = urlparse("/api/integration/workspace/files?sort=path&order=asc")
+    with patch("integration.workspace.handlers.integration_enabled", return_value=True):
+        with _patch_ws(ws_root):
+            with patch(
+                "integration.workspace.handlers.collect_workspace_file_entries_for_paths",
+            ) as collect:
                 assert try_handle_get(handler, parsed) is True
-                get_entries.assert_called_once()
+                collect.assert_not_called()
 
 
 def test_post_disabled_returns_false():

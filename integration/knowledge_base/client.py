@@ -89,8 +89,8 @@ def _is_json_upstream_response(resp: httpx.Response) -> bool:
     return content.lstrip().startswith((b"{", b"["))
 
 
-def post_show_pdf(body: dict[str, Any]) -> KnowledgeBaseShowPdfResult:
-    url = _downstream_url("show_pdf")
+def post_binary_or_json(route_key: str, body: dict[str, Any]) -> KnowledgeBaseShowPdfResult:
+    url = _downstream_url(route_key)
     try:
         with _client() as client:
             resp = client.post(url, json=body)
@@ -113,6 +113,10 @@ def post_show_pdf(body: dict[str, Any]) -> KnowledgeBaseShowPdfResult:
         content_type=content_type,
         extra_headers=extra_headers,
     )
+
+
+def post_show_pdf(body: dict[str, Any]) -> KnowledgeBaseShowPdfResult:
+    return post_binary_or_json("show_pdf", body)
 
 
 def post_json(route_key: str, body: dict[str, Any]) -> tuple[int, Any]:

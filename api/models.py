@@ -19,6 +19,14 @@ from api.config import (
     LOCK, STREAMS, STREAMS_LOCK, DEFAULT_WORKSPACE, DEFAULT_MODEL, PROJECTS_FILE, HOME,
     get_effective_default_model, _get_session_agent_lock,
 )
+from integration.chat_provider_errors.interruption_copy import (
+    INTERRUPTED_NEUTRAL_ZH,
+    INTERRUPTED_NO_OUTPUT_ZH,
+    INTERRUPTED_PENDING_RETRY_ZH,
+    INTERRUPTED_RECOVERED_ZH,
+    INTERRUPTION_CAUSE_DETAILS_ZH,
+    build_interrupted_content_zh,
+)
 from api.workspace import get_last_workspace
 from api.usage import prompt_cache_hit_percent
 from api.agent_sessions import (
@@ -989,50 +997,18 @@ def _get_profile_home(profile) -> Path:
         return Path(os.environ.get('HERMES_HOME') or '~/.hermes').expanduser()
 
 
-_INTERRUPTED_RECOVERED_WORDING = (
-    '**Response interrupted.**\n\n'
-    'The live response stream stopped before this turn finished. '
-    'The partial output above was recovered from the run journal, '
-    'but the interrupted agent process could not continue.'
-)
-_INTERRUPTED_NO_OUTPUT_WORDING = (
-    '**Response interrupted.**\n\n'
-    'The live response stream stopped before this turn finished. '
-    'The user message above was preserved, but no agent output was recovered.'
-)
-_INTERRUPTED_PENDING_RETRY_WORDING = (
-    '**Response interrupted.**\n\n'
-    'The live response stream stopped before this turn finished. '
-    'Recovering the partial output from the run journal — '
-    'reload this session to retry.'
-)
+# Interrupted-turn marker wording. Canonical copy lives in
+# ``integration/chat_provider_errors/interruption_copy.py``; re-exported here
+# so legacy callers/tests that reference ``models._INTERRUPTED_*_WORDING`` keep
+# working.
+_INTERRUPTED_RECOVERED_WORDING = INTERRUPTED_RECOVERED_ZH
+_INTERRUPTED_NO_OUTPUT_WORDING = INTERRUPTED_NO_OUTPUT_ZH
+_INTERRUPTED_PENDING_RETRY_WORDING = INTERRUPTED_PENDING_RETRY_ZH
 # Neutral wording used when the lazy retry path gives up (max attempts reached
 # or the marker has been pending longer than _JOURNAL_RETRY_GIVEUP_SECONDS).
-_INTERRUPTED_NEUTRAL_WORDING = (
-    '**Response interrupted.**\n\n'
-    'The live response stream stopped before this turn finished. '
-    'Partial output may have been lost.'
-)
+_INTERRUPTED_NEUTRAL_WORDING = INTERRUPTED_NEUTRAL_ZH
 
-_INTERRUPTION_CAUSE_DETAILS = {
-    'process_restart': (
-        'Evidence: the WebUI process started after this turn began, so this '
-        'looks like a real process crash or restart.'
-    ),
-    'stream_run_split_brain': (
-        'Evidence: the browser response stream was gone but the worker registry '
-        'still listed the run. This is a stream/run bookkeeping split-brain.'
-    ),
-    'lost_worker_bookkeeping': (
-        'Evidence: the stream was gone and worker bookkeeping no longer had an '
-        'active run for it. This usually means the worker state was lost or '
-        'cleaned up without a terminal event.'
-    ),
-    'unknown': (
-        'Evidence: the stream stopped, but the WebUI could not classify the '
-        'interruption more precisely.'
-    ),
-}
+_INTERRUPTION_CAUSE_DETAILS = INTERRUPTION_CAUSE_DETAILS_ZH
 
 
 def _classify_interruption_cause(
@@ -1066,26 +1042,10 @@ def _classify_interruption_cause(
 def _interrupted_content_for(
     *, recovered_output: bool, pending_retry: bool, interruption_cause: str,
 ) -> str:
-    if recovered_output:
-        outcome = (
-            'The partial output above was recovered from the run journal, '
-            'but the interrupted agent process could not continue.'
-        )
-    elif pending_retry:
-        outcome = (
-            'Recovering the partial output from the run journal — '
-            'reload this session to retry.'
-        )
-    else:
-        outcome = 'The user message above was preserved, but no agent output was recovered.'
-    cause_detail = _INTERRUPTION_CAUSE_DETAILS.get(
-        interruption_cause,
-        _INTERRUPTION_CAUSE_DETAILS['unknown'],
-    )
-    return (
-        '**Response interrupted.**\n\n'
-        'The live response stream stopped before this turn finished. '
-        f'{cause_detail} {outcome}'
+    return build_interrupted_content_zh(
+        recovered_output=recovered_output,
+        pending_retry=pending_retry,
+        interruption_cause=interruption_cause,
     )
 
 

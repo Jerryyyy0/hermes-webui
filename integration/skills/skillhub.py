@@ -11,7 +11,11 @@ from urllib.parse import quote
 import httpx
 
 from integration.config import skillhub_url
-from integration.skills.local_skills import _skill_dir_rel_path, skill_target_dir
+from integration.skills.local_skills import (
+    _skill_dir_rel_path,
+    normalize_dir_name,
+    skill_target_dir,
+)
 from integration.skills.list_item_shape import normalize_skill_list_items
 from integration.skills.mtime_utils import enrich_skills_mtime
 from integration.skills.paths import shared_skills_dir
@@ -24,6 +28,7 @@ from integration.skills.utils import (
 
 _log = logging.getLogger(__name__)
 _TIMEOUT = 30.0
+_HUB_CATALOG_NAME_SIDECAR = ".hub_catalog_name"
 
 
 def _client() -> httpx.Client:
@@ -174,6 +179,30 @@ def _read_local_skill_description(skills_dir: Path, dir_name: str) -> str:
         return ""
 
 
+def _read_hub_catalog_name_sidecar(skill_dir: Path) -> str:
+    sidecar = skill_dir / _HUB_CATALOG_NAME_SIDECAR
+    if not sidecar.is_file():
+        return ""
+    try:
+        return sidecar.read_text(encoding="utf-8").strip()
+    except Exception:
+        return ""
+
+
+def _lookup_installed_dir(installed_index: dict[str, str], catalog_name: str) -> str:
+    """Resolve hub catalog name to installed dir_name (handles leaf truncation)."""
+    key = str(catalog_name or "").strip()
+    if not key:
+        return ""
+    hit = installed_index.get(key, "")
+    if hit:
+        return hit
+    leaf = normalize_dir_name(key)
+    if leaf:
+        return installed_index.get(leaf, "")
+    return ""
+
+
 def _read_skill_catalog_name(skill_dir: Path, leaf: str) -> str:
     skill_md = find_skill_main_file(skill_dir)
     if not skill_md:
@@ -211,8 +240,11 @@ def _hub_installed_index(skills_dir: Path) -> dict[str, str]:
         leaf = skill_dir.name
         if not leaf or leaf.startswith("."):
             continue
-        catalog_name = _read_skill_catalog_name(skill_dir, leaf)
         dir_name = _skill_dir_rel_path(skill_dir, skills_dir)
+        hub_catalog_name = _read_hub_catalog_name_sidecar(skill_dir)
+        if hub_catalog_name:
+            index[hub_catalog_name] = dir_name
+        catalog_name = _read_skill_catalog_name(skill_dir, leaf)
         index[catalog_name] = dir_name
         if leaf != catalog_name:
             index.setdefault(leaf, dir_name)
@@ -247,7 +279,7 @@ def annotate_installed(
 
     for skill in skills:
         skill_name = str(skill.get("name") or "").strip()
-        dir_name = installed_index.get(skill_name, "")
+        dir_name = _lookup_installed_dir(installed_index, skill_name)
         is_installed = bool(dir_name)
         skill["installed"] = is_installed
         skill["hub_installed"] = is_installed
@@ -529,6 +561,9 @@ def install_skill(name: str, display_name: str = "", category: str = "") -> dict
         (target / ".category").write_text(cat_seg, encoding="utf-8")
     (target / ".hub_installed").write_text("1", encoding="utf-8")
     (target / ".install_name").write_text(label, encoding="utf-8")
+    catalog_name = str(name or "").strip()
+    if catalog_name:
+        (target / _HUB_CATALOG_NAME_SIDECAR).write_text(catalog_name, encoding="utf-8")
     try:
         from integration.skills.no_self_improve import add_names
 

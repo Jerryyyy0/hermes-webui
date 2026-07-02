@@ -269,9 +269,9 @@ def test_interrupted_recovery_markers_do_not_claim_restart_as_fact():
     ]
 
     for text in marker_texts:
-        assert "Response interrupted" in text
+        assert "响应已中断" in text
         assert "process restarted" not in text
-        assert "before this turn finished" in text
+        assert "完成前中断" in text
 
 
 def test_interrupted_marker_distinguishes_real_process_restart(monkeypatch):
@@ -283,7 +283,7 @@ def test_interrupted_marker_distinguishes_real_process_restart(monkeypatch):
     )
 
     assert marker["interruption_cause"] == "process_restart"
-    assert "WebUI process started after this turn began" in marker["content"]
+    assert "WebUI 进程在本轮开始之后才启动" in marker["content"]
     assert "process restarted" not in marker["content"]
 
 
@@ -298,7 +298,7 @@ def test_interrupted_marker_distinguishes_stream_run_split_brain(monkeypatch):
     )
 
     assert marker["interruption_cause"] == "stream_run_split_brain"
-    assert "stream was gone but the worker registry still listed the run" in marker["content"]
+    assert "浏览器响应流已消失，但 worker 注册表中仍记录着该运行" in marker["content"]
 
 
 def test_interrupted_marker_distinguishes_lost_worker_bookkeeping(monkeypatch):
@@ -311,15 +311,15 @@ def test_interrupted_marker_distinguishes_lost_worker_bookkeeping(monkeypatch):
     )
 
     assert marker["interruption_cause"] == "lost_worker_bookkeeping"
-    assert "worker bookkeeping no longer had an active run" in marker["content"]
+    assert "worker 记录中已无对应的活跃运行" in marker["content"]
 
 
 def test_messages_js_names_browser_sse_disconnect_separately():
     repo = models.Path(__file__).parent.parent
     js = (repo / "static" / "messages.js").read_text(encoding="utf-8")
 
-    assert "Connection interrupted" in js
-    assert "browser lost the live SSE connection" in js
+    assert "连接已中断" in js
+    assert "浏览器在响应完成前丢失了实时 SSE 连接" in js
     assert "Connection lost" not in js
 
 
@@ -358,7 +358,7 @@ def test_lost_response_recovered_on_second_read(hermes_home):
     assert last.get("_journal_retry_stream_id") == stream_id
     assert last.get("_journal_retry_attempts") == 0
     assert isinstance(last.get("_journal_retry_first_seen_ts"), int)
-    assert "no agent output was recovered" not in last["content"]
+    assert "未恢复出任何助手输出" not in last["content"]
     # pending fields cleared regardless of journal visibility
     assert s.pending_user_message is None
     assert s.active_stream_id is None
@@ -394,11 +394,11 @@ def test_lost_response_recovered_on_second_read(hermes_home):
 
     contents = [m.get("content", "") for m in s.messages]
     # The marker self-healed:
-    assert any("recovered from the run journal" in c for c in contents), (
+    assert any("已从运行日志恢复" in c for c in contents), (
         "After journaled tokens become readable, the marker must promote to "
         "the recovered-output wording."
     )
-    assert not any("no agent output was recovered" in c for c in contents)
+    assert not any("未恢复出任何助手输出" in c for c in contents)
 
     # The journaled assistant text and tool card landed BEFORE the marker
     # so chronological order in the transcript is preserved.

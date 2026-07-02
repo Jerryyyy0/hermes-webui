@@ -55,6 +55,58 @@ def parse_profile_pagination_query(parsed) -> tuple[str, int, int] | None:
 _parse_sessions_profile_pagination_query = parse_profile_pagination_query
 
 
+def parse_date_range_query(parsed) -> tuple[float | None, float | None] | str | None:
+    """Return (start_at, end_at) when either bound is set, else None.
+
+    On validation failure returns an error code string for the handler to map
+    to HTTP 400.
+    """
+    qs = parse_qs(parsed.query)
+    raw_start = qs.get("start_at", [""])[0].strip()
+    raw_end = qs.get("end_at", [""])[0].strip()
+    if not raw_start and not raw_end:
+        return None
+
+    start_at = end_at = None
+    if raw_start:
+        try:
+            start_at = float(raw_start)
+        except (TypeError, ValueError):
+            return "invalid_start_at"
+    if raw_end:
+        try:
+            end_at = float(raw_end)
+        except (TypeError, ValueError):
+            return "invalid_end_at"
+    if start_at is not None and end_at is not None and start_at > end_at:
+        return "start_after_end"
+    return start_at, end_at
+
+
+def filter_sessions_by_date_range(
+    rows: list[dict],
+    *,
+    start_at: float | None,
+    end_at: float | None,
+) -> list[dict]:
+    """Keep rows whose ``last_message_at`` falls within the inclusive bounds."""
+    out = []
+    for row in rows:
+        raw = row.get("last_message_at")
+        if raw is None or raw == "":
+            continue
+        try:
+            ts = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if start_at is not None and ts < start_at:
+            continue
+        if end_at is not None and ts > end_at:
+            continue
+        out.append(row)
+    return out
+
+
 def session_row_must_show(session: dict, *, active_session_id: str | None = None) -> bool:
     sid = str(session.get("session_id") or "").strip()
     if active_session_id and sid and sid == active_session_id:

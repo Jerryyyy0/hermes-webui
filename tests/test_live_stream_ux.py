@@ -19,7 +19,7 @@ def test_done_and_restore_filters_recovery_messages_from_frontend_state():
 
 def test_apererror_recovers_on_recovery_control_event():
     assert "isRecoveryControlMessage=isInterrupted && (d.recovery_control===true || _streamRecoveryControlMessageText(d.message));" in MESSAGES_JS
-    assert "Stream recovery signal received. Restoring transcript..." in MESSAGES_JS
+    assert "收到流恢复信号，正在恢复会话记录" in MESSAGES_JS
     assert "if(await _restoreSettledSession(source)) return;" in MESSAGES_JS
 
 
@@ -35,7 +35,8 @@ def test_recovery_control_detection_is_not_broad_phrase_matching():
     assert "|| /continue exactly where you left off/i.test(normalized)" not in UI_JS
     assert "|| /continue exactly where you left off/i.test(normalized)" not in MESSAGES_JS
     assert "const systemRecovery=/^\\[System:/i.test(normalized)" in UI_JS
-    assert "const backendRecovery=/^the live worker stopped before this run finished\\.?$/i.test(normalized)" in UI_JS
+    assert "实时 worker 在本次运行完成前已停止" in UI_JS
+    assert "the live worker stopped before this run finished" in UI_JS
 def test_recovery_control_does_not_filter_genuine_interruption_card():
     """A real 'Response interrupted' card carries provider_details_label
     'Interruption details' but is NOT a recovery-control row — it must stay
@@ -77,8 +78,8 @@ def test_recovery_control_does_not_filter_genuine_interruption_card():
         {"role": "user", "content": "my previous response was cut off, can you continue?"},
         # explicit server marker — IS recovery control
         {"role": "assistant", "content": "anything", "recovery_control": True},
-        # strict synthetic backend text — IS recovery control (backward-compat)
-        {"role": "assistant", "content": "The live worker stopped before this run finished."},
+        # strict synthetic backend text — IS recovery control (zh + backward-compat en)
+        {"role": "assistant", "content": "实时 worker 在本次运行完成前已停止。"},
     ]
     r = subprocess.run([node, "-e", driver, json.dumps(cases)], capture_output=True, text=True, timeout=15)
     assert r.returncode == 0, r.stderr

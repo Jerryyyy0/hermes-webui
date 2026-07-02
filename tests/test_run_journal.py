@@ -138,10 +138,10 @@ def test_stale_interrupted_event_reports_non_terminal_journal(tmp_path, monkeypa
     assert event["seq"] == 2
     assert event["terminal_state"] == "lost-worker-bookkeeping"
     assert event["payload"]["type"] == "interrupted"
-    assert "last journaled event" in event["payload"]["hint"]
+    assert "日志事件" in event["payload"]["hint"]
     assert "process restarted" not in event["payload"]["message"]
     assert "lost the live worker" not in event["payload"]["message"]
-    assert "live worker stopped" in event["payload"]["message"]
+    assert "实时 worker 在本次运行完成前已停止" in event["payload"]["message"]
 
 
 def test_stale_interrupted_event_skips_terminal_journal(tmp_path, monkeypatch):

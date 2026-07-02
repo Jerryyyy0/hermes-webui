@@ -13,6 +13,11 @@ import time
 from pathlib import Path
 from typing import Iterable
 
+from integration.chat_provider_errors.interruption_copy import (
+    RECOVERY_CONTROL_HINT_ZH as _RECOVERY_CONTROL_HINT_ZH,
+    RECOVERY_CONTROL_MESSAGE_ZH as _RECOVERY_CONTROL_MESSAGE_ZH,
+)
+
 RUN_JOURNAL_DIR_NAME = "_run_journal"
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 _WRITER_LOCKS: dict[tuple[str, str, str], threading.Lock] = {}
@@ -292,8 +297,8 @@ def stale_interrupted_event(session_id: str, run_id: str, *, after_seq: int | No
     payload = {
         "type": "interrupted",
         "recovery_control": True,
-        "message": "The live worker stopped before this run finished.",
-        "hint": "The transcript was restored to the last journaled event. Start a new turn if you still need the task to continue.",
+        "message": _RECOVERY_CONTROL_MESSAGE_ZH,
+        "hint": _RECOVERY_CONTROL_HINT_ZH,
         "session_id": session_id,
         "stream_id": run_id,
         "journal_last_seq": summary.get("last_seq"),

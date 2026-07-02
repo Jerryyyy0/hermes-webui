@@ -321,6 +321,354 @@ def load_manifest_records(
         return []
 
 
+def get_artifact_profile_index(
+    *,
+    db_path: Path | str | None = None,
+) -> dict[str, str]:
+    """Cross-session workspace-relative path → profile index.
+
+    Reads artifact records directly from ``session_manifest.db``. For each
+    path, the profile of the record with the greatest ``updated_at`` wins,
+    matching the previous ``artifact_profiles.py`` semantics. Paths whose
+    winning profile is empty (sessions without a profile) are excluded so the
+    index only maps paths to real profile labels.
+
+    The store does not record workspace per row; workspace scoping is left to
+    the caller (paths that do not resolve to real files under the target
+    workspace are dropped by the caller's file collection step).
+    """
+    try:
+        with closing(_connect(db_path)) as conn:
+            rows = conn.execute(
+                """
+                SELECT path, profile, MAX(updated_at) AS latest
+                FROM session_manifest_records
+                WHERE record_kind = ? AND preview = ?
+                GROUP BY path, profile
+                """,
+                (ARTIFACT_RECORD_KIND, MANIFEST_PREVIEW_FILE),
+            ).fetchall()
+    except (sqlite3.Error, OSError):
+        logger.debug("failed to read artifact profile index", exc_info=True)
+        return {}
+
+    latest_by_path: dict[str, tuple[str, float]] = {}
+    for row in rows:
+        path = str(row["path"] or "").strip()
+        profile = str(row["profile"] or "").strip()
+        if not path or not profile:
+            continue
+        updated_at = float(row["latest"] or 0.0)
+        current = latest_by_path.get(path)
+        if current is None or updated_at > current[1]:
+            latest_by_path[path] = (profile, updated_at)
+    return {path: profile for path, (profile, _ts) in latest_by_path.items()}
+
+
+def get_artifact_paths_for_profile(
+    profile: str,
+    *,
+    db_path: Path | str | None = None,
+) -> frozenset[str]:
+    """Return workspace-relative artifact paths authored under *profile*.
+
+    The profile label is matched exactly (case-sensitive) against the
+    ``profile`` column. Empty/None profile returns an empty set.
+    """
+    profile_norm = str(profile or "").strip()
+    if not profile_norm:
+        return frozenset()
+    try:
+        with closing(_connect(db_path)) as conn:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT path
+                FROM session_manifest_records
+                WHERE record_kind = ? AND preview = ? AND profile = ?
+                """,
+                (ARTIFACT_RECORD_KIND, MANIFEST_PREVIEW_FILE, profile_norm),
+            ).fetchall()
+    except (sqlite3.Error, OSError):
+        logger.debug("failed to read artifact paths for profile %s", profile_norm, exc_info=True)
+        return frozenset()
+    return frozenset(str(row["path"] or "").strip() for row in rows if str(row["path"] or "").strip())
+
+
+def backfill_empty_profile_artifacts(*, db_path: Path | str | None = None) -> dict[str, int]:
+    """Patch artifact rows whose profile column is empty when session.profile is set.
+
+    Scans ``session_manifest.db`` for artifact records with ``profile=''``,
+    loads each session's metadata, and updates matching rows when
+    ``session.profile`` is non-empty. Sessions without a profile are skipped.
+    """
+    scanned = 0
+    patched = 0
+    skipped = 0
+    try:
+        with closing(_connect(db_path)) as conn:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT session_id
+                FROM session_manifest_records
+                WHERE record_kind = ? AND profile = ''
+                """,
+                (ARTIFACT_RECORD_KIND,),
+            ).fetchall()
+    except (sqlite3.Error, OSError):
+        logger.debug("failed to list sessions with empty profile artifacts", exc_info=True)
+        return {"scanned": 0, "patched": 0, "skipped": 0}
+
+    from api.models import Session
+
+    session_ids = [
+        str(row["session_id"] or "").strip()
+        for row in rows
+        if _is_safe_session_id(str(row["session_id"] or "").strip())
+    ]
+    scanned = len(session_ids)
+
+    for sid in session_ids:
+        session = Session.load_metadata_only(sid)
+        if session is None:
+            skipped += 1
+            continue
+        profile = str(getattr(session, "profile", "") or "").strip()
+        if not profile:
+            skipped += 1
+            continue
+        try:
+            with closing(_connect(db_path)) as conn:
+                with conn:
+                    cur = conn.execute(
+                        """
+                        UPDATE session_manifest_records
+                        SET profile = ?
+                        WHERE session_id = ? AND record_kind = ? AND profile = ''
+                        """,
+                        (profile, sid, ARTIFACT_RECORD_KIND),
+                    )
+                    patched += int(cur.rowcount or 0)
+        except (sqlite3.Error, OSError):
+            logger.debug(
+                "failed to backfill profile for session %s",
+                sid,
+                exc_info=True,
+            )
+            skipped += 1
+
+    return {"scanned": scanned, "patched": patched, "skipped": skipped}
+
+
+def backfill_session_artifacts(
+    session,
+    *,
+    db_path: Path | str | None = None,
+) -> dict[str, int]:
+    """Extract and persist artifact records for a session lacking them.
+
+    Targets B-class missing profiles: files on disk that have no artifact row
+    in the store. Mirrors the streaming pipeline's ``_persist_turn_artifact_paths``
+    exactly — per-turn ``_extract_turn_artifact_entries`` (write_file/edit_file/…
+    tool args) plus the prose-path scan of the last assistant message (bare
+    filenames / relative paths / media tokens delivered in prose), so files
+    produced by non-mutation tools or delivered only in assistant prose are
+    also captured. Stored path/source_tool/preview/turn_key match the live
+    pipeline's format.
+
+    Re-extracts artifact records from messages and upserts them, mirroring the
+    streaming pipeline's ``_persist_turn_artifact_paths`` (per-turn
+    ``_extract_turn_artifact_entries`` + prose-path scan + disk-text supplement).
+    Sessions are never skipped wholesale — even sessions with a ``turn_artifacts``
+    dict or existing store rows may have files that the streaming pipeline missed
+    (e.g. paths listed in tool results by non-mutation tools).
+    ``upsert_manifest_records``'s ON CONFLICT keeps existing rows untouched while
+    adding any missing ones; this complements, never conflicts with, the lazy
+    ``backfill_from_session_turn_artifacts`` path in ``/api/session/manifest``
+    (which only fires when the store has zero rows).
+    """
+    sid = str(getattr(session, "session_id", "") or "").strip()
+    if not _is_safe_session_id(sid):
+        return {"written": 0, "skipped": 1, "turns": 0}
+
+    messages = list(getattr(session, "messages", None) or [])
+    if not messages:
+        return {"written": 0, "skipped": 1, "turns": 0}
+
+    from api.session_manifest import (
+        _extract_turn_artifact_entries,
+        _message_text,
+        _message_turns,
+        _paths_from_last_assistant_message,
+        _skills_dir_for_session,
+        _turn_message_slice,
+        filter_existing_turn_artifact_entries,
+    )
+
+    workspace = Path(str(getattr(session, "workspace", "") or "")).expanduser().resolve()
+    skills_dir = _skills_dir_for_session(session)
+    tool_calls = list(getattr(session, "tool_calls", None) or [])
+
+    # Build a workspace disk-file index once for the disk-text supplement pass
+    # below. Capped to avoid pathological workspaces; the common case is a few
+    # hundred files. Both relative posix paths and basenames are tracked so
+    # absolute-path tool results (e.g. "/Users/.../报告.md") can still match
+    # via their basename.
+    disk_basenames: dict[str, str] = {}
+    try:
+        from api.workspace import is_workspace_cruft_basename
+        for p in workspace.rglob("*"):
+            if not p.is_file() or p.is_symlink():
+                continue
+            if is_workspace_cruft_basename(p.name):
+                continue
+            disk_basenames.setdefault(p.name, p.relative_to(workspace).as_posix())
+    except (OSError, ValueError):
+        pass
+
+    turns = _message_turns(messages)
+    written = 0
+    turns_with_artifacts = 0
+    for turn in turns:
+        tk = str(turn.get("turn_key") or "").strip()
+        if not tk:
+            continue
+        slc = _turn_message_slice(messages, tk)
+        if not slc:
+            continue
+        entries = _extract_turn_artifact_entries(
+            slc,
+            tool_calls,
+            workspace,
+            start_msg_idx=turn.get("start_msg_idx"),
+            end_msg_idx=turn.get("end_msg_idx"),
+            skills_dir=skills_dir,
+        )
+        # Mirror _persist_turn_artifact_paths: also scan the last assistant
+        # message in the turn for relative-path/bare-filename deliveries (e.g.
+        # markdown table cells mentioning `报告.md`). Only paths that actually
+        # exist on disk survive the filter below. Dedupe within the turn only.
+        last_assistant_text = ""
+        for _m in reversed(slc):
+            if isinstance(_m, dict) and _m.get("role") == "assistant":
+                last_assistant_text = _message_text(_m.get("content"))
+                break
+        if last_assistant_text:
+            entry_paths = {str(e.get("path") or "") for e in entries if isinstance(e, dict)}
+            for _pp in _paths_from_last_assistant_message(last_assistant_text, workspace):
+                if _pp and _pp not in entry_paths:
+                    entries.append({
+                        "path": _pp,
+                        "source_tool": ASSISTANT_PROSE_SOURCE_TOOL,
+                        "preview": MANIFEST_PREVIEW_FILE,
+                    })
+        # Backfill-only disk-text supplement: scan the whole turn slice (tool
+        # results included, not just assistant prose) for any disk file basename.
+        # This catches files listed by non-mutation tools (e.g. a glob/read tool
+        # returning absolute paths) that the streaming pipeline intentionally
+        # skips. ``filter_existing_turn_artifact_entries`` below keeps it safe.
+        if disk_basenames:
+            entry_paths = {str(e.get("path") or "") for e in entries if isinstance(e, dict)}
+            import json as _json
+            slice_text = _json.dumps(slc, ensure_ascii=False)
+            for basename, rel in disk_basenames.items():
+                if rel in entry_paths or basename not in slice_text:
+                    continue
+                entries.append({
+                    "path": rel,
+                    "source_tool": ASSISTANT_PROSE_SOURCE_TOOL,
+                    "preview": MANIFEST_PREVIEW_FILE,
+                })
+        entries = filter_existing_turn_artifact_entries(workspace, skills_dir, entries)
+        if not entries:
+            continue
+        turns_with_artifacts += 1
+        rows = [
+            {
+                "path": str(entry.get("path") or "").strip(),
+                "source_tool": str(entry.get("source_tool") or ASSISTANT_PROSE_SOURCE_TOOL).strip(),
+                "preview": str(entry.get("preview") or MANIFEST_PREVIEW_FILE).strip(),
+            }
+            for entry in entries
+            if isinstance(entry, dict) and entry.get("path")
+        ]
+        if not rows:
+            continue
+        try:
+            records = upsert_manifest_records(session, tk, rows, db_path=db_path)
+            written += len(records)
+        except Exception:
+            logger.debug("failed to upsert manifest rows for session %s turn %s", sid, tk, exc_info=True)
+
+    return {"written": written, "skipped": 0, "turns": turns_with_artifacts}
+
+
+def backfill_workspace_artifacts_from_sessions(
+    *,
+    db_path: Path | str | None = None,
+) -> dict[str, int]:
+    """Scan persisted sessions and backfill artifact records for those missing them.
+
+    Iterates session JSON files under ``SESSION_DIR``. For each session, loads
+    metadata-only first to filter by a non-empty profile (only profiled
+    sessions contribute to the workspace profile index); only when extraction
+    is needed does it pay the cost of a full ``Session.load``.
+    """
+    scanned = 0
+    written = 0
+    skipped = 0
+    sessions_with_artifacts = 0
+
+    from api.models import Session
+
+    try:
+        ids = sorted(
+            p.stem
+            for p in SESSION_DIR.glob("*.json")
+            if not p.name.startswith("_")
+        )
+    except OSError:
+        logger.debug("failed to list session dir for workspace artifact backfill", exc_info=True)
+        return {"scanned": 0, "written": 0, "skipped": 0, "sessions": 0}
+
+    for sid in ids:
+        scanned += 1
+        meta = Session.load_metadata_only(sid)
+        if meta is None:
+            skipped += 1
+            continue
+        profile = str(getattr(meta, "profile", "") or "").strip()
+        if not profile:
+            skipped += 1
+            continue
+        try:
+            session = Session.load(sid)
+        except Exception:
+            logger.debug("failed to full-load session %s for backfill", sid, exc_info=True)
+            skipped += 1
+            continue
+        if session is None:
+            skipped += 1
+            continue
+        try:
+            result = backfill_session_artifacts(session, db_path=db_path)
+            w = int(result.get("written") or 0)
+            if w:
+                written += w
+                sessions_with_artifacts += 1
+            elif int(result.get("skipped") or 0):
+                skipped += 1
+        except Exception:
+            logger.debug("failed to backfill artifacts for session %s", sid, exc_info=True)
+            skipped += 1
+
+    return {
+        "scanned": scanned,
+        "written": written,
+        "skipped": skipped,
+        "sessions": sessions_with_artifacts,
+    }
+
+
 def delete_session_manifest_records(session_id: str, *, db_path: Path | str | None = None) -> None:
     sid = str(session_id or "").strip()
     if not _is_safe_session_id(sid):

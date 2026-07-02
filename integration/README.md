@@ -16,6 +16,7 @@ export SKILLHUB_URL=http://127.0.0.1:8000   # optional; SkillHub market only (se
 - **SkillHub** — UI and `/api/skillhub/*` routes are active only when `SKILLHUB_URL` is also set.
 - **Egress policy (iptables)** — gated API to apply iptables open/whitelist policies (see below). **Off by default**; requires `HERMES_EGRESS_POLICY_ENABLED=1`.
 - **Knowledge base BFF** — `POST /api/integration/knowledge_base/*` routes are active only when `KNOWLEDGE_BASE_URL` is also set.
+- **Notifications** — `/api/integration/notifications/*` for local notification storage (`notifications.db`) and knowledge base notification aggregation (from downstream `get_user_messages`).
 
 If you use a local HTTP proxy (`HTTP_PROXY`, e.g. Clash), add the SkillHub host to `NO_PROXY` (or rely on `ensure_skillhub_no_proxy()` at server startup, which appends the hostname from `SKILLHUB_URL`). Without this, `/api/skillhub/*` may return 502 while `curl` to the same upstream works.
 
@@ -230,13 +231,22 @@ export KNOWLEDGE_BASE_URL=http://192.168.1.132:17861
 | POST | `/api/integration/knowledge_base/members` | `get_user_inshkb` | `uuid`, `kbName`, `page`, `size` |
 | POST | `/api/integration/knowledge_base/documents` | `list_knowledge_bases_details` | `kbName`, `page`, `size` |
 | POST | `/api/integration/knowledge_base/upload_docs` | `upload_docs` | multipart：`uuid`, `kbName`, `files`, `fileProperties` |
+| POST | `/api/integration/knowledge_base/upload_artifacts` | `upload_docs`（编排） | `uuid`, `kbName`, `fileProperties`, `paths` |
 | POST | `/api/integration/knowledge_base/update_docs` | `update_docs` | `kbName`, `fileNames`, `fileProperties` |
 | POST | `/api/integration/knowledge_base/delete_docs` | `delete_docs` | `kbName`, `fileNames` |
 | POST | `/api/integration/knowledge_base/show_pdf` | `show_pdf` | `kbName`, `fileName`（可选 `flag`） |
 | POST | `/api/integration/knowledge_base/search_docs` | `search_docs` | `query`, `kbName`（可选 `topK`, `scoreThreshold`） |
 | POST | `/api/integration/knowledge_base/search_docs_xcore` | `search_docs_xcore` | `query`, `kbNames`（非空数组；可选 `topK`, `scoreThreshold`） |
+| POST | `/api/integration/knowledge_base/creater_handle_application` | `creater_handle_application` | 透传，无字段校验 |
+| POST | `/api/integration/knowledge_base/get_joinkb_applications` | `get_joinkb_applications` | 透传，无字段校验 |
+| POST | `/api/integration/knowledge_base/get_user_messages` | `get_user_messages` | 透传，无字段校验 |
+| POST | `/api/integration/knowledge_base/mark_message_read` | `mark_message_read` | 透传，无字段校验 |
+| POST | `/api/integration/knowledge_base/user_exit_shkb` | `user_exit_shkb` | 透传，无字段校验 |
+| POST | `/api/integration/knowledge_base/remove_from_myshkb` | `remove_from_myshkb` | 透传，无字段校验 |
+| POST | `/api/integration/knowledge_base/delete_readed_message` | `delete_readed_message` | 透传，无字段校验 |
+| POST | `/api/integration/knowledge_base/download_doc` | `download_doc` | 透传，无字段校验（二进制或 JSON） |
 
-成功时 HTTP 状态码与 JSON body **原样透传**下游响应（含 `code` / `msg` / `data` 包装）。`show_pdf` 在下游返回 PDF 时透传二进制。BFF 自身错误：请求校验失败 HTTP 400；下游不可达 HTTP 502。
+成功时 HTTP 状态码与 JSON body **原样透传**下游响应（含 `code` / `msg` / `data` 包装）。`show_pdf` 在下游返回 PDF 时透传二进制。`download_doc` 在下游返回文件时透传二进制。文档列表筛选请使用 `/documents`（下游同为 `list_knowledge_bases_details`）。BFF 自身错误：请求校验失败 HTTP 400；下游不可达 HTTP 502。
 
 文档上传须两步串联：`upload_docs` 成功后再 `update_docs`。
 
@@ -244,6 +254,37 @@ export KNOWLEDGE_BASE_URL=http://192.168.1.132:17861
 curl -sS -X POST http://127.0.0.1:8787/api/integration/knowledge_base/list \
   -H "Content-Type: application/json" \
   -d '{"account":"admin","uuid":"aaaaaaaa0000aaaa0000aaaaaaaaaaaa","isPersonal":1}'
+```
+
+### 通知系统（`HERMES_INTEGRATION=1` + `KNOWLEDGE_BASE_URL`）
+
+完整 API 文档：[`docs/integration-notifications-api.md`](../docs/integration-notifications-api.md)。
+
+HTTP 接口仅服务知识库通知（`kb_apply`），从下游 `get_user_messages` 实时聚合。`{HERMES_WEBUI_STATE_DIR}/notifications.db` 表结构与 `store.py` 预留，当前 HTTP 层不读写。
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/api/integration/notifications` | 知识库通知列表（`read_type`/`action_status` 过滤、游标分页；永久排除 `massType=3, state=2` 结果待处理） |
+| GET | `/api/integration/notifications/summary` | 未读计数（铃铛角标；计数规则与列表排除一致） |
+| POST | `/api/integration/notifications/read` | 标记已读（`kb:` ID 批量转发下游 `mark_message_read`） |
+| POST | `/api/integration/notifications/delete` | 删除（`kb:` ID 批量转发下游 `delete_readed_message`） |
+
+列表查询参数：
+- `account` / `uuid` — 必填
+- `read_type` — 下游 `readType`：`all`/`unread`/`seen`（默认 `all`）
+- `action_status` — 业务状态过滤，逗号分隔（如 `pending`）
+- `limit` — 每页条数（默认 20）
+- `cursor` — 游标分页
+
+审批（`approve`/`reject`/`ignore`）请调用 `POST /api/integration/knowledge_base/creater_handle_application`。
+
+```bash
+curl -sS 'http://127.0.0.1:8787/api/integration/notifications?account=admin&uuid=aaaaaaaa0000aaaa0000aaaaaaaaaaaa&limit=20'
+curl -sS 'http://127.0.0.1:8787/api/integration/notifications?account=admin&uuid=aaaaaaaa0000aaaa0000aaaaaaaaaaaa&read_type=unread&action_status=pending'
+curl -sS 'http://127.0.0.1:8787/api/integration/notifications/summary?account=admin&uuid=aaaaaaaa0000aaaa0000aaaaaaaaaaaa'
+curl -sS -X POST 'http://127.0.0.1:8787/api/integration/notifications/read' \
+  -H 'Content-Type: application/json' \
+  -d '{"ids":["kb:97"],"account":"admin","uuid":"aaaaaaaa0000aaaa0000aaaaaaaaaaaa"}'
 ```
 
 ## 维护约束
@@ -304,6 +345,7 @@ Response includes global `stats`: `{ hub, installed, not_installed, custom }` ac
 |------|------|
 | `config.py` | `HERMES_INTEGRATION`, `SKILLHUB_URL`, `KNOWLEDGE_BASE_URL`, `ZHILING_CONTROL_PLANE_URL`, `ZHILING_LOGOUT_API_URL`, `ZHILING_IDENTITY_CACHE_TTL_SECONDS`, `skillhub_enabled()`, `knowledge_base_enabled()`, `identity_lookup_enabled()`, `zhiling_identity_cache_ttl_seconds()`, `zhiling_logout_enabled()` |
 | `knowledge_base/` | `/api/integration/knowledge_base/*` → `{KNOWLEDGE_BASE_URL}/knowledge_base/*` |
+| `notifications/` | `/api/integration/notifications/*` — 通知存储（`notifications.db`）与知识库消息聚合 |
 | `identity/` | `GET /api/integration/webui_login` → Control Plane `/api/identity/lookup`；进程内身份缓存（`session_store.py`） |
 | `logout/` | `POST /api/integration/webui_logout` → `{ZHILING_LOGOUT_API_URL}/api/logout` |
 | `skills/skillhub.py` | Upstream httpx client |

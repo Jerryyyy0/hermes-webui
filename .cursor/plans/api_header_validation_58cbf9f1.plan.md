@@ -5,7 +5,6 @@ todos: []
 isProject: false
 ---
 
-
 # API Header 校验方案
 
 ## 设计思路
@@ -24,6 +23,8 @@ flowchart LR
     BeforeAPI -->|reject| Reject["400/401/403 Response"]
     BeforeAPI -->|skip| RouteDispatch
 ```
+
+
 
 ## 核心层改动（最小化）
 
@@ -97,12 +98,13 @@ def before_api_request(handler, parsed) -> bool:
             continue
         header_value = handler.headers.get(rule.header)
         if not rule.validate(header_value):
-            send_error(handler, rule, parsed.path)
+            send_error(handler, rule, parsed.path)----
             return False
     return True
 ```
 
 支持的 match 类型：
+
 - `exists`：header 存在即可
 - `exact`：精确匹配指定值
 - `regex`：正则表达式匹配
@@ -111,6 +113,7 @@ def before_api_request(handler, parsed) -> bool:
 ### 默认排除路径
 
 以下路径默认不参与校验（与 `check_auth` 公开路径保持一致）：
+
 - `/api/health`
 - `/api/auth/login`
 - `/api/auth/status`
@@ -118,16 +121,19 @@ def before_api_request(handler, parsed) -> bool:
 
 ## 改动文件清单
 
-| 文件 | 改动 |
-|------|------|
-| `server.py` | 在 `do_GET` 和 `_handle_write` 各加 1 行钩子调用 + import |
-| `integration/header_validation/__init__.py` | 新建，导出入口 |
-| `integration/header_validation/config.py` | 新建，规则加载 |
-| `integration/header_validation/validator.py` | 新建，校验引擎 |
-| `integration/README.md` | 补充 header_validation 说明 |
+
+| 文件                                           | 改动                                               |
+| -------------------------------------------- | ------------------------------------------------ |
+| `server.py`                                  | 在 `do_GET` 和 `_handle_write` 各加 1 行钩子调用 + import |
+| `integration/header_validation/__init__.py`  | 新建，导出入口                                          |
+| `integration/header_validation/config.py`    | 新建，规则加载                                          |
+| `integration/header_validation/validator.py` | 新建，校验引擎                                          |
+| `integration/README.md`                      | 补充 header_validation 说明                          |
+
 
 ## 不需要改的
 
 - 不改 `api/routes.py`（16000+ 行大文件，零触碰）
 - 不改 `api/auth.py`（与现有认证体系解耦）
 - 不改 `integration/swagger/openapi.json`（这是校验中间件，不是新 API）
+

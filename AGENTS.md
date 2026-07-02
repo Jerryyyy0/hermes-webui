@@ -65,6 +65,39 @@ Hermes WebUI 依赖并与 **Hermes Agent** 协同运行。当任务涉及 Agent 
 - **根目录 `CHANGELOG.md`**：以**上游 Hermes WebUI** 发布说明为主。集成外部服务、新增 `integration/` 内代码或改接缝文件时，**默认不要修改**根目录 `CHANGELOG.md`。Fork 侧说明写在 [`integration/CHANGELOG.md`](integration/CHANGELOG.md)；仅当用户明确要求、或该变更将并入上游 release 时再动根目录文件。
 - **API 与 Swagger 同步**：凡新增或变更 **integration 暴露的 HTTP 接口**（含 `/api/skillhub/*`、integration 注册的其它路由、查询参数、请求/响应体、状态码），须在同一变更中更新 [`integration/swagger/openapi.json`](integration/swagger/openapi.json)，并与 [`integration/README.md`](integration/README.md) 路由表一致。可在本地打开 `/docs` 核对。上游原生 `/api/*` 若未纳入 integration Swagger，按上游惯例处理，不强行写入 integration 规范。
 - **Integration API 路径命名**：`integration/` 新增或变更的 HTTP **路径段**使用 **snake_case（下划线 `_`）**，不使用 kebab-case（连字符 `-`）。示例：`/api/skillhub/skills/no_self_improve`，而非 `no-self-improve`。JSON 字段名、YAML config 键、Python 模块名沿用各自惯例（可与路径不同）。
+- **异常返回文案使用中文**：`integration/` **新增** HTTP 接口通过 `bad()`、`j(..., status=4xx/5xx)` 或其它方式返回给调用方的**错误/异常可读文案**（JSON 中的 `error`、`msg` 等字段）**须使用中文**。不要求改动既有上游 `/api/*` 的英文错误文案；下游外部服务原始错误仅用于日志或结构化透传字段时除外，但面向 WebUI 调用方展示或调试的错误说明仍应为中文。对应测试断言中的错误文案应与实现一致。
+
+### Integration HTTP 处理器注意点
+
+以下结论来自通知模块（`integration/notifications/`）与知识库 BFF 联调时的真实故障排查，适用于 `integration/` 下所有新增 HTTP handler。
+
+**JSON 响应必须走 `j()` / `bad()`**
+
+- `integration/` 新增 handler 写 JSON 响应时，**禁止**手动 `send_response` + `send_header("Content-Type")` + `end_headers()` + `wfile.write()`。
+- WebUI 使用 HTTP/1.1 keep-alive（`ThreadingHTTPServer`）。响应若无 `Content-Length` 且无 `Transfer-Encoding: chunked`，客户端（curl、浏览器）无法判断 body 是否结束，会挂起直到读超时（常见约 30 秒）。
+- 服务端 access log 中 `ms` 可能只有几十毫秒，但客户端仍长时间无响应——**不要据此误判为下游慢或 handler 逻辑慢**，先检查响应头是否缺少 `Content-Length`。
+- 统一使用 [`api/helpers.py`](api/helpers.py) 的 `j()`（成功 JSON）和 `bad()`（错误 JSON）；知识库 BFF 的 `_respond()` 也是薄封装到 `j()`。
+- 传给 `bad()` 的 `msg` 及错误 JSON 中的可读字段须为**中文**（见上文「异常返回文案使用中文」）。
+
+**知识库下游契约（调用 `integration/knowledge_base/client.py` 时）**
+
+- 下游标准响应信封为 `{code, msg, data}`，**消息列表在 `data` 字段**，不是 `messages`。
+- `get_user_messages` **必填** `account`、`uuid`、`readType`（`all` / `unread` / `seen`）；缺 `readType` 时下游快速返回 500，但字段名错误会导致永远取不到数据。
+- 用户标识由**调用方**在 query params（GET）或 request body（POST）传入；WebUI **不**从 Zhiling identity session 隐式推断 `account`/`uuid`（与知识库 BFF 透传模式一致）。
+- 下游消息字段名与常见假设不同，须按实际 schema 映射，**禁止**用相似字段兜底（例如下游是 `massage`、`createTime`、`showName`、`state`，不是 `message`、`createdAt`、`kbName`、`isRead`）。当前字段无明确来源时默认为空值。
+
+**认证与 curl 调试**
+
+- WebUI 认证是 **cookie session**（`hermes_session`），不是 Bearer token。`Authorization` header 不参与普通 `/api/integration/*` 认证（仅 `/api/integration/webui_login` 登录代理会提取 Bearer 做 identity lookup）。
+- 未设 `HERMES_WEBUI_PASSWORD` 时，`check_auth` 直接放行；curl 调 integration 接口**不需要** `Authorization`。
+- 浏览器 POST 在开启密码认证时需带 `X-Hermes-CSRF-Token`；curl 无 `Origin`/`Referer` 时不走 CSRF 校验。
+
+**排查「响应慢 + 空数据」时的顺序**
+
+1. 用 `curl -D -` 看响应头是否有 `Content-Length`。
+2. 对比同进程内知识库 BFF 透传（如 `POST /api/integration/knowledge_base/get_user_messages`）的耗时；BFF 快而 aggregation handler 慢，优先怀疑响应写法而非下游。
+3. 直连 `KNOWLEDGE_BASE_URL` 核对请求体字段（尤其 `readType`）与响应 `data` 结构。
+4. 看 server access log 的 `ms`：若 handler 已完成但客户端仍超时，几乎一定是 HTTP 响应格式问题。
 
 ## 贡献风格
 
@@ -73,6 +106,15 @@ Hermes WebUI 依赖并与 **Hermes Agent** 协同运行。当任务涉及 Agent 
 - 优先使用现有的 Python + 原生 JavaScript 结构。未经充分论证并提供回滚方案，不得引入新依赖、构建工具、框架或长期运行的进程。
 - 修改安装配置、引导流程、运行时行为、架构、测试指南或用户可见工作流时，同步更新文档。
 - 新增或大幅改写 Markdown 文档时，默认尽量使用中文说明；若编辑既有英文上游文档、外部规范、API 字段说明或需要保持原文风格的段落，可沿用原语言并避免中英风格混杂。
+
+### 简单接口文档
+
+当用户要求「简单的接口文档」或表达类似意图时，回复**仅**包含：
+
+1. **输入输出参数** — 路径、方法、请求体/query 字段、响应字段（含类型与是否必填）。
+2. **调用示例** — 可直接复制的 `curl` 或等价示例。
+
+不要额外展开架构背景、实现细节、排障步骤、变更历史或与调用无关的说明；用户未明确要求时不写长文档或新建 Markdown 文件。
 - 用户可见的行为、配置、工作流或文档变更（应出现在发布说明中的）：上游/Core 变更更新根目录 `CHANGELOG.md`；**仅 integration/Fork 侧**变更更新 `integration/CHANGELOG.md`（见上文 Integration 维护约束）。
 - UI 或 UX 变更须提供变更前后的对比截图，并测试桌面、窄屏和移动端状态。
 - 行为变更须在可行时新增或更新自动化测试，并列出已执行的手动验证。

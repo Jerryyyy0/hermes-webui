@@ -327,6 +327,7 @@ _CANCEL_MARKER_PATTERNS = (
     'task canceled',
     'response interrupted',
     '任务已取消',
+    '响应已中断',
 )
 
 
@@ -3613,7 +3614,7 @@ def _stream_writeback_can_supersede_recovery_marker(session, msg_text):
     if last.get('type') != 'interrupted':
         return False
     content = str(last.get('content') or '')
-    if 'Response interrupted' not in content or 'before this turn finished' not in content:
+    if '响应已中断' not in content or '完成前中断' not in content:
         return False
 
     expected = ' '.join(str(msg_text or '').split())
@@ -5242,8 +5243,10 @@ def _run_agent_streaming(
 
             _browser_preview = BrowserPreviewEmitter()
 
-            def _maybe_emit_browser_preview(tool_name):
-                _browser_preview.maybe_emit(put, session_id, stream_id, tool_name)
+            def _maybe_emit_browser_preview(tool_name, tool_args=None):
+                _browser_preview.maybe_emit(
+                    put, session_id, stream_id, tool_name, tool_args=tool_args,
+                )
 
             def _emit_manifest_delta(name, args, result='', *, tid='', status='completed', source_kind='tool_complete'):
                 try:
@@ -5438,7 +5441,7 @@ def _run_agent_streaming(
                         status='in_progress',
                         source_kind='tool_start',
                     )
-                    _maybe_emit_browser_preview(name)
+                    _maybe_emit_browser_preview(name, args)
                     put('tool', {
                         'event_type': event_type or 'tool.started',
                         'name': name,
@@ -5563,7 +5566,7 @@ def _run_agent_streaming(
                             status='in_progress',
                             source_kind='tool_start',
                         )
-                        _maybe_emit_browser_preview(name)
+                        _maybe_emit_browser_preview(name, args)
                         put('tool', {
                             'event_type': 'tool.started',
                             'name': name,

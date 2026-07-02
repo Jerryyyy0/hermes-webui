@@ -252,8 +252,10 @@ def _run_gateway_chat_streaming(
 
     _browser_preview = BrowserPreviewEmitter()
 
-    def _maybe_emit_gateway_browser_preview(tool_name):
-        _browser_preview.maybe_emit(put_gateway_event, session_id, stream_id, tool_name)
+    def _maybe_emit_gateway_browser_preview(tool_name, tool_args=None):
+        _browser_preview.maybe_emit(
+            put_gateway_event, session_id, stream_id, tool_name, tool_args=tool_args,
+        )
 
     manifest_delta_sequence = [0]
     manifest_turn_key = str(stream_turn_key or "").strip()
@@ -461,7 +463,10 @@ def _run_gateway_chat_streaming(
                                         break
                         emit_gateway_manifest_delta(event_payload, event_name)
                         if event_name == "tool":
-                            _maybe_emit_gateway_browser_preview(event_payload.get("name"))
+                            _maybe_emit_gateway_browser_preview(
+                                event_payload.get("name"),
+                                event_payload.get("args"),
+                            )
                         put_gateway_event(event_name, event_payload)
                         update_active_run(stream_id, phase="gateway-tool", latest_tool=event_payload.get("name"))
                     sse_event = "message"

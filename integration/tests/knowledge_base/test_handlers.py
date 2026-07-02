@@ -1,9 +1,11 @@
 import json
 from io import BytesIO
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 from urllib.parse import urlparse
 
 from integration.knowledge_base import client
+from integration.knowledge_base.client import KnowledgeBaseUpstreamError
 from integration.knowledge_base.handlers import try_handle_post, try_handle_post_early
 
 
@@ -117,7 +119,7 @@ def test_show_pdf_success():
     upstream_data = {"url": "http://kb.test/preview/abc.pdf"}
     with patch("integration.knowledge_base.handlers.knowledge_base_enabled", return_value=True):
         with patch(
-            "integration.knowledge_base.handlers.client.post_show_pdf",
+            "integration.knowledge_base.handlers.client.post_binary_or_json",
             return_value=client.KnowledgeBaseShowPdfResult(
                 kind="json", status=200, payload=upstream_data
             ),
@@ -126,7 +128,8 @@ def test_show_pdf_success():
     handler.send_response.assert_called_with(200)
     assert _json_payload(handler) == upstream_data
     mock_post.assert_called_once()
-    upstream_body = mock_post.call_args.args[0]
+    route_key, upstream_body = mock_post.call_args.args
+    assert route_key == "show_pdf"
     assert upstream_body == {
         "kbName": "share54",
         "fileName": "1656号附件-电力中长期市场基本规则.pdf",
@@ -142,7 +145,7 @@ def test_show_pdf_binary():
     pdf_bytes = b"%PDF-1.4 test"
     with patch("integration.knowledge_base.handlers.knowledge_base_enabled", return_value=True):
         with patch(
-            "integration.knowledge_base.handlers.client.post_show_pdf",
+            "integration.knowledge_base.handlers.client.post_binary_or_json",
             return_value=client.KnowledgeBaseShowPdfResult(
                 kind="binary",
                 status=200,
@@ -167,11 +170,12 @@ def test_show_pdf_with_flag():
     }
     with patch("integration.knowledge_base.handlers.knowledge_base_enabled", return_value=True):
         with patch(
-            "integration.knowledge_base.handlers.client.post_show_pdf",
+            "integration.knowledge_base.handlers.client.post_binary_or_json",
             return_value=client.KnowledgeBaseShowPdfResult(kind="json", status=200, payload=None),
         ) as mock_post:
             assert try_handle_post(handler, parsed, body) is True
-    upstream_body = mock_post.call_args.args[0]
+    route_key, upstream_body = mock_post.call_args.args
+    assert route_key == "show_pdf"
     assert upstream_body["flag"] is True
 
 
@@ -334,3 +338,375 @@ def test_upload_docs_success():
     assert kwargs["data"]["kbName"] == "kb1"
     assert kwargs["data"]["fileProperties"] == file_props
     assert kwargs["files"][0][1][0] == "doc.pdf"
+
+
+def test_handle_application_passthrough():
+    handler = MagicMock()
+    parsed = urlparse("/api/integration/knowledge_base/creater_handle_application")
+    body = {"userId": "u1", "uuid": "u1", "kbName": "share1", "action": "approve"}
+    upstream_resp = {"code": 200, "msg": "操作成功"}
+    with patch("integration.knowledge_base.handlers.knowledge_base_enabled", return_value=True):
+        with patch(
+            "integration.knowledge_base.handlers.client.post_json",
+            return_value=(200, upstream_resp),
+        ) as mock_post:
+            assert try_handle_post(handler, parsed, body) is True
+    handler.send_response.assert_called_with(200)
+    assert _json_payload(handler) == upstream_resp
+    mock_post.assert_called_once()
+    route_key, upstream_body = mock_post.call_args.args
+    assert route_key == "creater_handle_application"
+    assert upstream_body == body
+
+
+def test_get_joinkb_applications_passthrough():
+    handler = MagicMock()
+    parsed = urlparse("/api/integration/knowledge_base/get_joinkb_applications")
+    body = {
+        "userId": "admin",
+        "uuid": "aaaaaaaa0000aaaa0000aaaaaaaaaaaa",
+        "kbName": "share49",
+    }
+    upstream_resp = {
+        "code": 200,
+        "msg": "success",
+        "data": [
+            {
+                "id": 120,
+                "UserId": "aaaaaaaa0000aaaa0000aaaaaaaaaaaa",
+                "massage": "用户 wzq (wzq) 申请加入您的 法律法规 知识库",
+                "targetKbName": "share49",
+                "targetUserId": "7ef13dc63648f73a5aba7cab6432bb",
+                "createTime": "2026-07-01T19:20:06.196674",
+                "username": "wzq",
+                "portraitType": "pt1",
+            }
+        ],
+    }
+    with patch("integration.knowledge_base.handlers.knowledge_base_enabled", return_value=True):
+        with patch(
+            "integration.knowledge_base.handlers.client.post_json",
+            return_value=(200, upstream_resp),
+        ) as mock_post:
+            assert try_handle_post(handler, parsed, body) is True
+    handler.send_response.assert_called_with(200)
+    assert _json_payload(handler) == upstream_resp
+    mock_post.assert_called_once()
+    route_key, upstream_body = mock_post.call_args.args
+    assert route_key == "get_joinkb_applications"
+    assert upstream_body == body
+
+
+def test_get_user_messages_passthrough():
+    handler = MagicMock()
+    parsed = urlparse("/api/integration/knowledge_base/get_user_messages")
+    body = {"account": "18810008888", "uuid": "u1", "readType": "unread"}
+    upstream_resp = {"code": 200, "msg": "查询成功", "data": []}
+    with patch("integration.knowledge_base.handlers.knowledge_base_enabled", return_value=True):
+        with patch(
+            "integration.knowledge_base.handlers.client.post_json",
+            return_value=(200, upstream_resp),
+        ) as mock_post:
+            assert try_handle_post(handler, parsed, body) is True
+    handler.send_response.assert_called_with(200)
+    assert _json_payload(handler) == upstream_resp
+    mock_post.assert_called_once()
+    route_key, upstream_body = mock_post.call_args.args
+    assert route_key == "get_user_messages"
+    assert upstream_body == body
+
+
+def test_mark_message_read_passthrough():
+    handler = MagicMock()
+    parsed = urlparse("/api/integration/knowledge_base/mark_message_read")
+    body = {"messageId": [112]}
+    upstream_resp = {"code": 200, "msg": "操作成功", "data": None}
+    with patch("integration.knowledge_base.handlers.knowledge_base_enabled", return_value=True):
+        with patch(
+            "integration.knowledge_base.handlers.client.post_json",
+            return_value=(200, upstream_resp),
+        ) as mock_post:
+            assert try_handle_post(handler, parsed, body) is True
+    handler.send_response.assert_called_with(200)
+    assert _json_payload(handler) == upstream_resp
+    mock_post.assert_called_once()
+    route_key, upstream_body = mock_post.call_args.args
+    assert route_key == "mark_message_read"
+    assert upstream_body == body
+
+
+def test_user_exit_shkb_passthrough():
+    handler = MagicMock()
+    parsed = urlparse("/api/integration/knowledge_base/user_exit_shkb")
+    body = {
+        "account": "wzq",
+        "uuid": "7ef13dc63648f73a5aba7cab6432bb",
+        "kbName": "share28",
+    }
+    upstream_resp = {
+        "code": 200,
+        "msg": "用户 wzq (wzq) 已成功主动退出知识库 人工智能会议纪要",
+        "data": None,
+    }
+    with patch("integration.knowledge_base.handlers.knowledge_base_enabled", return_value=True):
+        with patch(
+            "integration.knowledge_base.handlers.client.post_json",
+            return_value=(200, upstream_resp),
+        ) as mock_post:
+            assert try_handle_post(handler, parsed, body) is True
+    handler.send_response.assert_called_with(200)
+    assert _json_payload(handler) == upstream_resp
+    mock_post.assert_called_once()
+    route_key, upstream_body = mock_post.call_args.args
+    assert route_key == "user_exit_shkb"
+    assert upstream_body == body
+
+
+def test_remove_from_myshkb_passthrough():
+    handler = MagicMock()
+    parsed = urlparse("/api/integration/knowledge_base/remove_from_myshkb")
+    body = {
+        "account": ["wzq"],
+        "uuid": ["7ef13dc63648f73a5aba7cab6432bb"],
+        "kbName": "share20",
+    }
+    upstream_resp = {
+        "code": 200,
+        "msg": "用户 7ef13dc63648f73a5aba7cab6432bb 已被成功移出知识库 share20",
+        "data": None,
+    }
+    with patch("integration.knowledge_base.handlers.knowledge_base_enabled", return_value=True):
+        with patch(
+            "integration.knowledge_base.handlers.client.post_json",
+            return_value=(200, upstream_resp),
+        ) as mock_post:
+            assert try_handle_post(handler, parsed, body) is True
+    handler.send_response.assert_called_with(200)
+    assert _json_payload(handler) == upstream_resp
+    mock_post.assert_called_once()
+    route_key, upstream_body = mock_post.call_args.args
+    assert route_key == "remove_from_myshkb"
+    assert upstream_body == body
+
+
+def test_delete_readed_message_passthrough():
+    handler = MagicMock()
+    parsed = urlparse("/api/integration/knowledge_base/delete_readed_message")
+    body = {"messageId": [116, 1]}
+    upstream_resp = {"code": 200, "msg": "操作成功", "data": None}
+    with patch("integration.knowledge_base.handlers.knowledge_base_enabled", return_value=True):
+        with patch(
+            "integration.knowledge_base.handlers.client.post_json",
+            return_value=(200, upstream_resp),
+        ) as mock_post:
+            assert try_handle_post(handler, parsed, body) is True
+    handler.send_response.assert_called_with(200)
+    assert _json_payload(handler) == upstream_resp
+    mock_post.assert_called_once()
+    route_key, upstream_body = mock_post.call_args.args
+    assert route_key == "delete_readed_message"
+    assert upstream_body == body
+
+
+def test_download_doc_passthrough_binary():
+    handler = MagicMock()
+    parsed = urlparse("/api/integration/knowledge_base/download_doc")
+    body = {"knowledge_base_name": "share28", "file_name": "test1.pdf"}
+    pdf_bytes = b"%PDF-1.4 download"
+    with patch("integration.knowledge_base.handlers.knowledge_base_enabled", return_value=True):
+        with patch(
+            "integration.knowledge_base.handlers.client.post_binary_or_json",
+            return_value=client.KnowledgeBaseShowPdfResult(
+                kind="binary",
+                status=200,
+                content=pdf_bytes,
+                content_type="application/pdf",
+                extra_headers={"Content-Disposition": 'attachment; filename="test1.pdf"'},
+            ),
+        ) as mock_post:
+            assert try_handle_post(handler, parsed, body) is True
+    handler.send_response.assert_called_with(200)
+    assert handler.wfile.write.call_args.args[0] == pdf_bytes
+    mock_post.assert_called_once_with("download_doc", body)
+
+
+def test_download_doc_passthrough_json_error():
+    handler = MagicMock()
+    parsed = urlparse("/api/integration/knowledge_base/download_doc")
+    body = {"knowledge_base_name": "share28", "file_name": "missing.pdf"}
+    upstream_resp = {"code": 500, "msg": "文件不存在", "data": None}
+    with patch("integration.knowledge_base.handlers.knowledge_base_enabled", return_value=True):
+        with patch(
+            "integration.knowledge_base.handlers.client.post_binary_or_json",
+            return_value=client.KnowledgeBaseShowPdfResult(
+                kind="json", status=500, payload=upstream_resp
+            ),
+        ) as mock_post:
+            assert try_handle_post(handler, parsed, body) is True
+    handler.send_response.assert_called_with(500)
+    assert _json_payload(handler) == upstream_resp
+    mock_post.assert_called_once_with("download_doc", body)
+
+
+def test_upload_artifacts_missing_uuid():
+    handler = MagicMock()
+    parsed = urlparse("/api/integration/knowledge_base/upload_artifacts")
+    body = {
+        "kbName": "share54",
+        "fileProperties": [{"fileName": "a.md", "fileClass": "直属", "fileUploader": "u1", "publicationDate": "1"}],
+        "paths": ["a.md"],
+    }
+    with patch("integration.knowledge_base.handlers.knowledge_base_enabled", return_value=True):
+        assert try_handle_post(handler, parsed, body) is True
+    handler.send_response.assert_called_with(400)
+    assert _json_payload(handler)["error"] == "缺少用户 UUID"
+
+
+def test_upload_artifacts_missing_file_properties():
+    handler = MagicMock()
+    parsed = urlparse("/api/integration/knowledge_base/upload_artifacts")
+    body = {"uuid": "u1", "kbName": "share54", "paths": ["a.md"]}
+    with patch("integration.knowledge_base.handlers.knowledge_base_enabled", return_value=True):
+        assert try_handle_post(handler, parsed, body) is True
+    handler.send_response.assert_called_with(400)
+    assert _json_payload(handler)["error"] == "缺少文件属性"
+
+
+def test_upload_artifacts_missing_paths():
+    handler = MagicMock()
+    parsed = urlparse("/api/integration/knowledge_base/upload_artifacts")
+    body = {
+        "uuid": "u1",
+        "kbName": "share54",
+        "fileProperties": [{"fileName": "a.md", "fileClass": "直属", "fileUploader": "u1", "publicationDate": "1"}],
+    }
+    with patch("integration.knowledge_base.handlers.knowledge_base_enabled", return_value=True):
+        assert try_handle_post(handler, parsed, body) is True
+    handler.send_response.assert_called_with(400)
+    assert _json_payload(handler)["error"] == "缺少路径"
+
+
+def test_upload_artifacts_count_mismatch():
+    handler = MagicMock()
+    parsed = urlparse("/api/integration/knowledge_base/upload_artifacts")
+    body = {
+        "uuid": "u1",
+        "kbName": "share54",
+        "fileProperties": [{"fileName": "a.md", "fileClass": "直属", "fileUploader": "u1", "publicationDate": "1"}],
+        "paths": ["a.md", "b.md"],
+    }
+    with patch("integration.knowledge_base.handlers.knowledge_base_enabled", return_value=True):
+        assert try_handle_post(handler, parsed, body) is True
+    handler.send_response.assert_called_with(400)
+    assert _json_payload(handler)["error"] == "文件属性与路径数量不一致"
+
+
+def test_upload_artifacts_path_traversal():
+    handler = MagicMock()
+    parsed = urlparse("/api/integration/knowledge_base/upload_artifacts")
+    body = {
+        "uuid": "u1",
+        "kbName": "share54",
+        "fileProperties": [{"fileName": "evil.md", "fileClass": "直属", "fileUploader": "u1", "publicationDate": "1"}],
+        "paths": ["../etc/passwd"],
+    }
+    fake_ws = Path("/tmp/fake-workspace")
+    with patch("integration.knowledge_base.handlers.knowledge_base_enabled", return_value=True):
+        with patch("api.workspace.resolve_trusted_workspace", return_value=fake_ws):
+            with patch("api.workspace.safe_resolve_ws", side_effect=ValueError("traversal")):
+                assert try_handle_post(handler, parsed, body) is True
+    handler.send_response.assert_called_with(400)
+    assert _json_payload(handler)["error"] == "路径越界"
+
+
+def test_upload_artifacts_file_not_found():
+    handler = MagicMock()
+    parsed = urlparse("/api/integration/knowledge_base/upload_artifacts")
+    body = {
+        "uuid": "u1",
+        "kbName": "share54",
+        "fileProperties": [{"fileName": "missing.md", "fileClass": "直属", "fileUploader": "u1", "publicationDate": "1"}],
+        "paths": ["missing.md"],
+    }
+    fake_ws = Path("/tmp/fake-workspace")
+    fake_resolved = Path("/tmp/fake-workspace/missing.md")
+    with patch("integration.knowledge_base.handlers.knowledge_base_enabled", return_value=True):
+        with patch("api.workspace.resolve_trusted_workspace", return_value=fake_ws):
+            with patch("api.workspace.safe_resolve_ws", return_value=fake_resolved):
+                assert try_handle_post(handler, parsed, body) is True
+    handler.send_response.assert_called_with(400)
+    assert _json_payload(handler)["error"] == "文件不存在"
+
+
+def test_upload_artifacts_too_many():
+    handler = MagicMock()
+    parsed = urlparse("/api/integration/knowledge_base/upload_artifacts")
+    paths = [f"file_{i}.md" for i in range(21)]
+    file_props = [
+        {"fileName": f"file_{i}.md", "fileClass": "直属", "fileUploader": "u1", "publicationDate": "1"}
+        for i in range(21)
+    ]
+    body = {"uuid": "u1", "kbName": "share54", "fileProperties": file_props, "paths": paths}
+    with patch("integration.knowledge_base.handlers.knowledge_base_enabled", return_value=True):
+        assert try_handle_post(handler, parsed, body) is True
+    handler.send_response.assert_called_with(400)
+    assert _json_payload(handler)["error"] == "文件数量过多"
+
+
+def test_upload_artifacts_success(tmp_path):
+    handler = MagicMock()
+    parsed = urlparse("/api/integration/knowledge_base/upload_artifacts")
+    (tmp_path / "reports").mkdir()
+    (tmp_path / "reports" / "2025.md").write_bytes(b"# report")
+    (tmp_path / "summary.pdf").write_bytes(b"%PDF-1.4")
+    file_props = [
+        {"fileName": "2025.md", "fileClass": "直属", "fileUploader": "uuid-1", "publicationDate": "1"},
+        {"fileName": "summary.pdf", "fileClass": "直属", "fileUploader": "uuid-1", "publicationDate": "1"},
+    ]
+    body = {
+        "uuid": "uuid-1",
+        "kbName": "share54",
+        "fileProperties": file_props,
+        "paths": ["reports/2025.md", "summary.pdf"],
+    }
+    upstream_resp = {"code": "200", "msg": "success", "data": None}
+    with patch("integration.knowledge_base.handlers.knowledge_base_enabled", return_value=True):
+        with patch("api.workspace.resolve_trusted_workspace", return_value=tmp_path):
+            with patch("api.workspace.safe_resolve_ws", side_effect=lambda ws, p: (ws / p).resolve()):
+                with patch(
+                    "integration.knowledge_base.handlers.client.post_multipart",
+                    return_value=(200, upstream_resp),
+                ) as mock_upload:
+                    assert try_handle_post(handler, parsed, body) is True
+    handler.send_response.assert_called_with(200)
+    assert _json_payload(handler) == upstream_resp
+    mock_upload.assert_called_once()
+    route_key = mock_upload.call_args.args[0]
+    assert route_key == "upload_docs"
+    kwargs = mock_upload.call_args.kwargs
+    assert kwargs["data"]["kbName"] == "share54"
+    fp_json = json.loads(kwargs["data"]["fileProperties"])
+    assert fp_json == file_props
+    assert len(kwargs["files"]) == 2
+    assert kwargs["files"][0][1][0] == "2025.md"
+    assert kwargs["files"][0][1][1] == b"# report"
+    assert kwargs["files"][1][1][0] == "summary.pdf"
+    assert kwargs["files"][1][1][1] == b"%PDF-1.4"
+
+
+def test_upload_artifacts_upstream_error(tmp_path):
+    handler = MagicMock()
+    parsed = urlparse("/api/integration/knowledge_base/upload_artifacts")
+    (tmp_path / "doc.md").write_bytes(b"content")
+    file_props = [{"fileName": "doc.md", "fileClass": "直属", "fileUploader": "uuid-1", "publicationDate": "1"}]
+    body = {"uuid": "uuid-1", "kbName": "share54", "fileProperties": file_props, "paths": ["doc.md"]}
+    with patch("integration.knowledge_base.handlers.knowledge_base_enabled", return_value=True):
+        with patch("api.workspace.resolve_trusted_workspace", return_value=tmp_path):
+            with patch("api.workspace.safe_resolve_ws", side_effect=lambda ws, p: (ws / p).resolve()):
+                with patch(
+                    "integration.knowledge_base.handlers.client.post_multipart",
+                    side_effect=KnowledgeBaseUpstreamError("connection refused"),
+                ):
+                    assert try_handle_post(handler, parsed, body) is True
+    handler.send_response.assert_called_with(502)
+    assert _json_payload(handler)["error"] == "知识库服务不可用"

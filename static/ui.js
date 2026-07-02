@@ -6173,7 +6173,8 @@ function _isRecoveryControlMessageText(text){
   const systemRecovery=/^\[System:/i.test(normalized)
     && /previous response was cut off by a network error/i.test(normalized)
     && /continue exactly where you left off/i.test(normalized);
-  const backendRecovery=/^the live worker stopped before this run finished\.?$/i.test(normalized);
+  const backendRecovery=/^实时 worker 在本次运行完成前已停止。?$/i.test(normalized)
+    || /^the live worker stopped before this run finished\.?$/i.test(normalized);
   return !!(systemRecovery || backendRecovery);
 }
 function _isRecoveryControlMessage(m){
@@ -6345,7 +6346,7 @@ function _assistantVisibleContentForReasoningCompare(m){
     }
   }
   if(_isMarkerOnlyAssistantCompressionMessage(m)){
-    content='**Error:** No response received after context compression. Please retry.';
+    content='**错误：** 压缩后未收到模型响应，请重试。';
   }
   if(_isAssistantEmptyPlaceholderContent(m, content)) return '';
   return String(content||'');
@@ -8132,7 +8133,7 @@ function renderMessages(options){
     }
     const isUser=m.role==='user';
     if(!isUser&&_isMarkerOnlyAssistantCompressionMessage(m)){
-      content='**Error:** No response received after context compression. Please retry.';
+      content='**错误：** 压缩后未收到模型响应，请重试。';
     }
     let userDisplayText=_stripWorkspaceDisplayPrefix(content);
     if(isUser&&_isCronDisplaySession(S.session)){

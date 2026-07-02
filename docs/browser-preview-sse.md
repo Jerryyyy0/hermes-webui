@@ -25,10 +25,14 @@ data: {"session_id":"abc","stream_id":"xyz","url":"http://192.168.1.139:6080/vnc
 ## 触发条件
 
 1. 环境变量 **`BROWSER_PREVIEW_URL`** 已设置为合法的 `http://` 或 `https://` URL（可含 path、query）。
-2. 当前 chat stream 中，**首次**出现以 `browser_` 开头的工具调用（如 `browser_navigate`、`browser_click`）。
-3. 每个 stream **最多发送一次**（`BrowserPreviewEmitter` 去重）。
+2. 当前 chat stream 中，**首次**出现下列任一浏览器相关工具开始执行：
+   - 以 `browser_` 开头的工具调用（如 `browser_navigate`、`browser_click`）
+   - `terminal` 工具且 `args.command` 在命令行开头或 `;` / `|` / `&&` / `||` 之后调用 `agent-browser` CLI（含 `npx agent-browser`、`npx -y agent-browser`、绝对路径形式）
+3. 每个 stream **最多发送一次**（`BrowserPreviewEmitter` 去重）：`browser_*` 与 `terminal`+`agent-browser` **共用同一闸门**，先触发者生效，后续不再重复打开预览。
 
 **不会**在 `/api/chat/start` 时发送；只在工具真正开始执行时发送。
+
+仅取 WebSocket URL 的 `python3 -c "..."` 等不含 `agent-browser` 的 terminal 命令**不会**触发。
 
 ### 后端发射点
 
@@ -49,7 +53,7 @@ data: {"session_id":"abc","stream_id":"xyz","url":"http://192.168.1.139:6080/vnc
 | `stream_id` | string | 当前 chat stream ID |
 | `url` | string | 嵌入 iframe 的完整预览地址（来自 `BROWSER_PREVIEW_URL`） |
 | `source` | string | 固定为 `"camofox"` |
-| `tool` | string | 触发本次事件的工具名，如 `browser_navigate` |
+| `tool` | string | 触发本次事件的工具名，如 `browser_navigate`；terminal 路径为 `agent-browser <subcommand>`（如 `agent-browser connect`） |
 
 若 `BROWSER_PREVIEW_URL` 未设置或无效，**不发送**该事件。
 
@@ -128,7 +132,7 @@ Docker 可在 `docker-compose.yml` 的 `environment:` 或同目录 `.env` 中配
 - 打开右侧工作区面板，进入 **browser** 预览模式。
 - 隐藏 Workspace 标题栏操作区、Files/Tasks 等标签页、文件树（保留关闭按钮）。
 - 在 `#previewBrowserIframe` 中加载 `url`。
-- 标题栏显示：`Browser (browser_navigate) — 192.168.1.139:6080`。
+- 标题栏显示：`Browser (browser_navigate) — 192.168.1.139:6080`，或 terminal 路径下 `Browser (agent-browser connect) — …`。
 - 提供 **Open in browser**，可在新标签打开同一 URL。
 - 对话结束、文件树刷新（`loadDir`）时 **不会自动关闭**；需用户点击 **×** 关闭。
 
@@ -148,7 +152,7 @@ sequenceDiagram
 
   User->>WebUI: 发送消息
   WebUI->>SSE: EventSource(stream_id)
-  Agent->>WebUI: 首次 browser_* 工具开始
+  Agent->>WebUI: 首次 browser_* 或 terminal agent-browser 开始
   Note over WebUI: 异步等待 BROWSER_PREVIEW_DELAY_SECONDS（默认 5s）
   WebUI->>SSE: event browser_preview
   SSE->>WebUI: JSON payload (url, tool, ...)

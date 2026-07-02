@@ -1302,7 +1302,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const systemRecovery=/^\[System:/i.test(normalized)
       && /previous response was cut off by a network error/i.test(normalized)
       && /continue exactly where you left off/i.test(normalized);
-    const backendRecovery=/^the live worker stopped before this run finished\.?$/i.test(normalized);
+    const backendRecovery=/^实时 worker 在本次运行完成前已停止。?$/i.test(normalized)
+      || /^the live worker stopped before this run finished\.?$/i.test(normalized);
     return !!(systemRecovery || backendRecovery);
   }
   function _streamRecoveryControlMessage(m){
@@ -1325,8 +1326,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(!Array.isArray(messages)) return false;
     const msg=[...messages].reverse().find(m=>m&&m.role==='assistant');
     if(!_isMarkerOnlyAssistantMessage(msg)) return false;
-    msg.content='**Error:** No response received after context compression. Please retry.';
-    msg.provider_details='The only assistant text returned for this turn was the internal preserved-task-list compression marker, so the WebUI replaced it with an explicit error instead of rendering the marker as a model response.';
+    msg.content='**错误：** 压缩后未收到模型响应，请重试。';
+    msg.provider_details='本轮助手返回的唯一内容是内部保留的任务列表压缩标记，因此 WebUI 用一条显式错误替换了它，而不是把该标记当作模型响应来渲染。';
     return true;
   }
   function _setActivePaneIdleIfOwner(){
@@ -3009,8 +3010,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           clearLiveToolCards();
           S.busy=false;
           // No-reply guard (#373): if agent returned nothing, show inline error
-          if(!S.messages.some(m=>m.role==='assistant'&&String(m.content||'').trim())&&!assistantText){removeThinking();S.messages.push({role:'assistant',content:'**No response received.** Check your API key and model selection.'});}
-          if(_markerOnlyAssistantError&&typeof showToast==='function') showToast('No response received after context compression. Please retry.',5000,'error');
+          if(!S.messages.some(m=>m.role==='assistant'&&String(m.content||'').trim())&&!assistantText){removeThinking();S.messages.push({role:'assistant',content:'**未收到响应。** 请检查 API Key 和模型选择。'});}
+          if(_markerOnlyAssistantError&&typeof showToast==='function') showToast('压缩后未收到模型响应，请重试。',5000,'error');
           if(isSessionViewed) _markSessionViewed(completedSid, completedSession.message_count ?? S.messages.length);
           // Cooldown: prevent refreshActiveSessionIfExternallyUpdated from
           // force-reloading immediately after "done" — the event already
@@ -3226,7 +3227,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           window._compressionUi=null;
           if(typeof clearCompressionUi==='function') clearCompressionUi();
           if(isRecoveryControlMessage){
-            if(typeof showToast==='function') showToast('Stream recovery signal received. Restoring transcript...',3500,'error');
+            if(typeof showToast==='function') showToast('收到流恢复信号，正在恢复会话记录…',3500,'error');
           } else if(d.session&&typeof d.session==='object'){
             S.session=d.session;
             S.messages=_carryForwardEphemeralTurnFields(S.messages||[], d.session.messages||[]);
@@ -3459,7 +3460,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(S.session.session_id);
         }
         const _markerOnlyAssistantError=_replaceMarkerOnlyAssistantWithStreamError(S.messages);
-        if(_markerOnlyAssistantError&&typeof showToast==='function') showToast('No response received after context compression. Please retry.',5000,'error');
+        if(_markerOnlyAssistantError&&typeof showToast==='function') showToast('压缩后未收到模型响应，请重试。',5000,'error');
         const hasMessageToolMetadata=S.messages.some(m=>{
           if(!m||m.role!=='assistant') return false;
           // Recognize both the standard `tool_calls` (used by completed assistant
@@ -3512,12 +3513,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(S.session&&S.session.session_id===activeSid){
       S.activeStreamId=null;
       clearLiveToolCards();if(!assistantText)removeThinking();
-      S.messages.push({role:'assistant',content:'**Connection interrupted:** The browser lost the live SSE connection before the response finished. If the worker completed, reopening this session should restore the settled transcript.'});renderMessages({preserveScroll:true});
+      S.messages.push({role:'assistant',content:'**连接已中断：** 浏览器在响应完成前丢失了实时 SSE 连接。如果 worker 已完成，重新打开本会话应能恢复最终记录。'});renderMessages({preserveScroll:true});
       _markSessionViewed(activeSid, S.messages.length);
     }else{
       if(typeof trackBackgroundError==='function'){
         const _errTitle=(typeof _allSessions!=='undefined'&&_allSessions.find(s=>s.session_id===activeSid)||{}).title||null;
-        trackBackgroundError(activeSid,_errTitle,'Connection interrupted');
+        trackBackgroundError(activeSid,_errTitle,'连接已中断');
       }
     }
     _setActivePaneIdleIfOwner();

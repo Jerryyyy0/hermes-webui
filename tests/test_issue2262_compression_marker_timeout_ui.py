@@ -25,7 +25,7 @@ def test_marker_only_assistant_message_renders_as_error_not_model_text():
     assert "m.role!=='assistant'" in src
     assert "_isPreservedCompressionTaskListMarkerOnlyText(text)" in src
     assert "if(!isUser&&_isMarkerOnlyAssistantCompressionMessage(m))" in src
-    assert "content='**Error:** No response received after context compression. Please retry.'" in src
+    assert "content='**错误：** 压缩后未收到模型响应，请重试。'" in src
 
 
 def test_done_and_restore_replace_marker_only_assistant_with_error_toast():
@@ -33,7 +33,7 @@ def test_done_and_restore_replace_marker_only_assistant_with_error_toast():
 
     assert "function _replaceMarkerOnlyAssistantWithStreamError(messages)" in src
     assert "_isMarkerOnlyAssistantMessage(msg)" in src
-    assert "msg.content='**Error:** No response received after context compression. Please retry.'" in src
-    assert "internal preserved-task-list compression marker" in src
+    assert "msg.content='**错误：** 压缩后未收到模型响应，请重试。'" in src
+    assert "内部保留的任务列表压缩标记" in src
     assert "_markerOnlyAssistantError=_replaceMarkerOnlyAssistantWithStreamError(S.messages)" in src
-    assert "showToast('No response received after context compression. Please retry.',5000,'error')" in src
+    assert "showToast('压缩后未收到模型响应，请重试。',5000,'error')" in src

@@ -166,7 +166,7 @@ def test_stale_stream_clear_trusts_completed_run_journal_instead_of_adding_marke
         "new prompt",
         "finished answer",
     ]
-    assert all("Response interrupted" not in str(m.get("content") or "") for m in s.messages)
+    assert all("响应已中断" not in str(m.get("content") or "") for m in s.messages)
     assert all(not m.get("_error") for m in s.messages)
 
 

@@ -15,6 +15,18 @@ from typing import Any
 
 DEFAULT_SLOW_REQUEST_SECONDS = 5.0
 MAX_STACK_FRAMES_PER_THREAD = 40
+_SLOW_REQUEST_STACKS_ENV = "HERMES_WEBUI_SLOW_REQUEST_STACKS"
+
+
+def _env_flag(name: str, *, default: bool = False) -> bool:
+    raw = os.getenv(name, "").strip().lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _slow_request_include_stacks() -> bool:
+    return _env_flag(_SLOW_REQUEST_STACKS_ENV, default=False)
 
 
 def _slow_request_seconds() -> float:
@@ -112,7 +124,7 @@ class RequestDiagnostics:
             if self._finished or self._watchdog_logged:
                 return
             self._watchdog_logged = True
-            record = self._build_record_locked(include_stacks=True)
+            record = self._build_record_locked(include_stacks=_slow_request_include_stacks())
         self.logger.warning(
             "Slow WebUI request still running: %s",
             json.dumps(record, sort_keys=True),

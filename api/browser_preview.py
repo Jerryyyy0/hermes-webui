@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 import threading
 from typing import Callable
 from urllib.parse import urlparse
@@ -12,9 +13,52 @@ BROWSER_PREVIEW_URL_ENV = "BROWSER_PREVIEW_URL"
 BROWSER_PREVIEW_DELAY_ENV = "BROWSER_PREVIEW_DELAY_SECONDS"
 BROWSER_PREVIEW_DEFAULT_DELAY_SECONDS = 5.0
 
+_AGENT_BROWSER_RE = re.compile(
+    r'(?:^|(?:;|\||&&|\|\|)\s*)(?:npx\s+(?:--yes|-y\s+)?)?(?:\S*/)?agent-browser(?:\s|$)',
+    re.IGNORECASE,
+)
+_AGENT_BROWSER_SUBCOMMAND_RE = re.compile(
+    r'(?:^|(?:;|\||&&|\|\|)\s*)(?:npx\s+(?:--yes|-y\s+)?)?(?:\S*/)?agent-browser\s+(\S+)',
+    re.IGNORECASE,
+)
+
 
 def is_browser_tool_name(name: str) -> bool:
     return str(name or "").strip().startswith("browser_")
+
+
+def command_invokes_agent_browser(command: str) -> bool:
+    return bool(_AGENT_BROWSER_RE.search(str(command or "").strip()))
+
+
+def should_emit_browser_preview(tool_name: str, tool_args: dict | None = None) -> bool:
+    if is_browser_tool_name(tool_name):
+        return True
+    if str(tool_name or "").strip() == "terminal":
+        cmd = (tool_args or {}).get("command")
+        return command_invokes_agent_browser(str(cmd or ""))
+    return False
+
+
+def _agent_browser_subcommand(command: str) -> str:
+    match = _AGENT_BROWSER_SUBCOMMAND_RE.search(str(command or "").strip())
+    if not match:
+        return ""
+    return str(match.group(1) or "").strip()
+
+
+def browser_preview_tool_label(tool_name: str, tool_args: dict | None = None) -> str:
+    name = str(tool_name or "").strip()
+    if is_browser_tool_name(name):
+        return name
+    if name == "terminal":
+        cmd = str((tool_args or {}).get("command") or "").strip()
+        if command_invokes_agent_browser(cmd):
+            sub = _agent_browser_subcommand(cmd)
+            if sub:
+                return f"agent-browser {sub}"
+            return "agent-browser"
+    return name
 
 
 def _normalize_http_url(raw: str) -> str:
@@ -70,6 +114,7 @@ def browser_preview_payload(
     stream_id: str,
     tool_name: str,
     environ: dict[str, str] | None = None,
+    tool_args: dict | None = None,
 ) -> dict | None:
     url = resolve_browser_preview_url(environ)
     if not url:
@@ -79,7 +124,7 @@ def browser_preview_payload(
         "stream_id": str(stream_id or ""),
         "url": url,
         "source": BROWSER_PREVIEW_SOURCE,
-        "tool": str(tool_name or "").strip(),
+        "tool": browser_preview_tool_label(tool_name, tool_args),
     }
 
 
@@ -97,12 +142,13 @@ class BrowserPreviewEmitter:
         stream_id: str,
         tool_name: str,
         environ: dict[str, str] | None = None,
+        tool_args: dict | None = None,
     ) -> bool:
         if self._emitted:
             return False
-        if not is_browser_tool_name(tool_name):
+        if not should_emit_browser_preview(tool_name, tool_args):
             return False
-        payload = browser_preview_payload(session_id, stream_id, tool_name, environ)
+        payload = browser_preview_payload(session_id, stream_id, tool_name, environ, tool_args)
         if not payload:
             return False
         self._emitted = True

@@ -15,7 +15,7 @@ class _StageRecorder:
         self.stages.append(name)
 
 
-def test_request_diagnostics_timeout_record_includes_stage_and_thread_stacks(caplog):
+def test_request_diagnostics_timeout_record_includes_stage_without_thread_stacks_by_default(caplog):
     logger = logging.getLogger("test.issue1855.timeout")
     diag = RequestDiagnostics(
         "GET",
@@ -36,6 +36,25 @@ def test_request_diagnostics_timeout_record_includes_stage_and_thread_stacks(cap
     assert record["current_stage"] == "all_sessions.read_index"
     assert record["elapsed_ms"] >= 0
     assert any(stage["name"] == "all_sessions.read_index" for stage in record["stages"])
+    assert "thread_stacks" not in record
+
+
+def test_request_diagnostics_timeout_record_includes_thread_stacks_when_enabled(caplog, monkeypatch):
+    monkeypatch.setenv("HERMES_WEBUI_SLOW_REQUEST_STACKS", "1")
+    logger = logging.getLogger("test.issue1855.timeout.stacks")
+    diag = RequestDiagnostics(
+        "GET",
+        "/api/sessions?all_profiles=1",
+        logger=logger,
+        timeout_seconds=5,
+        auto_start=False,
+    )
+    diag.stage("all_sessions.read_index")
+
+    with caplog.at_level(logging.WARNING, logger=logger.name):
+        diag._on_timeout()
+
+    record = json.loads(caplog.records[0].args[0])
     assert record["thread_stacks"]
 
 

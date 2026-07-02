@@ -21,7 +21,9 @@ from integration.skills.zip_import import discover_skill_roots
 
 _log = logging.getLogger(__name__)
 
-_SKILL_META_EXCLUDE = frozenset({".hub_installed", ".category", ".install_name"})
+_SKILL_META_EXCLUDE = frozenset(
+    {".hub_installed", ".category", ".install_name", ".hub_catalog_name"}
+)
 _SKILL_ORIGIN_SIDECAR = ".skill-origin.json"
 _UPLOAD_COPY_EXCLUDE = _SKILL_META_EXCLUDE | {_SKILL_ORIGIN_SIDECAR}
 

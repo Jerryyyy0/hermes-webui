@@ -7,9 +7,14 @@ import time
 from urllib.parse import parse_qs
 
 from api.helpers import _sanitize_error, bad, j
+from api.session_manifest_store import (
+    get_artifact_paths_for_profile,
+    get_artifact_profile_index,
+)
 from api.workspace import (
     WORKSPACE_FILE_SORT_FIELDS,
     WORKSPACE_FILE_SORT_ORDERS,
+    collect_workspace_file_entries_for_paths,
     is_workspace_cruft_basename,
     normalize_workspace_file_ext,
     paginate_workspace_file_entries,
@@ -94,25 +99,23 @@ def _handle_files_list(handler, parsed) -> bool:
     if force_refresh:
         invalidate_workspace_file_index(root, rel)
 
-    # Profile filter/annotation temporarily disabled (scheme C).
-    # from integration.workspace.artifact_profiles import get_workspace_artifact_profile_index
-    # from api.workspace import collect_workspace_file_entries_for_paths
-    # t0 = time.perf_counter()
-    # artifact_index = get_workspace_artifact_profile_index(root)
-    # artifact_ms = (time.perf_counter() - t0) * 1000.0
-    # profile_filter = _query_str(qs, "profile", "").strip() or None
-    # allowed_paths = None
-    # if profile_filter:
-    #     allowed_paths = frozenset(
-    #         path for path, prof in artifact_index.items() if prof == profile_filter
-    #     )
+    profile_filter = _query_str(qs, "profile", "").strip() or None
+    allowed_paths = None
+    artifact_index: dict[str, str] = {}
+
+    t0 = time.perf_counter()
+    if profile_filter:
+        allowed_paths = get_artifact_paths_for_profile(profile_filter)
+    else:
+        artifact_index = get_artifact_profile_index()
+    artifact_ms = (time.perf_counter() - t0) * 1000.0
 
     try:
         t1 = time.perf_counter()
-        # if profile_filter and allowed_paths is not None:
-        #     entries = collect_workspace_file_entries_for_paths(root, allowed_paths)
-        # else:
-        entries = get_workspace_file_entries(root, rel, force_refresh=force_refresh)
+        if profile_filter and allowed_paths is not None:
+            entries = collect_workspace_file_entries_for_paths(root, allowed_paths)
+        else:
+            entries = get_workspace_file_entries(root, rel, force_refresh=force_refresh)
         collect_ms = (time.perf_counter() - t1) * 1000.0
 
         t2 = time.perf_counter()
@@ -134,21 +137,21 @@ def _handle_files_list(handler, parsed) -> bool:
         return True
 
     files = result.get("files") or []
-    # for entry in files:
-    #     if not isinstance(entry, dict):
-    #         continue
-    #     path = str(entry.get("path") or "").strip()
-    #     if profile_filter:
-    #         entry["profile"] = profile_filter
-    #         continue
-    #     prof = artifact_index.get(path)
-    #     if prof:
-    #         entry["profile"] = prof
+    for entry in files:
+        if not isinstance(entry, dict):
+            continue
+        path = str(entry.get("path") or "").strip()
+        if profile_filter:
+            entry["profile"] = profile_filter
+            continue
+        prof = artifact_index.get(path)
+        if prof:
+            entry["profile"] = prof
 
     extra_headers = None
     if _DEBUG_TIMING:
         extra_headers = {
-            # "X-Hermes-Timing-Artifact-Ms": f"{artifact_ms:.2f}",
+            "X-Hermes-Timing-Artifact-Ms": f"{artifact_ms:.2f}",
             "X-Hermes-Timing-Collect-Ms": f"{collect_ms:.2f}",
             "X-Hermes-Timing-Sort-Ms": f"{sort_ms:.2f}",
         }
@@ -164,7 +167,7 @@ def _handle_files_list(handler, parsed) -> bool:
             "type": type_ext or "",
             "sort": sort,
             "order": order,
-            "profile": "",
+            "profile": profile_filter or "",
             "total": result.get("total", 0),
             "has_more": bool(result.get("has_more")),
             "files": files,

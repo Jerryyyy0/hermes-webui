@@ -4,6 +4,7 @@
 ## [Unreleased]
 
 ### Added
+- **`GET /api/sessions?start_at=&end_at=` optional date-range filtering on `last_message_at`.** Either bound may be omitted; both omitted preserves existing behavior. Invalid bounds return HTTP 400. Filter runs after profile scoping and integration sidebar filters, before redaction and pagination.
 - **`GET /api/sessions?profile=<name>&offset=&limit=` for per-profile sidebar pagination.** Cross-profile sidebar expansion now loads other profiles in pages instead of relying on the flat `?all_profiles=1` aggregate. The `all_profiles=1` response shape is unchanged for compatibility.
 - **Browser tool preview SSE.** When `BROWSER_PREVIEW_URL` or `CAMOFOX_URL` is set to a valid `http://` or `https://` remote viewer endpoint, WebUI emits a one-shot `browser_preview` chat-stream event the first time a `browser_*` tool starts in a turn so the UI embeds the preview in the workspace panel (`BROWSER_PREVIEW_URL` overrides `CAMOFOX_URL` when both are set).
 

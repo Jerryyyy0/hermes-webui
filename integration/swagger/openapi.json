@@ -27,7 +27,8 @@
     { "name": "System",      "description": "系统与工具" },
     { "name": "SkillHub",    "description": "SkillHub 远程技能市场代理（需 HERMES_INTEGRATION=1；市场类接口另需 SKILLHUB_URL）。安装/卸载/custom 读写均使用 shared_skills_dir（{HERMES_HOME}/skills，与 WebUI profile 无关）。" },
     { "name": "IntegrationCrons", "description": "跨 Profile 定时任务（需 HERMES_INTEGRATION=1）。列表/轮询用 GET /api/crons?all_profiles=1；创建用一个 profile 同时作为存储与执行 Profile；编辑/运行/删除/读取历史均用 profile 定位任务。" },
-    { "name": "IntegrationKnowledgeBase", "description": "知识库下游 BFF 代理（需 HERMES_INTEGRATION=1 且 KNOWLEDGE_BASE_URL）。`account`/`uuid` 由调用方在请求体传入；成功时返回下游 `data` 字段内容。" }
+    { "name": "IntegrationKnowledgeBase", "description": "知识库下游 BFF 代理（需 HERMES_INTEGRATION=1 且 KNOWLEDGE_BASE_URL）。`account`/`uuid` 由调用方在请求体传入；成功时返回下游 `data` 字段内容。" },
+    { "name": "IntegrationNotifications", "description": "通知系统（需 HERMES_INTEGRATION=1 且 KNOWLEDGE_BASE_URL）。知识库通知从下游 get_user_messages 实时聚合；notifications.db 表结构预留，HTTP 层当前不读写本地存储。" }
   ],
   "paths": {
 
@@ -173,6 +174,12 @@
         "tags": ["Session"],
         "summary": "获取会话列表",
         "parameters": [
+          { "name": "profile", "in": "query", "schema": { "type": "string" }, "description": "按 profile 分页加载；与 offset/limit 配合使用" },
+          { "name": "offset", "in": "query", "schema": { "type": "integer" }, "description": "分页偏移（profile 模式）" },
+          { "name": "limit", "in": "query", "schema": { "type": "integer" }, "description": "每页条数（profile 模式，默认 15，最大 50）" },
+          { "name": "all_profiles", "in": "query", "schema": { "type": "string" }, "description": "1/true/yes 时返回所有 profile 的会话" },
+          { "name": "start_at", "in": "query", "schema": { "type": "number" }, "description": "按 last_message_at 过滤的下界（Unix 秒，含边界）" },
+          { "name": "end_at", "in": "query", "schema": { "type": "number" }, "description": "按 last_message_at 过滤的上界（Unix 秒，含边界）" },
           { "name": "project", "in": "query", "schema": { "type": "string" }, "description": "按项目过滤" }
         ],
         "responses": { "200": { "description": "会话列表" } }
@@ -1165,6 +1172,20 @@
         }
       }
     },
+    "/api/integration/knowledge_base/upload_artifacts": {
+      "post": {
+        "tags": ["IntegrationKnowledgeBase"],
+        "summary": "上传 workspace 成果文件到知识库（编排）",
+        "description": "WebUI 原生编排端点：调用方传 `paths`（workspace 相对路径数组），WebUI 读取成果文件字节后复用下游 `upload_docs` 透传。`fileProperties` 与 `upload_docs` 一致（原样透传，`fileClass` 即直属库类型），`paths` 与 `fileProperties` 一一对应、等长。仅执行 `upload_docs`，不串联 `update_docs`。",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUploadArtifactsRequest" } } } },
+        "responses": {
+          "200": { "description": "下游 upload_docs 原始 JSON 响应" },
+          "400": { "description": "缺参、路径校验失败或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
+          "413": { "description": "请求体总量超限", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
+          "502": { "description": "下游不可达", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
+        }
+      }
+    },
     "/api/integration/knowledge_base/update_docs": {
       "post": {
         "tags": ["IntegrationKnowledgeBase"],
@@ -1247,6 +1268,108 @@
             }
           },
           "400": { "description": "缺参或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
+          "502": { "description": "下游不可达", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
+        }
+      }
+    },
+    "/api/integration/knowledge_base/creater_handle_application": {
+      "post": {
+        "tags": ["IntegrationKnowledgeBase"],
+        "summary": "处理用户的加入知识库请求（审批）",
+        "description": "透传代理 `POST {KNOWLEDGE_BASE_URL}/knowledge_base/creater_handle_application`。请求体原样转发，不做字段校验。典型字段：`userId`、`uuid`（申请人）、`kbName`、`action`（`approve`/`reject`/`ignore`）。",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughRequest" } } } },
+        "responses": {
+          "200": { "description": "下游原始 JSON 响应（如 `{code, msg}`）", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughResponse" } } } },
+          "502": { "description": "下游不可达", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
+        }
+      }
+    },
+    "/api/integration/knowledge_base/get_joinkb_applications": {
+      "post": {
+        "tags": ["IntegrationKnowledgeBase"],
+        "summary": "获取知识库加入申请列表",
+        "description": "透传代理 `POST {KNOWLEDGE_BASE_URL}/knowledge_base/get_joinkb_applications`。请求体原样转发，不做字段校验。典型字段：`userId`、`uuid`、`kbName`。",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughRequest" } } } },
+        "responses": {
+          "200": { "description": "下游原始 JSON 响应（如 `{code, msg, data}`）", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughResponse" } } } },
+          "502": { "description": "下游不可达", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
+        }
+      }
+    },
+    "/api/integration/knowledge_base/get_user_messages": {
+      "post": {
+        "tags": ["IntegrationKnowledgeBase"],
+        "summary": "获取用户消息通知列表",
+        "description": "透传代理 `POST {KNOWLEDGE_BASE_URL}/knowledge_base/get_user_messages`。请求体原样转发，不做字段校验。典型字段：`account`、`uuid`、`readType`（`all`/`unread`/`seen`）。",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughRequest" } } } },
+        "responses": {
+          "200": { "description": "下游原始 JSON 响应（如 `{code, msg, data}`）", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughResponse" } } } },
+          "502": { "description": "下游不可达", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
+        }
+      }
+    },
+    "/api/integration/knowledge_base/mark_message_read": {
+      "post": {
+        "tags": ["IntegrationKnowledgeBase"],
+        "summary": "标记消息已读",
+        "description": "透传代理 `POST {KNOWLEDGE_BASE_URL}/knowledge_base/mark_message_read`。请求体原样转发，不做字段校验。典型字段：`messageId`（整数数组）。",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughRequest" } } } },
+        "responses": {
+          "200": { "description": "下游原始 JSON 响应（如 `{code, msg, data}`）", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughResponse" } } } },
+          "502": { "description": "下游不可达", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
+        }
+      }
+    },
+    "/api/integration/knowledge_base/user_exit_shkb": {
+      "post": {
+        "tags": ["IntegrationKnowledgeBase"],
+        "summary": "用户主动退出团队知识库",
+        "description": "透传代理 `POST {KNOWLEDGE_BASE_URL}/knowledge_base/user_exit_shkb`。请求体原样转发，不做字段校验。典型字段：`account`、`uuid`、`kbName`。",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughRequest" } } } },
+        "responses": {
+          "200": { "description": "下游原始 JSON 响应（如 `{code, msg, data}`）", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughResponse" } } } },
+          "502": { "description": "下游不可达", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
+        }
+      }
+    },
+    "/api/integration/knowledge_base/remove_from_myshkb": {
+      "post": {
+        "tags": ["IntegrationKnowledgeBase"],
+        "summary": "创建者将用户移出团队知识库",
+        "description": "透传代理 `POST {KNOWLEDGE_BASE_URL}/knowledge_base/remove_from_myshkb`。请求体原样转发，不做字段校验。典型字段：`account`（数组）、`uuid`（数组）、`kbName`。",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughRequest" } } } },
+        "responses": {
+          "200": { "description": "下游原始 JSON 响应（如 `{code, msg, data}`）", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughResponse" } } } },
+          "502": { "description": "下游不可达", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
+        }
+      }
+    },
+    "/api/integration/knowledge_base/delete_readed_message": {
+      "post": {
+        "tags": ["IntegrationKnowledgeBase"],
+        "summary": "删除已读消息",
+        "description": "透传代理 `POST {KNOWLEDGE_BASE_URL}/knowledge_base/delete_readed_message`。请求体原样转发，不做字段校验。典型字段：`messageId`（整数数组）。",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughRequest" } } } },
+        "responses": {
+          "200": { "description": "下游原始 JSON 响应（如 `{code, msg, data}`）", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughResponse" } } } },
+          "502": { "description": "下游不可达", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
+        }
+      }
+    },
+    "/api/integration/knowledge_base/download_doc": {
+      "post": {
+        "tags": ["IntegrationKnowledgeBase"],
+        "summary": "下载知识库文档",
+        "description": "透传代理 `POST {KNOWLEDGE_BASE_URL}/knowledge_base/download_doc`。请求体原样转发，不做字段校验。典型字段：`knowledge_base_name`、`file_name`。成功且下游返回文件时透传二进制；业务错误仍为 JSON。",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughRequest" } } } },
+        "responses": {
+          "200": {
+            "description": "文件二进制或 JSON 错误",
+            "content": {
+              "application/octet-stream": { "schema": { "type": "string", "format": "binary" } },
+              "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughResponse" } }
+            }
+          },
           "502": { "description": "下游不可达", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
         }
       }
@@ -2239,6 +2362,221 @@
           "500": { "description": "写入失败" }
         }
       }
+    },
+
+    "/api/integration/notifications": {
+      "get": {
+        "tags": ["IntegrationNotifications"],
+        "summary": "获取知识库通知列表",
+        "description": "从下游 get_user_messages 实时聚合知识库通知（kb_apply），支持 read_type、action_status 过滤与游标分页。永久排除 massType=3 且 state=2 的申请人「结果待处理」消息。",
+        "parameters": [
+          {
+            "name": "account",
+            "in": "query",
+            "required": true,
+            "description": "用户账号",
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "uuid",
+            "in": "query",
+            "required": true,
+            "description": "用户 UUID",
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "read_type",
+            "in": "query",
+            "description": "下游 readType（默认 all）",
+            "schema": { "type": "string", "enum": ["all", "unread", "seen"], "default": "all" }
+          },
+          {
+            "name": "action_status",
+            "in": "query",
+            "description": "按业务状态过滤，逗号分隔（如 pending 或 approved,rejected）",
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "每页条数（默认 20）",
+            "schema": { "type": "integer", "default": 20 }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "游标分页，使用上次返回的 next_cursor（首次请求不传）",
+            "schema": { "type": "number", "format": "float" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "通知列表",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": { "$ref": "#/components/schemas/Notification" }
+                    },
+                    "next_cursor": {
+                      "type": "number",
+                      "format": "float",
+                      "nullable": true,
+                      "description": "下一页游标，null 表示没有更多数据"
+                    }
+                  },
+                  "required": ["items", "next_cursor"]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "/api/integration/notifications/summary": {
+      "get": {
+        "tags": ["IntegrationNotifications"],
+        "summary": "获取通知摘要",
+        "description": "返回知识库通知总数与未读计数（按 read_type 过滤）。永久排除 massType=3 且 state=2 的「结果待处理」消息，计数与列表一致。用于前端通知铃铛角标。",
+        "parameters": [
+          {
+            "name": "account",
+            "in": "query",
+            "required": true,
+            "description": "用户账号",
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "uuid",
+            "in": "query",
+            "required": true,
+            "description": "用户 UUID",
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "read_type",
+            "in": "query",
+            "description": "下游 readType（默认 unread）",
+            "schema": { "type": "string", "enum": ["all", "unread", "seen"], "default": "unread" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "通知摘要",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/NotificationSummary" }
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "/api/integration/notifications/read": {
+      "post": {
+        "tags": ["IntegrationNotifications"],
+        "summary": "标记通知已读",
+        "description": "批量标记知识库通知为已读（kb: 前缀 ID 批量转发到下游 mark_message_read）。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "ids": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "通知 ID 列表（kb: 前缀表示知识库通知，将转发到下游）"
+                  },
+                  "account": {
+                    "type": "string",
+                    "description": "用户账号（kb: 前缀通知转发到下游时必需）"
+                  },
+                  "uuid": {
+                    "type": "string",
+                    "description": "用户 UUID（kb: 前缀通知转发到下游时必需）"
+                  }
+                },
+                "required": ["ids"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "标记结果",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": { "type": "boolean" },
+                    "updated": { "type": "integer", "description": "实际更新条数" }
+                  },
+                  "required": ["ok", "updated"]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "/api/integration/notifications/delete": {
+      "post": {
+        "tags": ["IntegrationNotifications"],
+        "summary": "删除通知",
+        "description": "批量删除知识库通知（kb: 前缀 ID 批量转发到下游 delete_readed_message）。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "ids": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "通知 ID 列表（kb: 前缀表示知识库通知，将转发到下游）"
+                  },
+                  "account": {
+                    "type": "string",
+                    "description": "用户账号（kb: 前缀通知转发到下游时必需）"
+                  },
+                  "uuid": {
+                    "type": "string",
+                    "description": "用户 UUID（kb: 前缀通知转发到下游时必需）"
+                  }
+                },
+                "required": ["ids"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "删除结果",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": { "type": "boolean" },
+                    "deleted": { "type": "integer", "description": "实际删除条数" }
+                  },
+                  "required": ["ok", "deleted"]
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
 
@@ -2995,6 +3333,16 @@
           "message": { "type": "string" }
         }
       },
+      "KnowledgeBasePassthroughRequest": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "透传接口请求体：字段原样转发至下游，WebUI 不做校验或构建。"
+      },
+      "KnowledgeBasePassthroughResponse": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "透传接口响应体：下游返回的原始 JSON 原样回传。"
+      },
       "KnowledgeBaseAccountUuidRequest": {
         "type": "object",
         "required": ["account", "uuid"],
@@ -3198,6 +3546,23 @@
           "notRefreshVsCache": { "type": "boolean" }
         }
       },
+      "KnowledgeBaseUploadArtifactsRequest": {
+        "type": "object",
+        "required": ["uuid", "kbName", "fileProperties", "paths"],
+        "properties": {
+          "uuid": { "type": "string" },
+          "kbName": { "type": "string" },
+          "fileProperties": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "$ref": "#/components/schemas/KnowledgeBaseFileProperty" },
+            "description": "与 upload_docs 一致；fileClass 即直属库类型；与 paths 一一对应"
+          },
+          "paths": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "workspace 相对路径，与 fileProperties 等长" },
+          "chunkSize": { "type": "string" },
+          "chunkOverlap": { "type": "string" }
+        }
+      },
       "KnowledgeBaseFileProperty": {
         "type": "object",
         "properties": {
@@ -3389,6 +3754,43 @@
           "timestamp": { "type": "integer", "format": "int64", "description": "服务器响应 Unix 时间戳（秒）" }
         },
         "additionalProperties": true
+      },
+      "Notification": {
+        "type": "object",
+        "required": ["id", "category", "title", "created_at"],
+        "properties": {
+          "id": { "type": "string", "description": "通知 ID（kb: 前缀）" },
+          "category": { "type": "string", "description": "通知分类", "enum": ["kb_apply"] },
+          "title": { "type": "string", "description": "通知标题" },
+          "body": { "type": "string", "description": "通知正文" },
+          "source": { "type": "string", "description": "来源标识" },
+          "ref_id": { "type": "string", "description": "关联资源 ID" },
+          "status": { "type": "string", "description": "读取状态", "enum": ["unread", "read"] },
+          "actionable": { "type": "integer", "description": "是否可打开详情：massType=1 为 1，其余为 0" },
+          "action_status": { "type": "string", "description": "仅 massType=1：state 0→rejected、1→approved、2→pending；其余为空字符串" },
+          "metadata": { "type": "object", "description": "下游原始消息" },
+          "created_at": { "type": "number", "format": "float", "description": "创建时间戳" },
+          "updated_at": { "type": "number", "format": "float", "description": "更新时间戳" }
+        }
+      },
+      "NotificationSummary": {
+        "type": "object",
+        "required": ["total", "unread", "by_category"],
+        "properties": {
+          "total": { "type": "integer", "description": "通知总数" },
+          "unread": { "type": "integer", "description": "未读通知数" },
+          "by_category": {
+            "type": "object",
+            "description": "按分类统计",
+            "additionalProperties": {
+              "type": "object",
+              "properties": {
+                "total": { "type": "integer" },
+                "unread": { "type": "integer" }
+              }
+            }
+          }
+        }
       }
     },
     "securitySchemes": {

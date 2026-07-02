@@ -96,6 +96,7 @@ http://127.0.0.1:8787
 | 14 | `/show_pdf` | 预览 PDF / 文档 |
 | 15 | `/search_docs` | 单库检索 |
 | 16 | `/search_docs_xcore` | 跨库检索 |
+| 17 | `/upload_artifacts` | 上传 workspace 成果文件到知识库（编排） |
 
 ---
 
@@ -433,6 +434,56 @@ curl -sS -X POST "$BASE/search_docs_xcore" \
   -H "Content-Type: application/json" \
   -d '{"query":"2025年1月电力交易成交电量是多少","kbNames":["share15"],"topK":3,"scoreThreshold":1}'
 ```
+
+---
+
+### 17. 上传 workspace 成果文件到知识库（编排）
+
+`POST /api/integration/knowledge_base/upload_artifacts`
+
+**Content-Type：** `application/json`
+
+**说明：** WebUI 原生编排端点，调用方传 workspace 成果文件路径，WebUI 读取文件字节后复用下游 `upload_docs` 透传。参数与 `upload_docs` 对齐，新增 `paths` 标识源文件。仅执行 `upload_docs`，不串联 `update_docs`。
+
+**请求体**
+
+| 字段 | 必填 | 说明 |
+|------|------|------|
+| `uuid` | 是 | 用户 UUID（与 upload_docs 一致） |
+| `kbName` | 是 | 知识库名称（与 upload_docs 一致） |
+| `fileProperties` | 是 | JSON 对象数组（与 upload_docs 一致），每项 `{fileName, fileClass, fileUploader, publicationDate}`；`fileClass` 即直属库类型；原样透传，WebUI 不构造不补全 |
+| `paths` | 是 | 非空字符串数组，workspace 相对路径；长度须与 `fileProperties` 一一对应 |
+| `chunkSize` | 否 | 默认 `"500"`（与 upload_docs 一致） |
+| `chunkOverlap` | 否 | 默认 `"50"`（与 upload_docs 一致） |
+
+```json
+{
+  "uuid": "aaaaaaaa0000aaaa0000aaaaaaaaaaaa",
+  "kbName": "share54",
+  "fileProperties": [
+    {"fileName": "2025.md", "fileClass": "直属", "fileUploader": "aaaaaaaa0000aaaa0000aaaaaaaaaaaa", "publicationDate": "1"},
+    {"fileName": "summary.pdf", "fileClass": "直属", "fileUploader": "aaaaaaaa0000aaaa0000aaaaaaaaaaaa", "publicationDate": "1"}
+  ],
+  "paths": ["reports/2025.md", "data/summary.pdf"]
+}
+```
+
+**响应：** 下游 `upload_docs` 的 `{code, msg, data}` 原样透传。
+
+**WebUI 自身错误：**
+
+| HTTP | 含义 | Body 示例 |
+|------|------|-----------|
+| 400 | 缺参 | `{"error":"缺少用户 UUID"}` |
+| 400 | 两数组长度不等 | `{"error":"文件属性与路径数量不一致"}` |
+| 400 | 路径遍历 | `{"error":"路径越界"}` |
+| 400 | 文件不存在 | `{"error":"文件不存在"}` |
+| 400 | 文件过大 | `{"error":"文件过大"}` |
+| 400 | 文件数过多 | `{"error":"文件数量过多"}` |
+| 413 | 总量超限 | `{"error":"请求体过大"}` |
+| 502 | 知识库服务不可达 | `{"error":"知识库服务不可用","message":"..."}` |
+
+**限制：** 单文件 50MB、总量 200MB、最多 20 个文件。
 
 ---
 

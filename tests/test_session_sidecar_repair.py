@@ -318,17 +318,17 @@ class TestDraftRecovery:
         assert "preserved as a draft" not in content, (
             f"Error marker should not say 'preserved as a draft', got: {content}"
         )
-        assert "Response interrupted" in content
-        assert "live response stream stopped" in content
+        assert "响应已中断" in content
+        assert "完成前中断" in content
         assert "WebUI process restarted" not in content
         # The marker now arms the lazy-retry hook when a stream id is known
-        # ("Recovering the partial output… reload to retry."). The legacy
-        # "user message above was preserved" wording is reserved for the
+        # ("正在从运行日志恢复部分输出…刷新会话以重试。"). The legacy
+        # "上方的用户消息已保留" wording is reserved for the
         # no-stream-id repair case; the post-retry-give-up case demotes to
-        # the neutral "Partial output may have been lost." wording instead.
+        # the neutral "部分输出可能已丢失。" wording instead.
         assert (
-            "user message above was preserved" in content
-            or "Recovering the partial output" in content
+            "上方的用户消息已保留" in content
+            or "正在从运行日志恢复部分输出" in content
         )
         assert error_msgs[0].get("type") == "interrupted"
 
@@ -624,8 +624,8 @@ class TestNonEmptyMessagesPendingCleared:
         # Exactly one error marker
         error_msgs = [m for m in s.messages if m.get("_error")]
         assert len(error_msgs) == 1
-        assert "Response interrupted" in error_msgs[0]["content"]
-        assert "live response stream stopped" in error_msgs[0]["content"]
+        assert "响应已中断" in error_msgs[0]["content"]
+        assert "完成前中断" in error_msgs[0]["content"]
         assert "WebUI process restarted" not in error_msgs[0]["content"]
         assert error_msgs[0].get("type") == "interrupted"
 
@@ -691,8 +691,8 @@ class TestNonEmptyMessagesPendingCleared:
         assert s.tool_calls[0]["assistant_msg_idx"] < len(s.messages)
         error_msgs = [m for m in s.messages if m.get("_error")]
         assert len(error_msgs) == 1
-        assert "partial output above was recovered" in error_msgs[0]["content"]
-        assert "no agent output was recovered" not in error_msgs[0]["content"]
+        assert "上方部分输出已从运行日志恢复" in error_msgs[0]["content"]
+        assert "未恢复出任何助手输出" not in error_msgs[0]["content"]
 
     def test_journal_recovery_does_not_materialize_reasoning_only_events(self, hermes_home, monkeypatch):
         """Run-journal repair must not turn hidden reasoning into visible chat
@@ -728,8 +728,8 @@ class TestNonEmptyMessagesPendingCleared:
         # recovered" wording is now reserved for the no-stream-id case.
         assert error_msgs[0].get("_pending_journal_recovery") is True
         assert error_msgs[0].get("_journal_retry_stream_id") == "reasoning_only_stream"
-        assert "no agent output was recovered" not in error_msgs[0]["content"]
-        assert "Recovering the partial output" in error_msgs[0]["content"]
+        assert "未恢复出任何助手输出" not in error_msgs[0]["content"]
+        assert "正在从运行日志恢复部分输出" in error_msgs[0]["content"]
 
     def test_journal_recovery_keeps_consecutive_tools_on_one_anchor(self, hermes_home, monkeypatch):
         """Consecutive journaled tools without an intervening visible update
@@ -828,7 +828,7 @@ class TestNonEmptyMessagesPendingCleared:
         assert s.tool_calls[0]["name"] == "terminal"
         error_msgs = [m for m in s.messages if m.get("_error")]
         assert len(error_msgs) == 1
-        assert "partial output above was recovered" in error_msgs[0]["content"]
+        assert "上方部分输出已从运行日志恢复" in error_msgs[0]["content"]
         assert s.pending_user_message is None
         assert s.active_stream_id is None
 
@@ -1208,25 +1208,25 @@ class TestInterruptedRecoveryMarker:
         assert marker["_error"] is True
         assert marker["type"] == "interrupted"
         assert "_pending_journal_recovery" not in marker
-        assert "recovered from the run journal" in marker["content"]
+        assert "已从运行日志恢复" in marker["content"]
 
     def test_marker_pending_retry_sets_flag_and_wording(self):
         marker = models._interrupted_recovery_marker(pending_retry=True)
         assert marker.get("_pending_journal_recovery") is True
-        assert "Recovering the partial output" in marker["content"]
-        assert "no agent output was recovered" not in marker["content"]
+        assert "正在从运行日志恢复部分输出" in marker["content"]
+        assert "未恢复出任何助手输出" not in marker["content"]
 
     def test_marker_recovered_output_beats_pending_retry(self):
         marker = models._interrupted_recovery_marker(
             recovered_output=True, pending_retry=True,
         )
         assert "_pending_journal_recovery" not in marker
-        assert "recovered from the run journal" in marker["content"]
+        assert "已从运行日志恢复" in marker["content"]
 
     def test_marker_default_wording_unchanged_for_no_output_no_retry(self):
         marker = models._interrupted_recovery_marker()
         assert "_pending_journal_recovery" not in marker
-        assert "no agent output was recovered" in marker["content"]
+        assert "未恢复出任何助手输出" in marker["content"]
 
 
 class TestRetryJournalRecoveryInPlace:
@@ -1270,7 +1270,7 @@ class TestRetryJournalRecoveryInPlace:
         )
         promoted = s.messages[marker_idx]
         assert promoted is marker_before
-        assert "recovered from the run journal" in promoted["content"]
+        assert "已从运行日志恢复" in promoted["content"]
         assert "_pending_journal_recovery" not in promoted
         assert "_journal_retry_stream_id" not in promoted
         assert "_journal_retry_attempts" not in promoted
@@ -1296,7 +1296,7 @@ class TestRetryJournalRecoveryInPlace:
         marker = s.messages[-1]
         assert marker.get("_pending_journal_recovery") is True
         assert marker.get("_journal_retry_attempts") == 1
-        assert "Recovering the partial output" in marker["content"]
+        assert "正在从运行日志恢复部分输出" in marker["content"]
 
     def test_demotes_to_neutral_after_max_attempts(self, hermes_home, monkeypatch):
         stream_id = "lazy_stream_giveup_attempts"
@@ -1311,8 +1311,8 @@ class TestRetryJournalRecoveryInPlace:
         assert "_journal_retry_stream_id" not in marker
         assert "_journal_retry_attempts" not in marker
         assert "_journal_retry_first_seen_ts" not in marker
-        assert "Partial output may have been lost" in marker["content"]
-        assert "Recovering the partial output" not in marker["content"]
+        assert "部分输出可能已丢失" in marker["content"]
+        assert "正在从运行日志恢复部分输出" not in marker["content"]
 
     def test_demotes_to_neutral_after_giveup_seconds(self, hermes_home, monkeypatch):
         stream_id = "lazy_stream_giveup_age"
@@ -1324,7 +1324,7 @@ class TestRetryJournalRecoveryInPlace:
         assert ok is False
         marker = s.messages[-1]
         assert "_pending_journal_recovery" not in marker
-        assert "Partial output may have been lost" in marker["content"]
+        assert "部分输出可能已丢失" in marker["content"]
 
     def test_noop_when_no_pending_marker(self, hermes_home, monkeypatch):
         s = _make_session(messages=[
@@ -1406,7 +1406,7 @@ class TestGetSessionLazyRetryHook:
             m for m in s.messages
             if m.get("type") == "interrupted" and m.get("_error")
         )
-        assert "recovered from the run journal" in marker["content"]
+        assert "已从运行日志恢复" in marker["content"]
         assert "_pending_journal_recovery" not in marker
 
     def test_triggers_retry_on_cold_load(self, hermes_home, monkeypatch):
@@ -1422,7 +1422,7 @@ class TestGetSessionLazyRetryHook:
             m for m in reloaded.messages
             if m.get("type") == "interrupted" and m.get("_error")
         )
-        assert "recovered from the run journal" in marker["content"]
+        assert "已从运行日志恢复" in marker["content"]
         assert "_pending_journal_recovery" not in marker
 
     def test_short_circuit_when_no_pending_marker(self, hermes_home, monkeypatch):
@@ -1647,7 +1647,7 @@ class TestWslPageCacheRace:
         ok = models._retry_journal_recovery_in_place(s)
         assert ok is True
         marker_after = next(m for m in s.messages if m.get("type") == "interrupted")
-        assert "recovered from the run journal" in marker_after["content"]
+        assert "已从运行日志恢复" in marker_after["content"]
         assert "_pending_journal_recovery" not in marker_after
 
     def test_journal_grows_between_reads(self, hermes_home, monkeypatch):
@@ -1680,7 +1680,7 @@ class TestWslPageCacheRace:
         ok = models._retry_journal_recovery_in_place(s)
         assert ok is True
         marker_after = next(m for m in s.messages if m.get("type") == "interrupted")
-        assert "recovered from the run journal" in marker_after["content"]
+        assert "已从运行日志恢复" in marker_after["content"]
         # Both tokens recovered, in order, before the marker.
         marker_idx = s.messages.index(marker_after)
         recovered_text = " ".join(
