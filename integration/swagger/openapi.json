@@ -28,7 +28,8 @@
     { "name": "SkillHub",    "description": "SkillHub 远程技能市场代理（需 HERMES_INTEGRATION=1；市场类接口另需 SKILLHUB_URL）。安装/卸载/custom 读写均使用 shared_skills_dir（{HERMES_HOME}/skills，与 WebUI profile 无关）。" },
     { "name": "IntegrationCrons", "description": "跨 Profile 定时任务（需 HERMES_INTEGRATION=1）。列表/轮询用 GET /api/crons?all_profiles=1；创建用一个 profile 同时作为存储与执行 Profile；编辑/运行/删除/读取历史均用 profile 定位任务。" },
     { "name": "IntegrationKnowledgeBase", "description": "知识库下游 BFF 代理（需 HERMES_INTEGRATION=1 且 KNOWLEDGE_BASE_URL）。`account`/`uuid` 由调用方在请求体传入；成功时返回下游 `data` 字段内容。" },
-    { "name": "IntegrationNotifications", "description": "通知系统（需 HERMES_INTEGRATION=1 且 KNOWLEDGE_BASE_URL）。知识库通知从下游 get_user_messages 实时聚合；notifications.db 表结构预留，HTTP 层当前不读写本地存储。" }
+    { "name": "IntegrationNotifications", "description": "通知系统（需 HERMES_INTEGRATION=1 且 KNOWLEDGE_BASE_URL）。知识库通知从下游 get_user_messages 实时聚合；notifications.db 表结构预留，HTTP 层当前不读写本地存储。" },
+    { "name": "IntegrationMemory",   "description": "记忆统计（需 HERMES_INTEGRATION=1）。聚合展示会话天数、定时任务和记忆文件。" }
   ],
   "paths": {
 
@@ -2574,6 +2575,68 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+
+    "/api/integration/memory/stats": {
+      "get": {
+        "tags": ["IntegrationMemory"],
+        "summary": "获取记忆统计",
+        "description": "聚合当前 profile 或指定 profile 的会话天数、会话列表、定时任务列表和记忆文件列表。需要 `HERMES_INTEGRATION=1`。",
+        "parameters": [
+          {
+            "name": "profile",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" },
+            "description": "Profile 名称（不传时使用当前活跃 profile）"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "记忆统计数据",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["profile", "stats", "sessions", "crons", "memory_files"],
+                  "properties": {
+                    "profile": { "type": "string", "description": "Profile 名称" },
+                    "stats": {
+                      "type": "object",
+                      "required": ["session_days", "session_count", "cron_count"],
+                      "properties": {
+                        "session_days": {
+                          "type": "array",
+                          "items": { "type": "string" },
+                          "description": "有会话活跃的日期列表（YYYY-MM-DD，去重后升序）"
+                        },
+                        "session_count": { "type": "integer", "description": "会话总数" },
+                        "cron_count": { "type": "integer", "description": "定时任务总数（含禁用的）" }
+                      }
+                    },
+                    "sessions": {
+                      "type": "array",
+                      "description": "会话列表（与 GET /api/sessions 返回的会话行格式一致）"
+                    },
+                    "crons": {
+                      "type": "array",
+                      "description": "定时任务列表（与 GET /api/crons 返回的定时任务格式一致）"
+                    },
+                    "memory_files": {
+                      "type": "array",
+                      "items": { "type": "string" },
+                      "description": "memories 目录下的文件名列表"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "profile 参数错误"
           }
         }
       }

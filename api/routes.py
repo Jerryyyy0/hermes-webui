@@ -6582,6 +6582,14 @@ def handle_get(handler, parsed) -> bool:
         pass
 
     try:
+        from integration.memory_stats.handlers import try_handle_get as _memory_stats_try_get
+
+        if _memory_stats_try_get(handler, parsed) is True:
+            return True
+    except ImportError:
+        pass
+
+    try:
         from integration.workspace.handlers import try_handle_get as _workspace_try_get
 
         if _workspace_try_get(handler, parsed) is True:

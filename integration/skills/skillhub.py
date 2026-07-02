@@ -12,6 +12,7 @@ import httpx
 
 from integration.config import skillhub_url
 from integration.skills.local_skills import (
+    _find_skill,
     _skill_dir_rel_path,
     normalize_dir_name,
     skill_target_dir,
@@ -535,6 +536,15 @@ def install_skill(name: str, display_name: str = "", category: str = "") -> dict
     if path_err:
         return path_err
     assert target is not None and cat_seg is not None
+
+    # 全局扫描：检查 shared_skills_dir 下是否存在同名技能（无论路径）
+    existing_dir, _ = _find_skill(name, skills_dir)
+    if existing_dir is not None:
+        rel_path = _skill_dir_rel_path(existing_dir, skills_dir)
+        return {
+            "error": f"Skill already installed at '{rel_path}'",
+            "status": 409,
+        }
 
     if find_skill_main_file(target) or (target / ".hub_installed").is_file():
         return {"error": "Skill already installed", "status": 409}

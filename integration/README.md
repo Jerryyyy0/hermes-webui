@@ -265,6 +265,12 @@ HTTP 接口仅服务知识库通知（`kb_apply`），从下游 `get_user_messag
 | Method | Path | Purpose |
 |--------|------|---------|
 | GET | `/api/integration/notifications` | 知识库通知列表（`read_type`/`action_status` 过滤、游标分页；永久排除 `massType=3, state=2` 结果待处理） |
+
+### 记忆统计（`HERMES_INTEGRATION=1`）
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/api/integration/memory/stats` | 聚合统计：会话天数和列表、定时任务及列表、记忆文件名；可选 `?profile=` 指定 profile（默认当前活跃 profile） |
 | GET | `/api/integration/notifications/summary` | 未读计数（铃铛角标；计数规则与列表排除一致） |
 | POST | `/api/integration/notifications/read` | 标记已读（`kb:` ID 批量转发下游 `mark_message_read`） |
 | POST | `/api/integration/notifications/delete` | 删除（`kb:` ID 批量转发下游 `delete_readed_message`） |
