@@ -364,8 +364,13 @@ def _scan_custom_skill_dicts(
 
 
 def scan_custom_skills_global(hub_names: set[str], q: str | None = None, profile: str = "default") -> list[dict]:
-    """Scan all custom skills under a profile's skills dir (no category filter)."""
-    return _scan_custom_skill_dicts(skills_dir_for_profile(profile), hub_names, q=q)
+    """Scan all custom skills under shared_skills_dir (no category filter).
+
+    ``hub_names`` and ``profile`` are accepted for call-site stability; custom
+    listing always reads ``{HERMES_HOME}/skills`` regardless of WebUI profile.
+    """
+    _ = hub_names, profile
+    return _scan_custom_skill_dicts(shared_skills_dir(), "", q=q)
 
 
 def _filter_custom_skills_in_memory(
@@ -416,7 +421,8 @@ def list_custom_skills(
     if pre_scanned is not None:
         all_skills = _filter_custom_skills_in_memory(pre_scanned, category, q)
     else:
-        all_skills = _scan_custom_skill_dicts(skills_dir_for_profile(profile), category, hub_names, q=q)
+        _ = profile, hub_names
+        all_skills = _scan_custom_skill_dicts(shared_skills_dir(), category, q=q)
     all_skills = sort_skill_items(all_skills, sort=sort, order=order)
     total = len(all_skills)
     if all_records:

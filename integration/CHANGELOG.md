@@ -17,6 +17,8 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Fixed
 
+- **SkillHub custom scope empty list** — `scan_custom_skills_global` 误将上游 `hub_names`（set）当作 `_scan_custom_skill_dicts` 的 `category` 参数，SkillHub 目录非空时 `scope=custom` 列表与 `stats.custom` 恒为 0。现固定扫描 `shared_skills_dir()` 且不按 category 预过滤。
+
 - **Notification status read mapping** — 列表项 `status` 由 `read_type` 推导：`unread`/`seen` 恒为对应值；`all` 时额外拉取下游 `readType=seen` 的 ID 集合判断 `read`/`unread`。
 - **Notification delete uses delete_readed_message** — `POST /api/integration/notifications/delete` 批量转发下游 `delete_readed_message`，不再走 `creater_handle_application`（`action: delete`）。
 - **Notification read uses mark_message_read** — `POST /api/integration/notifications/read` 将 `kb:` 前缀 ID 批量转发到下游 `mark_message_read`（`messageId` 整数数组），不再逐条调用 `creater_handle_application`（`action: read`）。
