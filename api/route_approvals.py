@@ -44,6 +44,9 @@ except ImportError:
 
 # ── Approval SSE subscribers (long-connection push) ──────────────────────────
 _approval_sse_subscribers: dict[str, list[queue.Queue]] = {}
+_GATEWAY_MIRROR_FLAG = "_gateway_mirror"
+_GATEWAY_MIRROR_TOKEN = "_gateway_mirror_token"
+_GATEWAY_ENTRY_DATA_TOKEN_KEY = "_webui_mirror_token"
 
 
 def _approval_sse_subscribe(session_id: str) -> queue.Queue:
@@ -103,6 +106,118 @@ def _approval_sse_notify(session_id: str, head: dict | None, total: int) -> None
         _approval_sse_notify_locked(session_id, head, total)
 
 
+def _gateway_mirror_entry_token(entry) -> str:
+    """Return a stable token for the current process lifetime of a gateway head.
+
+    Stamps a token key into the entry's `.data` dict so
+    slotted objects like `_ApprovalEntry` work without attribute mutation
+    and the token survives CPython `id()` reuse after GC.
+    """
+    data = getattr(entry, "data", None)
+    if isinstance(data, dict):
+        token = data.get(_GATEWAY_ENTRY_DATA_TOKEN_KEY)
+        if not token:
+            token = uuid.uuid4().hex
+            data[_GATEWAY_ENTRY_DATA_TOKEN_KEY] = token
+        return token
+    return uuid.uuid4().hex
+
+
+def _is_gateway_mirror_entry(entry: dict | None) -> bool:
+    return isinstance(entry, dict) and bool(entry.get(_GATEWAY_MIRROR_FLAG))
+
+
+def _normalize_pending_queue_locked(session_key: str) -> list[dict]:
+    """Return the session's polling queue as a mutable list under `_lock`."""
+    queue_list = _pending.setdefault(session_key, [])
+    if not isinstance(queue_list, list):
+        _pending[session_key] = [queue_list]
+        queue_list = _pending[session_key]
+    return queue_list
+
+
+def reconcile_gateway_pending_mirror_locked(session_key: str) -> tuple[dict | None, int, bool]:
+    """Purge stale gateway mirrors and ensure at most one live head mirror exists.
+
+    CALLER MUST HOLD `_lock`.
+    """
+    changed = False
+    queue_list = list(_normalize_pending_queue_locked(session_key))
+    live_gateway_queue = _gateway_queues.get(session_key) or []
+
+    live_head_entry = live_gateway_queue[0] if live_gateway_queue else None
+    live_head_data = getattr(live_head_entry, "data", None) or {}
+    live_token = _gateway_mirror_entry_token(live_head_entry) if live_head_entry and live_head_data else None
+
+    rebuilt: list[dict] = []
+    live_mirror_present = False
+    for entry in queue_list:
+        if not _is_gateway_mirror_entry(entry):
+            rebuilt.append(entry)
+            continue
+        if live_token and entry.get(_GATEWAY_MIRROR_TOKEN) == live_token and not live_mirror_present:
+            rebuilt.append(entry)
+            live_mirror_present = True
+            continue
+        changed = True
+
+    if live_token and not live_mirror_present:
+        mirror_entry = dict(live_head_data)
+        mirror_entry.setdefault("approval_id", uuid.uuid4().hex)
+        mirror_entry[_GATEWAY_MIRROR_FLAG] = True
+        mirror_entry[_GATEWAY_MIRROR_TOKEN] = live_token
+        rebuilt.append(mirror_entry)
+        live_mirror_present = True
+        changed = True
+
+    if rebuilt:
+        if rebuilt != queue_list:
+            _pending[session_key] = rebuilt
+            changed = True
+    else:
+        if session_key in _pending:
+            _pending.pop(session_key, None)
+            changed = True
+
+    head = rebuilt[0] if rebuilt else None
+    total = len(rebuilt)
+    return head, total, changed
+
+
+def _gateway_mirrored_pending_run_id(session_key: str, approval_id: str) -> str | None:
+    """Return the mirrored gateway approval run_id for a matching pending card.
+
+    Reconciles the mirror first so a live gateway head still survives a lost
+    `active_stream_id` pointer.
+    """
+    approval_id = str(approval_id or "").strip()
+    if not approval_id:
+        return None
+    with _lock:
+        reconcile_gateway_pending_mirror_locked(session_key)
+        queue = _pending.get(session_key)
+        if isinstance(queue, list):
+            entries = queue
+        elif queue:
+            entries = [queue]
+        else:
+            return None
+        for entry in entries:
+            if isinstance(entry, dict) and entry.get("approval_id") == approval_id and entry.get(_GATEWAY_MIRROR_FLAG):
+                run_id = str(entry.get("run_id") or "").strip()
+                return run_id or None
+    return None
+
+
+def submit_gateway_pending_mirror(session_key: str, approval: dict) -> None:
+    """Mirror the live gateway head into WebUI polling state under a typed tag."""
+    del approval  # mirror from the live gateway head under `_lock`, not from callback input
+    with _lock:
+        head, total, _changed = reconcile_gateway_pending_mirror_locked(session_key)
+        _approval_sse_notify_locked(session_key, head, total)
+    publish_session_list_changed("attention_pending")
+
+
 def submit_pending(session_key: str, approval: dict) -> None:
     """Append a pending approval to the per-session queue.
 
@@ -116,11 +231,7 @@ def submit_pending(session_key: str, approval: dict) -> None:
     entry = dict(approval)
     entry.setdefault("approval_id", uuid.uuid4().hex)
     with _lock:
-        queue_list = _pending.setdefault(session_key, [])
-        # Replace a legacy non-list value if the agent version uses the old pattern.
-        if not isinstance(queue_list, list):
-            _pending[session_key] = [queue_list]
-            queue_list = _pending[session_key]
+        queue_list = _normalize_pending_queue_locked(session_key)
         queue_list.append(entry)
         total = len(queue_list)
         head = queue_list[0]  # /api/approval/pending always returns head

@@ -1,7 +1,7 @@
 """
 Hermes Web UI -- optional authentication.
 Off by default. Enable by setting HERMES_WEBUI_PASSWORD, configuring a
-password in Settings, or registering passkeys and then going passwordless.
+password in Settings, registering passkeys, or configuring native OIDC SSO.
 """
 import hashlib
 import hmac
@@ -9,12 +9,14 @@ import http.cookies
 import json
 import logging
 import os
+import re
 import secrets
 import tempfile
 import threading
 import time
+from pathlib import Path
 
-from api.config import STATE_DIR, load_settings
+from api.config import STATE_DIR, get_config, load_settings
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +51,7 @@ def _resolve_session_ttl() -> int:
 PUBLIC_PATHS = frozenset({
     '/login', '/health', '/favicon.ico', '/sw.js',
     '/api/auth/login', '/api/auth/status',
+    '/api/auth/oidc/start', '/api/auth/oidc/callback',
     '/api/auth/passkey/options', '/api/auth/passkey/login',
     '/manifest.json', '/manifest.webmanifest',
     '/session/manifest.json', '/session/manifest.webmanifest',
@@ -56,6 +59,45 @@ PUBLIC_PATHS = frozenset({
 
 COOKIE_NAME = 'hermes_session'
 CSRF_HEADER_NAME = 'X-Hermes-CSRF-Token'
+
+
+# RFC 6265 cookie-name token: a non-empty run of token chars
+# (no controls, whitespace, or separators such as ';', '=', ',').
+_COOKIE_NAME_RE = re.compile(r"^[-!#$%&'*+.^_`|~0-9A-Za-z]+$")
+
+
+def _resolve_cookie_name() -> str:
+    """Resolve the auth session cookie name from env > default.
+
+    Honours ``HERMES_WEBUI_COOKIE_NAME`` so multiple WebUI instances sharing a
+    hostname (different ports) can use distinct cookie names instead of
+    trampling each other's session — browsers scope cookies by host, not
+    host+port (RFC 6265). Falls back to ``COOKIE_NAME`` when the env var is
+    unset, empty, or not a valid RFC 6265 token.
+    """
+    name = os.getenv('HERMES_WEBUI_COOKIE_NAME', '').strip()
+    if not name:
+        return COOKIE_NAME
+    if _COOKIE_NAME_RE.match(name):
+        return name
+    logger.warning(
+        'Ignoring invalid HERMES_WEBUI_COOKIE_NAME=%r; falling back to %r '
+        '(name must be a valid RFC 6265 token)', name, COOKIE_NAME,
+    )
+    return COOKIE_NAME
+
+
+def _warn_auth_persistence_failure(prefix: str, artifact: Path, exc: Exception, consequence: str) -> None:
+    logger.warning(
+        '%s at %s (STATE_DIR=%s): %s: %s; %s',
+        prefix,
+        artifact,
+        STATE_DIR,
+        exc.__class__.__name__,
+        exc,
+        consequence,
+    )
+
 
 _SESSIONS_FILE = STATE_DIR / '.sessions.json'
 
@@ -67,16 +109,39 @@ def _load_sessions() -> dict[str, float]:
     blocked by a corrupt or missing sessions file.
     """
     try:
-        if _SESSIONS_FILE.exists():
-            data = json.loads(_SESSIONS_FILE.read_text(encoding='utf-8'))
-            if not isinstance(data, dict):
-                raise ValueError('malformed sessions file — expected dict')
-            now = time.time()
-            return {t: exp for t, exp in data.items()
-                    if isinstance(t, str) and isinstance(exp, (int, float)) and exp > now}
+        if not _SESSIONS_FILE.exists():
+            return {}
+        raw = _SESSIONS_FILE.read_text(encoding='utf-8')
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            raise ValueError('malformed sessions file: expected dict')
+    except OSError as e:
+        _warn_auth_persistence_failure(
+            'Auth session store read failed',
+            _SESSIONS_FILE,
+            e,
+            'starting fresh with an empty session table',
+        )
+        return {}
+    except (UnicodeDecodeError, json.JSONDecodeError) as e:
+        _warn_auth_persistence_failure(
+            'Ignoring malformed auth session store',
+            _SESSIONS_FILE,
+            e,
+            'starting fresh with an empty session table',
+        )
+        return {}
     except Exception as e:
-        logger.debug("Failed to load sessions file, starting fresh: %s", e)
-    return {}
+        _warn_auth_persistence_failure(
+            'Ignoring malformed auth session store',
+            _SESSIONS_FILE,
+            e,
+            'starting fresh with an empty session table',
+        )
+        return {}
+    now = time.time()
+    return {t: exp for t, exp in data.items()
+            if isinstance(t, str) and isinstance(exp, (int, float)) and exp > now}
 
 
 def _save_sessions(sessions: dict[str, float]) -> None:
@@ -100,7 +165,12 @@ def _save_sessions(sessions: dict[str, float]) -> None:
                 pass
             raise
     except Exception as e:
-        logger.debug("Failed to persist sessions: %s", e)
+        _warn_auth_persistence_failure(
+            'Auth session persistence failed',
+            _SESSIONS_FILE,
+            e,
+            'keeping the in-process session table available',
+        )
 
 
 # Active sessions: token -> expiry timestamp (persisted across restarts via STATE_DIR)
@@ -203,15 +273,39 @@ def _load_key(filename: str) -> bytes:
             raw = key_file.read_bytes()
             if len(raw) >= 32:
                 return raw[:32]
-    except OSError:
-        logger.debug("Failed to read key %s", filename)
+    except OSError as e:
+        _warn_auth_persistence_failure(
+            'Auth key read failed',
+            key_file,
+            e,
+            'generating a new key and continuing',
+        )
+    except Exception as e:
+        _warn_auth_persistence_failure(
+            'Auth key read failed',
+            key_file,
+            e,
+            'generating a new key and continuing',
+        )
     key = secrets.token_bytes(32)
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
         key_file.write_bytes(key)
         key_file.chmod(0o600)
-    except OSError:
-        logger.debug("Failed to persist key %s", filename)
+    except OSError as e:
+        _warn_auth_persistence_failure(
+            'Auth key persistence failed',
+            key_file,
+            e,
+            'returning the generated key so startup can continue',
+        )
+    except Exception as e:
+        _warn_auth_persistence_failure(
+            'Auth key persistence failed',
+            key_file,
+            e,
+            'returning the generated key so startup can continue',
+        )
     return key
 
 
@@ -350,9 +444,67 @@ def are_passkeys_enabled() -> bool:
         return False
 
 
+def is_oidc_auth_enabled() -> bool:
+    """True if native OIDC login is configured for WebUI sessions."""
+    try:
+        from api.auth_oidc import is_oidc_enabled
+
+        return is_oidc_enabled()
+    except Exception as exc:
+        logger.debug("Failed to inspect OIDC availability: %s", exc)
+        return False
+
+
+def get_oidc_startup_warning() -> str | None:
+    """Return a startup warning when OIDC auth is only partially configured."""
+    try:
+        cfg = get_config()
+        raw = cfg.get("webui_oidc") if isinstance(cfg, dict) else {}
+        if not isinstance(raw, dict):
+            raw = {}
+    except Exception:
+        logger.debug("Failed to read webui_oidc config", exc_info=True)
+        raw = {}
+
+    def pick(name: str, env_name: str) -> str:
+        env_value = os.getenv(env_name)
+        value = env_value if env_value is not None else raw.get(name)
+        return str(value or "").strip()
+
+    issuer = bool(pick("issuer", "HERMES_WEBUI_OIDC_ISSUER"))
+    client_id = bool(pick("client_id", "HERMES_WEBUI_OIDC_CLIENT_ID"))
+    allow_claim = bool(pick("allow_claim", "HERMES_WEBUI_OIDC_ALLOW_CLAIM"))
+    allow_values = bool(pick("allow_values", "HERMES_WEBUI_OIDC_ALLOW_VALUES"))
+
+    if not any((issuer, client_id, allow_claim, allow_values)):
+        return None
+    if issuer and client_id and allow_claim and allow_values:
+        return None
+
+    missing = []
+    if not issuer:
+        missing.append("issuer")
+    if not client_id:
+        missing.append("client_id")
+    if not allow_claim:
+        missing.append("allow_claim")
+    if not allow_values:
+        missing.append("allow_values")
+
+    joined = ", ".join(missing)
+    return (
+        "Native OIDC login is only partially configured; missing "
+        f"{joined}. The WebUI will not enable OIDC auth until all four fields are set."
+    )
+
+
 def is_auth_enabled() -> bool:
-    """True if password auth or passkey-only auth is configured."""
-    return is_password_auth_enabled() or are_passkeys_enabled()
+    """True if password auth, passkeys, or OIDC login is configured."""
+    return (
+        is_password_auth_enabled()
+        or are_passkeys_enabled()
+        or is_oidc_auth_enabled()
+    )
 
 
 def verify_password(plain: str) -> bool:
@@ -439,6 +591,53 @@ def _session_token_from_cookie_value(cookie_value: str) -> str | None:
     return token or None
 
 
+def sign_profile_cookie_value(profile_name: str, session_cookie_value: str | None) -> str:
+    """Return a profile cookie value authenticated for one WebUI session.
+
+    The active-profile cookie is client-controlled, so when auth is enabled it
+    must not be trusted as a bare profile name. Binding the selected profile to
+    the HttpOnly session token prevents a client from forging
+    ``hermes_profile=<other-profile>`` and bypassing profile visibility guards.
+    """
+    if not session_cookie_value or not verify_session(session_cookie_value):
+        raise ValueError("active auth session is required to sign profile cookie")
+    token = _session_token_from_cookie_value(session_cookie_value)
+    if not token:
+        raise ValueError("active auth session is required to sign profile cookie")
+    sig = hmac.new(
+        _signing_key(),
+        f"profile:{token}:{profile_name}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    return f"{profile_name}.{sig}"
+
+
+def verify_profile_cookie_value(cookie_value: str, session_cookie_value: str | None) -> str | None:
+    """Verify a session-bound profile cookie and return its profile name."""
+    if not cookie_value or '.' not in cookie_value:
+        return None
+    if not session_cookie_value or not verify_session(session_cookie_value):
+        return None
+    profile_name, sig = cookie_value.rsplit('.', 1)
+    token = _session_token_from_cookie_value(session_cookie_value)
+    if not profile_name or not token or not sig:
+        return None
+    # Defense-in-depth: validate the profile-name pattern here too, not only in
+    # get_profile_cookie(), so any future caller of this verifier can't return an
+    # unvalidated name. (#4023 Opus hardening.)
+    from api.profiles import _PROFILE_ID_RE
+    if profile_name != 'default' and not _PROFILE_ID_RE.fullmatch(profile_name):
+        return None
+    expected = hmac.new(
+        _signing_key(),
+        f"profile:{token}:{profile_name}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    if hmac.compare_digest(str(sig), expected):
+        return profile_name
+    return None
+
+
 def csrf_token_for_session(cookie_value: str) -> str | None:
     """Return the CSRF token bound to an authenticated WebUI session.
 
@@ -482,7 +681,7 @@ def parse_cookie(handler) -> str | None:
         cookie.load(cookie_header)
     except http.cookies.CookieError:
         return None
-    morsel = cookie.get(COOKIE_NAME)
+    morsel = cookie.get(_resolve_cookie_name())
     return morsel.value if morsel else None
 
 
@@ -589,21 +788,23 @@ def _is_secure_context(handler=None) -> bool:
 def set_auth_cookie(handler, cookie_value) -> None:
     """Set the auth cookie on the response."""
     cookie = http.cookies.SimpleCookie()
-    cookie[COOKIE_NAME] = cookie_value
-    cookie[COOKIE_NAME]['httponly'] = True
-    cookie[COOKIE_NAME]['samesite'] = 'Lax'
-    cookie[COOKIE_NAME]['path'] = '/'
-    cookie[COOKIE_NAME]['max-age'] = str(_resolve_session_ttl())
+    name = _resolve_cookie_name()
+    cookie[name] = cookie_value
+    cookie[name]['httponly'] = True
+    cookie[name]['samesite'] = 'Lax'
+    cookie[name]['path'] = '/'
+    cookie[name]['max-age'] = str(_resolve_session_ttl())
     if _is_secure_context(handler):
-        cookie[COOKIE_NAME]['secure'] = True
-    handler.send_header('Set-Cookie', cookie[COOKIE_NAME].OutputString())
+        cookie[name]['secure'] = True
+    handler.send_header('Set-Cookie', cookie[name].OutputString())
 
 
 def clear_auth_cookie(handler) -> None:
     """Clear the auth cookie on the response."""
     cookie = http.cookies.SimpleCookie()
-    cookie[COOKIE_NAME] = ''
-    cookie[COOKIE_NAME]['httponly'] = True
-    cookie[COOKIE_NAME]['path'] = '/'
-    cookie[COOKIE_NAME]['max-age'] = '0'
-    handler.send_header('Set-Cookie', cookie[COOKIE_NAME].OutputString())
+    name = _resolve_cookie_name()
+    cookie[name] = ''
+    cookie[name]['httponly'] = True
+    cookie[name]['path'] = '/'
+    cookie[name]['max-age'] = '0'
+    handler.send_header('Set-Cookie', cookie[name].OutputString())

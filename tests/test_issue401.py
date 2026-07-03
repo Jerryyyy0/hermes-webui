@@ -72,20 +72,23 @@ def test_loadsession_uses_session_toolcalls_only_as_fallback():
 
 def test_rendermessages_treats_openai_toolcall_assistants_as_visible():
     """OpenAI assistant rows with empty content but tool_calls must stay anchorable."""
+    assert "function _messageIsRenderable(m)" in UI_JS
     assert "const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;" in UI_JS
-    assert "if(hasTc||hasTu||hasPartialTc||_messageHasReasoningPayload(m)) return true;" in UI_JS
+    assert "hasTc||hasTu||hasPartialTc||_messageHasReasoningPayload(m)||_assistantMessageHasVisibleContent(m)" in UI_JS
 
 
 def test_rendermessages_treats_partial_toolcall_assistants_as_visible():
     """Assistant rows carrying `_partial_tool_calls` must stay anchorable."""
+    assert "function _messageIsRenderable(m)" in UI_JS
     assert "const hasPartialTc=Array.isArray(m._partial_tool_calls)&&m._partial_tool_calls.length>0;" in UI_JS
-    assert "if(hasTc||hasTu||hasPartialTc||_messageHasReasoningPayload(m)) return true;" in UI_JS
+    assert "hasTc||hasTu||hasPartialTc||_messageHasReasoningPayload(m)||_assistantMessageHasVisibleContent(m)" in UI_JS
 
 
 def test_rendermessages_rebuilds_tool_cards_from_partial_tool_calls():
     """Fallback reconstruction should include private `_partial_tool_calls` rows."""
-    assert "const hasPartialToolCalls=Array.isArray(m._partial_tool_calls)&&m._partial_tool_calls.length>0;" in UI_JS
-    assert "if(hasTopLevelToolCalls||hasContentToolUse||hasPartialToolCalls) fallbackToolSources.push({m,rawIdx});" in UI_JS
+    assert "function _legacySettledFallbackHasToolMetadata(message)" in UI_JS
+    assert "Array.isArray(message._partial_tool_calls)&&message._partial_tool_calls.length>0" in UI_JS
+    assert "if(_legacySettledFallbackHasToolMetadata(m)) fallbackToolSources.push({m,rawIdx});" in UI_JS
     assert "if(Array.isArray(m._partial_tool_calls)){" in UI_JS
     assert "tc.snippet||tc.result||tc.output||tc.preview" in UI_JS
     assert "done:true" in UI_JS

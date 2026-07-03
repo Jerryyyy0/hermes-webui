@@ -13,21 +13,22 @@ def test_done_and_restore_filters_recovery_messages_from_frontend_state():
     assert "_filterRecoveryControlMessages(S.messages || [])" in MESSAGES_JS
     assert "if(!m||m.role==='tool') return false;" in MESSAGES_JS
     assert "if(m.recovery_control===true) return true;" in MESSAGES_JS
-    assert "previous response was cut off by a network error" in MESSAGES_JS
     assert "continue exactly where you left off" in MESSAGES_JS
+    assert "do not retry the same tool call" in MESSAGES_JS
 
 
 def test_apererror_recovers_on_recovery_control_event():
     assert "isRecoveryControlMessage=isInterrupted && (d.recovery_control===true || _streamRecoveryControlMessageText(d.message));" in MESSAGES_JS
-    assert "收到流恢复信号，正在恢复会话记录" in MESSAGES_JS
-    assert "if(await _restoreSettledSession(source)) return;" in MESSAGES_JS
+    assert "Stream recovery signal received. Restoring transcript..." in MESSAGES_JS
+    assert "if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})) return;" in MESSAGES_JS
 
 
 def test_ui_rejects_recovery_control_as_visible_assistant_content():
     assert "function _isRecoveryControlMessageText" in UI_JS
     assert "function _assistantMessageHasVisibleContent" in UI_JS
     assert "if(_isRecoveryControlMessage(m)) return false;" in UI_JS
-    assert "if(_isRecoveryControlMessage(m)){ri++;continue;}" in UI_JS
+    assert "function _messageIsRenderable(m)" in UI_JS
+    assert "if(_isRecoveryControlMessage(m)) return false;" in UI_JS[UI_JS.index("function _messageIsRenderable(m)"):]
     assert "_assistantMessageHasVisibleContent(m)" in UI_JS
 
 
@@ -35,8 +36,7 @@ def test_recovery_control_detection_is_not_broad_phrase_matching():
     assert "|| /continue exactly where you left off/i.test(normalized)" not in UI_JS
     assert "|| /continue exactly where you left off/i.test(normalized)" not in MESSAGES_JS
     assert "const systemRecovery=/^\\[System:/i.test(normalized)" in UI_JS
-    assert "实时 worker 在本次运行完成前已停止" in UI_JS
-    assert "the live worker stopped before this run finished" in UI_JS
+    assert "const backendRecovery=/^the live worker stopped before this run finished\\.?$/i.test(normalized)" in UI_JS
 def test_recovery_control_does_not_filter_genuine_interruption_card():
     """A real 'Response interrupted' card carries provider_details_label
     'Interruption details' but is NOT a recovery-control row — it must stay
@@ -78,8 +78,8 @@ def test_recovery_control_does_not_filter_genuine_interruption_card():
         {"role": "user", "content": "my previous response was cut off, can you continue?"},
         # explicit server marker — IS recovery control
         {"role": "assistant", "content": "anything", "recovery_control": True},
-        # strict synthetic backend text — IS recovery control (zh + backward-compat en)
-        {"role": "assistant", "content": "实时 worker 在本次运行完成前已停止。"},
+        # strict synthetic backend text — IS recovery control (backward-compat)
+        {"role": "assistant", "content": "The live worker stopped before this run finished."},
     ]
     r = subprocess.run([node, "-e", driver, json.dumps(cases)], capture_output=True, text=True, timeout=15)
     assert r.returncode == 0, r.stderr

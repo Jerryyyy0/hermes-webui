@@ -19,9 +19,58 @@ def test_active_session_external_refresh_uses_metadata_then_force_reload():
     assert "function ensureActiveSessionExternalRefreshPoll()" in SESSIONS_JS
     assert "async function refreshActiveSessionIfExternallyUpdated(reason)" in SESSIONS_JS
     assert "messages=0&resolve_model=0" in SESSIONS_JS
-    assert "remoteCount > localCount || remoteLast > localLast" in SESSIONS_JS
+    assert "if(remoteCount !== localCount)" in SESSIONS_JS
+    assert "else if(remoteLast > localLast)" in SESSIONS_JS
     assert "if(S.busy || S.activeStreamId) return;" in SESSIONS_JS
     assert "document.hidden" in SESSIONS_JS
+    assert "externalRefreshReason:reason||'poll'" in SESSIONS_JS
+
+
+def test_active_session_external_refresh_skips_destructive_reload_on_metadata_only_bump():
+    """A timestamp-only active-session update should not blank the transcript.
+
+    Background skill/memory review can update session timestamps without adding
+    chat messages. The old `remoteCount > localCount || remoteLast > localLast`
+    condition called `loadSession(..., {force:true})` for that metadata-only
+    bump; `loadSession(force)` clears S.messages before async message fetches,
+    so the whole transcript visibly disappeared and reappeared with no new
+    content. Only a message_count CHANGE should force-reload the transcript;
+    timestamp-only bumps update local metadata and refresh the lightweight
+    sidebar list.
+    """
+    assert "remoteCount > localCount || remoteLast > localLast" not in SESSIONS_JS
+    assert "if(remoteCount !== localCount){" in SESSIONS_JS
+    assert "await loadSession(sid, {force:true, externalRefreshReason:reason||'poll', keepStaleUntilLoaded:_keepStaleUntilLoaded});" in SESSIONS_JS
+    assert "}else if(remoteLast > localLast){" in SESSIONS_JS
+    assert "S.session.last_message_at = remoteLast" in SESSIONS_JS
+    assert "if(data.session.updated_at) S.session.updated_at = data.session.updated_at;" in SESSIONS_JS
+
+
+def test_active_session_external_refresh_force_reloads_on_count_decrease():
+    """A LOWER remote message_count must still force-reload the transcript.
+
+    Another tab/client can shrink the active transcript via /api/session/truncate,
+    /retry, /undo, or regenerate — all reduce message_count while advancing
+    updated_at. A `remoteCount > localCount` gate would treat that as a
+    metadata-only bump and silently keep the stale (longer) transcript forever.
+    The condition is `remoteCount !== localCount` precisely so a decrease also
+    re-syncs.
+    """
+    # The force-reload branch must trigger on ANY count change, not just growth.
+    assert "if(remoteCount !== localCount){" in SESSIONS_JS
+    assert "if(remoteCount > localCount){" not in SESSIONS_JS
+    # The metadata-only branch must be gated on an unchanged count (the else of
+    # the count-change check), never reachable when the count differs.
+    assert "}else if(remoteLast > localLast){" in SESSIONS_JS
+
+
+def test_webui_source_never_counts_as_external_session():
+    assert "function _isWebUiSourceSession(session)" in SESSIONS_JS
+    assert "if (!session || _isWebUiSourceSession(session)) return false;" in SESSIONS_JS
+    external_start = SESSIONS_JS.index("function _isExternalSession(session)")
+    external_body = SESSIONS_JS[external_start : external_start + 300]
+    assert "_isWebUiSourceSession(session)" in external_body
+    assert "session.is_cli_session || _isMessagingSession(session)" in external_body
 
 
 def test_active_session_external_refresh_has_focus_and_visibility_hooks():
@@ -47,13 +96,19 @@ def test_session_list_external_refresh_uses_sse_invalidation_not_polling():
     assert "ensureSessionEventsSSE();" in SESSIONS_JS
     assert "document._hermesSessionEventsVisibilityHook" in SESSIONS_JS
     ensure_fn = SESSIONS_JS[SESSIONS_JS.find("function ensureSessionEventsSSE()") :]
-    assert ensure_fn.find("document._hermesSessionEventsVisibilityHook") < ensure_fn.find("document.hidden) return")
+    # The visibility hook must be installed before the open-guard early-return.
+    # #4151 replaced the `document.hidden) return` open guard with the focus-aware
+    # `_sidebarSseBackgrounded()) return` predicate (which also covers PWA blur).
+    assert ensure_fn.find("document._hermesSessionEventsVisibilityHook") < ensure_fn.find("_sidebarSseBackgrounded()) return")
     assert "_sessionListExternalRefreshMs" not in SESSIONS_JS
     assert "addEventListener('sessions_changed', (ev) => {" in ensure_fn
     assert "const activeProfile = S.activeProfile || 'default';" in ensure_fn
     assert "const payload = typeof ev?.data === 'string' ? JSON.parse(ev.data) : {};" in ensure_fn
     assert "const eventProfile = payload && typeof payload.profile === 'string' ? payload.profile : '';" in ensure_fn
     assert "if (!_sessionEventProfilesMatch(eventProfile, activeProfile)) {" in ensure_fn
+    assert "function _sessionEventTargetsActiveSession(payload)" in SESSIONS_JS
+    assert "typeof payload.session_id === 'string'" in SESSIONS_JS
+    assert "eventTargetsActiveSession?'event-active-session':'event'" in ensure_fn
 
 
 def test_session_event_profile_filter_tolerates_default_root_aliases():
@@ -62,7 +117,8 @@ def test_session_event_profile_filter_tolerates_default_root_aliases():
     assert "function _sessionEventProfilesMatch(eventProfile, activeProfile)" in SESSIONS_JS
     assert "if (!_profileMatchesActiveProfile(sessionProfile, activeProfile)) return false;" in SESSIONS_JS
     assert "activeProfileIsDefault:true" in UI_JS
-    assert "S.activeProfileIsDefault=!!p.is_default;" in BOOT_JS
+    assert "const activeProfileState = await _resolveActiveProfileBootstrapState();" in BOOT_JS
+    assert "S.activeProfileIsDefault = activeProfileState.isDefault;" in BOOT_JS
     assert "S.activeProfileIsDefault = !!data.is_default;" in PANELS_JS
 
 
@@ -93,7 +149,7 @@ def test_same_session_force_reload_preserves_non_empty_composer_input():
     assert "function _restoreComposerDraft(draft, targetSid, opts={})" in SESSIONS_JS
     assert "const preserveActiveInput = !!(opts && opts.preserveActiveInput);" in SESSIONS_JS
     assert "if (preserveActiveInput && current && current !== text) return;" in SESSIONS_JS
-    assert "_restoreComposerDraft(_draft, sid, {preserveActiveInput:currentSid===sid&&forceReload});" in SESSIONS_JS
+    assert "_restoreComposerDraft(_draft, sid, {preserveActiveInput:!!opts.preserveActiveInput || (currentSid===sid&&forceReload)});" in SESSIONS_JS
 
 
 def test_same_session_force_reload_keeps_loaded_transcript_width_hint():
@@ -131,7 +187,7 @@ def test_same_width_force_reload_invalidates_visible_message_cache():
     assert "_visWithIdxCacheLen=0;" in clear_body
     assert "clearVisibleMessageRowCache();" in UI_JS[UI_JS.index("function clearMessageRenderCache()") :]
 
-    ensure_start = SESSIONS_JS.index("async function _ensureMessagesLoaded(sid)")
+    ensure_start = SESSIONS_JS.index("async function _ensureMessagesLoaded(sid")
     ensure_end = SESSIONS_JS.index("function _messageComparableText", ensure_start)
     ensure_body = SESSIONS_JS[ensure_start:ensure_end]
     invalidate_pos = ensure_body.index("if(typeof clearVisibleMessageRowCache==='function') clearVisibleMessageRowCache();")

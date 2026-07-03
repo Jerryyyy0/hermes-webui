@@ -40,6 +40,37 @@ Hermes WebUI 依赖并与 **Hermes Agent** 协同运行。当任务涉及 Agent 
 - 不得打印 API 密钥、OAuth 令牌、Cookie、完整 `.env` 文件、完整 `auth.json` 文件或密码哈希
 - 在推荐修复方案前，先收集非敏感的状态和日志证据
 
+## 贡献风格
+
+- Keep one logical change per PR; split unrelated refactors or cleanup.
+- Read `docs/CONTRACTS.md` and the linked contract/RFC for the touched
+  subsystem before editing.
+- For local pytest runs, use `./scripts/test.sh` instead of bare `python3`,
+  `python -m pytest`, or `pytest`. The script creates/uses the repo `.venv`,
+  pins execution to Python 3.11-3.13, and installs missing dev test dependencies.
+  `HERMES_WEBUI_TEST_PYTHON` selects the supported base interpreter used to
+  create or rebuild `.venv`; it must not install test dependencies into a
+  system/Homebrew interpreter directly.
+  If a direct pytest invocation reports an unsupported interpreter, rerun through
+  `./scripts/test.sh` before debugging product code.
+- Prefer the existing Python + vanilla JavaScript structure. Do not add
+  dependencies, build tools, frameworks, or long-lived processes without clear
+  justification and a rollback story.
+- Update docs when changing setup, onboarding, runtime behavior, architecture,
+  testing guidance, or user-facing workflows.
+- Do not edit `CHANGELOG.md` in ordinary contributor PRs. The release workflow
+  owns changelog updates through release commits. If a change is release-note
+  worthy, include concise release-note wording in the PR body instead.
+- For UI or UX changes, include before/after evidence and test relevant
+  desktop, narrow, and mobile states.
+- For behavior changes, add or update automated tests where practical and list
+  the manual verification performed.
+- For runtime, streaming, recovery, replay, compression, or sidebar metadata
+  changes, name the state layer being mutated and prove the relevant invariant.
+- For Docker build changes in `docker_init.bash`, mirror directory exclusions
+  in both the `rsync` and `cp -a` paths — `/opt/hermes` may contain subdirectories
+  with restricted permissions (e.g. `.playwright/`).
+
 ## Fork 集成边界（上游同步）
 
 本仓库是上游 Hermes WebUI 的 Fork。自定义行为优先放在仓库内的 `integration/` 层，以保持 rebase 和上游拉取的低摩擦。
@@ -98,14 +129,6 @@ Hermes WebUI 依赖并与 **Hermes Agent** 协同运行。当任务涉及 Agent 
 2. 对比同进程内知识库 BFF 透传（如 `POST /api/integration/knowledge_base/get_user_messages`）的耗时；BFF 快而 aggregation handler 慢，优先怀疑响应写法而非下游。
 3. 直连 `KNOWLEDGE_BASE_URL` 核对请求体字段（尤其 `readType`）与响应 `data` 结构。
 4. 看 server access log 的 `ms`：若 handler 已完成但客户端仍超时，几乎一定是 HTTP 响应格式问题。
-
-## 贡献风格
-
-- 每个 PR 保持一个逻辑变更；将无关的重构或清理拆分到单独 PR。
-- 编辑前阅读 `docs/CONTRACTS.md` 及所涉及子系统的契约/RFC。
-- 优先使用现有的 Python + 原生 JavaScript 结构。未经充分论证并提供回滚方案，不得引入新依赖、构建工具、框架或长期运行的进程。
-- 修改安装配置、引导流程、运行时行为、架构、测试指南或用户可见工作流时，同步更新文档。
-- 新增或大幅改写 Markdown 文档时，默认尽量使用中文说明；若编辑既有英文上游文档、外部规范、API 字段说明或需要保持原文风格的段落，可沿用原语言并避免中英风格混杂。
 
 ### 简单接口文档
 

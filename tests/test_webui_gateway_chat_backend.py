@@ -9,13 +9,16 @@ import urllib.error
 import api.gateway_chat as gateway_chat
 import api.models as models
 import api.streaming as streaming
-from api.config import STREAMS, create_stream_channel
+from api.config import PENDING_GOAL_CONTINUATION, STREAMS, create_stream_channel
 from api.models import new_session
 from api.gateway_chat import (
     _gateway_http_error_event,
+    _gateway_reasoning_delta,
     _gateway_sse_delta,
+    _gateway_sse_reasoning_delta,
     _gateway_stream_usage,
     _gateway_tool_progress_event,
+    _gateway_use_runs_api_enabled,
     gateway_chat_config_status,
     webui_chat_backend_mode,
     webui_gateway_chat_enabled,
@@ -130,7 +133,36 @@ def test_gateway_tool_progress_event_translates_gateway_lifecycle_payloads():
             "tid": "call-1",
         },
     )
+    assert _gateway_tool_progress_event(
+        {"tool": "_thinking", "status": "running", "preview": "Thinking..."}
+    ) == (
+        "reasoning",
+        {
+            "text": "Thinking...",
+        },
+    )
+    assert _gateway_tool_progress_event(
+        {"tool": "_thinking", "status": "running", "text": "Thinking from text..."}
+    ) == (
+        "reasoning",
+        {
+            "text": "Thinking from text...",
+        },
+    )
     assert _gateway_tool_progress_event({"tool": "_thinking", "status": "running"}) is None
+
+
+def test_gateway_reasoning_delta_keeps_string_deltas_and_ignores_structured_payloads():
+    assert _gateway_reasoning_delta({"text": " Let me"}) == " Let me"
+    assert _gateway_reasoning_delta({"text": "   ", "preview": " think"}) == " think"
+    assert _gateway_reasoning_delta({"content": {"text": "safe", "debug": {"note": "x"}}}) == ""
+    assert _gateway_reasoning_delta({"text": ["safe"], "preview": " more"}) == " more"
+
+
+def test_gateway_sse_reasoning_delta_extracts_reasoning_content_chunks():
+    assert _gateway_sse_reasoning_delta({"choices": [{"delta": {"reasoning_content": "Let me"}}]}) == "Let me"
+    assert _gateway_sse_reasoning_delta({"choices": [{"message": {"reasoning_content": "Done thinking"}}]}) == "Done thinking"
+    assert _gateway_sse_reasoning_delta({"choices": [{"delta": {"reasoning_content": "   "}}]}) == ""
 
 
 def test_gateway_http_401_reports_gateway_auth_not_provider_key():
@@ -232,6 +264,10 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
             yield b'data: {"tool":"terminal","label":"terminal: pytest","toolCallId":"call-1","status":"running"}\n\n'
             yield b'data: {"choices":[{"delta":{"content":"hel"}}]}\n\n'
             yield b'event: hermes.tool.progress\n'
+            yield b'data: {"tool":"_thinking","text":"Thinking from tool progress"}\n\n'
+            yield b'event: reasoning.available\n'
+            yield b'data: {"text":"Reasoning preview", "preview":"Reasoning preview"}\n\n'
+            yield b'event: hermes.tool.progress\n'
             yield b'data: {"tool":"terminal","toolCallId":"call-1","status":"completed"}\n\n'
             yield b'data: {"choices":[{"delta":{"content":"lo"}}],"usage":{"prompt_tokens":4,"completion_tokens":2}}\n\n'
             yield b'data: [DONE]\n\n'
@@ -244,6 +280,7 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
 
     monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
     monkeypatch.setenv("HERMES_WEBUI_GATEWAY_API_KEY", "secret-token")
+    monkeypatch.setattr(gateway_chat, "_gateway_reasoning_effort_for_request", lambda *args, **kwargs: "high")
     monkeypatch.setattr(streaming, "_load_webui_prefill_context", lambda cfg: {
         "status": "loaded",
         "source": "test",
@@ -291,6 +328,7 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
     assert captured["headers"]["X-hermes-session-key"] == f"webui:{s.session_id}"
     assert '"stream": true' in captured["body"]
     payload = json.loads(captured["body"])
+    assert payload["reasoning_effort"] == "high"
     # #3324: the gateway path's first system message is now the full WebUI
     # ephemeral system prompt (progress prompt + session/delivery context),
     # NOT the bare _WEBUI_PROGRESS_PROMPT — otherwise the delivery/session
@@ -321,6 +359,8 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
         "is_error": False,
         "tid": "call-1",
     }) in event_pairs
+    assert ("reasoning", {"text": "Thinking from tool progress"}) in event_pairs
+    assert ("reasoning", {"text": "Reasoning preview"}) in event_pairs
     assert ("tool_complete", {
         "event_type": "tool.completed",
         "name": "terminal",
@@ -330,6 +370,275 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
         "tid": "call-1",
     }) in event_pairs
     assert all(len(item) == 3 and item[2] for item in events)
+
+
+def test_gateway_chat_worker_preserves_reasoning_delta_whitespace_and_persists_reasoning(tmp_path, monkeypatch):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def __iter__(self):
+            yield b'data: {"choices":[{"delta":{"content":"hel"}}]}\n\n'
+            yield b'event: hermes.tool.progress\n'
+            yield b'data: {"tool":"_thinking","text":"Let me"}\n\n'
+            yield b'event: reasoning.available\n'
+            yield b'data: {"text":" think", "preview":"should not win"}\n\n'
+            yield b'event: reasoning.available\n'
+            yield b'data: {"content":{"text":"safe","debug":{"note":"x"}}}\n\n'
+            yield b'event: reasoning.available\n'
+            yield b'data: {"preview":" more"}\n\n'
+            yield b'data: {"choices":[{"delta":{"content":"lo"}}]}\n\n'
+            yield b'data: [DONE]\n\n'
+
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", lambda req, timeout=0: FakeResponse())
+
+    s = new_session()
+    stream_id = "stream-gateway-reasoning-persist-test"
+    s.active_stream_id = stream_id
+    s.pending_user_message = "Say hello"
+    s.pending_attachments = []
+    s.pending_started_at = 123
+    s.save()
+    channel = create_stream_channel()
+    subscriber = channel.subscribe()
+    STREAMS[stream_id] = channel
+
+    gateway_chat._run_gateway_chat_streaming(
+        s.session_id,
+        "Say hello",
+        "test-model",
+        str(tmp_path),
+        stream_id,
+        [],
+    )
+
+    saved = models.get_session(s.session_id)
+    assert saved.messages[-1]["content"] == "hello"
+    assert saved.messages[-1]["reasoning"] == "Let me think more"
+    reasoning_events = []
+    while not subscriber.empty():
+        item = subscriber.get_nowait()
+        if item[0] == "reasoning":
+            reasoning_events.append(item[1]["text"])
+    assert reasoning_events == ["Let me", " think", " more"]
+    assert not any("debug" in text for text in reasoning_events)
+
+
+def test_gateway_chat_worker_reads_reasoning_content_deltas_from_chat_completions(tmp_path, monkeypatch):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def __iter__(self):
+            yield b'data: {"choices":[{"delta":{"reasoning_content":"Let me ","content":"hel"}}]}\n\n'
+            yield b'data: {"choices":[{"delta":{"reasoning_content":"think","content":"lo"}}]}\n\n'
+            yield b'data: [DONE]\n\n'
+
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", lambda req, timeout=0: FakeResponse())
+
+    s = new_session()
+    stream_id = "stream-gateway-reasoning-content-test"
+    s.active_stream_id = stream_id
+    s.pending_user_message = "Say hello"
+    s.pending_attachments = []
+    s.pending_started_at = 123
+    s.save()
+    channel = create_stream_channel()
+    subscriber = channel.subscribe()
+    STREAMS[stream_id] = channel
+
+    gateway_chat._run_gateway_chat_streaming(
+        s.session_id,
+        "Say hello",
+        "test-model",
+        str(tmp_path),
+        stream_id,
+        [],
+    )
+
+    saved = models.get_session(s.session_id)
+    assert saved.messages[-1]["content"] == "hello"
+    assert saved.messages[-1]["reasoning"] == "Let me think"
+    reasoning_events = []
+    while not subscriber.empty():
+        item = subscriber.get_nowait()
+        if item[0] == "reasoning":
+            reasoning_events.append(item[1]["text"])
+    assert reasoning_events == ["Let me ", "think"]
+
+
+def test_gateway_chat_worker_emits_goal_continue_for_goal_related_turn(tmp_path, monkeypatch):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def __iter__(self):
+            yield b'data: {"choices":[{"delta":{"content":"goal "}}]}\n\n'
+            yield b'data: {"choices":[{"delta":{"content":"reply"}}]}\n\n'
+            yield b'data: [DONE]\n\n'
+
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", lambda req, timeout=0: FakeResponse())
+
+    from api import goals as webui_goals
+
+    monkeypatch.setattr(webui_goals, "has_active_goal", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        webui_goals,
+        "evaluate_goal_after_turn",
+        lambda *args, **kwargs: {
+            "should_continue": True,
+            "continuation_prompt": "continue the goal",
+            "message": "Continuing goal",
+            "message_key": "goal_continuing",
+            "message_args": ["one step remains"],
+        },
+    )
+
+    s = new_session()
+    stream_id = "stream-gateway-goal-continue"
+    s.active_stream_id = stream_id
+    s.pending_user_message = "finish it"
+    s.pending_attachments = []
+    s.pending_started_at = 123
+    s.save()
+    channel = create_stream_channel()
+    subscriber = channel.subscribe()
+    STREAMS[stream_id] = channel
+    PENDING_GOAL_CONTINUATION.discard(s.session_id)
+
+    gateway_chat._run_gateway_chat_streaming(
+        s.session_id,
+        "finish it",
+        "test-model",
+        str(tmp_path),
+        stream_id,
+        [],
+        goal_related=True,
+    )
+
+    saved = models.get_session(s.session_id)
+    events = []
+    while not subscriber.empty():
+        events.append(subscriber.get_nowait())
+    event_names = [item[0] for item in events]
+
+    assert event_names.count("goal") == 2
+    assert "goal_continue" in event_names
+    assert "done" in event_names
+    assert "stream_end" in event_names
+    assert event_names.index("goal_continue") < event_names.index("done")
+    assert event_names.index("done") < event_names.index("stream_end")
+    assert s.session_id in PENDING_GOAL_CONTINUATION
+
+    goal_continue_event = next(item for item in events if item[0] == "goal_continue")
+    assert goal_continue_event[1]["continuation_prompt"] == "continue the goal"
+    assert goal_continue_event[1]["message"] == "Continuing goal"
+    assert goal_continue_event[1]["message_key"] == "goal_continuing"
+    assert saved.messages[-1]["role"] == "assistant"
+    assert saved.messages[-1]["content"] == "goal reply"
+
+
+def test_gateway_chat_worker_skips_goal_judge_for_non_goal_turn(tmp_path, monkeypatch):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def __iter__(self):
+            yield b'data: {"choices":[{"delta":{"content":"plain reply"}}]}\n\n'
+            yield b'data: [DONE]\n\n'
+
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", lambda req, timeout=0: FakeResponse())
+
+    from api import goals as webui_goals
+
+    has_goal_calls = []
+    judge_calls = []
+
+    monkeypatch.setattr(
+        webui_goals,
+        "has_active_goal",
+        lambda *args, **kwargs: has_goal_calls.append((args, kwargs)) or True,
+    )
+    monkeypatch.setattr(
+        webui_goals,
+        "evaluate_goal_after_turn",
+        lambda *args, **kwargs: judge_calls.append((args, kwargs)),
+    )
+
+    s = new_session()
+    stream_id = "stream-gateway-no-goal"
+    s.active_stream_id = stream_id
+    s.pending_user_message = "plain turn"
+    s.pending_attachments = []
+    s.pending_started_at = 123
+    s.save()
+    channel = create_stream_channel()
+    subscriber = channel.subscribe()
+    STREAMS[stream_id] = channel
+    PENDING_GOAL_CONTINUATION.discard(s.session_id)
+
+    gateway_chat._run_gateway_chat_streaming(
+        s.session_id,
+        "plain turn",
+        "test-model",
+        str(tmp_path),
+        stream_id,
+        [],
+        goal_related=False,
+    )
+
+    events = []
+    while not subscriber.empty():
+        events.append(subscriber.get_nowait())
+    event_names = [item[0] for item in events]
+
+    assert "goal" not in event_names
+    assert "goal_continue" not in event_names
+    assert "done" in event_names
+    assert "stream_end" in event_names
+    assert has_goal_calls == []
+    assert judge_calls == []
+    assert s.session_id not in PENDING_GOAL_CONTINUATION
 
 
 def test_gateway_chat_worker_normalizes_prefill_slice_before_system_prefix(tmp_path, monkeypatch):
@@ -669,3 +978,264 @@ def test_gateway_chat_worker_forwards_image_attachments_as_multimodal_parts(tmp_
     assert content[0] == {"type": "text", "text": "What is in this image?"}
     assert content[1]["type"] == "image_url"
     assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+# ── #4113 (salvage): _resolve_image_input_mode delegates to the agent's
+# canonical decide_image_input_mode, but preserves the WebUI carve-out that
+# UNKNOWN/custom models still forward images NATIVELY. ──────────────────────
+#
+# The agent package is not importable in the WebUI standalone test environment
+# (``import agent`` raises ModuleNotFoundError), so we inject fake
+# ``agent.image_routing`` / ``agent.auxiliary_client`` modules to exercise the
+# real delegation branch. The fakes let us control exactly what the canonical
+# router returns and what capability lookup reports, so each behaviour is
+# pinned independently of models.dev data.
+
+def _install_fake_agent_routing(monkeypatch, *, decision, supports,
+                                provider="customcorp", model="mystery-9000"):
+    """Inject fake agent.image_routing + agent.auxiliary_client into sys.modules.
+
+    ``decision`` is what the canonical ``decide_image_input_mode`` returns;
+    ``supports`` is what ``_lookup_supports_vision`` returns (True / False /
+    None — None means "unknown / no capability data").
+    """
+    import sys
+    import types
+
+    img = types.ModuleType("agent.image_routing")
+    img.decide_image_input_mode = lambda p, m, cfg: decision
+    img._lookup_supports_vision = lambda p, m, cfg=None: supports
+    aux = types.ModuleType("agent.auxiliary_client")
+    aux._read_main_provider = lambda: provider
+    aux._read_main_model = lambda: model
+    pkg = types.ModuleType("agent")
+
+    monkeypatch.setitem(sys.modules, "agent", pkg)
+    monkeypatch.setitem(sys.modules, "agent.image_routing", img)
+    monkeypatch.setitem(sys.modules, "agent.auxiliary_client", aux)
+
+
+def test_resolve_image_input_mode_unknown_model_forwards_native(monkeypatch):
+    """WebUI carve-out: an UNKNOWN/custom model (no capability data) forwards
+    images natively even though the canonical router conservatively returns
+    ``"text"`` for it.
+
+    This is the behaviour the gateway image-forwarding test relies on, and the
+    agent's strip-and-retry guard downgrades to text on a provider rejection.
+    """
+    _install_fake_agent_routing(monkeypatch, decision="text", supports=None)
+    cfg = {"agent": {"image_input_mode": "auto"},
+           "auxiliary": {"vision": {"provider": "auto"}}}
+    assert streaming._resolve_image_input_mode(cfg) == "native"
+
+
+def test_resolve_image_input_mode_known_text_only_routes_text(monkeypatch):
+    """NON-VACUOUS regression for #4113's real divergence.
+
+    The OLD local re-implementation never consulted model capability, so a
+    model KNOWN to lack vision (``supports_vision == False``) still got images
+    embedded as native ``image_url`` parts — silently sending pixels to a model
+    that cannot see them (#21160). Delegating to the canonical router fixes
+    this: a known text-only model now routes through the text (vision_analyze)
+    pipeline.
+
+    Against master this assertion FAILS — the old code returns ``"native"`` for
+    this exact config (auto mode, no explicit vision backend) because it ignored
+    capability entirely.
+    """
+    _install_fake_agent_routing(monkeypatch, decision="text", supports=False)
+    cfg = {"agent": {"image_input_mode": "auto"},
+           "auxiliary": {"vision": {"provider": "auto"}}}
+    assert streaming._resolve_image_input_mode(cfg) == "text"
+
+
+def test_resolve_image_input_mode_known_vision_model_forwards_native(monkeypatch):
+    """A model KNOWN to support vision forwards natively (canonical native)."""
+    _install_fake_agent_routing(monkeypatch, decision="native", supports=True)
+    cfg = {"agent": {"image_input_mode": "auto"}}
+    assert streaming._resolve_image_input_mode(cfg) == "native"
+
+
+def test_resolve_image_input_mode_explicit_text_signal_honored(monkeypatch):
+    """An explicit user choice for the text pipeline is honoured even for an
+    unknown model — the carve-out only fires when there is NO explicit signal.
+
+    Both an explicit ``agent.image_input_mode: text`` and a configured
+    ``auxiliary.vision`` backend count as explicit signals.
+    """
+    _install_fake_agent_routing(monkeypatch, decision="text", supports=None)
+    assert streaming._resolve_image_input_mode(
+        {"agent": {"image_input_mode": "text"}}) == "text"
+    assert streaming._resolve_image_input_mode(
+        {"agent": {"image_input_mode": "auto"},
+         "auxiliary": {"vision": {"provider": "openai", "model": "gpt-4o"}}}) == "text"
+
+
+def test_resolve_image_input_mode_fallback_when_agent_unavailable(monkeypatch):
+    """When the agent package cannot be imported (standalone WebUI env), fall
+    back to historical WebUI behaviour: explicit text signal wins, else native.
+    """
+    import sys
+
+    # Ensure the delegation import fails: stub agent.image_routing as a module
+    # that raises on attribute access of the routing fn would still import, so
+    # instead force an ImportError by mapping the submodule to None.
+    monkeypatch.setitem(sys.modules, "agent", None)
+    monkeypatch.setitem(sys.modules, "agent.image_routing", None)
+
+    # No explicit signal -> native (this is what keeps the gateway image test
+    # green, since agent is not importable there either).
+    assert streaming._resolve_image_input_mode(
+        {"agent": {"image_input_mode": "auto"},
+         "auxiliary": {"vision": {"provider": "auto"}}}) == "native"
+    # Explicit text mode -> text.
+    assert streaming._resolve_image_input_mode(
+        {"agent": {"image_input_mode": "text"}}) == "text"
+    # Explicit auxiliary vision backend -> text.
+    assert streaming._resolve_image_input_mode(
+        {"auxiliary": {"vision": {"provider": "anthropic"}}}) == "text"
+
+
+def test_gateway_use_runs_api_is_default_off():
+    for env in ({}, {"HERMES_WEBUI_GATEWAY_USE_RUNS_API": ""}):
+        assert _gateway_use_runs_api_enabled({}, env) is False
+
+
+def test_gateway_use_runs_api_only_accepts_explicit_truthy_values():
+    for value in ("1", "true", "yes", "on", " True ", " ON "):
+        assert _gateway_use_runs_api_enabled({}, {"HERMES_WEBUI_GATEWAY_USE_RUNS_API": value}) is True
+
+
+def test_gateway_use_runs_api_rejects_generic_truthy_strings():
+    for value in ("enabled", "gateway", "api_server", "absolutely"):
+        assert _gateway_use_runs_api_enabled({}, {"HERMES_WEBUI_GATEWAY_USE_RUNS_API": value}) is False
+
+
+def test_gateway_use_runs_api_can_be_enabled_from_config():
+    assert _gateway_use_runs_api_enabled({"webui_gateway_use_runs_api": "true"}, {}) is True
+    assert _gateway_use_runs_api_enabled({"webui_gateway_use_runs_api": "1"}, {}) is True
+
+
+def test_gateway_use_runs_api_env_wins_over_config():
+    assert _gateway_use_runs_api_enabled(
+        {"webui_gateway_use_runs_api": "true"},
+        {"HERMES_WEBUI_GATEWAY_USE_RUNS_API": "false"},
+    ) is False
+
+
+def test_gateway_runs_api_body_includes_session_id():
+    """#4535: the runs API body must carry session_id so the agent reuses the
+    browser session instead of creating a fresh run_<uuid> per message."""
+    from unittest.mock import patch, MagicMock
+    from api.config import STREAMS, STREAMS_LOCK
+    from api.gateway_chat import _run_gateway_chat_streaming
+
+    captured = {}
+    events = []
+    q = MagicMock()
+    q.put_nowait = lambda item: events.append(item)
+    stream_id = "sid-runs-session-id"
+    with STREAMS_LOCK:
+        STREAMS[stream_id] = q
+
+    call_count = [0]
+
+    def fake_urlopen(req, *, timeout=None):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            captured["body"] = json.loads(req.data.decode("utf-8"))
+            captured["url"] = req.full_url
+            resp = MagicMock()
+            resp.read = lambda sz=65536: json.dumps({"run_id": "run_abc"}).encode()
+            resp.__enter__ = lambda s: s
+            resp.__exit__ = lambda s, *a: None
+            return resp
+        resp = MagicMock()
+        resp.__iter__ = lambda s: iter([
+            b'data: {"choices":[{"delta":{"content":"ok"}}]}\n',
+            b'data: [DONE]\n',
+        ])
+        resp.__enter__ = lambda s: s
+        resp.__exit__ = lambda s, *a: None
+        return resp
+
+    import os
+    env = {k: v for k, v in os.environ.items()}
+    env["HERMES_WEBUI_CHAT_BACKEND"] = "gateway"
+    env["HERMES_WEBUI_GATEWAY_USE_RUNS_API"] = "1"
+    env["HERMES_WEBUI_GATEWAY_BASE_URL"] = "http://gateway.local"
+
+    try:
+        with patch.dict("os.environ", env, clear=True):
+            with patch("api.gateway_chat.gateway_supports_approval", return_value=True), \
+                 patch("urllib.request.urlopen", side_effect=fake_urlopen), \
+                 patch("api.gateway_chat.get_session", return_value=MagicMock(
+                     active_stream_id=stream_id, workspace="/tmp",
+                     profile=None, context_messages=[], messages=[],
+                 )):
+                _run_gateway_chat_streaming(
+                    session_id="sess-stable-uuid",
+                    msg_text="hi",
+                    model="test",
+                    workspace="/tmp",
+                    stream_id=stream_id,
+                )
+        assert "/v1/runs" in captured["url"]
+        assert captured["body"]["session_id"] == "sess-stable-uuid"
+    finally:
+        with STREAMS_LOCK:
+            STREAMS.pop(stream_id, None)
+
+
+def test_gateway_worker_skips_runs_api_when_opt_in_absent():
+    """Worker uses chat/completions even when gateway advertises approval support, unless opt-in is set."""
+    from unittest.mock import patch, MagicMock
+    from api.config import STREAMS, STREAMS_LOCK
+    from api.gateway_chat import _run_gateway_chat_streaming
+
+    events = []
+    q = MagicMock()
+    q.put_nowait = lambda item: events.append(item)
+    stream_id = "sid-optin-gate"
+    with STREAMS_LOCK:
+        STREAMS[stream_id] = q
+
+    sse_body = b'data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n'
+
+    def fake_urlopen(req, *, timeout=None):
+        assert "/v1/chat/completions" in req.full_url
+        resp = MagicMock()
+        resp.__iter__ = lambda s: iter(sse_body.split(b"\n"))
+        resp.__enter__ = lambda s: s
+        resp.__exit__ = lambda s, *a: None
+        return resp
+
+    import os
+    env_override = {"HERMES_WEBUI_CHAT_BACKEND": "gateway"}
+    env_without_opt_in = {
+        k: v for k, v in os.environ.items()
+        if k != "HERMES_WEBUI_GATEWAY_USE_RUNS_API"
+    }
+    env_without_opt_in.update(env_override)
+
+    try:
+        with patch.dict("os.environ", env_without_opt_in, clear=True):
+            with patch("api.gateway_chat.gateway_supports_approval", return_value=True), \
+                 patch("urllib.request.urlopen", side_effect=fake_urlopen), \
+                 patch("api.gateway_chat.get_session", return_value=MagicMock(
+                     active_stream_id=stream_id, workspace="/tmp",
+                     profile=None, context_messages=[], messages=[],
+                 )):
+                _run_gateway_chat_streaming(
+                    session_id="sess-optin",
+                    msg_text="hi",
+                    model="test",
+                    workspace="/tmp",
+                    stream_id=stream_id,
+                )
+        event_types = [e[0] for e in events if isinstance(e, tuple) and len(e) >= 2]
+        assert "token" in event_types, "expected a token event from chat/completions path"
+        assert "apperror" not in event_types, "runs API path fired unexpectedly"
+    finally:
+        with STREAMS_LOCK:
+            STREAMS.pop(stream_id, None)

@@ -11,6 +11,7 @@ from pathlib import Path
 from api.config import MAX_UPLOAD_BYTES, STATE_DIR
 from api.helpers import j, bad
 from api.models import get_session
+from api.profiles import _profiles_match, get_active_profile_name as _get_active_profile_name
 from api.workspace import (
     safe_resolve_ws,
     resolve_trusted_workspace,
@@ -174,6 +175,21 @@ def _session_attachment_dir(session_id: str, *, root: Path | None = None) -> Pat
     return dest_dir
 
 
+def _session_visible_to_active_profile(session) -> bool:
+    """Return whether an upload target session belongs to the active profile."""
+    session_profile = getattr(session, 'profile', None)
+    if not isinstance(session_profile, str):
+        session_profile = None
+    return _profiles_match(session_profile, _get_active_profile_name())
+
+
+def _reject_invisible_session(handler, session) -> bool:
+    if _session_visible_to_active_profile(session):
+        return False
+    j(handler, {'error': 'Session not found'}, status=404)
+    return True
+
+
 def handle_upload(handler):
     import traceback as _tb
     try:
@@ -192,6 +208,8 @@ def handle_upload(handler):
             s = get_session(session_id)
         except KeyError:
             return j(handler, {'error': '会话不存在'}, status=404)
+        if _reject_invisible_session(handler, s):
+            return True
         safe_name = _sanitize_upload_name(filename)
         dest = _upload_destination(session_id, safe_name)
         dest.write_bytes(file_bytes)
@@ -369,6 +387,8 @@ def handle_upload_extract(handler):
             s = get_session(session_id)
         except KeyError:
             return j(handler, {'error': 'Session not found'}, status=404)
+        if _reject_invisible_session(handler, s):
+            return True
         session_dir = _session_attachment_dir(session_id)
         session_dir.mkdir(parents=True, exist_ok=True)
         result = extract_archive(file_bytes, filename, session_dir)
@@ -482,6 +502,13 @@ def _stt_provider_capability_from_module(stt):
             # non-WAV input through ffmpeg before invoking the command.
             return has_local_command() and has_browser_audio_converter()
 
+        def command_provider_available(provider):
+            resolver = getattr(stt, "_resolve_command_stt_provider_config", None)
+            try:
+                return callable(resolver) and resolver(provider, cfg_dict) is not None
+            except Exception:
+                return False
+
         def resolve_provider(provider):
             if provider == "local":
                 if bool(getattr(stt, "_HAS_FASTER_WHISPER", False)):
@@ -510,6 +537,8 @@ def _stt_provider_capability_from_module(stt):
                     return "none"
             if provider == "elevenlabs":
                 return "elevenlabs" if bool(env("ELEVENLABS_API_KEY")) else "none"
+            if command_provider_available(provider):
+                return provider
             return "none"
 
         explicit = "provider" in cfg_dict
@@ -519,6 +548,12 @@ def _stt_provider_capability_from_module(stt):
             return provider != "none", provider if provider != "none" else configured
 
         for candidate in ("local", "local_command", "groq", "openai", "mistral", "xai", "elevenlabs"):
+            # Command (custom) STT providers are intentionally omitted from this
+            # auto-detect tuple to mirror the agent's _get_provider() (transcription_tools.py),
+            # which only auto-selects local > groq > openai and never auto-picks a command
+            # provider. A command-backed STT activates only via an explicit stt.provider.
+            # Do NOT add command providers here without matching the agent, or the WebUI
+            # probe will diverge from what the agent actually resolves.
             provider = resolve_provider(candidate)
             if provider != "none":
                 return True, provider
@@ -573,6 +608,8 @@ def handle_workspace_upload(handler):
             session = get_session(session_id)
         except KeyError:
             return j(handler, {'error': 'Session not found'}, status=404)
+        if _reject_invisible_session(handler, session):
+            return True
 
         # Resolve workspace root from session
         workspace = resolve_trusted_workspace(session.workspace)

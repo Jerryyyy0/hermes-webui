@@ -1771,33 +1771,182 @@ function applyBotName(){
   if(topbarTitle && (!S.session)) topbarTitle.textContent=name;
   const msg=$('msg');
   if(msg) msg.placeholder='Message '+name+'\u2026';
+  if(typeof _applyBusyComposerPlaceholder==='function') _applyBusyComposerPlaceholder();
 }
+
+const _COMPOSER_CONTROL_TOGGLE_DEFS=[
+  {key:'hide_composer_attach',label:'Attach',labelKey:'composer_control_attach',selectors:['#btnAttach'],orderSelector:'#btnAttach',orderGroup:'left'},
+  {key:'hide_composer_saved_prompts',label:'Saved prompts',labelKey:'composer_control_saved_prompts',selectors:['#btnSavedPrompts'],orderSelector:'#btnSavedPrompts',orderGroup:'left'},
+  {key:'hide_composer_mic',label:'Mic',labelKey:'composer_control_mic',selectors:['#btnMic'],orderSelector:'#btnMic',orderGroup:'left'},
+  {key:'hide_composer_profile',label:'Profile',labelKey:'composer_control_profile',selectors:['#profileChipWrap'],orderSelector:'#profileChipWrap',orderGroup:'left'},
+  {key:'hide_composer_workspace',label:'Workspace',labelKey:'composer_control_workspace',selectors:['.composer-ws-wrap','#composerMobileWorkspaceAction'],orderSelector:'.composer-ws-wrap',orderGroup:'left'},
+  {key:'hide_composer_model',label:'Model',labelKey:'composer_control_model',selectors:['.composer-model-wrap','#composerMobileModelAction'],orderSelector:'.composer-model-wrap',orderGroup:'left'},
+  {key:'hide_composer_reasoning',label:'Reasoning',labelKey:'composer_control_reasoning',selectors:['#composerReasoningWrap','#composerMobileReasoningAction'],orderSelector:'#composerReasoningWrap',orderGroup:'left'},
+  {key:'hide_composer_context',label:'Context',labelKey:'composer_control_context',selectors:['#ctxIndicatorWrap','#composerMobileContextAction'],orderSelector:'#ctxIndicatorWrap',orderGroup:'right'},
+];
+window._COMPOSER_CONTROL_TOGGLE_DEFS=_COMPOSER_CONTROL_TOGGLE_DEFS;
+
+const _COMPOSER_SITUATIONAL_CONTROL_TOGGLE_DEFS=[
+  {key:'hide_composer_voice_mode',label:'Voice mode',labelKey:'composer_control_voice_mode',selectors:['#btnVoiceMode'],orderSelector:'#btnVoiceMode',orderGroup:'left'},
+  {key:'hide_composer_yolo',label:'YOLO',labelKey:'composer_control_yolo',selectors:['#yoloPill'],orderSelector:'#yoloPill',orderGroup:'left'},
+  {key:'hide_composer_bg_badge',label:'Background badge',labelKey:'composer_control_bg_badge',selectors:['#bgBadge'],orderSelector:'#bgBadge',orderGroup:'right'},
+  {key:'hide_composer_mobile_config',label:'Mobile config',labelKey:'composer_control_mobile_config',selectors:['#composerMobileConfigBtn'],orderSelector:'#composerMobileConfigBtn',orderGroup:'left'},
+  {key:'hide_composer_quota_chip',label:'Quota chip',labelKey:'composer_control_quota_chip',selectors:['#providerQuotaChip','#composerMobileQuotaAction'],orderSelector:'#providerQuotaChip',orderGroup:'left'},
+  {key:'hide_composer_toolsets',label:'Toolsets',labelKey:'composer_control_toolsets',selectors:['#composerToolsetsWrap'],orderSelector:'#composerToolsetsWrap',orderGroup:'left'},
+  {key:'hide_composer_status',label:'Status',labelKey:'composer_control_status',selectors:['#composerStatus'],orderSelector:'#composerStatus',orderGroup:'right'},
+];
+window._COMPOSER_SITUATIONAL_CONTROL_TOGGLE_DEFS=_COMPOSER_SITUATIONAL_CONTROL_TOGGLE_DEFS;
+
+function _allComposerControlToggleDefs(){
+  return _COMPOSER_CONTROL_TOGGLE_DEFS.concat(_COMPOSER_SITUATIONAL_CONTROL_TOGGLE_DEFS);
+}
+
+function _sanitizeComposerControlOrder(order){
+  if(!Array.isArray(order)) return [];
+  const allowed=new Set(_allComposerControlToggleDefs().map(def=>def.key));
+  const out=[];
+  order.forEach(key=>{
+    if(typeof key!=='string') return;
+    key=key.trim();
+    if(!key||!allowed.has(key)||out.includes(key)) return;
+    out.push(key);
+  });
+  return out;
+}
+window._sanitizeComposerControlOrder=_sanitizeComposerControlOrder;
+
+function _orderedComposerControlDefs(order){
+  const defs=_allComposerControlToggleDefs();
+  const byKey=new Map(defs.map(def=>[def.key,def]));
+  const out=[];
+  _sanitizeComposerControlOrder(Array.isArray(order)?order:window._composerControlOrder).forEach(key=>{
+    if(byKey.has(key)) out.push(byKey.get(key));
+  });
+  defs.forEach(def=>{if(!out.includes(def)) out.push(def);});
+  return out;
+}
+window._orderedComposerControlDefs=_orderedComposerControlDefs;
+
+function _applyComposerControlOrder(order){
+  window._composerControlOrder=_sanitizeComposerControlOrder(order);
+  const grouped=new Map();
+  _orderedComposerControlDefs(window._composerControlOrder).forEach(def=>{
+    const node=document.querySelector(def.orderSelector||def.selectors&&def.selectors[0]);
+    if(!node||!node.parentNode) return;
+    const parent=node.parentNode;
+    if(!grouped.has(parent)) grouped.set(parent,[]);
+    grouped.get(parent).push(node);
+  });
+  grouped.forEach((nodes,parent)=>{
+    if(!nodes.length) return;
+    const marker=document.createComment('composer-control-order');
+    parent.insertBefore(marker,nodes[0]);
+    let ref=marker;
+    nodes.forEach(node=>{
+      parent.insertBefore(node,ref.nextSibling);
+      ref=node;
+    });
+    marker.remove();
+  });
+  if(typeof _fitComposerFooter==='function') _fitComposerFooter();
+}
+window._applyComposerControlOrder=_applyComposerControlOrder;
+
+function _composerControlVisibilityFromSettings(settings){
+  const next={};
+  for(const def of _allComposerControlToggleDefs()){
+    next[def.key]=!!(settings&&settings[def.key]);
+  }
+  return next;
+}
+window._composerControlVisibilityFromSettings=_composerControlVisibilityFromSettings;
+
+function _setComposerControlHidden(el, hidden){
+  if(!el) return;
+  el.classList.toggle('composer-control-hidden', !!hidden);
+  if(hidden) el.setAttribute('aria-hidden','true');
+  else el.removeAttribute('aria-hidden');
+}
+
+function _applyComposerFooterVisibilitySettings(){
+  const hidden=window._composerControlVisibility||{};
+  for(const def of _allComposerControlToggleDefs()){
+    const isHidden=!!hidden[def.key];
+    for(const selector of def.selectors){
+      document.querySelectorAll(selector).forEach(el=>_setComposerControlHidden(el,isHidden));
+    }
+  }
+
+  const hideMic=!!hidden.hide_composer_mic;
+  if(hideMic&&window._micActive&&typeof window._stopMic==='function'){
+    try{window._stopMic();}catch(_){ }
+  }
+
+  const hideSavedPrompts=!!hidden.hide_composer_saved_prompts;
+  const savedBtn=$('btnSavedPrompts');
+  const savedPopup=$('savedPromptsPopup');
+  if(hideSavedPrompts&&savedPopup){
+    savedPopup.style.display='none';
+    if(savedBtn) savedBtn.setAttribute('aria-expanded','false');
+  }
+
+  if(hidden.hide_composer_workspace&&typeof closeWsDropdown==='function') closeWsDropdown();
+  if(hidden.hide_composer_profile&&typeof closeProfileDropdown==='function') closeProfileDropdown();
+  if(hidden.hide_composer_model&&typeof closeModelDropdown==='function') closeModelDropdown();
+  if(hidden.hide_composer_reasoning&&typeof closeReasoningDropdown==='function') closeReasoningDropdown();
+  if(hidden.hide_composer_toolsets&&typeof closeToolsetsDropdown==='function') closeToolsetsDropdown();
+  if(hidden.hide_composer_mobile_config&&typeof closeMobileComposerConfig==='function') closeMobileComposerConfig();
+}
+window._applyComposerFooterVisibilitySettings=_applyComposerFooterVisibilitySettings;
+
+function _applyTitlebarProfileVisibility(){
+  const btn=$('titlebarProfileBtn');
+  if(!btn) return;
+  btn.style.display=window._showTitlebarProfile?'':'none';
+}
+window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
 
 (async()=>{
   // Load send key preference
   let _bootSettings={};
+  const prefillIntent=(typeof _composerPrefillIntentFromLocation==='function')?_composerPrefillIntentFromLocation():null;
   try{
     const s=await api('/api/settings');
     _bootSettings=s;
     window._sendKey=s.send_key||'enter';
-    window._showTokenUsage=!!s.show_token_usage;
-    window._showQuotaChip=s.show_quota_chip===true;
-    window._hideEmptyStateSuggestions=s.hide_empty_state_suggestions===true;
-    applyEmptyStateSuggestionPref();
-    window._showTps=!!s.show_tps;
-    window._fadeTextEffect=!!s.fade_text_effect;
-    window._showCliSessions=!!s.show_cli_sessions;
-    window._showPreviousMessagingSessions=!!s.show_previous_messaging_sessions;
-    window._soundEnabled=!!s.sound_enabled;
-    window._notificationsEnabled=!!s.notifications_enabled;
     // Persist default workspace so the blank new-chat page can show it
     // and workspace actions (New file/folder) work before the first session (#804).
     if(s.default_workspace) S._profileDefaultWorkspace=s.default_workspace;
+    window._showTokenUsage=!!s.show_token_usage;
+    window._showQuotaChip=s.show_quota_chip===true;
+    window._showConversationOutline=s.show_conversation_outline===true;
+    document.documentElement.dataset.conversationOutline=window._showConversationOutline?'enabled':'disabled';
+    if(typeof applyConversationOutlinePreference==='function') applyConversationOutlinePreference();
+    window._hideEmptyStateSuggestions=s.hide_empty_state_suggestions===true;
+    applyEmptyStateSuggestionPref();
+    // #4343: transcript virtualization is EXPERIMENTAL/opt-IN (default OFF).
+    // It caused scroll-up flicker on long sessions, so it's off for everyone
+    // unless explicitly opted in; long transcripts render in full by default.
+    window._virtualizeTranscript=s.virtualize_transcript===true;
+    window._showTps=!!s.show_tps;
+    window._fadeTextEffect=!!s.fade_text_effect;
+    window._showCliSessions=s.show_cli_sessions!==false;
+    window._showPreviousMessagingSessions=!!s.show_previous_messaging_sessions;
+    window._soundEnabled=!!s.sound_enabled;
+    window._notificationsEnabled=!!s.notifications_enabled;
     window._whatsNewSummaryEnabled=!!s.whats_new_summary_enabled;
     window._showThinking=s.show_thinking!==false;
-    window._simplifiedToolCalling=s.simplified_tool_calling!==false;
+    window._simplifiedToolCalling=true;
+    window._chatActivityDisplayMode=s.chat_activity_display_mode==='transparent_stream'?'transparent_stream':'compact_worklog';
+    window._transparentStream=window._chatActivityDisplayMode==='transparent_stream';
     window._terminalAutoExpandOnOutput=!!s.terminal_auto_expand_on_output;
-    window._activityFeedExpandedDefault=!!s.activity_feed_expanded_default;
+    window._worklogDetailsExpandedByDefault=!!(
+      Object.prototype.hasOwnProperty.call(s,'worklog_details_expanded_default')
+        ? s.worklog_details_expanded_default
+        : s.activity_feed_expanded_default
+    );
+    window._workspaceTodosTab=!!s.workspace_todos_tab;
+    if(typeof _applyWorkspaceTodosTabVisibility==='function') _applyWorkspaceTodosTabVisibility();
     window._sidebarDensity=(s.sidebar_density==='detailed'?'detailed':'compact');
     window._inflightStateLimits={
       maxSessions:parseInt(s.inflight_state_max_sessions||8,10)||8,
@@ -1877,27 +2026,50 @@ function applyBotName(){
       setLocale(_lang);
       if(typeof applyLocaleToDOM==='function')applyLocaleToDOM();
     }
+    _applyComposerFooterVisibilitySettings();
     // TTS: apply enabled state on boot so buttons show/hide correctly (#499)
     if(typeof _applyTtsEnabled==='function') _applyTtsEnabled(localStorage.getItem('hermes-tts-enabled')==='true');
   }catch(e){
     window._sendKey='enter';
     window._showTokenUsage=false;
     window._showQuotaChip=false;
+    window._showConversationOutline=false;
+    document.documentElement.dataset.conversationOutline='disabled';
+    if(typeof applyConversationOutlinePreference==='function') applyConversationOutlinePreference();
     window._hideEmptyStateSuggestions=false;
     applyEmptyStateSuggestionPref();
+    window._virtualizeTranscript=false;  // settings-load failed: default-OFF (experimental/opt-in) (#4343)
     window._showTps=false;
     window._fadeTextEffect=false;
-    window._showCliSessions=false;
+    window._showCliSessions=true;  // settings-load failed: mirror the True config default (#3988)
     window._soundEnabled=false;
     window._notificationsEnabled=false;
     window._whatsNewSummaryEnabled=false;
     window._showThinking=true;
     window._simplifiedToolCalling=true;
+    window._chatActivityDisplayMode='compact_worklog';
+    window._transparentStream=false;
     window._terminalAutoExpandOnOutput=false;
+    window._workspaceTodosTab=false;
+    if(typeof _applyWorkspaceTodosTabVisibility==='function') _applyWorkspaceTodosTabVisibility();
     window._sessionJumpButtonsEnabled=false;
+    window._structuredCodeDefaultView='auto';
+    window._structuredCodeAutoTreeLines=10;
     window._sidebarDensity='compact';
     window._busyInputMode='queue';
+    window._pinnedSessionsLimit=3;
+    // Settings load failed: keep the persisted default-message-mode preference
+    // (the eager default already read it from the localStorage mirror) instead
+    // of clobbering it, so a saved 'steer'/'interrupt'/'queue' still applies
+    // when the server is unreachable (#5167). The placeholder-hint has no
+    // persisted mirror, so it defaults off on failure.
+    window._defaultMessageMode=_readPersistedDefaultMessageMode();
+    window._showBusyPlaceholderHint=false;
     window._sessionEndlessScrollEnabled=false;
+    window._autoScrollFollow=true;
+    window._composerControlVisibility=_composerControlVisibilityFromSettings(null);
+    window._composerControlOrder=[];
+    _applyComposerControlOrder(window._composerControlOrder);
     window._botName='Hermes';
     _bootSettings={check_for_updates:false};
     if(typeof setLocale==='function'){

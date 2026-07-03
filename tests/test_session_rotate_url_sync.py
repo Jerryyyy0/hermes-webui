@@ -22,8 +22,13 @@ def test_stream_completion_syncs_rotated_session_id_to_tab_state():
     assert completion_pos != -1
     assert settled_pos != -1
 
-    completion_block = MESSAGES_JS[completion_pos : completion_pos + 800]
-    settled_block = MESSAGES_JS[settled_pos : settled_pos + 800]
+    # Proximity window scoping "the completion/settled handler block near the
+    # session assignment". The settled restore block now includes the terminal
+    # stale-prefix guard before the tab-state sync, so keep the assertion local
+    # to the handler while widening the slice enough to cover the new helper
+    # state and the unchanged localStorage/update-url writes.
+    completion_block = MESSAGES_JS[completion_pos : completion_pos + 1000]
+    settled_block = MESSAGES_JS[settled_pos : settled_pos + 1800]
 
     for block in (completion_block, settled_block):
         assert "localStorage.setItem('hermes-webui-session',S.session.session_id);" in block

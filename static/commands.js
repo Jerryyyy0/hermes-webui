@@ -123,6 +123,7 @@ function _invalidateSkillCommandCache(){
 if(typeof window!=='undefined'){
   window._invalidateSlashModelCache=_invalidateSlashModelCache;
   window._invalidateSkillCommandCache=_invalidateSkillCommandCache;
+  window.invalidateSlashSkillCaches=invalidateSlashSkillCaches;
   // Auto-invalidate skill command cache when a skill is deleted or toggled
   window.addEventListener('hermes:skill-delete',()=>_invalidateSkillCommandCache());
   window.addEventListener('hermes:skill-toggle',()=>_invalidateSkillCommandCache());
