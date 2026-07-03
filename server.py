@@ -185,6 +185,9 @@ from api.helpers import (
 )
 from api.profiles import set_request_profile, clear_request_profile
 from api.routes import handle_delete, handle_get, handle_patch, handle_post, handle_put
+from integration.auth.csrf_hooks import install_zhiling_split_webui_csrf_hook
+
+install_zhiling_split_webui_csrf_hook()
 from api.startup import auto_install_agent_deps, fix_credential_permissions
 from api.updates import WEBUI_VERSION
 
@@ -373,6 +376,22 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             clear_request_profile()
 
+    def _drain_request_body(self) -> None:
+        # Consume unread request body before an early auth/CSRF return.
+        # HTTP/1.1 keep-alive reuses the same socket. If a POST is rejected
+        # before route handlers call read_body(), the unread JSON body remains
+        # on the socket and corrupts the next request line, producing spurious
+        # 501 methods like JSON-prefixed POST.
+        try:
+            length = int(self.headers.get("Content-Length") or "0")
+        except Exception:
+            length = 0
+        if length > 0:
+            try:
+                self.rfile.read(length)
+            except Exception:
+                pass
+
     def _handle_write(self, route_func) -> None:
         self._req_t0 = time.time()
         # Per-request profile context from cookie (issue #798)
@@ -389,7 +408,9 @@ class Handler(BaseHTTPRequestHandler):
             _is_csp_report_post = (
                 parsed.path == "/api/csp-report" and self.command == "POST"
             )
-            if not _is_csp_report_post and not check_auth(self, parsed): return
+            if not _is_csp_report_post and not check_auth(self, parsed):
+                self._drain_request_body()
+                return
             result = route_func(self, parsed)
             if result is False:
                 return j(self, {'error': 'not found'}, status=404)

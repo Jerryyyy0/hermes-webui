@@ -17,6 +17,9 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Fixed
 
+- **Zhiling split WebUI CSRF** — When `HERMES_INTEGRATION=1`, requests from shared frontend origins (`192.168.1.139:23003`, `47.93.211.132:23003`) with `Authorization` or `X-Forwarded-User` (auth-proxy trust boundary) bypass built-in same-origin CSRF rejection. Hook in `integration/auth/csrf_hooks.py`; `server.py` calls `install_zhiling_split_webui_csrf_hook()` at import.
+- **HTTP/1.1 keep-alive auth reject body drain** — `Handler._drain_request_body()` consumes unread POST body before early auth failure returns, preventing keep-alive socket corruption and spurious 501 on the next request.
+
 - **SkillHub custom scope empty list** — `scan_custom_skills_global` 误将上游 `hub_names`（set）当作 `_scan_custom_skill_dicts` 的 `category` 参数，SkillHub 目录非空时 `scope=custom` 列表与 `stats.custom` 恒为 0。现固定扫描 `shared_skills_dir()` 且不按 category 预过滤。
 
 - **Notification status read mapping** — 列表项 `status` 由 `read_type` 推导：`unread`/`seen` 恒为对应值；`all` 时额外拉取下游 `readType=seen` 的 ID 集合判断 `read`/`unread`。
