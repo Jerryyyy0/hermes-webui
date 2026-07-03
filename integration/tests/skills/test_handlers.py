@@ -30,7 +30,7 @@ def test_skillhub_skills_route():
                 assert try_handle_get(handler, parsed) is True
                 lst.assert_called_once()
                 assert lst.call_args.kwargs["category"] == "tools"
-                assert "profile" not in lst.call_args.kwargs
+                assert lst.call_args.kwargs["profile"] == "default"
                 j_fn.assert_called_once()
 
 

@@ -24,7 +24,6 @@ from integration.chat_provider_errors.interruption_copy import (
     INTERRUPTED_NO_OUTPUT_ZH,
     INTERRUPTED_PENDING_RETRY_ZH,
     INTERRUPTED_RECOVERED_ZH,
-    INTERRUPTION_CAUSE_DETAILS_ZH,
     build_interrupted_content_zh,
 )
 from api.workspace import get_last_workspace
@@ -1008,7 +1007,6 @@ _INTERRUPTED_PENDING_RETRY_WORDING = INTERRUPTED_PENDING_RETRY_ZH
 # or the marker has been pending longer than _JOURNAL_RETRY_GIVEUP_SECONDS).
 _INTERRUPTED_NEUTRAL_WORDING = INTERRUPTED_NEUTRAL_ZH
 
-_INTERRUPTION_CAUSE_DETAILS = INTERRUPTION_CAUSE_DETAILS_ZH
 
 
 def _classify_interruption_cause(
@@ -1072,10 +1070,16 @@ def _interrupted_recovery_marker(
     set so the caller cannot accidentally re-arm retry on a successful
     repair.
     """
+    from integration.chat_provider_errors.interruption_copy import (
+        INTERRUPTION_CAUSE_ZH,
+        build_interrupted_content_zh,
+    )
+
     interruption_cause = _classify_interruption_cause(
         stream_id=stream_id,
         pending_started_at=pending_started_at,
     )
+    interruption_cause_zh = INTERRUPTION_CAUSE_ZH.get(interruption_cause, '')
     content = _interrupted_content_for(
         recovered_output=recovered_output,
         pending_retry=pending_retry,
@@ -1087,7 +1091,7 @@ def _interrupted_recovery_marker(
         'timestamp': int(time.time()),
         '_error': True,
         'type': 'interrupted',
-        'interruption_cause': interruption_cause,
+        'interruption_cause': interruption_cause_zh,
     }
     if pending_retry and not recovered_output:
         marker['_pending_journal_recovery'] = True

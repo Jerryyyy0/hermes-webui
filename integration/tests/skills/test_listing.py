@@ -107,9 +107,10 @@ def test_list_skillhub_skills_custom_scope():
                         sort="mtime",
                         order="desc",
                     )
-                    scan.assert_called_once_with({"hub-skill"})
+                    scan.assert_called_once_with({"hub-skill"}, profile="default")
                     custom.assert_called_once_with(
                         category="tools",
+                        profile="default",
                         q=None,
                         hub_names={"hub-skill"},
                         page=1,
@@ -185,6 +186,7 @@ def test_list_skillhub_skills_custom_all_records():
                     result = listing.list_skillhub_skills(scope="custom", all_records=True)
                     custom.assert_called_once_with(
                         category="",
+                        profile="default",
                         q=None,
                         hub_names=set(),
                         page=1,

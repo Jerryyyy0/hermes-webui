@@ -261,6 +261,7 @@ def list_installed(
 
 
 def _scan_custom_skill_dicts(
+    skills_dir: Path,
     category: str,
     hub_names: set[str] = frozenset(),  # kept for backward compat, no longer used
     q: str | None = None,
@@ -274,7 +275,6 @@ def _scan_custom_skill_dicts(
         skill_matches_platform,
     )
 
-    skills_dir = shared_skills_dir()
     if not skills_dir.exists():
         skills_dir.mkdir(parents=True, exist_ok=True)
     disabled = _get_disabled_skill_names()
@@ -363,9 +363,9 @@ def _scan_custom_skill_dicts(
     return all_skills
 
 
-def scan_custom_skills_global(hub_names: set[str], q: str | None = None) -> list[dict]:
-    """Scan all custom skills under shared_skills_dir (no category filter)."""
-    return _scan_custom_skill_dicts("", hub_names, q=q)
+def scan_custom_skills_global(hub_names: set[str], q: str | None = None, profile: str = "default") -> list[dict]:
+    """Scan all custom skills under a profile's skills dir (no category filter)."""
+    return _scan_custom_skill_dicts(skills_dir_for_profile(profile), hub_names, q=q)
 
 
 def _filter_custom_skills_in_memory(
@@ -395,12 +395,13 @@ def _filter_custom_skills_in_memory(
 
 
 def count_custom_skills(category: str, hub_names: set[str]) -> int:
-    return len(_scan_custom_skill_dicts(category, hub_names))
+    return len(_scan_custom_skill_dicts(shared_skills_dir(), category, hub_names))
 
 
 def list_custom_skills(
     category: str,
     hub_names: set[str],
+    profile: str = "default",
     q: str | None = None,
     page: int = 1,
     page_size: int = 20,
@@ -415,7 +416,7 @@ def list_custom_skills(
     if pre_scanned is not None:
         all_skills = _filter_custom_skills_in_memory(pre_scanned, category, q)
     else:
-        all_skills = _scan_custom_skill_dicts(category, hub_names, q=q)
+        all_skills = _scan_custom_skill_dicts(skills_dir_for_profile(profile), category, hub_names, q=q)
     all_skills = sort_skill_items(all_skills, sort=sort, order=order)
     total = len(all_skills)
     if all_records:

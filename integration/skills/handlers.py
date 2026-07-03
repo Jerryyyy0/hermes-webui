@@ -260,6 +260,7 @@ def _get_skillhub_download(handler, parsed) -> bool:
 def _get_skillhub_skills(handler, parsed) -> bool:
     qs = _qs(parsed)
     scope = (qs.get("scope") or ["hub"])[0]
+    profile = str((qs.get("profile") or ["default"])[0]).strip() or "default"
     category = _normalize_category((qs.get("category") or [""])[0])
     q = (qs.get("q") or [None])[0]
     page = _optional_int((qs.get("page") or [None])[0])
@@ -280,6 +281,7 @@ def _get_skillhub_skills(handler, parsed) -> bool:
     try:
         payload = listing.list_skillhub_skills(
             scope=scope,
+            profile=profile,
             category=category,
             q=q,
             page=page,

@@ -56,6 +56,7 @@ def _envelope(
 def list_skillhub_skills(
     category: str = "",
     scope: str = "hub",
+    profile: str = "default",
     q: str | None = None,
     page: int | None = None,
     page_size: int | None = None,
@@ -68,12 +69,13 @@ def list_skillhub_skills(
     page_limit = _normalize_page_size(page_size)
     category_key = str(category or "").strip()
     ctx = skillhub.build_hub_catalog_context()
-    custom_all = local_skills.scan_custom_skills_global(ctx.hub_names)
+    custom_all = local_skills.scan_custom_skills_global(ctx.hub_names, profile=profile)
     stats = skillhub.compute_scope_stats_from(ctx, custom_count=len(custom_all))
 
     if scope_key == "custom":
         payload = local_skills.list_custom_skills(
             category=category_key,
+            profile=profile,
             q=q,
             hub_names=ctx.hub_names,
             page=page_num,
