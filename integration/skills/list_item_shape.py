@@ -6,6 +6,7 @@ _LIST_STRING_FIELDS = (
     "name",
     "dir_name",
     "display_name",
+    "display_description",
     "description",
     "category",
     "version",

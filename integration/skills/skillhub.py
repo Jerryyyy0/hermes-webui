@@ -15,6 +15,7 @@ from integration.skills.local_skills import (
     _find_skill,
     _skill_dir_rel_path,
     normalize_dir_name,
+    read_detail_json,
     skill_target_dir,
 )
 from integration.skills.list_item_shape import normalize_skill_list_items
@@ -291,6 +292,17 @@ def annotate_installed(
             local_description = _read_local_skill_description(skills_dir, dir_name)
             if local_description:
                 skill["description"] = local_description
+            # Read display_name/display_description from detail metadata if present
+            skill_dir = (skills_dir / dir_name).resolve()
+            if skill_path_within(skills_dir, skill_dir) and skill_dir.is_dir():
+                detail_data = read_detail_json(skill_dir)
+                if detail_data:
+                    dn = str(detail_data.get("display_name") or "").strip()
+                    dd = str(detail_data.get("display_description") or "").strip()
+                    if dn:
+                        skill["display_name"] = dn
+                    if dd:
+                        skill["display_description"] = dd
         skill.pop("catalog_only", None)
         if lock_fields_ok:
             try:
@@ -447,6 +459,7 @@ def _filter_skills_by_q(skills: list[dict], q: str | None) -> list[dict]:
                 str(skill.get("name") or ""),
                 str(skill.get("display_name") or ""),
                 str(skill.get("description") or ""),
+                str(skill.get("display_description") or ""),
             ]
         ).lower()
         if query in haystack:
@@ -574,6 +587,17 @@ def install_skill(name: str, display_name: str = "", category: str = "") -> dict
     catalog_name = str(name or "").strip()
     if catalog_name:
         (target / _HUB_CATALOG_NAME_SIDECAR).write_text(catalog_name, encoding="utf-8")
+    # Save detail.json from upstream for structured detail display
+    try:
+        import json as _json
+        detail_data = fetch_skill_detail(name)
+        if isinstance(detail_data, dict) and detail_data:
+            (target / "detail.json").write_text(
+                _json.dumps(detail_data, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+    except Exception as exc:
+        _log.debug("Could not save detail.json for %s: %s", name, exc)
     try:
         from integration.skills.no_self_improve import add_names
 
