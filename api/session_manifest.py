@@ -1961,14 +1961,12 @@ def _session_media_preview_path(workspace: Path, rel: str, entry_kind: str) -> s
     if not path_text:
         return None
     try:
-        from api.workspace import MAX_FILE_BYTES, is_workspace_cruft_basename
+        from api.workspace import is_workspace_cruft_basename
 
         target = Path(path_text).expanduser().resolve()
         if not target.is_file():
             return None
         if is_workspace_cruft_basename(target.name):
-            return None
-        if target.stat().st_size > MAX_FILE_BYTES:
             return None
         return target.as_posix()
     except (ValueError, OSError, FileNotFoundError):
@@ -1982,14 +1980,12 @@ def _file_preview_path(workspace: Path, rel: str, entry_kind: str) -> str | None
     if not in_workspace:
         return None
     try:
-        from api.workspace import MAX_FILE_BYTES, is_workspace_cruft_basename, safe_resolve_ws
+        from api.workspace import is_workspace_cruft_basename, safe_resolve_ws
 
         target = safe_resolve_ws(workspace, ws_rel)
         if not target.is_file():
             return None
         if is_workspace_cruft_basename(target.name):
-            return None
-        if target.stat().st_size > MAX_FILE_BYTES:
             return None
         return ws_rel
     except (ValueError, OSError, FileNotFoundError):
