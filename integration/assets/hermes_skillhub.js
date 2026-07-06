@@ -1070,7 +1070,6 @@
     _hideAiModal();
     try {
       await ensureCategories();
-      console.log('[SkillHub] categories loaded:', _skillhubCategories.length, _skillhubCategories);
     } catch (_) {}
     if (!_skillhubCategories.length && Array.isArray(_skillhubData)) {
       const cats = new Set();

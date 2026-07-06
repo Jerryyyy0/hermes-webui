@@ -608,6 +608,32 @@ def validate_dir_name(dir_name: str) -> dict | None:
     return None
 
 
+def _replace_frontmatter_name(content: str, new_name: str) -> str:
+    """Replace the ``name`` value inside YAML frontmatter, preserving the rest."""
+    text = str(content or "")
+    stripped = text.lstrip()
+    if not stripped.startswith("---"):
+        return text
+    parts = stripped.split("---", 2)
+    if len(parts) < 3:
+        return text
+    prefix = text[: len(text) - len(stripped)]
+    fm_lines = parts[1].splitlines(keepends=True)
+    replaced = False
+    new_lines = []
+    for line in fm_lines:
+        if not replaced and line.strip() and not line.strip().startswith("#"):
+            key, _, _ = line.partition(":")
+            if key.strip().lower() == "name":
+                new_lines.append(f"name: {new_name}\n")
+                replaced = True
+                continue
+        new_lines.append(line)
+    if not replaced:
+        new_lines.insert(0, f"name: {new_name}\n")
+    return f"{prefix}---{''.join(new_lines)}---{parts[2]}"
+
+
 def parse_logical_name_from_content(content: str) -> str | None:
     """Parse frontmatter ``name`` from SKILL.md content."""
     try:
@@ -1127,9 +1153,17 @@ def _upload_zip_skills(
             return {"error": "; ".join(errors), "status": err_status}
 
         entries: list[dict] = []
+        has_request_name = str(request_name or "").strip() != ""
         for skill_root, dest, list_name, stored_category, dirs_to_remove in planned:
             _remove_upload_dirs(dirs_to_remove)
             _copy_skill_tree(skill_root, dest)
+            if has_request_name:
+                skill_md = find_skill_main_file(dest)
+                if skill_md:
+                    original = skill_md.read_text(encoding="utf-8")
+                    patched = _replace_frontmatter_name(original, list_name)
+                    if patched != original:
+                        skill_md.write_text(patched, encoding="utf-8")
             created.append(dest)
             _write_category_marker(dest, stored_category)
             entries.append(_skill_upload_entry(dest, skills_dir, list_name, stored_category))
@@ -1181,6 +1215,8 @@ def _upload_single_md(
         _remove_upload_dirs(dirs_to_remove)
         target.mkdir(parents=True, exist_ok=True)
         created = True
+        if use_explicit:
+            content = _replace_frontmatter_name(content, leaf)
         (target / "SKILL.md").write_text(content, encoding="utf-8")
         skill_md = find_skill_main_file(target)
         if not skill_md:
