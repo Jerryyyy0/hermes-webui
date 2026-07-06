@@ -554,6 +554,10 @@ def _post_skillhub_ai_meta(handler, body: dict) -> bool:
             name=name,
             description=description,
         )
+        import logging
+        _log = logging.getLogger(__name__)
+        detail_json = result.get("detailJson") if isinstance(result, dict) else None
+        _log.info("ai-meta detail_json: %s", detail_json)
         return _respond(handler, result)
     except Exception as exc:
         import logging

@@ -221,6 +221,11 @@ def list_installed(
             install_file = skill_dir / ".install_name"
             if install_file.is_file():
                 install_name = install_file.read_text(encoding="utf-8").strip()
+            # Read icon from detail metadata if present
+            icon_from_detail = ""
+            detail_data = read_detail_json(skill_dir)
+            if detail_data:
+                icon_from_detail = str(detail_data.get("icon") or "").strip()
             all_skills.append(
                 {
                     "name": name,
@@ -229,6 +234,7 @@ def list_installed(
                     "category": cat,
                     "version": str(frontmatter.get("version", "") or ""),
                     "author": str(frontmatter.get("author", "") or ""),
+                    "icon": icon_from_detail,
                     "hub_installed": hub_installed,
                     "can_delete": not is_system_skill(name),
                     "install_name": install_name or name,
@@ -320,13 +326,15 @@ def _scan_custom_skill_dicts(
                         break
             if len(description) > MAX_DESCRIPTION_LENGTH:
                 description = description[: MAX_DESCRIPTION_LENGTH - 3] + "..."
-            # Read display_name/display_description from detail metadata if present
+            # Read display_name/display_description/icon from detail metadata if present
             display_name_from_detail = ""
             display_desc_from_detail = ""
+            icon_from_detail = ""
             detail_data = read_detail_json(skill_dir)
             if detail_data:
                 display_name_from_detail = str(detail_data.get("display_name") or "").strip()
                 display_desc_from_detail = str(detail_data.get("display_description") or "").strip()
+                icon_from_detail = str(detail_data.get("icon") or "").strip()
             if query:
                 haystack = " ".join(
                     [
@@ -349,6 +357,7 @@ def _scan_custom_skill_dicts(
                 "category": str(cat or ""),
                 "version": str(frontmatter.get("version", "") or ""),
                 "author": str(frontmatter.get("author", "") or ""),
+                "icon": icon_from_detail,
                 "installed": True,
                 "hub_installed": False,
                 "custom": True,

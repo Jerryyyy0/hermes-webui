@@ -79,5 +79,8 @@ def generate_ai_meta(
 
     if detail:
         result["detailJson"] = detail
+        _log.info("generate_ai_meta detailJson extracted: %s", detail)
+    else:
+        _log.warning("generate_ai_meta detailJson is empty — skill-detail-extract returned None")
 
     return result

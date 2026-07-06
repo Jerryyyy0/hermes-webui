@@ -11,6 +11,7 @@ _LIST_STRING_FIELDS = (
     "category",
     "version",
     "author",
+    "icon",
 )
 _LIST_BOOL_FIELDS = (
     "installed",

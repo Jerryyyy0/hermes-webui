@@ -292,17 +292,20 @@ def annotate_installed(
             local_description = _read_local_skill_description(skills_dir, dir_name)
             if local_description:
                 skill["description"] = local_description
-            # Read display_name/display_description from detail metadata if present
+            # Read display_name/display_description/icon from detail metadata if present
             skill_dir = (skills_dir / dir_name).resolve()
             if skill_path_within(skills_dir, skill_dir) and skill_dir.is_dir():
                 detail_data = read_detail_json(skill_dir)
                 if detail_data:
                     dn = str(detail_data.get("display_name") or "").strip()
                     dd = str(detail_data.get("display_description") or "").strip()
+                    ic = str(detail_data.get("icon") or "").strip()
                     if dn:
                         skill["display_name"] = dn
                     if dd:
                         skill["display_description"] = dd
+                    if ic:
+                        skill["icon"] = ic
         skill.pop("catalog_only", None)
         if lock_fields_ok:
             try:
