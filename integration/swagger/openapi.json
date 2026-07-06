@@ -1146,7 +1146,7 @@
       "post": {
         "tags": ["IntegrationKnowledgeBase"],
         "summary": "上传文档（multipart）",
-        "description": "代理 `upload_docs`。必填表单字段：`uuid`、`kbName`、`files`、`fileProperties`（JSON 字符串）。成功后需再调用 `/update_docs` 触发解析。",
+        "description": "透传代理 `POST {KNOWLEDGE_BASE_URL}/knowledge_base/upload_docs`。请求 multipart body 与 `Content-Type` 原样转发，不做字段校验、默认值补全或大小限制；参数校验与 `chunkSize`/`chunkOverlap` 默认值由下游处理。典型字段：`uuid`、`kbName`、`files`、`fileProperties`（JSON 字符串）。成功后需再调用 `/update_docs` 触发解析。",
         "requestBody": {
           "required": true,
           "content": {
@@ -1168,7 +1168,7 @@
         },
         "responses": {
           "200": { "description": "下游原始 JSON 响应" },
-          "400": { "description": "缺参或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
+          "400": { "description": "Content-Length 无效、请求体不完整或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
           "502": { "description": "下游不可达", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
         }
       }

@@ -151,6 +151,13 @@ def classify_provider_error(err_str: str, exc=None, *, silent_failure: bool = Fa
         or ('context length exceeded' in _err_lower and 'cannot compress further' in _err_lower)
         or ('context compression' in _err_lower and 'max compression attempts' in _err_lower)
     )
+    _is_content_filtered = (
+        'data_inspection_failed' in _err_lower
+        or 'content_filter' in _err_lower
+        or 'content_policy_violation' in _err_lower
+        or 'content policy violation' in _err_lower
+        or 'moderation' in _err_lower
+    )
     if _is_quota:
         return _result('quota_exhausted')
     if _is_rate_limit:
@@ -161,6 +168,8 @@ def classify_provider_error(err_str: str, exc=None, *, silent_failure: bool = Fa
         return _result('model_not_found')
     if _is_compression_exhausted:
         return _result('compression_exhausted')
+    if _is_content_filtered:
+        return _result('content_filtered')
     if silent_failure:
         return _result('no_response')
     return _result('error')

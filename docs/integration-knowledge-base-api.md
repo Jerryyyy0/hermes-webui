@@ -67,8 +67,6 @@ http://127.0.0.1:8787
 | `iconType` | `1` | create / edit |
 | `location` | `"101"`（create）/ `101`（edit） | create / edit |
 | `size` | `15` | available / members / documents |
-| `chunkSize` | `"500"` | upload_docs |
-| `chunkOverlap` | `"50"` | upload_docs |
 | `deleteContent` | `true` | delete_docs |
 | `notRefreshVsCache` | `false` | delete_docs |
 | `topK` | `3` | search_docs / search_docs_xcore |
@@ -265,16 +263,16 @@ http://127.0.0.1:8787
 
 `POST /api/integration/knowledge_base/upload_docs`
 
-**Content-Type：** `multipart/form-data`
+**Content-Type：** `multipart/form-data`（请求体与 `Content-Type` 原样透传下游，WebUI 不做字段校验、默认值补全或上传大小限制）
 
 | 表单字段 | 必填 | 说明 |
 |---------|------|------|
 | `uuid` | 是 | 用户 UUID |
 | `kbName` | 是 | 知识库名称 |
-| `files` | 是 | 文件二进制，字段名 `files` |
+| `files` | 是 | 文件二进制，字段名 `files`（可多文件，重复 `-F files=@...`） |
 | `fileProperties` | 是 | JSON 数组字符串 |
-| `chunkSize` | 否 | 默认 `"500"` |
-| `chunkOverlap` | 否 | 默认 `"50"` |
+| `chunkSize` | 否 | 由下游处理默认值 |
+| `chunkOverlap` | 否 | 由下游处理默认值 |
 
 `fileProperties` 示例：
 

@@ -6,8 +6,13 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ## [Unreleased]
 
+### Changed
+
+- **Knowledge base upload_docs raw passthrough** — `POST /api/integration/knowledge_base/upload_docs` now forwards the incoming multipart body and `Content-Type` to downstream `upload_docs` unchanged. WebUI no longer parses/rebuilds multipart (fixes multi-file uploads where duplicate `files` parts were dropped), does not validate form fields locally, and does not inject `chunkSize`/`chunkOverlap` defaults or a WebUI-side upload size cap. Transport errors only: invalid `Content-Length`, incomplete body, downstream unreachable (502).
+
 ### Added
 
+- **Chat apperror `content_filtered` type** — Provider 内容审核拦截（如 `data_inspection_failed`、`content_filter`、`content_policy_violation`、`moderation`）不再落到通用 `error` 兜底文案，新增 `content_filtered` 分类，中文文案「内容被审核拦截 / 输入内容被模型服务的内容审核策略拦截」，`details_label` 为「审核详情」。分类与文案集中在 `integration/chat_provider_errors/`（`classify.py`、`messages.py`），`api/streaming.py` 接缝不动。
 - **Knowledge base get_joinkb_applications passthrough** — `POST /api/integration/knowledge_base/get_joinkb_applications` proxies downstream `POST /knowledge_base/get_joinkb_applications` verbatim (no field validation). Typical body: `userId`, `uuid`, `kbName`.
 - **Knowledge base mark_message_read passthrough** — `POST /api/integration/knowledge_base/mark_message_read` proxies downstream `POST /knowledge_base/mark_message_read` verbatim (no field validation). Typical body: `messageId` (integer array).
 - **Knowledge base remove_from_myshkb passthrough** — `POST /api/integration/knowledge_base/remove_from_myshkb` proxies downstream `POST /knowledge_base/remove_from_myshkb` verbatim (no field validation). Typical body: `account`, `uuid`, `kbName`.

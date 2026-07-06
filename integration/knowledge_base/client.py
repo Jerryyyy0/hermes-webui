@@ -144,6 +144,25 @@ def post_multipart(
     return parse_upstream_response(resp)
 
 
+def post_raw_body(
+    route_key: str,
+    *,
+    body: bytes,
+    content_type: str,
+) -> tuple[int, Any]:
+    """Forward request body bytes to downstream unchanged."""
+    url = _downstream_url(route_key)
+    headers: dict[str, str] = {}
+    if content_type:
+        headers["Content-Type"] = content_type
+    try:
+        with _client(timeout=_UPLOAD_TIMEOUT) as client:
+            resp = client.post(url, content=body, headers=headers)
+    except httpx.HTTPError as exc:
+        raise KnowledgeBaseUpstreamError(str(exc)) from exc
+    return parse_upstream_response(resp)
+
+
 def _location_create() -> str:
     return DEFAULT_LOCATION
 

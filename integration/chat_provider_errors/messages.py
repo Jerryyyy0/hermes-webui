@@ -57,6 +57,11 @@ CHAT_ERROR_ZH: dict[tuple[str, str | None], dict[str, str]] = {
         'message': '对话上下文过长，无法继续安全压缩。',
         'hint': '请新建会话，或缩小当前任务范围后重试。',
     },
+    ('content_filtered', None): {
+        'label': '内容被审核拦截',
+        'message': '输入内容被模型服务的内容审核策略拦截，未能完成本次响应。',
+        'hint': '请调整输入内容后重试，或联系管理员了解审核策略。',
+    },
     ('cancelled', None): {
         'label': '任务已取消',
         'message': '任务已取消。',
@@ -111,4 +116,6 @@ def provider_details_label_for_type(err_type: str) -> str:
         return '取消详情'
     if err_type == 'interrupted':
         return '中断详情'
+    if err_type == 'content_filtered':
+        return '审核详情'
     return '技术详情'

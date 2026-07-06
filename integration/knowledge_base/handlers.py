@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from api.helpers import MAX_BODY_BYTES, _sanitize_error, bad, j, read_body
+from api.helpers import _sanitize_error, bad, j
 
 from integration.config import knowledge_base_enabled
 from integration.knowledge_base.constants import (
@@ -213,70 +213,25 @@ def try_handle_post_early(handler, parsed) -> bool:
     return _handle_upload_docs(handler)
 
 
-def _upload_multipart_error(exc: ValueError) -> str:
-    message = str(exc)
-    known = {
-        "No boundary in Content-Type": "Content-Type 缺少 boundary",
-        "Invalid filename": "文件名无效",
-    }
-    return known.get(message, "请求格式无效")
-
-
 def _handle_upload_docs(handler) -> bool:
     content_type = str(handler.headers.get("Content-Type", "") or "")
-    content_length = int(handler.headers.get("Content-Length", 0) or 0)
-    max_mb = MAX_BODY_BYTES // 1024 // 1024
-    if content_length > MAX_BODY_BYTES:
-        return _respond_bad(handler, f"请求体过大（最大 {max_mb}MB）", 413)
+    try:
+        content_length = int(handler.headers.get("Content-Length", 0) or 0)
+    except (TypeError, ValueError):
+        return _respond_bad(handler, "Content-Length 无效", 400)
+    if content_length < 0:
+        return _respond_bad(handler, "Content-Length 无效", 400)
 
-    if "multipart/form-data" not in content_type:
-        return _respond_bad(handler, "Content-Type 须为 multipart/form-data", 400)
-
-    from api.upload import parse_multipart
+    body = handler.rfile.read(content_length)
+    if len(body) != content_length:
+        return _respond_bad(handler, "请求体不完整", 400)
 
     try:
-        fields, files = parse_multipart(handler.rfile, content_type, content_length)
-    except ValueError as exc:
-        return _respond_bad(handler, _upload_multipart_error(exc), 400)
-
-    kb_name = str(fields.get("kbName", "") or "").strip()
-    uuid = str(fields.get("uuid", "") or "").strip()
-    if not kb_name:
-        return _respond_bad(handler, "missing_kbName", 400)
-    if not uuid:
-        return _respond_bad(handler, "missing_uuid", 400)
-
-    upload_files = [(name, data) for name, data in files.items() if name == "files"]
-    if not upload_files:
-        for key, value in files.items():
-            if key.startswith("files"):
-                upload_files.append((key, value))
-    if not upload_files:
-        return _respond_bad(handler, "missing_files", 400)
-
-    file_properties_raw = str(fields.get("fileProperties", "") or "")
-    try:
-        client.parse_file_properties_json(file_properties_raw)
-    except (ValueError, TypeError) as exc:
-        return _respond_bad(handler, _sanitize_error(exc), 400)
-
-    httpx_files: list[tuple[str, tuple[str, bytes, str | None]]] = []
-    for _, (filename, file_bytes) in upload_files:
-        if not filename:
-            return _respond_bad(handler, "missing_filename", 400)
-        httpx_files.append(
-            ("files", (filename, file_bytes, "application/octet-stream")),
+        status, payload = client.post_raw_body(
+            "upload_docs",
+            body=body,
+            content_type=content_type,
         )
-
-    form_data = client.build_upload_form_data(
-        kb_name=kb_name,
-        file_properties_raw=file_properties_raw,
-        chunk_size=str(fields.get("chunkSize", "") or "").strip() or None,
-        chunk_overlap=str(fields.get("chunkOverlap", "") or "").strip() or None,
-    )
-
-    try:
-        status, payload = client.post_multipart("upload_docs", files=httpx_files, data=form_data)
     except client.KnowledgeBaseUpstreamError as exc:
         return _respond(
             handler,

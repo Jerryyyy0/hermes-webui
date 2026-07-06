@@ -279,65 +279,63 @@ def test_search_docs_xcore_success():
     )
 
 
-def test_upload_docs_missing_uuid():
+def test_upload_docs_passthrough_raw_body():
+    handler = MagicMock()
+    content_type = 'multipart/form-data; boundary="----boundary"'
+    raw_body = (
+        b'--boundary\r\n'
+        b'Content-Disposition: form-data; name="uuid"\r\n\r\n'
+        b'uuid-1\r\n'
+        b'--boundary--\r\n'
+    )
+    handler.headers = {
+        "Content-Type": content_type,
+        "Content-Length": str(len(raw_body)),
+    }
+    handler.rfile = BytesIO(raw_body)
+    parsed = urlparse("/api/integration/knowledge_base/upload_docs")
+    upstream_resp = {"code": "200", "msg": "success", "data": None}
+    with patch("integration.knowledge_base.handlers.knowledge_base_enabled", return_value=True):
+        with patch(
+            "integration.knowledge_base.handlers.client.post_raw_body",
+            return_value=(200, upstream_resp),
+        ) as mock_upload:
+            assert try_handle_post_early(handler, parsed) is True
+    handler.send_response.assert_called_with(200)
+    assert _json_payload(handler) == upstream_resp
+    mock_upload.assert_called_once_with(
+        "upload_docs",
+        body=raw_body,
+        content_type=content_type,
+    )
+
+
+def test_upload_docs_rejects_invalid_content_length():
+    handler = MagicMock()
+    handler.headers = {
+        "Content-Type": 'multipart/form-data; boundary="----boundary"',
+        "Content-Length": "not-a-number",
+    }
+    handler.rfile = BytesIO(b"")
+    parsed = urlparse("/api/integration/knowledge_base/upload_docs")
+    with patch("integration.knowledge_base.handlers.knowledge_base_enabled", return_value=True):
+        assert try_handle_post_early(handler, parsed) is True
+    handler.send_response.assert_called_with(400)
+    assert _json_payload(handler)["error"] == "Content-Length 无效"
+
+
+def test_upload_docs_rejects_incomplete_body():
     handler = MagicMock()
     handler.headers = {
         "Content-Type": 'multipart/form-data; boundary="----boundary"',
         "Content-Length": "10",
     }
-    handler.rfile = BytesIO(b"")
+    handler.rfile = BytesIO(b"short")
     parsed = urlparse("/api/integration/knowledge_base/upload_docs")
     with patch("integration.knowledge_base.handlers.knowledge_base_enabled", return_value=True):
-        with patch("api.upload.parse_multipart") as mock_parse:
-            mock_parse.return_value = (
-                {"kbName": "kb1", "fileProperties": "[]"},
-                {"files": ("doc.pdf", b"%PDF")},
-            )
-            assert try_handle_post_early(handler, parsed) is True
+        assert try_handle_post_early(handler, parsed) is True
     handler.send_response.assert_called_with(400)
-    assert _json_payload(handler)["error"] == "missing_uuid"
-
-
-def test_upload_docs_success():
-    handler = MagicMock()
-    handler.headers = {
-        "Content-Type": 'multipart/form-data; boundary="----boundary"',
-        "Content-Length": "100",
-    }
-    handler.rfile = BytesIO(b"")
-    parsed = urlparse("/api/integration/knowledge_base/upload_docs")
-    file_props = json.dumps(
-        [
-            {
-                "fileName": "doc.pdf",
-                "fileClass": "",
-                "fileUploader": "uuid-1",
-                "publicationDate": "1",
-            }
-        ]
-    )
-    with patch("integration.knowledge_base.handlers.knowledge_base_enabled", return_value=True):
-        with patch("api.upload.parse_multipart") as mock_parse:
-            mock_parse.return_value = (
-                {
-                    "kbName": "kb1",
-                    "uuid": "uuid-1",
-                    "fileProperties": file_props,
-                },
-                {"files": ("doc.pdf", b"%PDF-1.4")},
-            )
-            with patch(
-                "integration.knowledge_base.handlers.client.post_multipart",
-                return_value=(200, None),
-            ) as mock_upload:
-                assert try_handle_post_early(handler, parsed) is True
-    handler.send_response.assert_called_with(200)
-    assert _json_payload(handler) is None
-    mock_upload.assert_called_once()
-    _, kwargs = mock_upload.call_args
-    assert kwargs["data"]["kbName"] == "kb1"
-    assert kwargs["data"]["fileProperties"] == file_props
-    assert kwargs["files"][0][1][0] == "doc.pdf"
+    assert _json_payload(handler)["error"] == "请求体不完整"
 
 
 def test_handle_application_passthrough():

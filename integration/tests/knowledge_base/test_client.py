@@ -220,6 +220,36 @@ def test_post_json_upstream_unreachable():
                 client.post_json("list", {"account": "a", "uuid": "u", "isPersonal": 1})
 
 
+def test_post_raw_body_forwards_bytes():
+    captured = {}
+
+    def _fake_post(url, content=None, headers=None, **kwargs):
+        captured["url"] = url
+        captured["content"] = content
+        captured["headers"] = headers or {}
+        resp = MagicMock(spec=httpx.Response)
+        resp.status_code = 200
+        resp.json.return_value = {"code": "200", "msg": "ok", "data": None}
+        return resp
+
+    body = b"--b\r\nContent-Disposition: form-data; name=\"files\"; filename=\"a.pdf\"\r\n\r\nAAA\r\n--b--\r\n"
+    content_type = "multipart/form-data; boundary=b"
+
+    with patch("integration.knowledge_base.client.knowledge_base_url", return_value="http://kb.test"):
+        with patch("httpx.Client") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client.__enter__.return_value = mock_client
+            mock_client.post.side_effect = _fake_post
+            mock_client_cls.return_value = mock_client
+            status, payload = client.post_raw_body("upload_docs", body=body, content_type=content_type)
+
+    assert status == 200
+    assert payload == {"code": "200", "msg": "ok", "data": None}
+    assert captured["url"] == "http://kb.test/knowledge_base/upload_docs"
+    assert captured["content"] == body
+    assert captured["headers"]["Content-Type"] == content_type
+
+
 def test_post_json_forwards_body():
     captured = {}
 

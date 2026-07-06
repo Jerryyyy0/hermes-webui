@@ -230,7 +230,7 @@ export KNOWLEDGE_BASE_URL=http://192.168.1.132:17861
 | POST | `/api/integration/knowledge_base/apply_join` | `apply_join_shkb` | `account`, `uuid`, `kbName` |
 | POST | `/api/integration/knowledge_base/members` | `get_user_inshkb` | `uuid`, `kbName`, `page`, `size` |
 | POST | `/api/integration/knowledge_base/documents` | `list_knowledge_bases_details` | `kbName`, `page`, `size` |
-| POST | `/api/integration/knowledge_base/upload_docs` | `upload_docs` | multipart：`uuid`, `kbName`, `files`, `fileProperties` |
+| POST | `/api/integration/knowledge_base/upload_docs` | `upload_docs` | multipart 透传，无字段校验 |
 | POST | `/api/integration/knowledge_base/upload_artifacts` | `upload_docs`（编排） | `uuid`, `kbName`, `fileProperties`, `paths` |
 | POST | `/api/integration/knowledge_base/update_docs` | `update_docs` | `kbName`, `fileNames`, `fileProperties` |
 | POST | `/api/integration/knowledge_base/delete_docs` | `delete_docs` | `kbName`, `fileNames` |

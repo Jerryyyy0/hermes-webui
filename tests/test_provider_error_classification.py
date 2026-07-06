@@ -116,3 +116,32 @@ class TestOtherErrorTypesRemainChinese:
         assert result['type'] == 'no_response'
         assert result['label'] == '模型无响应'
         assert '模型服务' in build_user_error_content(err_type='no_response')['message']
+
+
+class TestContentFilteredClassification:
+    def test_data_inspection_failed_maps_to_content_filtered(self):
+        raw = (
+            'HTTP 400: data: {"error":{"code":"data_inspection_failed","param":null,'
+            '"message":"Input text data may contain inappropriate content.",'
+            '"type":"data_inspection_failed"},'
+            '"id":"chatcmpl-e4a6237e-fe03-4ede-8708-c0a7eaff7b32"}'
+        )
+        result = classify_provider_error(raw)
+        assert result['type'] == 'content_filtered'
+        assert result['label'] == '内容被审核拦截'
+        assert '审核策略' in result['message']
+        assert raw not in result['message']
+
+    def test_content_filter_keyword_maps_to_content_filtered(self):
+        result = classify_provider_error('content_filter_triggered')
+        assert result['type'] == 'content_filtered'
+
+    def test_content_filtered_payload_preserves_raw_in_details(self):
+        raw = 'data_inspection_failed: Input text data may contain inappropriate content.'
+        classification = classify_provider_error(raw)
+        payload = provider_error_payload_from_classification(raw, classification)
+        assert payload['type'] == 'content_filtered'
+        assert payload['label'] == '内容被审核拦截'
+        assert raw not in payload['message']
+        assert payload['details'] == raw
+        assert payload['details_label'] == '审核详情'
