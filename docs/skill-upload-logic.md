@@ -322,3 +322,66 @@ Step 2: POST /api/skillhub/skill/detail
 - 技能详情页显示 `display_name` 作为标题、`display_description` 作为摘要
 - 技能列表项显示 `display_name` / `display_description`
 - 搜索过滤匹配 `display_name` 和 `display_description`
+
+---
+
+## 技能详情页接口调用说明
+
+技能详情页通过 `openSkillHubItem` 函数加载，并行请求以下三个接口：
+
+### 接口列表
+
+| 接口 | 说明 | scope 参数 |
+|------|------|-----------|
+| `GET /api/skillhub/content` | 获取 SKILL.md 原文 | 支持 |
+| `GET /api/skillhub/structure` | 获取 scripts/references 目录结构 | 支持 |
+| `GET /api/skillhub/detail` | 获取上游 SkillHub 元数据（仅未安装市场技能） | 不支持 |
+| `GET /api/skillhub/file?path=detail.json` | 获取本地 detail.json 文件 | 支持 |
+
+### 各 Tab 调用方式
+
+#### 1. Catalog（市场目录，scope=hub）
+
+| 接口 | URL |
+|------|-----|
+| 列表 | `GET /api/skillhub/skills?scope=hub` |
+| SKILL.md | `GET /api/skillhub/content?name={name}&scope=hub` |
+| 结构 | `GET /api/skillhub/structure?name={name}&scope=hub` |
+| 元数据 | `GET /api/skillhub/detail?name={name}`（从上游 SkillHub 获取） |
+
+#### 2. Installed（已安装，scope=installed）
+
+| 接口 | URL |
+|------|-----|
+| 列表 | `GET /api/skillhub/skills?scope=installed` |
+| SKILL.md | `GET /api/skillhub/content?name={name}`（auto 模式，本地优先） |
+| 结构 | `GET /api/skillhub/structure?name={name}`（auto 模式，本地优先） |
+| 元数据 | `GET /api/skillhub/file?name={name}&path=detail.json`（auto 模式，本地优先） |
+
+#### 3. Not installed（未安装，scope=not_installed）
+
+| 接口 | URL |
+|------|-----|
+| 列表 | `GET /api/skillhub/skills?scope=not_installed` |
+| SKILL.md | `GET /api/skillhub/content?name={name}&scope=hub` |
+| 结构 | `GET /api/skillhub/structure?name={name}&scope=hub` |
+| 元数据 | `GET /api/skillhub/detail?name={name}`（从上游 SkillHub 获取） |
+
+#### 4. My skills（自定义技能，scope=custom）
+
+| 接口 | URL |
+|------|-----|
+| 列表 | `GET /api/skillhub/skills?scope=custom` |
+| SKILL.md | `GET /api/skillhub/content?name={name}&scope=custom` |
+| 结构 | `GET /api/skillhub/structure?name={name}&scope=custom` |
+| 元数据 | `GET /api/skillhub/file?name={name}&path=detail.json&scope=custom` |
+
+### scope 参数行为
+
+| scope 值 | 行为 |
+|----------|------|
+| `custom` | 仅读取本地 `shared_skills_dir`，404 当缺失 |
+| `hub` | 仅从上游 SkillHub 获取 |
+| `auto`（默认） | 本地优先，本地不存在时回退到上游 |
+
+**注意**：`GET /api/skillhub/detail` 接口不支持 scope 参数，始终从上游 SkillHub 获取。已安装和自定义技能的元数据通过 `GET /api/skillhub/file?path=detail.json` 从本地读取。
