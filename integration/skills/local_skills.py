@@ -221,11 +221,15 @@ def list_installed(
             install_file = skill_dir / ".install_name"
             if install_file.is_file():
                 install_name = install_file.read_text(encoding="utf-8").strip()
-            # Read icon from detail metadata if present
+            # Read detail metadata if present
             icon_from_detail = ""
+            display_name_from_detail = ""
+            display_desc_from_detail = ""
             detail_data = read_detail_json(skill_dir)
             if detail_data:
                 icon_from_detail = str(detail_data.get("icon") or "").strip()
+                display_name_from_detail = str(detail_data.get("display_name") or "").strip()
+                display_desc_from_detail = str(detail_data.get("display_description") or "").strip()
             all_skills.append(
                 {
                     "name": name,
@@ -235,6 +239,8 @@ def list_installed(
                     "version": str(frontmatter.get("version", "") or ""),
                     "author": str(frontmatter.get("author", "") or ""),
                     "icon": icon_from_detail,
+                    "display_name": display_name_from_detail or str(frontmatter.get("display_name", "") or ""),
+                    "display_description": display_desc_from_detail,
                     "hub_installed": hub_installed,
                     "can_delete": not is_system_skill(name),
                     "install_name": install_name or name,
