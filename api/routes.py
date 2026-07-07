@@ -527,10 +527,14 @@ def _skill_view_from_file(skill_dir: Path | None, skill_md: Path) -> dict:
     }
 
 
-def _skill_view_from_active_dir(name: str) -> dict:
+def _skill_view_from_active_dir(name: str, profile: str | None = None) -> dict:
     from tools.skills_tool import skill_view as _skill_view
 
-    skills_dir = _active_skills_dir()
+    if profile:
+        from integration.skills.paths import skills_dir_for_profile
+        skills_dir = skills_dir_for_profile(profile)
+    else:
+        skills_dir = _active_skills_dir()
     search_dirs = _active_skill_search_dirs(skills_dir)
     skill_dir, skill_md = _find_skill_in_dirs(name, search_dirs)
     if not skill_md:
@@ -6683,7 +6687,12 @@ def handle_get(handler, parsed) -> bool:
 
             if _re.search(r"[*?\[\]]", name):
                 return bad(handler, "Invalid skill name", 400)
-            skills_dir = _active_skills_dir()
+            profile = qs.get("profile", [""])[0].strip() or None
+            if profile:
+                from integration.skills.paths import skills_dir_for_profile
+                skills_dir = skills_dir_for_profile(profile)
+            else:
+                skills_dir = _active_skills_dir()
             skill_dir, _skill_md = _find_skill_in_dirs(
                 name, _active_skill_search_dirs(skills_dir)
             )
@@ -6700,7 +6709,8 @@ def handle_get(handler, parsed) -> bool:
                 handler,
                 {"content": target.read_text(encoding="utf-8"), "path": file_path},
             )
-        data = _skill_view_from_active_dir(name)
+        profile = qs.get("profile", [""])[0].strip() or None
+        data = _skill_view_from_active_dir(name, profile=profile)
         if not isinstance(data.get("linked_files"), dict):
             data["linked_files"] = {}
         return j(handler, data)

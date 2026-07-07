@@ -4112,14 +4112,16 @@ function _setSkillHeaderButtons(mode) {
   else { hide(editBtn); hide(delBtn); hide(cancelBtn); hide(saveBtn); }
 }
 
-async function openSkill(name, el) {
+async function openSkill(name, el, profileName) {
   // Highlight active skill in the sidebar list
   document.querySelectorAll('.skill-item').forEach(e => e.classList.remove('active'));
   if (el) el.classList.add('active');
   _skillPreFormDetail = null;
   _editingSkillName = null;
   try {
-    const data = await api(`/api/skills/content?name=${encodeURIComponent(name)}`);
+    let url = `/api/skills/content?name=${encodeURIComponent(name)}`;
+    if (profileName) url += `&profile=${encodeURIComponent(profileName)}`;
+    const data = await api(url);
     if (data && (data.success === false || data.error)) {
       const message = data.error || t('skill_load_failed');
       _renderSkillError(name, message);
@@ -5518,7 +5520,16 @@ function _renderProfileDetail(p, activeName){
   if (p.provider) rows.push(`<div class="detail-row"><div class="detail-row-label">Provider</div><div class="detail-row-value">${esc(p.provider)}</div></div>`);
   if (p.base_url) rows.push(`<div class="detail-row"><div class="detail-row-label">Base URL</div><div class="detail-row-value"><code>${esc(p.base_url)}</code></div></div>`);
   rows.push(`<div class="detail-row"><div class="detail-row-label">API key</div><div class="detail-row-value">${p.has_env ? esc(t('profile_api_keys_configured')) : '<span style="color:var(--muted)">Not configured</span>'}</div></div>`);
-  if (p.total_skills && p.total_skills > 0) rows.push(`<div class="detail-row"><div class="detail-row-label">Skills</div><div class="detail-row-value">${esc(t('profile_skill_count', p.total_skills).replace(String(p.total_skills), `${p.enabled_skills} / ${p.total_skills}`))}</div></div>`);
+  if (p.skills && p.skills.length > 0) {
+    const items = p.skills.map(s => {
+      const dn = s.display_name || s.name || '';
+      const dd = s.display_description || s.description || '';
+      return `<div class="profile-skill-item" data-skill-name="${esc(s.name)}"><span class="skill-name">${esc(dn)}</span>${dd ? `<span class="skill-desc">${esc(dd)}</span>` : ''}</div>`;
+    }).join('');
+    rows.push(`<div class="detail-row" style="flex-direction:column;align-items:stretch"><div class="detail-row-label">Skills (${p.skills.length})</div><div class="profile-skills-list" data-profile-name="${esc(p.name)}">${items}</div></div>`);
+  } else if (p.total_skills && p.total_skills > 0) {
+    rows.push(`<div class="detail-row"><div class="detail-row-label">Skills</div><div class="detail-row-value">${esc(t('profile_skill_count', p.total_skills).replace(String(p.total_skills), `${p.enabled_skills} / ${p.total_skills}`))}</div></div>`);
+  }
   if (p.default_workspace) rows.push(`<div class="detail-row"><div class="detail-row-label">Default space</div><div class="detail-row-value"><code>${esc(p.default_workspace)}</code></div></div>`);
   body.innerHTML = `
     <div class="main-view-content">
@@ -5563,6 +5574,21 @@ function openProfileDetail(name, el){
   _profilePreFormDetail = null;
   _renderProfileDetail(p, _profilesCache.active);
 }
+
+function openProfileSkill(skillName, profileName){
+  switchPanel('skills');
+  openSkill(skillName, null, profileName);
+}
+
+// Global delegated click handler for profile skill items
+document.addEventListener('click', e => {
+  const item = e.target.closest('.profile-skill-item');
+  if (!item) return;
+  const list = item.closest('.profile-skills-list');
+  const profileName = list ? list.dataset.profileName : '';
+  const skillName = item.dataset.skillName || '';
+  if (skillName) openProfileSkill(skillName, profileName);
+});
 
 function _clearProfileDetail(){
   _currentProfileDetail = null;
