@@ -1039,7 +1039,7 @@ async function send(){
       if(typeof renderSessionList==='function') void renderSessionList();
       return;
     }
-    const conflictActiveStream=/session already has an active stream/i.test(errMsg);
+    const conflictActiveStream=/该会话已有正在进行的对话流/.test(errMsg);
     if(conflictActiveStream){
       delete INFLIGHT[activeSid];
       if(typeof clearInflightState==='function') clearInflightState(activeSid);
@@ -1049,7 +1049,7 @@ async function send(){
       const _retryModelState=_chatPayloadModelState();
       queueSessionMessage(activeSid,{text:msgText,files:[],model:_retryModelState.model,model_provider:_retryModelState.model_provider,profile:S.activeProfile||'default'});
       updateQueueBadge(activeSid);
-      showToast('Current session is still running. Reconnected and queued your message.',2600);
+      showToast('当前会话仍在运行，已重新连接并将你的消息加入队列。',2600);
       try{
         await loadSession(activeSid);
         setComposerStatus('');

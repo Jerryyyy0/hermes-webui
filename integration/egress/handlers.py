@@ -73,7 +73,7 @@ def _handle_traffic_get(handler, parsed) -> bool:
         bad(handler, "tcpdump not found in container", status=500)
         return True
     except Exception as exc:
-        bad(handler, _sanitize_error(exc), status=500)
+        bad(handler, _sanitize_error(exc), status=500, exc_info=(type(exc), exc, exc.__traceback__))
         return True
     j(handler, {"ok": True, "count": len(records), "records": records})
     return True
@@ -123,7 +123,7 @@ def try_handle_post(handler, parsed, body: dict | None) -> bool:
         bad(handler, str(exc), status=400)
         return True
     except Exception as exc:
-        bad(handler, _sanitize_error(exc), status=500)
+        bad(handler, _sanitize_error(exc), status=500, exc_info=(type(exc), exc, exc.__traceback__))
         return True
 
     result = apply_iptables_rules(rules, rules_path=egress_policy_rules_path())

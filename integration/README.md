@@ -20,6 +20,17 @@ export SKILLHUB_URL=http://127.0.0.1:8000   # optional; SkillHub market only (se
 
 If you use a local HTTP proxy (`HTTP_PROXY`, e.g. Clash), add the SkillHub host to `NO_PROXY` (or rely on `ensure_skillhub_no_proxy()` at server startup, which appends the hostname from `SKILLHUB_URL`). Without this, `/api/skillhub/*` may return 502 while `curl` to the same upstream works.
 
+### API error logging
+
+All JSON API responses with `status >= 400` (via `j()` / `bad()`) emit a structured `[webui]` log line with `event=api_error`. Unhandled handler exceptions use the same format with `source=unhandled`. The per-request access log may include `error_summary` when an API error was recorded.
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `HERMES_WEBUI_API_ERROR_LOG` | `1` | Set to `0` to disable structured API error logs |
+| `HERMES_WEBUI_API_ERROR_LOG_MIN_STATUS` | `400` | Minimum HTTP status to log (e.g. `500` to skip 4xx noise) |
+
+Implementation: [`integration/request_logging/`](request_logging/).
+
 ### Profile enrich (`info.json`)
 
 When integration is enabled, `GET /api/profiles` enriches each entry:
@@ -63,6 +74,7 @@ Cron and Kanban profile pickers still show profile `name` only (by design).
 
 | Method | Path | Purpose |
 |--------|------|---------|
+| GET | `/api/crons` | Active profile jobs; optional `?profile=` for a single named profile |
 | GET | `/api/crons?all_profiles=1` | Grouped jobs: `{ profiles: [{ profile, jobs }] }` |
 | GET | `/api/crons/recent?all_profiles=1&since=` | Cross-profile completions + session materialize |
 | GET | `/api/crons/history`, `/run`, `/output` | Optional `?profile=` (storage and execution profile) |

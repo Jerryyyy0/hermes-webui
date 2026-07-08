@@ -76,8 +76,8 @@ def _route_key(parsed) -> str | None:
     return None
 
 
-def _respond(handler, payload, status: int = 200) -> bool:
-    j(handler, payload, status=status)
+def _respond(handler, payload, status: int = 200, *, exc_info=None) -> bool:
+    j(handler, payload, status=status, exc_info=exc_info)
     return True
 
 
@@ -101,8 +101,8 @@ def _respond_binary(
     return True
 
 
-def _respond_bad(handler, msg: str, status: int = 400) -> bool:
-    bad(handler, msg, status=status)
+def _respond_bad(handler, msg: str, status: int = 400, *, exc_info=None) -> bool:
+    bad(handler, msg, status=status, exc_info=exc_info)
     return True
 
 
@@ -173,6 +173,7 @@ def _handle_upstream(handler, route_key: str, upstream_body: dict[str, Any]) -> 
                 "message": _sanitize_error(exc),
             },
             status=502,
+            exc_info=(type(exc), exc, exc.__traceback__),
         )
     return _respond(handler, payload, status=status)
 
@@ -188,6 +189,7 @@ def _handle_binary_passthrough(handler, route_key: str, upstream_body: dict[str,
                 "message": _sanitize_error(exc),
             },
             status=502,
+            exc_info=(type(exc), exc, exc.__traceback__),
         )
     if result.kind == "binary":
         return _respond_binary(
@@ -240,6 +242,7 @@ def _handle_upload_docs(handler) -> bool:
                 "message": _sanitize_error(exc),
             },
             status=502,
+            exc_info=(type(exc), exc, exc.__traceback__),
         )
 
     return _respond(handler, payload, status=status)
@@ -330,5 +333,6 @@ def _handle_upload_artifacts(handler, body: dict[str, Any]) -> bool:
             handler,
             {"error": "知识库服务不可用", "message": _sanitize_error(exc)},
             status=502,
+            exc_info=(type(exc), exc, exc.__traceback__),
         )
     return _respond(handler, payload, status=status)

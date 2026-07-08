@@ -60,7 +60,7 @@ CHAT_ERROR_ZH: dict[tuple[str, str | None], dict[str, str]] = {
     ('content_filtered', None): {
         'label': '内容被审核拦截',
         'message': '输入内容被模型服务的内容审核策略拦截，未能完成本次响应。',
-        'hint': '请调整输入内容后重试，或联系管理员了解审核策略。',
+        'hint': '请调整输入内容后重试。',
     },
     ('cancelled', None): {
         'label': '任务已取消',

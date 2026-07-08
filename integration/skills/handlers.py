@@ -18,13 +18,13 @@ from integration.skills.sort_utils import (
 from integration.skills.utils import stream_zip_to_handler
 
 
-def _respond(handler, payload, status: int = 200) -> bool:
-    j(handler, payload, status=status)
+def _respond(handler, payload, status: int = 200, *, exc_info=None) -> bool:
+    j(handler, payload, status=status, exc_info=exc_info)
     return True
 
 
-def _respond_bad(handler, msg, status: int = 400) -> bool:
-    bad(handler, msg, status=status)
+def _respond_bad(handler, msg, status: int = 400, *, exc_info=None) -> bool:
+    bad(handler, msg, status=status, exc_info=exc_info)
     return True
 
 
@@ -292,14 +292,14 @@ def _get_skillhub_skills(handler, parsed) -> bool:
         )
         return _respond(handler, payload)
     except Exception as exc:
-        return _respond_bad(handler, str(exc), 502)
+        return _respond_bad(handler, str(exc), 502, exc_info=(type(exc), exc, exc.__traceback__))
 
 
 def _get_skillhub_categories(handler, parsed) -> bool:
     try:
         return _respond(handler, skillhub.fetch_categories())
     except Exception as exc:
-        return _respond_bad(handler, str(exc), 502)
+        return _respond_bad(handler, str(exc), 502, exc_info=(type(exc), exc, exc.__traceback__))
 
 
 def _get_skillhub_detail(handler, parsed) -> bool:
@@ -310,7 +310,7 @@ def _get_skillhub_detail(handler, parsed) -> bool:
     try:
         return _respond(handler, skillhub.fetch_skill_detail(name))
     except Exception as exc:
-        return _respond_bad(handler, str(exc), 502)
+        return _respond_bad(handler, str(exc), 502, exc_info=(type(exc), exc, exc.__traceback__))
 
 
 def _get_skillhub_content(handler, parsed) -> bool:
@@ -326,7 +326,7 @@ def _get_skillhub_content(handler, parsed) -> bool:
     try:
         return _respond(handler, skillhub.fetch_doc(name))
     except Exception as exc:
-        return _respond_bad(handler, str(exc), 502)
+        return _respond_bad(handler, str(exc), 502, exc_info=(type(exc), exc, exc.__traceback__))
 
 
 def _get_skillhub_structure(handler, parsed) -> bool:
@@ -342,7 +342,7 @@ def _get_skillhub_structure(handler, parsed) -> bool:
     try:
         return _respond(handler, skillhub.fetch_structure(name))
     except Exception as exc:
-        return _respond_bad(handler, str(exc), 502)
+        return _respond_bad(handler, str(exc), 502, exc_info=(type(exc), exc, exc.__traceback__))
 
 
 def _get_skillhub_file(handler, parsed) -> bool:
@@ -361,7 +361,7 @@ def _get_skillhub_file(handler, parsed) -> bool:
     try:
         return _respond(handler, skillhub.fetch_file(name, file_path))
     except Exception as exc:
-        return _respond_bad(handler, str(exc), 502)
+        return _respond_bad(handler, str(exc), 502, exc_info=(type(exc), exc, exc.__traceback__))
 
 
 def _post_skillhub_install(handler, parsed, body: dict) -> bool:
@@ -382,9 +382,9 @@ def _post_skillhub_install(handler, parsed, body: dict) -> bool:
             return _respond_bad(handler, result.get("error", "conflict"), 409)
         return _respond(handler, result)
     except RuntimeError as exc:
-        return _respond_bad(handler, str(exc), 503)
+        return _respond_bad(handler, str(exc), 503, exc_info=(type(exc), exc, exc.__traceback__))
     except Exception as exc:
-        return _respond_bad(handler, str(exc), 502)
+        return _respond_bad(handler, str(exc), 502, exc_info=(type(exc), exc, exc.__traceback__))
 
 
 def _post_skillhub_edit(handler, body: dict) -> bool:

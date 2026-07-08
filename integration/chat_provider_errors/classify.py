@@ -1,10 +1,39 @@
 """Provider error classification for chat stream apperror events."""
 from __future__ import annotations
 
+import re
+
 from integration.chat_provider_errors.messages import (
     build_user_error_content,
     cancelled_turn_hint,
 )
+
+
+# Matches a 3-digit HTTP status code only when it appears as a real status token
+# (preceded by "HTTP ", a space, a colon, or start-of-string), not as a random
+# substring inside a UUID/chatcmpl/JSON id. Examples that match:
+#   "HTTP 404", " 404 ", "404 Not Found", "status: 404"
+# Examples that do NOT match:
+#   "chatcmpl-95c64d9f-8364-4bd4-a89e-d06404ddf433"  (404 inside UUID)
+#   "id\":\"chatcmpl-...401...\""                     (401 inside chatcmpl id)
+_HTTP_STATUS_RE = re.compile(r'(?:^|(?<=HTTP )|(?<=[ :]))\d{3}(?![0-9a-zA-Z])')
+
+
+def _has_http_status(err_str: str, code: int) -> bool:
+    """Return True only when ``code`` appears as a real HTTP status token.
+
+    Naive ``str(code) in err_str`` substrings match inside UUIDs/chatcmpl IDs
+    (e.g. ``d06404ddf433`` contains ``404``), producing false positives. This
+    helper requires the digits to be delimited as a status token.
+    """
+    s = str(err_str or '')
+    if not s:
+        return False
+    code_str = str(code)
+    for m in _HTTP_STATUS_RE.finditer(s):
+        if m.group(0) == code_str:
+            return True
+    return False
 
 
 def classify_connection_error_code(err_str: str, exc=None) -> str | None:
@@ -122,18 +151,16 @@ def classify_provider_error(err_str: str, exc=None, *, silent_failure: bool = Fa
         return _result('connection_error', error_code=_connection_code)
     _is_quota = is_quota_error_text(err_str)
     _is_auth = (
-        not _is_quota and (
-            '401' in err_str
-            or (exc is not None and 'AuthenticationError' in _exc_name)
-            or 'authentication' in _err_lower
-            or 'unauthorized' in _err_lower
-            or 'invalid api key' in _err_lower
-            or 'invalid_api_key' in _err_lower
-            or 'no cookie auth credentials' in _err_lower
-        )
+        _has_http_status(err_str, 401)
+        or (exc is not None and 'AuthenticationError' in _exc_name)
+        or 'authentication' in _err_lower
+        or 'unauthorized' in _err_lower
+        or 'invalid api key' in _err_lower
+        or 'invalid_api_key' in _err_lower
+        or 'no cookie auth credentials' in _err_lower
     )
     _is_not_found = (
-        '404' in err_str
+        _has_http_status(err_str, 404)
         or 'not found' in _err_lower
         or 'does not exist' in _err_lower
         or 'model not found' in _err_lower
@@ -142,8 +169,10 @@ def classify_provider_error(err_str: str, exc=None, *, silent_failure: bool = Fa
         or 'does not match any known model' in _err_lower
         or 'unknown model' in _err_lower
     )
-    _is_rate_limit = (not _is_quota) and (
-        'rate limit' in _err_lower or '429' in err_str or (exc is not None and 'RateLimitError' in _exc_name)
+    _is_rate_limit = (
+        'rate limit' in _err_lower
+        or _has_http_status(err_str, 429)
+        or (exc is not None and 'RateLimitError' in _exc_name)
     )
     _is_compression_exhausted = (
         'compression_exhausted' in _err_lower
@@ -158,18 +187,22 @@ def classify_provider_error(err_str: str, exc=None, *, silent_failure: bool = Fa
         or 'content policy violation' in _err_lower
         or 'moderation' in _err_lower
     )
+    # Provider-specific codes (compression_exhausted, content_filtered) are
+    # stronger signals than weak status-code/text heuristics (auth, not_found,
+    # rate_limit). Check them first so a content-filtered 400 with a chatcmpl
+    # id that happens to contain "404" is not misrouted to model_not_found.
     if _is_quota:
         return _result('quota_exhausted')
+    if _is_compression_exhausted:
+        return _result('compression_exhausted')
+    if _is_content_filtered:
+        return _result('content_filtered')
     if _is_rate_limit:
         return _result('rate_limit')
     if _is_auth:
         return _result('auth_mismatch')
     if _is_not_found:
         return _result('model_not_found')
-    if _is_compression_exhausted:
-        return _result('compression_exhausted')
-    if _is_content_filtered:
-        return _result('content_filtered')
     if silent_failure:
         return _result('no_response')
     return _result('error')

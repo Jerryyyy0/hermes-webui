@@ -124,7 +124,9 @@ class TestContentFilteredClassification:
             'HTTP 400: data: {"error":{"code":"data_inspection_failed","param":null,'
             '"message":"Input text data may contain inappropriate content.",'
             '"type":"data_inspection_failed"},'
-            '"id":"chatcmpl-e4a6237e-fe03-4ede-8708-c0a7eaff7b32"}'
+            # chatcmpl id contains "404" as a substring — must NOT trigger
+            # model_not_found via naive '404' in err_str matching.
+            '"id":"chatcmpl-95c64d9f-8364-4bd4-a89e-d06404ddf433"}'
         )
         result = classify_provider_error(raw)
         assert result['type'] == 'content_filtered'
@@ -145,3 +147,38 @@ class TestContentFilteredClassification:
         assert raw not in payload['message']
         assert payload['details'] == raw
         assert payload['details_label'] == '审核详情'
+
+
+class TestHttpStatusCodeMatching:
+    """Naive 'NNN' in err_str substring matching misclassified chatcmpl/UUID
+    substrings as HTTP status codes. These tests pin the strict matcher."""
+
+    def test_404_inside_chatcmpl_id_does_not_trigger_model_not_found(self):
+        raw = 'data_inspection_failed in chatcmpl-95c64d9f-8364-4bd4-a89e-d06404ddf433'
+        result = classify_provider_error(raw)
+        assert result['type'] == 'content_filtered'
+        assert result['type'] != 'model_not_found'
+
+    def test_401_inside_chatcmpl_id_does_not_trigger_auth_mismatch(self):
+        raw = 'data_inspection_failed in chatcmpl-abc401def-1234-5678'
+        result = classify_provider_error(raw)
+        assert result['type'] == 'content_filtered'
+        assert result['type'] != 'auth_mismatch'
+
+    def test_429_inside_chatcmpl_id_does_not_trigger_rate_limit(self):
+        raw = 'data_inspection_failed in chatcmpl-abc429def-1234-5678'
+        result = classify_provider_error(raw)
+        assert result['type'] == 'content_filtered'
+        assert result['type'] != 'rate_limit'
+
+    def test_real_http_404_still_triggers_model_not_found(self):
+        result = classify_provider_error('HTTP 404: model not found')
+        assert result['type'] == 'model_not_found'
+
+    def test_real_http_401_still_triggers_auth_mismatch(self):
+        result = classify_provider_error('HTTP 401: unauthorized')
+        assert result['type'] == 'auth_mismatch'
+
+    def test_real_http_429_still_triggers_rate_limit(self):
+        result = classify_provider_error('HTTP 429: rate limit exceeded')
+        assert result['type'] == 'rate_limit'

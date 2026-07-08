@@ -32,9 +32,9 @@ def require(body: dict, *fields) -> None:
         raise ValueError(f"Missing required field(s): {', '.join(missing)}")
 
 
-def bad(handler, msg, status: int=400):
+def bad(handler, msg, status: int=400, *, exc_info=None, log_error=None):
     """Return a clean JSON error response."""
-    return j(handler, {'error': msg}, status=status)
+    return j(handler, {'error': msg}, status=status, exc_info=exc_info, log_error=log_error)
 
 
 def _sanitize_error(e: Exception) -> str:
@@ -243,12 +243,18 @@ def _json_response_body(payload, *, pretty: bool = True) -> bytes:
     return _json.dumps(payload, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
 
 
-def j(handler, payload, status: int=200, extra_headers: dict=None, *, pretty: bool = True) -> None:
+def j(handler, payload, status: int=200, extra_headers: dict=None, *, pretty: bool = True, exc_info=None, log_error=None) -> None:
     """Send a JSON response.
 
     *extra_headers*: optional dict of additional headers to include
     (e.g., {'Set-Cookie': '...'}).  Headers are sent before end_headers().
     """
+    if log_error is not False and status >= 400:
+        try:
+            from integration.request_logging import maybe_log_api_response
+            maybe_log_api_response(handler, status, payload, exc_info=exc_info)
+        except ImportError:
+            pass
     body = _json_response_body(payload, pretty=pretty)
     handler.send_response(status)
     handler.send_header('Content-Type', 'application/json; charset=utf-8')

@@ -6,13 +6,23 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ## [Unreleased]
 
+### Added
+
+- **Structured API error logging** — `j()` / `bad()` responses with `status >= 400` emit `[webui]` JSON `event=api_error` lines (method, path without query, status, error/message, optional traceback for 5xx). Unhandled exceptions in `server.py` use the same format (`source=unhandled`). Access logs may include `error_summary` when an API error was recorded. Module: `integration/request_logging/`. Env: `HERMES_WEBUI_API_ERROR_LOG` (default on), `HERMES_WEBUI_API_ERROR_LOG_MIN_STATUS` (default `400`). Errors are written only via `[webui]` stderr JSON (no duplicate `logging` mirror line).
+
 ### Changed
 
 - **Knowledge base upload_docs raw passthrough** — `POST /api/integration/knowledge_base/upload_docs` now forwards the incoming multipart body and `Content-Type` to downstream `upload_docs` unchanged. WebUI no longer parses/rebuilds multipart (fixes multi-file uploads where duplicate `files` parts were dropped), does not validate form fields locally, and does not inject `chunkSize`/`chunkOverlap` defaults or a WebUI-side upload size cap. Transport errors only: invalid `Content-Length`, incomplete body, downstream unreachable (502).
 
 ### Added
 
-- **Chat apperror `content_filtered` type** — Provider 内容审核拦截（如 `data_inspection_failed`、`content_filter`、`content_policy_violation`、`moderation`）不再落到通用 `error` 兜底文案，新增 `content_filtered` 分类，中文文案「内容被审核拦截 / 输入内容被模型服务的内容审核策略拦截」，`details_label` 为「审核详情」。分类与文案集中在 `integration/chat_provider_errors/`（`classify.py`、`messages.py`），`api/streaming.py` 接缝不动。
+- **`GET /api/crons?profile=`** — Optional single-profile query lists jobs from that profile's `cron/jobs.json` without switching the WebUI active profile. Unknown profile names return 400 (`Unknown profile: …`). Same `?profile=` semantics as `/api/crons/history` and `/output`.
+
+- **Chat apperror `content_filtered` type** — Provider 内容审核拦截（如 `data_inspection_failed`、`content_filter`、`content_policy_violation`、`moderation`）不再落到通用 `error` 兜底文案，新增 `content_filtered` 分类，中文文案「内容被审核拦截 / 输入内容被模型服务的内容审核策略拦截」，`details_label` 为「审核详情」。分类与文案集中在 `integration/chat_provider_errors/`（`classify.py`、`messages.py`），`api/streaming.py` 接缝不动。分类顺序：`content_filtered` / `compression_exhausted` 等 provider 专有 code 优先于 `404`/`401`/`429` 弱状态码匹配，避免 chatcmpl ID 子串误判（见下条 Fixed）。
+
+### Fixed
+
+- **Chat apperror HTTP 状态码子串误判** — `classify_provider_error` 此前用 `'404' in err_str` / `'401' in err_str` / `'429' in err_str` 纯子串匹配，会命中 chatcmpl/UUID 里的随机数字（如 `chatcmpl-95c64d9f-8364-4bd4-a89e-d06404ddf433` 中的 `404`），把 `data_inspection_failed` 的 400 错误误分类为 `model_not_found`。新增 `_has_http_status()` 用正则要求 3 位状态码前后有定界符（`HTTP ` 前缀 / 空格 / 冒号 / 行首），不匹配 UUID 子串。同时调整 return 顺序：`quota_exhausted` → `compression_exhausted` → `content_filtered` → `rate_limit` → `auth_mismatch` → `model_not_found`，provider 专有 code 优先于弱状态码/文本匹配。回归测试覆盖含 `404`/`401`/`429` 的 chatcmpl ID 与真实 `HTTP 404`/`401`/`429` 两类。
 - **Knowledge base get_joinkb_applications passthrough** — `POST /api/integration/knowledge_base/get_joinkb_applications` proxies downstream `POST /knowledge_base/get_joinkb_applications` verbatim (no field validation). Typical body: `userId`, `uuid`, `kbName`.
 - **Knowledge base mark_message_read passthrough** — `POST /api/integration/knowledge_base/mark_message_read` proxies downstream `POST /knowledge_base/mark_message_read` verbatim (no field validation). Typical body: `messageId` (integer array).
 - **Knowledge base remove_from_myshkb passthrough** — `POST /api/integration/knowledge_base/remove_from_myshkb` proxies downstream `POST /knowledge_base/remove_from_myshkb` verbatim (no field validation). Typical body: `account`, `uuid`, `kbName`.

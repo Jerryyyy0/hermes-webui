@@ -413,11 +413,32 @@ class Handler(BaseHTTPRequestHandler):
         }
         if forwarded_for:
             record_data['forwarded_for'] = forwarded_for
+        error_summary = getattr(self, '_api_error_summary', None)
+        if error_summary:
+            record_data['error_summary'] = error_summary
         record = _json.dumps(record_data)
         self._safe_webui_print(f'[webui] {record}')
 
+    @staticmethod
+    def _log_unhandled_exception(handler) -> None:
+        try:
+            from integration.request_logging import emit_api_error
+
+            emit_api_error(
+                handler,
+                status=500,
+                message="Internal server error",
+                source="unhandled",
+                exc_info=True,
+            )
+        except ImportError:
+            handler._safe_webui_print(
+                f'[webui] ERROR {handler.command} {handler.path}\n' + traceback.format_exc()
+            )
+
     def do_GET(self) -> None:
         self._req_t0 = time.time()
+        self._api_error_summary = None
         cookie_profile = get_profile_cookie(self)
         if cookie_profile:
             set_request_profile(cookie_profile)
@@ -431,9 +452,9 @@ class Handler(BaseHTTPRequestHandler):
             # Expected disconnect path; do not convert it into a misleading server 500.
             return
         except Exception:
-            self._safe_webui_print(f'[webui] ERROR {self.command} {self.path}\n' + traceback.format_exc())
+            self._log_unhandled_exception(self)
             try:
-                j(self, {'error': 'Internal server error'}, status=500)
+                j(self, {'error': 'Internal server error'}, status=500, log_error=False)
             except _CLIENT_DISCONNECT_ERRORS:
                 pass
             except Exception:
@@ -459,6 +480,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _handle_write(self, route_func) -> None:
         self._req_t0 = time.time()
+        self._api_error_summary = None
         cookie_profile = get_profile_cookie(self)
         if cookie_profile:
             set_request_profile(cookie_profile)
@@ -477,9 +499,9 @@ class Handler(BaseHTTPRequestHandler):
             # Expected disconnect path; do not convert it into a misleading server 500.
             return
         except Exception:
-            self._safe_webui_print(f'[webui] ERROR {self.command} {self.path}\n' + traceback.format_exc())
+            self._log_unhandled_exception(self)
             try:
-                j(self, {'error': 'Internal server error'}, status=500)
+                j(self, {'error': 'Internal server error'}, status=500, log_error=False)
             except _CLIENT_DISCONNECT_ERRORS:
                 pass
             except Exception:

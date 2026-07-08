@@ -482,8 +482,9 @@
       "get": {
         "tags": ["Crons"],
         "summary": "获取定时任务列表",
-        "description": "默认返回当前活跃 Profile 下 `cron/jobs.json`（`{ jobs: [...] }`）。`all_profiles=1` 且 `HERMES_INTEGRATION=1` 时返回按 Profile 分组：`{ all_profiles: true, profiles: [{ profile, jobs }] }`。Cron Hub 创建/更新的 job 内 `profile` 应与分组层 `profile` 相同。",
+        "description": "默认返回当前活跃 Profile 下 `cron/jobs.json`（`{ jobs: [...] }`）。`profile` 可指定单个 Profile 名称，读取该 Profile 的 `cron/jobs.json`（不必切换 WebUI 活跃 Profile）。`all_profiles=1` 且 `HERMES_INTEGRATION=1` 时返回按 Profile 分组：`{ all_profiles: true, profiles: [{ profile, jobs }] }`。Cron Hub 创建/更新的 job 内 `profile` 应与分组层 `profile` 相同。",
         "parameters": [
+          { "name": "profile", "in": "query", "required": false, "schema": { "type": "string" }, "description": "单个 Profile 名称；返回该 Profile 存储的定时任务列表" },
           { "name": "all_profiles", "in": "query", "required": false, "schema": { "type": "string", "enum": ["0", "1", "true", "false"] }, "description": "为 1/true 时聚合所有 Profile（需 integration cron 开关）" }
         ],
         "responses": {

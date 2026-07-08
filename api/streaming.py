@@ -6208,11 +6208,23 @@ def _run_agent_streaming(
             if _process_notifications:
                 _agent_msg_text = "\n\n".join([*_process_notifications, msg_text]).strip()
             user_message = _build_native_multimodal_message(workspace_ctx, _agent_msg_text, attachments, workspace, cfg=_cfg)
+            conversation_history = _sanitize_messages_for_api(_previous_context_messages, cfg=_cfg)
+            logger.info(
+                "[agent_prompt_input] session_id=%s stream_id=%s model=%s provider=%s system_message=%r ephemeral_system_prompt=%r conversation_history=%r user_message=%r",
+                session_id,
+                stream_id,
+                model,
+                model_provider,
+                workspace_system_msg,
+                getattr(agent, 'ephemeral_system_prompt', None),
+                conversation_history,
+                user_message,
+            )
             _persistent_state_before = _persistent_state_snapshot(_profile_home)
             result = agent.run_conversation(
                 user_message=user_message,
                 system_message=workspace_system_msg,
-                conversation_history=_sanitize_messages_for_api(_previous_context_messages, cfg=_cfg),
+                conversation_history=conversation_history,
                 task_id=session_id,
                 persist_user_message=msg_text,
             )

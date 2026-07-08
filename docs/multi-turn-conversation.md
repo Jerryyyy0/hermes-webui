@@ -123,7 +123,7 @@ POST /api/chat/start
   │     ├─ _active_stream_blocks_chat_start()
   │     │   → 检查 STREAMS 字典 + ACTIVE_RUNS 字典
   │     │   → 检查 pending_user_message 是否在宽限期内（30s）
-  │     └─ 如果冲突 → 返回 409 {"error": "session already has an active stream"}
+  │     └─ 如果冲突 → 返回 409 {"error": "该会话已有正在进行的对话流"}
   │
   ├─ 5. _start_chat_stream_for_session()
   │     ├─ _prepare_chat_start_session_for_stream()

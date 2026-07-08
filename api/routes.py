@@ -6461,9 +6461,16 @@ def handle_get(handler, parsed) -> bool:
             except ImportError:
                 pass
         from cron.jobs import list_jobs
-        from api.profiles import cron_profile_context
 
-        with cron_profile_context():
+        qs = parse_qs(parsed.query)
+        profile_q = (qs.get("profile") or [""])[0].strip()
+        if profile_q:
+            try:
+                _normalize_cron_profile_value(profile_q)
+            except ValueError as e:
+                return bad(handler, str(e))
+
+        with _cron_context_for_query(parsed):
             return j(handler, {"jobs": _cron_jobs_for_api(list_jobs(include_disabled=True))})
 
     if parsed.path == "/api/crons/output":
@@ -11829,7 +11836,7 @@ def _handle_btw(handler, body):
     if current_stream_id:
         with STREAMS_LOCK:
             if current_stream_id in STREAMS:
-                return j(handler, {"error": "session already has an active stream"}, status=409)
+                return j(handler, {"error": "该会话已有正在进行的对话流，请稍等再试"}, status=409)
         s.active_stream_id = None
     # Create ephemeral hidden session inheriting context
     from api.models import new_session as _new_session
@@ -12169,7 +12176,7 @@ def _start_chat_stream_for_session(
         if _active_stream_blocks_chat_start(s, current_stream_id):
             diag.stage("response_write") if diag else None
             return {
-                "error": "session already has an active stream",
+                "error": "该会话已有正在进行的对话流，请稍等再试",
                 "active_stream_id": current_stream_id,
                 "_status": 409,
             }
@@ -12194,7 +12201,7 @@ def _start_chat_stream_for_session(
                 if _active_stream_blocks_chat_start(s, locked_stream_id):
                     diag.stage("response_write") if diag else None
                     return {
-                        "error": "session already has an active stream",
+                        "error": "该会话已有正在进行的对话流，请稍等再试",
                         "active_stream_id": locked_stream_id,
                         "_status": 409,
                     }
@@ -12204,7 +12211,7 @@ def _start_chat_stream_for_session(
                 if blocking_run_stream_id:
                     diag.stage("response_write") if diag else None
                     return {
-                        "error": "session already has an active stream",
+                        "error": "该会话已有正在进行的对话流，请稍等再试",
                         "active_stream_id": blocking_run_stream_id,
                         "_status": 409,
                     }
@@ -12229,7 +12236,7 @@ def _start_chat_stream_for_session(
             if not cleared and getattr(s, "active_stream_id", None):
                 diag.stage("response_write") if diag else None
                 return {
-                    "error": "session already has an active stream",
+                    "error": "该会话已有正在进行的对话流，请稍等再试",
                     "active_stream_id": getattr(s, "active_stream_id", None),
                     "_status": 409,
                 }
@@ -12547,6 +12554,16 @@ def _handle_chat_start(handler, body, diag=None):
             profile_provider=_pp_provider,
             profile_default_model=_pp_default,
             explicit_model_pick=explicit_model_pick,
+        )
+        logger.info(
+            "[chat_prompt_input] session_id=%s profile=%s workspace=%s model=%s provider=%s attachments=%s message=%r",
+            getattr(s, "session_id", body.get("session_id")),
+            requested_profile or getattr(s, "profile", None),
+            workspace,
+            model,
+            model_provider,
+            attachments,
+            msg,
         )
         from api.runtime_adapter import (
             LegacyJournalRuntimeAdapter,
