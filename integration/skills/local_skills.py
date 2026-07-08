@@ -199,6 +199,9 @@ def list_installed(
             else:
                 full_name = skill_dir.name
                 cat = None
+            category_file = skill_dir / ".category"
+            if category_file.is_file():
+                cat = category_file.read_text(encoding="utf-8").strip() or cat
             content = skill_md.read_text(encoding="utf-8")[:4000]
             frontmatter, body = _parse_frontmatter(content)
             if not skill_matches_platform(frontmatter):
