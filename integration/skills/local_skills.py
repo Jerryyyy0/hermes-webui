@@ -22,7 +22,7 @@ from integration.skills.zip_import import discover_skill_roots
 _log = logging.getLogger(__name__)
 
 _SKILL_META_EXCLUDE = frozenset(
-    {".hub_installed", ".category", ".install_name", ".hub_catalog_name"}
+    {".hub_installed", ".category", ".install_name", ".hub_catalog_name", ".user_created"}
 )
 _SKILL_ORIGIN_SIDECAR = ".skill-origin.json"
 _UPLOAD_COPY_EXCLUDE = _SKILL_META_EXCLUDE | {_SKILL_ORIGIN_SIDECAR}
@@ -280,6 +280,7 @@ def _scan_custom_skill_dicts(
     category: str,
     hub_names: set[str] = frozenset(),  # kept for backward compat, no longer used
     q: str | None = None,
+    user_created_only: bool = False,
 ) -> list[dict]:
     from agent.skill_utils import iter_skill_index_files
     from tools.skills_tool import (
@@ -325,6 +326,9 @@ def _scan_custom_skill_dicts(
                 continue
             # Exclude hub-installed skills via marker file only
             if (skill_dir / ".hub_installed").is_file():
+                continue
+            # Filter for user-created skills only if requested
+            if user_created_only and not (skill_dir / ".user_created").is_file():
                 continue
             description = str(frontmatter.get("description", "") or "")
             if not description:
@@ -391,14 +395,31 @@ def _scan_custom_skill_dicts(
     return all_skills
 
 
-def scan_custom_skills_global(hub_names: set[str], q: str | None = None, profile: str = "default") -> list[dict]:
-    """Scan all custom skills under shared_skills_dir (no category filter).
-
-    ``hub_names`` and ``profile`` are accepted for call-site stability; custom
-    listing always reads ``{HERMES_HOME}/skills`` regardless of WebUI profile.
-    """
+def scan_custom_skills_global(hub_names: set[str], q: str | None = None, profile: str = "default", user_created_only: bool = False) -> list[dict]:
+    """Scan all custom skills across all profiles' skills directories."""
     _ = hub_names, profile
-    return _scan_custom_skill_dicts(shared_skills_dir(), "", q=q)
+    all_skills: list[dict] = []
+    seen: set[str] = set()
+    # Scan all profiles
+    try:
+        from api.profiles import list_profiles_api
+        profiles = list_profiles_api()
+    except Exception:
+        profiles = [{"name": "default"}]
+    for p in profiles:
+        profile_name = str(p.get("name") or "").strip()
+        if not profile_name:
+            continue
+        skills_dir = skills_dir_for_profile(profile_name)
+        if not skills_dir.exists():
+            continue
+        skills = _scan_custom_skill_dicts(skills_dir, "", q=q, user_created_only=user_created_only)
+        for s in skills:
+            skill_name = str(s.get("name") or "").strip()
+            if skill_name and skill_name not in seen:
+                seen.add(skill_name)
+                all_skills.append(s)
+    return all_skills
 
 
 def _filter_custom_skills_in_memory(
@@ -1205,6 +1226,7 @@ def _upload_zip_skills(
                         skill_md.write_text(patched, encoding="utf-8")
             created.append(dest)
             _write_category_marker(dest, stored_category)
+            (dest / ".user_created").write_text("1", encoding="utf-8")
             entries.append(_skill_upload_entry(dest, skills_dir, list_name, stored_category))
 
         ok = True
@@ -1264,6 +1286,7 @@ def _upload_single_md(
         if fmt_err:
             return fmt_err
         _write_category_marker(target, stored_category)
+        (target / ".user_created").write_text("1", encoding="utf-8")
         list_name = _resolve_list_name(
             use_explicit=use_explicit, leaf=leaf, skill_md=skill_md,
         )

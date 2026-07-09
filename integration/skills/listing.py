@@ -69,7 +69,10 @@ def list_skillhub_skills(
     page_limit = _normalize_page_size(page_size)
     category_key = str(category or "").strip()
     ctx = skillhub.build_hub_catalog_context()
-    custom_all = local_skills.scan_custom_skills_global(ctx.hub_names, profile=profile)
+    # Always scan user-created skills for stats and custom scope
+    custom_all = local_skills.scan_custom_skills_global(
+        ctx.hub_names, profile=profile, user_created_only=True
+    )
     stats = skillhub.compute_scope_stats_from(ctx, custom_count=len(custom_all))
 
     if scope_key == "custom":
