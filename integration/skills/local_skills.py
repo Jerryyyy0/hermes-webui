@@ -514,10 +514,34 @@ def _find_skill(name: str, skills_dir: Path) -> tuple[Path | None, Path | None]:
 
 
 def has_local_skill(name: str) -> bool:
-    """True when name resolves to SKILL.md under shared_skills_dir."""
+    """True when name resolves to SKILL.md under any profile's skills dir."""
+    skills_dir, _ = _find_skill_in_any_profile(name)
+    return skills_dir is not None
+
+
+def _find_skill_in_any_profile(name: str) -> tuple[Path | None, Path | None]:
+    """Find a skill in any profile's skills directory. Returns (skill_dir, skill_md)."""
+    # Try default profile first
     skills_dir = shared_skills_dir()
-    _, skill_md = _find_skill(name, skills_dir)
-    return skill_md is not None
+    skill_dir, skill_md = _find_skill(name, skills_dir)
+    if skill_md:
+        return skill_dir, skill_md
+    # Try other profiles
+    try:
+        from api.profiles import list_profiles_api
+        for p in list_profiles_api():
+            profile_name = str(p.get("name") or "").strip()
+            if not profile_name or profile_name == "default":
+                continue
+            profile_skills_dir = skills_dir_for_profile(profile_name)
+            if not profile_skills_dir.exists():
+                continue
+            skill_dir, skill_md = _find_skill(name, profile_skills_dir)
+            if skill_md:
+                return skill_dir, skill_md
+    except Exception:
+        pass
+    return None, None
 
 
 def _structure_file_entries(skill_dir: Path, subdir: str, extensions: list[str]) -> list[dict]:
@@ -533,8 +557,7 @@ def _structure_file_entries(skill_dir: Path, subdir: str, extensions: list[str])
 
 
 def get_custom_doc(name: str) -> dict:
-    skills_dir = shared_skills_dir()
-    skill_dir, skill_md = _find_skill(name, skills_dir)
+    skill_dir, skill_md = _find_skill_in_any_profile(name)
     if not skill_md:
         return {"error": "Skill not found", "status": 404}
     return {
@@ -545,8 +568,7 @@ def get_custom_doc(name: str) -> dict:
 
 
 def get_custom_structure(name: str) -> dict:
-    skills_dir = shared_skills_dir()
-    skill_dir, skill_md = _find_skill(name, skills_dir)
+    skill_dir, skill_md = _find_skill_in_any_profile(name)
     if not skill_dir or not skill_md:
         return {"error": "Skill not found", "status": 404}
     return {
@@ -561,8 +583,7 @@ def get_custom_structure(name: str) -> dict:
 
 
 def get_custom_file(name: str, file_path: str) -> dict:
-    skills_dir = shared_skills_dir()
-    skill_dir, skill_md = _find_skill(name, skills_dir)
+    skill_dir, skill_md = _find_skill_in_any_profile(name)
     if not skill_dir or not skill_md:
         return {"error": "Skill not found", "status": 404}
     target = (skill_dir / file_path).resolve()

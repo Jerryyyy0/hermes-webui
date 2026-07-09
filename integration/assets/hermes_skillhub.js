@@ -415,6 +415,7 @@
       canDelete:
         (isCustom && _skillhubScope === 'custom') ||
         (!isCustom && (_skillhubScope === 'hub' || _skillhubScope === 'installed') && installed),
+      canManageProfiles: installed && integrationReady,
     };
   }
 
@@ -424,6 +425,7 @@
     const editBtn = $('btnSkillhubEdit');
     const installBtn = $('btnSkillhubInstall');
     const uninstallBtn = $('btnSkillhubUninstall');
+    const manageBtn = $('btnSkillhubManageProfiles');
     const cancelBtn = $('btnSkillhubCancelEdit');
     const saveBtn = $('btnSkillhubSaveEdit');
     const show = b => b && (b.style.display = '');
@@ -437,6 +439,8 @@
       else hide(installBtn);
       if (opts.canDelete) show(uninstallBtn);
       else hide(uninstallBtn);
+      if (opts.canManageProfiles) show(manageBtn);
+      else hide(manageBtn);
       hide(cancelBtn);
       hide(saveBtn);
     } else if (mode === 'edit') {
@@ -444,6 +448,7 @@
       hide(editBtn);
       hide(installBtn);
       hide(uninstallBtn);
+      hide(manageBtn);
       show(cancelBtn);
       show(saveBtn);
     } else {
@@ -451,6 +456,7 @@
       hide(editBtn);
       hide(installBtn);
       hide(uninstallBtn);
+      hide(manageBtn);
       hide(cancelBtn);
       hide(saveBtn);
     }
@@ -669,28 +675,34 @@
     const scopeParam = _skillhubPreviewScopeParam(skill);
     try {
       const useLocalDetail = isCustom || (skill && skill.installed);
-      const detailPromise = useLocalDetail
-        ? api(`/api/skillhub/file?name=${encodeURIComponent(name)}&path=detail.json${scopeParam}`).catch(() => null)
-        : api(`/api/skillhub/detail?name=${encodeURIComponent(name)}`).catch(() => null);
-      const [doc, structure, detailResp] = await Promise.all([
+      // Always try upstream detail first, fall back to local for installed/custom
+      const detailPromise = api(`/api/skillhub/detail?name=${encodeURIComponent(name)}`)
+        .then(resp => ({ source: 'upstream', data: resp }))
+        .catch(() => useLocalDetail
+          ? api(`/api/skillhub/file?name=${encodeURIComponent(name)}&path=detail.json${scopeParam}`)
+              .then(resp => ({ source: 'local', data: resp }))
+              .catch(() => null)
+          : null
+        );
+      const [doc, structure, detailResult] = await Promise.all([
         api(`/api/skillhub/content?name=${encodeURIComponent(name)}${scopeParam}`),
         api(`/api/skillhub/structure?name=${encodeURIComponent(name)}${scopeParam}`).catch(() => null),
         detailPromise,
       ]);
       let detailJson = null;
       let detailMeta = null;
-      if (detailResp && !detailResp.error) {
-        if (useLocalDetail && detailResp.content) {
+      if (detailResult && detailResult.data && !detailResult.data.error) {
+        if (detailResult.source === 'local' && detailResult.data.content) {
           // Local file response: parse content string
           try {
-            const parsed = JSON.parse(detailResp.content);
+            const parsed = JSON.parse(detailResult.data.content);
             detailMeta = parsed;
             detailJson = parsed && parsed.detail_json ? parsed.detail_json : parsed;
           } catch (_) {}
-        } else if (!useLocalDetail) {
+        } else if (detailResult.source === 'upstream') {
           // Upstream detail response: already parsed
-          detailMeta = detailResp;
-          detailJson = detailResp.detail_json || detailResp;
+          detailMeta = detailResult.data;
+          detailJson = detailResult.data.detail_json || detailResult.data;
         }
       }
       _skillhubPreFormDetail = {
@@ -852,20 +864,27 @@
   async function installCurrent() {
     if (!_currentSkillhubItem) return;
     const name = _currentSkillhubItem.name;
+    const displayName = _currentSkillhubItem.display_name || _currentSkillhubItem.install_name || name;
+    const category = _currentSkillhubItem.category || '';
+
+    // Show profile selection dialog
+    let profiles;
     try {
-      await api('/api/skillhub/install', {
+      profiles = await _showInstallProfileDialog(name, displayName);
+    } catch (_) {
+      return; // user cancelled
+    }
+    if (!profiles || profiles.length === 0) return;
+
+    try {
+      const resp = await api('/api/skillhub/install-to-profiles', {
         method: 'POST',
-        body: JSON.stringify({
-          name,
-          display_name: _currentSkillhubItem.display_name || _currentSkillhubItem.install_name || name,
-          category: _currentSkillhubItem.category || '',
-        }),
+        body: JSON.stringify({ name, display_name: displayName, category, profiles }),
       });
-      // Ensure the installed skill is in enabled state (remove from disabled list if present)
-      await api('/api/skills/toggle', {
-        method: 'POST',
-        body: JSON.stringify({ name, enabled: true }),
-      }).catch(() => {});
+      const results = resp.results || [];
+      const successCount = results.filter(r => r.ok).length;
+      const failCount = results.filter(r => !r.ok).length;
+
       _skillhubData = null;
       if (typeof _invalidateSkillsDataCache === 'function') _invalidateSkillsDataCache();
       if (typeof _invalidateSkillCommandCache === 'function') _invalidateSkillCommandCache();
@@ -876,11 +895,150 @@
         openSkillHubItem(_currentSkillhubItem, null);
       }
       if (typeof showToast === 'function') {
-        showToast(typeof t === 'function' ? t('skill_installed') || 'Installed' : 'Installed');
+        if (failCount === 0) {
+          const msg = typeof t === 'function' ? t('install_toast_success') : 'Installed to {0} assistants';
+          showToast(msg.replace('{0}', successCount));
+        } else {
+          const msg = typeof t === 'function' ? t('install_toast_partial') : 'Some installations failed';
+          showToast(msg, 5000, 'error');
+        }
       }
     } catch (e) {
-      if (typeof showToast === 'function') showToast(e.message);
+      if (typeof showToast === 'function') showToast(e.message, 5000, 'error');
     }
+  }
+
+  function _showInstallProfileDialog(skillName, displayName) {
+    return new Promise(async (resolve, reject) => {
+      // Fetch profiles list
+      let profiles = [];
+      try {
+        const resp = await api('/api/profiles');
+        profiles = resp.profiles || [];
+      } catch (_) {
+        profiles = [];
+      }
+
+      // Filter out profiles that already have this skill installed
+      const installedProfiles = new Set();
+      for (const p of profiles) {
+        const skills = p.skills || [];
+        if (skills.some(s => s.name === skillName || s.dir_name === skillName)) {
+          installedProfiles.add(p.name);
+        }
+      }
+
+      const overlay = document.createElement('div');
+      overlay.className = 'app-dialog-overlay';
+      overlay.style.display = 'flex';
+
+      const titleLabel = typeof t === 'function' ? t('install_select_profiles') : 'Select Assistants';
+      const selectAllLabel = typeof t === 'function' ? t('install_select_all') : 'Select All';
+      const deselectAllLabel = typeof t === 'function' ? t('install_deselect_all') : 'Deselect All';
+      const installLabel = typeof t === 'function' ? t('install_btn') : 'Install';
+      const cancelLabel = typeof t === 'function' ? t('cancel') : 'Cancel';
+      const alreadyInstalledLabel = typeof t === 'function' ? t('install_already_installed') : 'Already installed';
+      const noSelectionLabel = typeof t === 'function' ? t('install_no_profile_selected') : 'Please select at least one assistant';
+
+      const profileCards = profiles.map(p => {
+        const isInstalled = installedProfiles.has(p.name);
+        const info = p.info || {};
+        const logo = info.logo || '';
+        const display_name = info.display_name || p.name;
+        const desc = info.description || '';
+        const logoHtml = logo
+          ? `<img src="${logo}" style="width:32px;height:32px;border-radius:6px;object-fit:cover">`
+          : `<div style="width:32px;height:32px;border-radius:6px;background:var(--accent);display:flex;align-items:center;justify-content:center;color:#fff;font-size:14px;font-weight:600">${esc(display_name.charAt(0).toUpperCase())}</div>`;
+        return `
+          <label class="install-profile-card" data-profile="${esc(p.name)}" style="display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px solid var(--border2);border-radius:8px;cursor:${isInstalled ? 'default' : 'pointer'};opacity:${isInstalled ? '0.5' : '1'};background:var(--bg);transition:border-color .15s">
+            <input type="checkbox" value="${esc(p.name)}" ${isInstalled ? 'disabled checked' : ''} style="accent-color:var(--accent);width:16px;height:16px">
+            ${logoHtml}
+            <div style="flex:1;min-width:0">
+              <div style="font-size:13px;font-weight:500;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(display_name)}</div>
+              ${desc ? `<div style="font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(desc)}</div>` : ''}
+            </div>
+            ${isInstalled ? `<span style="font-size:11px;color:var(--muted);white-space:nowrap">${esc(alreadyInstalledLabel)}</span>` : ''}
+          </label>
+        `;
+      }).join('');
+
+      overlay.innerHTML = `
+        <div class="app-dialog" role="dialog" style="max-width:420px;width:90vw">
+          <div class="app-dialog-header">
+            <div class="app-dialog-title">${esc(titleLabel)}</div>
+            <button class="app-dialog-close" id="installProfileClose">&times;</button>
+          </div>
+          <div style="font-size:12px;color:var(--muted);margin-bottom:4px">${esc(displayName || skillName)}</div>
+          <div style="display:flex;gap:8px;margin:8px 0">
+            <button id="installProfileSelectAll" class="app-dialog-btn" style="font-size:12px;padding:4px 10px">${esc(selectAllLabel)}</button>
+            <button id="installProfileDeselectAll" class="app-dialog-btn" style="font-size:12px;padding:4px 10px">${esc(deselectAllLabel)}</button>
+          </div>
+          <div id="installProfileList" style="max-height:320px;overflow-y:auto;display:flex;flex-direction:column;gap:6px;margin:8px 0">
+            ${profileCards}
+          </div>
+          <div id="installProfileError" style="display:none;font-size:12px;color:var(--error,#e74c3c);margin-bottom:8px"></div>
+          <div class="app-dialog-actions">
+            <button class="app-dialog-btn" id="installProfileCancel">${esc(cancelLabel)}</button>
+            <button class="app-dialog-btn confirm" id="installProfileConfirm">${esc(installLabel)}</button>
+          </div>
+        </div>
+      `;
+
+      document.body.appendChild(overlay);
+
+      const close = (result) => {
+        overlay.remove();
+        if (result) resolve(result);
+        else reject(new Error('cancelled'));
+      };
+
+      // Event handlers
+      overlay.querySelector('#installProfileClose').onclick = () => close(null);
+      overlay.querySelector('#installProfileCancel').onclick = () => close(null);
+      overlay.addEventListener('click', (e) => {
+        if (e.target === overlay) close(null);
+      });
+      document.addEventListener('keydown', function escHandler(ev) {
+        if (ev.key === 'Escape') {
+          document.removeEventListener('keydown', escHandler);
+          close(null);
+        }
+      });
+
+      // Select all / deselect all
+      overlay.querySelector('#installProfileSelectAll').onclick = () => {
+        overlay.querySelectorAll('#installProfileList input[type="checkbox"]:not(:disabled)').forEach(cb => {
+          cb.checked = true;
+        });
+      };
+      overlay.querySelector('#installProfileDeselectAll').onclick = () => {
+        overlay.querySelectorAll('#installProfileList input[type="checkbox"]:not(:disabled)').forEach(cb => {
+          cb.checked = false;
+        });
+      };
+
+      // Hover effect for cards
+      overlay.querySelectorAll('.install-profile-card').forEach(card => {
+        if (card.style.opacity === '0.5') return;
+        card.addEventListener('mouseenter', () => { card.style.borderColor = 'var(--accent)'; });
+        card.addEventListener('mouseleave', () => { card.style.borderColor = 'var(--border2)'; });
+      });
+
+      // Confirm
+      overlay.querySelector('#installProfileConfirm').onclick = () => {
+        const selected = [];
+        overlay.querySelectorAll('#installProfileList input[type="checkbox"]:checked:not(:disabled)').forEach(cb => {
+          selected.push(cb.value);
+        });
+        if (selected.length === 0) {
+          const errEl = overlay.querySelector('#installProfileError');
+          errEl.textContent = noSelectionLabel;
+          errEl.style.display = 'block';
+          return;
+        }
+        close(selected);
+      };
+    });
   }
 
   async function deleteCurrent() {
@@ -889,7 +1047,7 @@
     const label = _currentSkillhubItem.display_name || name;
     const message = typeof t === 'function' && t('skill_delete_confirm')
       ? t('skill_delete_confirm').replace('{0}', label)
-      : `Delete skill "${label}"?`;
+      : `Delete skill "${label}" from all assistants?`;
     if (typeof showConfirmDialog === 'function') {
       const ok = await showConfirmDialog({
         title: typeof t === 'function' ? t('delete_title') : 'Delete',
@@ -901,7 +1059,7 @@
       if (!ok) return;
     }
     try {
-      await api('/api/skillhub/delete', {
+      await api('/api/skillhub/delete-from-all-profiles', {
         method: 'POST',
         body: JSON.stringify({
           name,
@@ -922,6 +1080,184 @@
     } catch (e) {
       if (typeof showToast === 'function') showToast(e.message);
     }
+  }
+
+  async function manageProfilesCurrent() {
+    if (!_currentSkillhubItem) return;
+    const name = _currentSkillhubItem.name;
+    const displayName = _currentSkillhubItem.display_name || _currentSkillhubItem.install_name || name;
+    const category = _currentSkillhubItem.category || '';
+    const isCustom = _skillhubScope === 'custom' || _currentSkillhubItem.custom === true;
+
+    let result;
+    try {
+      result = await _showManageProfilesDialog(name, displayName);
+    } catch (_) {
+      return; // user cancelled
+    }
+    if (!result) return;
+
+    const { install: toInstall, uninstall: toUninstall } = result;
+    if (toInstall.length === 0 && toUninstall.length === 0) return;
+
+    try {
+      const resp = await api('/api/skillhub/sync-profiles', {
+        method: 'POST',
+        body: JSON.stringify({ name, display_name: displayName, category, is_custom: isCustom, install: toInstall, uninstall: toUninstall }),
+      });
+      const installed = resp.installed || [];
+      const uninstalled = resp.uninstalled || [];
+      const failCount = installed.filter(r => !r.ok).length + uninstalled.filter(r => !r.ok).length;
+
+      _skillhubData = null;
+      if (typeof _invalidateSkillsDataCache === 'function') _invalidateSkillsDataCache();
+      if (typeof _invalidateSkillCommandCache === 'function') _invalidateSkillCommandCache();
+      await loadSkillHub(true);
+      if (typeof loadSkills === 'function') await loadSkills();
+      if (_currentSkillhubItem) {
+        openSkillHubItem(_currentSkillhubItem, null);
+      }
+      if (typeof showToast === 'function') {
+        if (failCount === 0) {
+          const msg = typeof t === 'function' ? t('manage_profiles_success') : 'Associations updated';
+          showToast(msg);
+        } else {
+          const msg = typeof t === 'function' ? t('manage_profiles_partial') : 'Some changes failed';
+          showToast(msg, 5000, 'error');
+        }
+      }
+    } catch (e) {
+      if (typeof showToast === 'function') showToast(e.message, 5000, 'error');
+    }
+  }
+
+  function _showManageProfilesDialog(skillName, displayName) {
+    return new Promise(async (resolve, reject) => {
+      // Fetch profiles list
+      let profiles = [];
+      try {
+        const resp = await api('/api/profiles');
+        profiles = resp.profiles || [];
+      } catch (_) {
+        profiles = [];
+      }
+
+      // Determine which profiles currently have this skill
+      const installedProfiles = new Set();
+      for (const p of profiles) {
+        const skills = p.skills || [];
+        if (skills.some(s => s.name === skillName || s.dir_name === skillName)) {
+          installedProfiles.add(p.name);
+        }
+      }
+
+      const overlay = document.createElement('div');
+      overlay.className = 'app-dialog-overlay';
+      overlay.style.display = 'flex';
+
+      const titleLabel = typeof t === 'function' ? t('manage_profiles_title') : 'Manage Skill Assistants';
+      const selectAllLabel = typeof t === 'function' ? t('install_select_all') : 'Select All';
+      const deselectAllLabel = typeof t === 'function' ? t('install_deselect_all') : 'Deselect All';
+      const confirmLabel = typeof t === 'function' ? t('save') : 'Save';
+      const cancelLabel = typeof t === 'function' ? t('cancel') : 'Cancel';
+
+      const profileCards = profiles.map(p => {
+        const isChecked = installedProfiles.has(p.name);
+        const info = p.info || {};
+        const logo = info.logo || '';
+        const display_name = info.display_name || p.name;
+        const desc = info.description || '';
+        const logoHtml = logo
+          ? `<img src="${logo}" style="width:32px;height:32px;border-radius:6px;object-fit:cover">`
+          : `<div style="width:32px;height:32px;border-radius:6px;background:var(--accent);display:flex;align-items:center;justify-content:center;color:#fff;font-size:14px;font-weight:600">${esc(display_name.charAt(0).toUpperCase())}</div>`;
+        return `
+          <label class="install-profile-card" data-profile="${esc(p.name)}" style="display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px solid var(--border2);border-radius:8px;cursor:pointer;background:var(--bg);transition:border-color .15s">
+            <input type="checkbox" value="${esc(p.name)}" ${isChecked ? 'checked' : ''} style="accent-color:var(--accent);width:16px;height:16px">
+            ${logoHtml}
+            <div style="flex:1;min-width:0">
+              <div style="font-size:13px;font-weight:500;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(display_name)}</div>
+              ${desc ? `<div style="font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(desc)}</div>` : ''}
+            </div>
+          </label>
+        `;
+      }).join('');
+
+      overlay.innerHTML = `
+        <div class="app-dialog" role="dialog" style="max-width:420px;width:90vw">
+          <div class="app-dialog-header">
+            <div class="app-dialog-title">${esc(titleLabel)}</div>
+            <button class="app-dialog-close" id="manageProfileClose">&times;</button>
+          </div>
+          <div style="font-size:12px;color:var(--muted);margin-bottom:4px">${esc(displayName || skillName)}</div>
+          <div style="display:flex;gap:8px;margin:8px 0">
+            <button id="manageProfileSelectAll" class="app-dialog-btn" style="font-size:12px;padding:4px 10px">${esc(selectAllLabel)}</button>
+            <button id="manageProfileDeselectAll" class="app-dialog-btn" style="font-size:12px;padding:4px 10px">${esc(deselectAllLabel)}</button>
+          </div>
+          <div id="manageProfileList" style="max-height:320px;overflow-y:auto;display:flex;flex-direction:column;gap:6px;margin:8px 0">
+            ${profileCards}
+          </div>
+          <div class="app-dialog-actions">
+            <button class="app-dialog-btn" id="manageProfileCancel">${esc(cancelLabel)}</button>
+            <button class="app-dialog-btn confirm" id="manageProfileConfirm">${esc(confirmLabel)}</button>
+          </div>
+        </div>
+      `;
+
+      document.body.appendChild(overlay);
+
+      const close = (result) => {
+        overlay.remove();
+        if (result) resolve(result);
+        else reject(new Error('cancelled'));
+      };
+
+      // Event handlers
+      overlay.querySelector('#manageProfileClose').onclick = () => close(null);
+      overlay.querySelector('#manageProfileCancel').onclick = () => close(null);
+      overlay.addEventListener('click', (e) => {
+        if (e.target === overlay) close(null);
+      });
+      document.addEventListener('keydown', function escHandler(ev) {
+        if (ev.key === 'Escape') {
+          document.removeEventListener('keydown', escHandler);
+          close(null);
+        }
+      });
+
+      // Select all / deselect all
+      overlay.querySelector('#manageProfileSelectAll').onclick = () => {
+        overlay.querySelectorAll('#manageProfileList input[type="checkbox"]').forEach(cb => {
+          cb.checked = true;
+        });
+      };
+      overlay.querySelector('#manageProfileDeselectAll').onclick = () => {
+        overlay.querySelectorAll('#manageProfileList input[type="checkbox"]').forEach(cb => {
+          cb.checked = false;
+        });
+      };
+
+      // Hover effect for cards
+      overlay.querySelectorAll('.install-profile-card').forEach(card => {
+        card.addEventListener('mouseenter', () => { card.style.borderColor = 'var(--accent)'; });
+        card.addEventListener('mouseleave', () => { card.style.borderColor = 'var(--border2)'; });
+      });
+
+      // Confirm - compute diff
+      overlay.querySelector('#manageProfileConfirm').onclick = () => {
+        const toInstall = [];
+        const toUninstall = [];
+        overlay.querySelectorAll('#manageProfileList input[type="checkbox"]').forEach(cb => {
+          const profileName = cb.value;
+          const wasInstalled = installedProfiles.has(profileName);
+          if (cb.checked && !wasInstalled) {
+            toInstall.push(profileName);
+          } else if (!cb.checked && wasInstalled) {
+            toUninstall.push(profileName);
+          }
+        });
+        close({ install: toInstall, uninstall: toUninstall });
+      };
+    });
   }
 
   function pickUpload() {
@@ -1467,6 +1803,7 @@
     openSkillHubItem,
     installCurrent,
     deleteCurrent,
+    manageProfilesCurrent,
     editCurrent,
     cancelEditForm,
     saveEditForm,

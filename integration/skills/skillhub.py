@@ -20,7 +20,7 @@ from integration.skills.local_skills import (
 )
 from integration.skills.list_item_shape import normalize_skill_list_items
 from integration.skills.mtime_utils import enrich_skills_mtime
-from integration.skills.paths import shared_skills_dir
+from integration.skills.paths import shared_skills_dir, skills_dir_for_profile
 from integration.skills.sort_utils import sort_skill_items
 from integration.skills.utils import (
     extract_zip_and_flatten,
@@ -253,20 +253,47 @@ def _hub_installed_index(skills_dir: Path) -> dict[str, str]:
     return index
 
 
+def _hub_installed_index_all_profiles() -> dict[str, tuple[str, str]]:
+    """Map catalog skill name to (profile_name, dir_name), scanning all profiles."""
+    from api.profiles import list_profiles_api
+
+    combined: dict[str, tuple[str, str]] = {}
+    profiles = list_profiles_api()
+    for p in profiles:
+        profile_name = str(p.get("name") or "").strip()
+        if not profile_name:
+            continue
+        skills_dir = skills_dir_for_profile(profile_name)
+        try:
+            index = _hub_installed_index(skills_dir)
+        except Exception:
+            continue
+        # First profile to install a skill wins (dedup by name)
+        for skill_name, dir_name in index.items():
+            combined.setdefault(skill_name, (profile_name, dir_name))
+    return combined
+
+
 def annotate_installed(
     skills: list[dict],
     *,
     installed_index: dict[str, str] | None = None,
     locked_names: set[str] | None = None,
 ) -> list[dict]:
-    """Mark hub catalog items with local install state under shared_skills_dir."""
-    skills_dir = shared_skills_dir()
-    if installed_index is None:
+    """Mark hub catalog items with local install state across all profiles."""
+    # Use all-profiles index by default
+    profile_index: dict[str, tuple[str, str]] = {}
+    if installed_index is not None:
+        # Backward compat: caller provided a flat index (default profile only)
+        default_profile = "default"
+        for k, v in installed_index.items():
+            profile_index[k] = (default_profile, v)
+    else:
         try:
-            installed_index = _hub_installed_index(skills_dir)
+            profile_index = _hub_installed_index_all_profiles()
         except Exception as exc:
-            _log.debug("annotate_installed failed: %s", exc)
-            installed_index = {}
+            _log.debug("annotate_installed all-profiles failed: %s", exc)
+            profile_index = {}
 
     disabled = _disabled_skill_names()
     lock_fields_ok = True
@@ -281,18 +308,20 @@ def annotate_installed(
 
     for skill in skills:
         skill_name = str(skill.get("name") or "").strip()
-        dir_name = _lookup_installed_dir(installed_index, skill_name)
+        entry = profile_index.get(skill_name)
+        dir_name = entry[1] if entry else ""
+        profile_name = entry[0] if entry else ""
         is_installed = bool(dir_name)
         skill["installed"] = is_installed
         skill["hub_installed"] = is_installed
         skill["custom"] = False
         skill["dir_name"] = dir_name
         skill["disabled"] = skill_name in disabled
-        if is_installed and dir_name:
+        if is_installed and dir_name and profile_name:
+            skills_dir = skills_dir_for_profile(profile_name)
             local_description = _read_local_skill_description(skills_dir, dir_name)
             if local_description:
                 skill["description"] = local_description
-            # Read display_name/display_description/icon from detail metadata if present
             skill_dir = (skills_dir / dir_name).resolve()
             if skill_path_within(skills_dir, skill_dir) and skill_dir.is_dir():
                 detail_data = read_detail_json(skill_dir)
@@ -373,9 +402,9 @@ def build_hub_catalog_context() -> _HubCatalogContext:
     except Exception:
         locked_names = set()
     annotated = [dict(skill) for skill in raw_skills]
+    # Don't pass installed_index so annotate_installed scans all profiles
     annotate_installed(
         annotated,
-        installed_index=installed_index,
         locked_names=locked_names,
     )
     return _HubCatalogContext(
@@ -613,6 +642,232 @@ def install_skill(name: str, display_name: str = "", category: str = "") -> dict
         "category": cat_seg or "",
         "dir_name": _skill_dir_rel_path(target, skills_dir),
     }
+
+
+def install_skill_to_profile(
+    name: str, profile_name: str, display_name: str = "", category: str = ""
+) -> dict:
+    """Install a skill to a specific profile's skills directory."""
+    skills_dir = skills_dir_for_profile(profile_name)
+    skills_dir.mkdir(parents=True, exist_ok=True)
+    target, cat_seg, path_err = skill_target_dir(skills_dir, category, name)
+    if path_err:
+        return path_err
+    assert target is not None and cat_seg is not None
+
+    existing_dir, _ = _find_skill(name, skills_dir)
+    if existing_dir is not None:
+        rel_path = _skill_dir_rel_path(existing_dir, skills_dir)
+        return {
+            "error": f"Skill already installed at '{rel_path}'",
+            "status": 409,
+        }
+
+    if find_skill_main_file(target) or (target / ".hub_installed").is_file():
+        return {"error": "Skill already installed", "status": 409}
+
+    label = (display_name or name).strip()
+    try:
+        zip_bytes = download_bytes(name)
+        target.mkdir(parents=True, exist_ok=True)
+        extract_zip_and_flatten(zip_bytes, target)
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code != 404:
+            raise
+        doc = fetch_doc(name)
+        text = str(doc.get("content") or "")
+        target.mkdir(parents=True, exist_ok=True)
+        (target / "SKILL.md").write_text(text, encoding="utf-8")
+    except Exception:
+        doc = fetch_doc(name)
+        text = str(doc.get("content") or "")
+        target.mkdir(parents=True, exist_ok=True)
+        (target / "SKILL.md").write_text(text, encoding="utf-8")
+
+    if cat_seg:
+        (target / ".category").write_text(cat_seg, encoding="utf-8")
+    (target / ".hub_installed").write_text("1", encoding="utf-8")
+    (target / ".install_name").write_text(label, encoding="utf-8")
+    catalog_name = str(name or "").strip()
+    if catalog_name:
+        (target / _HUB_CATALOG_NAME_SIDECAR).write_text(catalog_name, encoding="utf-8")
+    try:
+        import json as _json
+        detail_data = fetch_skill_detail(name)
+        if isinstance(detail_data, dict) and detail_data:
+            (target / "detail.json").write_text(
+                _json.dumps(detail_data, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+    except Exception as exc:
+        _log.debug("Could not save detail.json for %s: %s", name, exc)
+    try:
+        from integration.skills.no_self_improve import add_names
+        add_names([name])
+    except Exception as exc:
+        _log.exception("failed to add hub skill to no_self_improve: %s", exc)
+    # Ensure skill is enabled in profile config
+    _ensure_skill_enabled(profile_name, name)
+    return {
+        "ok": True,
+        "name": name,
+        "profile": profile_name,
+        "category": cat_seg or "",
+        "dir_name": _skill_dir_rel_path(target, skills_dir),
+    }
+
+
+def _ensure_skill_enabled(profile_name: str, skill_name: str) -> None:
+    """Remove skill from disabled list in profile's config.yaml if present."""
+    try:
+        from api.profiles import get_hermes_home_for_profile
+        import yaml
+        home = Path(get_hermes_home_for_profile(profile_name))
+        config_path = home / "config.yaml"
+        if not config_path.exists():
+            return
+        with open(config_path, "r", encoding="utf-8") as f:
+            cfg = yaml.safe_load(f) or {}
+        skills_cfg = cfg.get("skills") or {}
+        disabled = skills_cfg.get("disabled") or []
+        if isinstance(disabled, list) and skill_name in disabled:
+            disabled.remove(skill_name)
+            skills_cfg["disabled"] = disabled
+            cfg["skills"] = skills_cfg
+            with open(config_path, "w", encoding="utf-8") as f:
+                yaml.safe_dump(cfg, f, allow_unicode=True, default_flow_style=False)
+    except Exception as exc:
+        _log.debug("Could not ensure skill enabled for %s/%s: %s", profile_name, skill_name, exc)
+
+
+def copy_custom_skill_to_profile(name: str, profile_name: str, category: str = "") -> dict:
+    """Copy a custom skill from any profile to the target profile."""
+    import shutil
+    from integration.skills.local_skills import (
+        _find_skill_in_any_profile,
+        _skill_dir_rel_path,
+    )
+
+    src_dir, src_md = _find_skill_in_any_profile(name)
+    if not src_dir or not src_md:
+        return {"error": "Skill not found", "status": 404}
+
+    skills_dir = skills_dir_for_profile(profile_name)
+    skills_dir.mkdir(parents=True, exist_ok=True)
+
+    # Determine target directory
+    cat_seg = str(category or "").strip()
+    leaf = src_dir.name
+    if cat_seg:
+        target = skills_dir / cat_seg / leaf
+    else:
+        target = skills_dir / leaf
+
+    # Check if already exists
+    if target.exists():
+        rel_path = _skill_dir_rel_path(target, skills_dir)
+        return {"error": f"Skill already installed at '{rel_path}'", "status": 409}
+
+    # Copy the entire skill directory
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(src_dir, target)
+    except Exception as exc:
+        return {"error": f"Failed to copy skill: {exc}", "status": 500}
+
+    _ensure_skill_enabled(profile_name, name)
+    return {
+        "ok": True,
+        "name": name,
+        "profile": profile_name,
+        "category": cat_seg,
+        "dir_name": _skill_dir_rel_path(target, skills_dir),
+    }
+
+
+def delete_skill_from_profile(name: str, profile_name: str, dir_name: str = "") -> dict:
+    """Delete a skill from a specific profile's skills directory."""
+    from integration.skills.local_skills import (
+        _resolve_skill_dir,
+        _skill_dir_rel_path,
+        is_system_skill,
+        parse_logical_name_from_skill_md,
+    )
+    import shutil
+
+    if is_system_skill(name):
+        return {"error": "Cannot delete system skill", "status": 403}
+    skills_dir = skills_dir_for_profile(profile_name)
+    if not skills_dir.exists():
+        return {"error": "Skill not found", "status": 404}
+    skill_dir = _resolve_skill_dir(skills_dir, name, dir_name)
+    if not skill_dir:
+        return {"error": "Skill not found", "status": 404}
+    hub_installed = (skill_dir / ".hub_installed").is_file()
+    skill_md = find_skill_main_file(skill_dir)
+    logical_name = (
+        parse_logical_name_from_skill_md(skill_md) if skill_md else None
+    ) or str(name or "").strip() or skill_dir.name
+    shutil.rmtree(skill_dir)
+    try:
+        from integration.skills.no_self_improve import remove_names
+        remove_names([logical_name])
+    except Exception as exc:
+        _log.exception("failed to remove skill from no_self_improve: %s", exc)
+    _remove_skill_from_profile_config(profile_name, logical_name)
+    return {
+        "ok": True,
+        "name": logical_name,
+        "profile": profile_name,
+        "dir_name": _skill_dir_rel_path(skill_dir, skills_dir),
+        "hub_installed": hub_installed,
+    }
+
+
+def delete_skill_from_all_profiles(name: str, dir_name: str = "") -> dict:
+    """Delete a skill from all profiles."""
+    from api.profiles import list_profiles_api
+
+    profiles = list_profiles_api()
+    results = []
+    for p in profiles:
+        profile_name = str(p.get("name", "")).strip()
+        if not profile_name:
+            continue
+        try:
+            result = delete_skill_from_profile(name, profile_name, dir_name=dir_name)
+            if result.get("ok"):
+                results.append({"profile": profile_name, "ok": True})
+            elif result.get("status") == 404:
+                results.append({"profile": profile_name, "ok": True, "skipped": True})
+            else:
+                results.append({"profile": profile_name, "ok": False, "error": result.get("error", "unknown")})
+        except Exception as exc:
+            results.append({"profile": profile_name, "ok": False, "error": str(exc)})
+    return {"ok": True, "results": results}
+
+
+def _remove_skill_from_profile_config(profile_name: str, skill_name: str) -> None:
+    """Remove a skill from the disabled list in a profile's config.yaml."""
+    try:
+        from api.profiles import get_hermes_home_for_profile
+        import yaml
+        home = Path(get_hermes_home_for_profile(profile_name))
+        config_path = home / "config.yaml"
+        if not config_path.exists():
+            return
+        with open(config_path, "r", encoding="utf-8") as f:
+            cfg = yaml.safe_load(f) or {}
+        skills_cfg = cfg.get("skills") or {}
+        disabled = skills_cfg.get("disabled") or []
+        if isinstance(disabled, list) and skill_name in disabled:
+            disabled.remove(skill_name)
+            skills_cfg["disabled"] = disabled
+            cfg["skills"] = skills_cfg
+            with open(config_path, "w", encoding="utf-8") as f:
+                yaml.safe_dump(cfg, f, allow_unicode=True, default_flow_style=False)
+    except Exception as exc:
+        _log.debug("Could not remove skill from config for %s/%s: %s", profile_name, skill_name, exc)
 
 
 # Backward-compatible alias for tests/callers
