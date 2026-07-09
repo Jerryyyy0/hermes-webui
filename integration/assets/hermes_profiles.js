@@ -4,7 +4,7 @@
   const cfg = window.__HERMES_CONFIG__ || {};
   if (!cfg.integrationSkills) return;
 
-  const LOGO_MAX_BYTES = 4 * 1024 * 1024;
+  const LOGO_MAX_BYTES = 10 * 1024 * 1024;
 
   let _presetsCache = null;
   let _logoPickerState = { mode: 'none', presetId: '', logoBase64: '' };
@@ -122,7 +122,7 @@
         <div class="profile-logo-grid">${grid || `<span class="profile-logo-empty">${esc(typeof t === 'function' ? t('profiles_no_profiles') : 'No presets')}</span>`}</div>
         <div class="profile-logo-upload-row">
           <label class="profile-logo-upload">${esc('Upload custom')}
-            <input type="file" accept="image/png,image/jpeg,image/gif,image/webp" class="profile-logo-file-input" hidden>
+            <input type="file" accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml" class="profile-logo-file-input" hidden>
           </label>
           <button type="button" class="profile-logo-remove">${esc('Remove logo')}</button>
           ${preview}
@@ -147,7 +147,7 @@
         const file = fileInput.files && fileInput.files[0];
         if (!file) return;
         if (file.size > LOGO_MAX_BYTES) {
-          if (typeof showToast === 'function') showToast('Logo must be 4MB or smaller');
+          if (typeof showToast === 'function') showToast('Logo must be 10MB or smaller');
           return;
         }
         const reader = new FileReader();

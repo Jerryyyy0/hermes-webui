@@ -5535,7 +5535,7 @@
           "skill_count":      { "type": "integer" },
           "info": {
             "type": "object",
-            "description": "profile/info.json 内容；logo 为 Data URI base64，单图 raw ≤ 4MB；置顶字段 pinned/pin_order 亦在此返回",
+            "description": "profile/info.json 内容；logo 为 PNG/JPEG/GIF/WebP/SVG Data URI base64，单图 raw ≤ 10MB；置顶字段 pinned/pin_order 亦在此返回",
             "properties": {
               "display_name": { "type": "string" },
               "description":  { "type": "string" },

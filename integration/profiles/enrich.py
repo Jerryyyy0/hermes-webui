@@ -12,12 +12,14 @@ from integration.profiles.memory_snapshot import load_memory_snapshot
 
 _log = logging.getLogger(__name__)
 
-LOGO_MAX_BYTES = 4 * 1024 * 1024
-_ALLOWED_MIMES = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
+LOGO_MAX_BYTES = 10 * 1024 * 1024
+_ALLOWED_MIMES = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp", "image/svg+xml"})
 _DATA_URI_RE = re.compile(
-    r"^data:(image/(?:png|jpeg|gif|webp));base64,([A-Za-z0-9+/=\s]+)$",
+    r"^data:(image/(?:png|jpeg|gif|webp|svg\+xml));base64,([A-Za-z0-9+/=\s]+)$",
     re.DOTALL,
 )
+_SVG_EVENT_ATTR_RE = re.compile(r"\son[a-z0-9_-]+\s*=", re.IGNORECASE)
+_SVG_REMOTE_REF_RE = re.compile(r"(?:href|xlink:href)\s*=\s*['\"]\s*(?:https?:)?//", re.IGNORECASE)
 
 
 def _read_info_json(profile_path: str) -> dict:
@@ -30,6 +32,21 @@ def _read_info_json(profile_path: str) -> dict:
     except Exception as exc:
         _log.debug("info.json read failed for %s: %s", profile_path, exc)
         return {}
+
+
+def _svg_logo_is_safe(decoded: bytes) -> bool:
+    try:
+        text = decoded.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    lowered = text.lower()
+    if "<svg" not in lowered:
+        return False
+    if "<script" in lowered or "javascript:" in lowered:
+        return False
+    if _SVG_EVENT_ATTR_RE.search(text) or _SVG_REMOTE_REF_RE.search(text):
+        return False
+    return True
 
 
 def normalize_logo_data_uri(value: str) -> str | None:
@@ -57,6 +74,8 @@ def normalize_logo_data_uri(value: str) -> str | None:
         return None
 
     if len(decoded) > LOGO_MAX_BYTES:
+        return None
+    if mime == "image/svg+xml" and not _svg_logo_is_safe(decoded):
         return None
 
     encoded = base64.b64encode(decoded).decode("ascii")

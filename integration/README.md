@@ -38,7 +38,7 @@ When integration is enabled, `GET /api/profiles` enriches each entry:
 | Response field | Source |
 |----------------|--------|
 | `info` | `{profile.path}/info.json` (missing file → `{}`) |
-| `info.logo` | Data URI base64 in info.json; invalid/over 4MB omitted from response |
+| `info.logo` | Data URI base64 in info.json; PNG/JPEG/GIF/WebP/SVG, invalid/over 10MB omitted from response |
 | `skills` | Installed skills for that profile (`local_skills.list_installed`) |
 | `memory_snapshot` | `{path}/memories/MEMORY.md`, `USER.md`, and `{path}/SOUL.md` (same fields as `GET /api/memory`, redacted) |
 | `info.pinned` | `info.json` → `pinned: true`（仅置顶时返回） |

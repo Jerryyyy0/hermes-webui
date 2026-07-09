@@ -157,3 +157,35 @@ def test_normalize_logo_data_uri_raw_base64():
     b64 = base64.b64encode(_TINY_PNG).decode("ascii")
     out = normalize_logo_data_uri(b64)
     assert out and out.startswith("data:image/png;base64,")
+
+
+def test_normalize_logo_data_uri_accepts_safe_svg():
+    svg = b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"><rect width="1" height="1"/></svg>'
+    b64 = base64.b64encode(svg).decode("ascii")
+    out = normalize_logo_data_uri(f"data:image/svg+xml;base64,{b64}")
+    assert out and out.startswith("data:image/svg+xml;base64,")
+
+
+def test_normalize_logo_data_uri_rejects_script_svg():
+    svg = b'<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>'
+    b64 = base64.b64encode(svg).decode("ascii")
+    assert normalize_logo_data_uri(f"data:image/svg+xml;base64,{b64}") is None
+
+
+def test_normalize_logo_data_uri_rejects_svg_event_attrs():
+    svg = b'<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"></svg>'
+    b64 = base64.b64encode(svg).decode("ascii")
+    assert normalize_logo_data_uri(f"data:image/svg+xml;base64,{b64}") is None
+
+
+def test_normalize_logo_data_uri_rejects_svg_remote_refs():
+    svg = b'<svg xmlns="http://www.w3.org/2000/svg"><image href="https://example.com/a.png"/></svg>'
+    b64 = base64.b64encode(svg).decode("ascii")
+    assert normalize_logo_data_uri(f"data:image/svg+xml;base64,{b64}") is None
+
+
+def test_normalize_logo_data_uri_accepts_ten_mb_limit():
+    raw = b"a" * LOGO_MAX_BYTES
+    b64 = base64.b64encode(raw).decode("ascii")
+    out = normalize_logo_data_uri(f"data:image/png;base64,{b64}")
+    assert out and out.startswith("data:image/png;base64,")
