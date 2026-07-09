@@ -674,16 +674,19 @@
     const actions = _skillhubReadActions(skill);
     const scopeParam = _skillhubPreviewScopeParam(skill);
     try {
-      const useLocalDetail = isCustom || (skill && skill.installed);
-      // Always try upstream detail first, fall back to local for installed/custom
-      const detailPromise = api(`/api/skillhub/detail?name=${encodeURIComponent(name)}`)
-        .then(resp => ({ source: 'upstream', data: resp }))
-        .catch(() => useLocalDetail
-          ? api(`/api/skillhub/file?name=${encodeURIComponent(name)}&path=detail.json${scopeParam}`)
-              .then(resp => ({ source: 'local', data: resp }))
-              .catch(() => null)
-          : null
-        );
+      // Custom skills: always use local detail. Others: try upstream first, fall back to local.
+      const detailPromise = isCustom
+        ? api(`/api/skillhub/file?name=${encodeURIComponent(name)}&path=detail.json${scopeParam}`)
+            .then(resp => ({ source: 'local', data: resp }))
+            .catch(() => null)
+        : api(`/api/skillhub/detail?name=${encodeURIComponent(name)}`)
+            .then(resp => ({ source: 'upstream', data: resp }))
+            .catch(() => (skill && skill.installed)
+              ? api(`/api/skillhub/file?name=${encodeURIComponent(name)}&path=detail.json${scopeParam}`)
+                  .then(resp => ({ source: 'local', data: resp }))
+                  .catch(() => null)
+              : null
+            );
       const [doc, structure, detailResult] = await Promise.all([
         api(`/api/skillhub/content?name=${encodeURIComponent(name)}${scopeParam}`),
         api(`/api/skillhub/structure?name=${encodeURIComponent(name)}${scopeParam}`).catch(() => null),
