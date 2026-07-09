@@ -199,6 +199,9 @@ def list_installed(
             else:
                 full_name = skill_dir.name
                 cat = None
+            category_file = skill_dir / ".category"
+            if category_file.is_file():
+                cat = category_file.read_text(encoding="utf-8").strip() or cat
             content = skill_md.read_text(encoding="utf-8")[:4000]
             frontmatter, body = _parse_frontmatter(content)
             if not skill_matches_platform(frontmatter):
@@ -221,6 +224,15 @@ def list_installed(
             install_file = skill_dir / ".install_name"
             if install_file.is_file():
                 install_name = install_file.read_text(encoding="utf-8").strip()
+            # Read detail metadata if present
+            icon_from_detail = ""
+            display_name_from_detail = ""
+            display_desc_from_detail = ""
+            detail_data = read_detail_json(skill_dir)
+            if detail_data:
+                icon_from_detail = str(detail_data.get("icon") or "").strip()
+                display_name_from_detail = str(detail_data.get("display_name") or "").strip()
+                display_desc_from_detail = str(detail_data.get("display_description") or "").strip()
             all_skills.append(
                 {
                     "name": name,
@@ -229,6 +241,9 @@ def list_installed(
                     "category": cat,
                     "version": str(frontmatter.get("version", "") or ""),
                     "author": str(frontmatter.get("author", "") or ""),
+                    "icon": icon_from_detail,
+                    "display_name": display_name_from_detail or str(frontmatter.get("display_name", "") or ""),
+                    "display_description": display_desc_from_detail,
                     "hub_installed": hub_installed,
                     "can_delete": not is_system_skill(name),
                     "install_name": install_name or name,
@@ -320,12 +335,23 @@ def _scan_custom_skill_dicts(
                         break
             if len(description) > MAX_DESCRIPTION_LENGTH:
                 description = description[: MAX_DESCRIPTION_LENGTH - 3] + "..."
+            # Read display_name/display_description/icon from detail metadata if present
+            display_name_from_detail = ""
+            display_desc_from_detail = ""
+            icon_from_detail = ""
+            detail_data = read_detail_json(skill_dir)
+            if detail_data:
+                display_name_from_detail = str(detail_data.get("display_name") or "").strip()
+                display_desc_from_detail = str(detail_data.get("display_description") or "").strip()
+                icon_from_detail = str(detail_data.get("icon") or "").strip()
             if query:
                 haystack = " ".join(
                     [
                         name,
                         str(frontmatter.get("display_name", "") or ""),
+                        display_name_from_detail,
                         description,
+                        display_desc_from_detail,
                     ]
                 ).lower()
                 if query not in haystack:
@@ -334,11 +360,13 @@ def _scan_custom_skill_dicts(
             entry: dict = {
                 "name": name,
                 "dir_name": dir_key,
-                "display_name": str(frontmatter.get("display_name", "") or ""),
+                "display_name": display_name_from_detail or str(frontmatter.get("display_name", "") or ""),
+                "display_description": display_desc_from_detail,
                 "description": description,
                 "category": str(cat or ""),
                 "version": str(frontmatter.get("version", "") or ""),
                 "author": str(frontmatter.get("author", "") or ""),
+                "icon": icon_from_detail,
                 "installed": True,
                 "hub_installed": False,
                 "custom": True,
@@ -392,6 +420,7 @@ def _filter_custom_skills_in_memory(
                 str(skill.get("name") or ""),
                 str(skill.get("display_name") or ""),
                 str(skill.get("description") or ""),
+                str(skill.get("display_description") or ""),
             ]
         ).lower()
         if query in haystack:
@@ -597,6 +626,32 @@ def validate_dir_name(dir_name: str) -> dict | None:
     return None
 
 
+def _replace_frontmatter_name(content: str, new_name: str) -> str:
+    """Replace the ``name`` value inside YAML frontmatter, preserving the rest."""
+    text = str(content or "")
+    stripped = text.lstrip()
+    if not stripped.startswith("---"):
+        return text
+    parts = stripped.split("---", 2)
+    if len(parts) < 3:
+        return text
+    prefix = text[: len(text) - len(stripped)]
+    fm_lines = parts[1].splitlines(keepends=True)
+    replaced = False
+    new_lines = []
+    for line in fm_lines:
+        if not replaced and line.strip() and not line.strip().startswith("#"):
+            key, _, _ = line.partition(":")
+            if key.strip().lower() == "name":
+                new_lines.append(f"name: {new_name}\n")
+                replaced = True
+                continue
+        new_lines.append(line)
+    if not replaced:
+        new_lines.insert(0, f"name: {new_name}\n")
+    return f"{prefix}---{''.join(new_lines)}---{parts[2]}"
+
+
 def parse_logical_name_from_content(content: str) -> str | None:
     """Parse frontmatter ``name`` from SKILL.md content."""
     try:
@@ -673,6 +728,9 @@ def _resolve_dir_from_explicit(skills_dir: Path, explicit_dir_name: str) -> tupl
 
 
 def _stored_category_for_dir(skill_dir: Path, skills_dir: Path, request_category: str) -> str:
+    cat_seg, _ = _normalize_category_segment(request_category)
+    if cat_seg:
+        return cat_seg
     category_file = skill_dir / ".category"
     if category_file.is_file():
         cat = category_file.read_text(encoding="utf-8").strip()
@@ -682,8 +740,7 @@ def _stored_category_for_dir(skill_dir: Path, skills_dir: Path, request_category
     parts = rel.split("/")
     if len(parts) >= 2:
         return parts[0]
-    cat_seg, _ = _normalize_category_segment(request_category)
-    return cat_seg or ""
+    return ""
 
 
 def resolve_upload_target(
@@ -721,8 +778,17 @@ def resolve_upload_target(
             sidecar_cat = str((sidecar or {}).get("category") or "").strip()
             stored_category = sidecar_cat or _stored_category_for_dir(target, skills_dir, category)
         elif len(matches) == 1:
-            target = matches[0]
-            stored_category = _stored_category_for_dir(target, skills_dir, category)
+            existing = matches[0]
+            desired, cat_seg, path_err = skill_target_dir(skills_dir, category, leaf)
+            if path_err:
+                return path_err
+            assert desired is not None
+            if cat_seg and desired.resolve() != existing.resolve():
+                target = desired
+                stored_category = cat_seg
+            else:
+                target = existing
+                stored_category = _stored_category_for_dir(target, skills_dir, category)
         elif len(matches) > 1:
             default_dest, cat_seg, path_err = skill_target_dir(skills_dir, category, leaf)
             if path_err:
@@ -731,9 +797,10 @@ def resolve_upload_target(
             match_resolved = {path.resolve() for path in matches}
             if default_dest.resolve() in match_resolved:
                 target = default_dest
+                stored_category = cat_seg or _stored_category_for_dir(target, skills_dir, category)
             else:
                 target = sorted(matches, key=lambda p: _skill_dir_rel_path(p, skills_dir))[0]
-            stored_category = _stored_category_for_dir(target, skills_dir, category)
+                stored_category = _stored_category_for_dir(target, skills_dir, category)
         else:
             target, cat_seg, path_err = skill_target_dir(skills_dir, category, leaf)
             if path_err:
@@ -795,6 +862,63 @@ def resolve_dir_name(request_name: str, filename: str | None) -> tuple[str | Non
         err = validate_dir_name(dir_name)
         return (None, err) if err else (dir_name, None)
     return (None, {"error": "缺少 name", "status": 400})
+
+
+def _resolve_leaf_and_logical(
+    content: str,
+    *,
+    request_name: str = "",
+    skill_root: Path | None = None,
+    skill_md: Path | None = None,
+    filename: str | None = None,
+) -> tuple[str, str, dict | None]:
+    """Determine (leaf, logical_name, error) for upload target.
+
+    When request_name is provided, it takes priority and logical_name == leaf.
+    Otherwise falls back to frontmatter name, then filename stem.
+    """
+    explicit_req = str(request_name or "").strip()
+    if explicit_req:
+        leaf = normalize_dir_name(explicit_req)
+        err = validate_dir_name(leaf)
+        if err:
+            return "", "", err
+        return leaf, leaf, None
+
+    if skill_md is not None:
+        leaf = _leaf_from_skill_root(skill_root or skill_md.parent, skill_md)
+    else:
+        logical = parse_logical_name_from_content(content)
+        if logical:
+            leaf = normalize_dir_name(logical)
+        else:
+            leaf, name_err = resolve_dir_name("", filename)
+            if name_err:
+                return "", "", name_err
+            assert leaf is not None
+    logical_name = parse_logical_name_from_content(content) or leaf
+    err = validate_dir_name(leaf)
+    if err:
+        return "", "", err
+    return leaf, logical_name, None
+
+
+def _resolve_list_name(
+    *,
+    use_explicit: bool,
+    leaf: str,
+    skill_md: Path | None = None,
+) -> str:
+    """Determine the list_name for upload response.
+
+    When use_explicit is True (user provided form name), list_name == leaf.
+    Otherwise reads from SKILL.md frontmatter, falling back to leaf.
+    """
+    if use_explicit:
+        return leaf
+    if skill_md is not None:
+        return _list_name_from_skill_md(skill_md, leaf)
+    return leaf
 
 
 def _list_name_from_skill_md(skill_md: Path, dir_name: str) -> str:
@@ -877,6 +1001,22 @@ def _write_category_marker(skill_dir: Path, cat_seg: str) -> None:
         (skill_dir / ".category").write_text(cat_seg, encoding="utf-8")
 
 
+def read_detail_json(skill_dir: Path) -> dict | None:
+    """Read detail metadata, preferring detail.meta.json over detail.json."""
+    import json as _json
+
+    for name in ("detail.meta.json", "detail.json"):
+        p = skill_dir / name
+        if p.is_file():
+            try:
+                data = _json.loads(p.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    return data
+            except Exception:
+                pass
+    return None
+
+
 def _skill_upload_entry(
     skill_dir: Path,
     skills_dir: Path,
@@ -888,6 +1028,7 @@ def _skill_upload_entry(
         "dir_name": _skill_dir_rel_path(skill_dir, skills_dir),
         "category": stored_category,
         "custom": True,
+        "has_detail": (skill_dir / "detail.json").is_file(),
     }
 
 
@@ -938,6 +1079,7 @@ def _plan_zip_import(
     *,
     overwrite: bool = False,
     explicit_dir_name: str = "",
+    request_name: str = "",
 ) -> tuple[list[tuple[Path, Path, str, str, list[Path]]], list[str], int]:
     """Return (planned copies, error messages, http_status_if_errors)."""
     cat_seg, cat_err = _normalize_category_segment(category)
@@ -961,13 +1103,14 @@ def _plan_zip_import(
             errors.append(f"{skill_root.name}: {fmt_err.get('error', 'SKILL.md 格式无效')}")
             status = 400
             continue
-        leaf = _leaf_from_skill_root(skill_root, skill_md)
-        leaf_err = validate_dir_name(leaf)
+        leaf, logical_name, leaf_err = _resolve_leaf_and_logical(
+            content, request_name=request_name, skill_root=skill_root, skill_md=skill_md,
+        )
         if leaf_err:
             errors.append(f"{skill_root.name}: {leaf_err.get('error', '名称无效')}")
             status = 400
             continue
-        logical_name = parse_logical_name_from_content(content) or leaf
+        use_explicit = str(request_name or "").strip() != ""
         sidecar = read_skill_origin_sidecar(skill_root)
         resolved = resolve_upload_target(
             skills_dir,
@@ -990,7 +1133,9 @@ def _plan_zip_import(
             status = 409
             continue
         seen_dests.add(dest_key)
-        list_name = _list_name_from_skill_md(skill_md, leaf)
+        list_name = _resolve_list_name(
+            use_explicit=use_explicit, leaf=leaf, skill_md=skill_md,
+        )
         planned.append((skill_root, dest, list_name, stored_category, dirs_to_remove))
 
     return planned, errors, status
@@ -1003,6 +1148,7 @@ def _upload_zip_skills(
     *,
     overwrite: bool = False,
     explicit_dir_name: str = "",
+    request_name: str = "",
 ) -> dict:
     temp_dir = Path(tempfile.mkdtemp(prefix="hermes-skill-upload-"))
     created: list[Path] = []
@@ -1019,14 +1165,23 @@ def _upload_zip_skills(
             roots,
             overwrite=overwrite,
             explicit_dir_name=explicit_dir_name,
+            request_name=request_name,
         )
         if errors:
             return {"error": "; ".join(errors), "status": err_status}
 
         entries: list[dict] = []
+        has_request_name = str(request_name or "").strip() != ""
         for skill_root, dest, list_name, stored_category, dirs_to_remove in planned:
             _remove_upload_dirs(dirs_to_remove)
             _copy_skill_tree(skill_root, dest)
+            if has_request_name:
+                skill_md = find_skill_main_file(dest)
+                if skill_md:
+                    original = skill_md.read_text(encoding="utf-8")
+                    patched = _replace_frontmatter_name(original, list_name)
+                    if patched != original:
+                        skill_md.write_text(patched, encoding="utf-8")
             created.append(dest)
             _write_category_marker(dest, stored_category)
             entries.append(_skill_upload_entry(dest, skills_dir, list_name, stored_category))
@@ -1052,13 +1207,13 @@ def _upload_single_md(
     content: str,
     leaf: str,
     *,
+    logical_name: str = "",
     overwrite: bool = False,
     explicit_dir_name: str = "",
 ) -> dict:
-    fmt_err = validate_skill_md_content(content)
-    if fmt_err:
-        return fmt_err
-    logical_name = parse_logical_name_from_content(content) or leaf
+    if not logical_name:
+        logical_name = leaf
+    use_explicit = logical_name == leaf
     resolved = resolve_upload_target(
         skills_dir,
         category=category,
@@ -1078,6 +1233,8 @@ def _upload_single_md(
         _remove_upload_dirs(dirs_to_remove)
         target.mkdir(parents=True, exist_ok=True)
         created = True
+        if use_explicit:
+            content = _replace_frontmatter_name(content, leaf)
         (target / "SKILL.md").write_text(content, encoding="utf-8")
         skill_md = find_skill_main_file(target)
         if not skill_md:
@@ -1086,7 +1243,9 @@ def _upload_single_md(
         if fmt_err:
             return fmt_err
         _write_category_marker(target, stored_category)
-        list_name = _list_name_from_skill_md(skill_md, leaf)
+        list_name = _resolve_list_name(
+            use_explicit=use_explicit, leaf=leaf, skill_md=skill_md,
+        )
         ok = True
         return _upload_batch_response(
             [_skill_upload_entry(target, skills_dir, list_name, stored_category)],
@@ -1132,29 +1291,22 @@ def upload_custom_skill(
             zip_bytes,
             overwrite=overwrite,
             explicit_dir_name=explicit,
+            request_name=request_name,
         )
 
     assert content is not None
-    fmt_err = validate_skill_md_content(content)
-    if fmt_err:
-        return fmt_err
-    logical_name = parse_logical_name_from_content(content)
-    if logical_name:
-        leaf = normalize_dir_name(logical_name)
-        leaf_err = validate_dir_name(leaf)
-        if leaf_err:
-            return leaf_err
-    else:
-        leaf, name_err = resolve_dir_name(request_name, filename)
-        if name_err:
-            return name_err
-        assert leaf is not None
+    leaf, logical_name, err = _resolve_leaf_and_logical(
+        content, request_name=request_name, filename=filename,
+    )
+    if err:
+        return err
 
     return _upload_single_md(
         skills_dir,
         category,
         content,
         leaf,
+        logical_name=logical_name,
         overwrite=overwrite,
         explicit_dir_name=explicit,
     )
@@ -1222,6 +1374,52 @@ def edit_custom_skill(*, name: str, content: str, dir_name: str = "") -> dict:
     }
 
 
+def _remove_skill_from_config_yaml(skill_name: str) -> None:
+    """Remove a skill from the disabled lists in config.yaml."""
+    try:
+        from api.config import _get_config_path, _load_yaml_config_file, _save_yaml_config_file
+        from api.profiles import get_active_hermes_home
+
+        try:
+            config_path = Path(get_active_hermes_home()) / "config.yaml"
+        except Exception:
+            config_path = _get_config_path()
+
+        if not config_path.exists():
+            return
+
+        cfg = _load_yaml_config_file(config_path)
+        if not isinstance(cfg, dict):
+            return
+
+        skills_cfg = cfg.get("skills")
+        if not isinstance(skills_cfg, dict):
+            return
+
+        modified = False
+
+        # Remove from skills.disabled
+        disabled = skills_cfg.get("disabled")
+        if isinstance(disabled, list) and skill_name in disabled:
+            skills_cfg["disabled"] = [d for d in disabled if d != skill_name]
+            modified = True
+
+        # Remove from skills.platform_disabled.webui
+        platform_disabled = skills_cfg.get("platform_disabled")
+        if isinstance(platform_disabled, dict) and "webui" in platform_disabled:
+            webui_disabled = platform_disabled["webui"]
+            if isinstance(webui_disabled, list) and skill_name in webui_disabled:
+                platform_disabled["webui"] = [d for d in webui_disabled if d != skill_name]
+                modified = True
+
+        if modified:
+            cfg["skills"] = skills_cfg
+            _save_yaml_config_file(config_path, cfg)
+            _log.info("Removed skill '%s' from config.yaml disabled lists", skill_name)
+    except Exception as exc:
+        _log.warning("Failed to remove skill from config.yaml: %s", exc)
+
+
 def delete_local_skill(name: str, dir_name: str = "") -> dict:
     """Remove a hub install or custom skill from shared_skills_dir."""
     if is_system_skill(name):
@@ -1242,9 +1440,128 @@ def delete_local_skill(name: str, dir_name: str = "") -> dict:
         remove_names([logical_name])
     except Exception as exc:
         _log.exception("failed to remove skill from no_self_improve: %s", exc)
+    # Remove skill from config.yaml disabled lists
+    _remove_skill_from_config_yaml(logical_name)
     return {
         "ok": True,
         "name": logical_name,
         "dir_name": _skill_dir_rel_path(skill_dir, skills_dir),
         "hub_installed": hub_installed,
     }
+
+
+def save_skill_detail(name: str, detail: dict, dir_name: str = "") -> dict:
+    """Write detail.json into the skill directory."""
+    skill_name = str(name or "").strip()
+    if not skill_name:
+        return {"error": "缺少 name", "status": 400}
+    if not isinstance(detail, dict):
+        return {"error": "detail must be a dict", "status": 400}
+    skills_dir = shared_skills_dir()
+    skill_dir = _resolve_skill_dir(skills_dir, skill_name, dir_name)
+    if not skill_dir or not skill_dir.is_dir():
+        return {"error": "Skill not found", "status": 404}
+    try:
+        # When detail.json already exists (e.g. from zip), save AI data separately
+        # to avoid overwriting the author's original metadata.
+        if (skill_dir / "detail.json").is_file():
+            dest = skill_dir / "detail.meta.json"
+        else:
+            dest = skill_dir / "detail.json"
+        with open(dest, "w", encoding="utf-8") as f:
+            json.dump(detail, f, ensure_ascii=False, indent=2)
+    except Exception as exc:
+        _log.warning("save_skill_detail: failed to write %s: %s", dest, exc)
+        return {"error": str(exc), "status": 500}
+    return {"ok": True, "name": skill_name}
+
+
+def extract_zip_skill_content(zip_bytes: bytes) -> dict:
+    """Extract SKILL.md content from zip bytes without persisting to disk.
+
+    Returns {"content": str, "name": str} or {"error": str, "status": int}.
+    """
+    import io
+    import tempfile
+    import zipfile
+
+    from integration.skills.zip_import import discover_skill_roots
+
+    try:
+        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+            members = [m for m in zf.namelist() if m and not m.endswith("/")]
+            if not members:
+                return {"error": "压缩包为空", "status": 400}
+    except zipfile.BadZipFile:
+        return {"error": "无效的 ZIP 文件", "status": 400}
+
+    tmp_dir = None
+    try:
+        tmp_dir = tempfile.mkdtemp(prefix="hermes_extract_")
+        tmp_path = Path(tmp_dir)
+        extract_zip_and_flatten(zip_bytes, tmp_path)
+        roots = discover_skill_roots(tmp_path)
+        if not roots:
+            return {"error": "压缩包中未找到 SKILL.md", "status": 400}
+        skill_root = roots[0]
+        skill_md = find_skill_main_file(skill_root)
+        if not skill_md:
+            return {"error": "压缩包中未找到 SKILL.md", "status": 400}
+        content = skill_md.read_text(encoding="utf-8", errors="replace")
+        name = skill_root.name
+        return {"content": content, "name": name}
+    except Exception as exc:
+        _log.warning("extract_zip_skill_content failed: %s", exc)
+        return {"error": str(exc), "status": 500}
+    finally:
+        if tmp_dir:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def check_duplicate_skill(
+    name: str = "",
+    display_name: str = "",
+    exclude_dir_name: str = "",
+) -> dict:
+    """Check if a skill with the same name or display_name already exists.
+
+    Returns {"ok": True} if no duplicate, or {"error": str, "status": 409} if duplicate.
+    """
+    check_name = str(name or "").strip().lower()
+    check_display = str(display_name or "").strip().lower()
+    if not check_name and not check_display:
+        return {"ok": True}
+
+    skills_dir = shared_skills_dir()
+    if not skills_dir.exists():
+        return {"ok": True}
+
+    from agent.skill_utils import iter_skill_index_files
+    from tools.skills_tool import _EXCLUDED_SKILL_DIRS, _parse_frontmatter
+
+    exclude = str(exclude_dir_name or "").strip().lower()
+    for skill_md in iter_skill_index_files(skills_dir, "SKILL.md"):
+        if any(part in _EXCLUDED_SKILL_DIRS for part in skill_md.parts):
+            continue
+        skill_dir = skill_md.parent
+        dir_name_lower = skill_dir.name.lower()
+        if exclude and dir_name_lower == exclude:
+            continue
+        try:
+            rel = skill_md.relative_to(skills_dir)
+            parts = rel.parts
+            if len(parts) >= 3:
+                continue
+            content = skill_md.read_text(encoding="utf-8", errors="replace")
+            fm, _ = _parse_frontmatter(content)
+            if not fm:
+                continue
+            existing_name = str(fm.get("name") or "").strip().lower()
+            existing_display = str(fm.get("display_name") or "").strip().lower()
+            if check_name and existing_name and check_name == existing_name:
+                return {"error": f"已存在同名技能: {fm.get('name')}", "status": 409}
+            if check_display and existing_display and check_display == existing_display:
+                return {"error": f"已存在同显示名称的技能: {fm.get('display_name')}", "status": 409}
+        except Exception:
+            continue
+    return {"ok": True}

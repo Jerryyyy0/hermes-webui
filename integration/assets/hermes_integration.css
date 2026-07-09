@@ -381,3 +381,89 @@
 .skillhub-file-link:hover {
   text-decoration: underline;
 }
+.ai-meta-category-select {
+  appearance: auto;
+  -webkit-appearance: auto;
+  background: var(--bg, #fff);
+  border: 1px solid var(--border, #ccc);
+  border-radius: 6px;
+  padding: 6px 28px 6px 10px;
+  font-size: 13px;
+  color: var(--text, #333);
+  cursor: pointer;
+  width: 100%;
+}
+.ai-meta-category-select:focus {
+  border-color: var(--accent, var(--link, #4a9eff));
+  outline: none;
+}
+.detail-json-section {
+  margin-bottom: 16px;
+}
+.detail-json-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  margin-bottom: 6px;
+}
+.detail-json-list {
+  padding-left: 20px;
+  margin: 4px 0;
+  font-size: 13px;
+}
+.detail-json-list li {
+  margin-bottom: 4px;
+}
+.detail-json-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.detail-json-chip {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 12px;
+  background: var(--bg-secondary, #f0f0f0);
+  font-size: 12px;
+  color: var(--text, #333);
+}
+.detail-json-badge {
+  display: inline-block;
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  margin-right: 4px;
+  font-weight: 600;
+}
+.detail-json-badge.required {
+  background: #e6f4ea;
+  color: #1a7f37;
+}
+.detail-json-badge.optional {
+  background: #f0f0f0;
+  color: #666;
+}
+.detail-json-dialog {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.detail-json-msg {
+  padding: 10px 14px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.detail-json-msg.user {
+  background: var(--bg-secondary, #f7f7f7);
+}
+.detail-json-msg.assistant {
+  border-top: 1px solid var(--border);
+}
+.detail-json-role {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  margin-bottom: 2px;
+}

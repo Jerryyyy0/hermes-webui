@@ -3798,7 +3798,9 @@ function renderSkills(skills) {
   const query = ($('skillsSearch').value || '').toLowerCase();
   const filtered = query ? skills.filter(s =>
     (s.name||'').toLowerCase().includes(query) ||
+    (s.display_name||'').toLowerCase().includes(query) ||
     (s.description||'').toLowerCase().includes(query) ||
+    (s.display_description||'').toLowerCase().includes(query) ||
     (s.category||'').toLowerCase().includes(query)
   ) : skills;
   // Group by category
@@ -3843,10 +3845,10 @@ function renderSkills(skills) {
       body.className = 'skill-item-body';
       const nameEl = document.createElement('span');
       nameEl.className = 'skill-name';
-      nameEl.textContent = skill.name;
+      nameEl.textContent = skill.display_name || skill.name;
       const descEl = document.createElement('span');
       descEl.className = 'skill-desc';
-      descEl.textContent = skill.description || '';
+      descEl.textContent = skill.display_description || skill.description || '';
       body.append(nameEl, descEl);
       el.append(enableWrap, body);
       const lockEl = buildSkillLockEl(skill, toggleSkillLock);
@@ -3947,15 +3949,114 @@ function _enhanceSkillMarkdown(root) {
   });
 }
 
-function _renderSkillDetail(name, content, linkedFiles) {
+function _renderSkillDetailJson(name, detail, content, linkedFiles, category) {
+  const title = $('skillDetailTitle');
+  const body = $('skillDetailBody');
+  const empty = $('skillDetailEmpty');
+  const meta = (_currentSkillDetail && _currentSkillDetail.detail_meta) || {};
+  // display_name / display_description: detail_meta > detail (detail_json content) > fallback
+  const displayName = meta.display_name || detail.display_name || '';
+  const displayDesc = meta.display_description || detail.display_description || '';
+  if (title) title.textContent = displayName || name;
+  const tl = (k, fb) => (typeof t === 'function' ? t(k) || fb : fb);
+  const section = (label, inner) => `<div class="detail-json-section"><div class="detail-json-label">${esc(label)}</div>${inner}</div>`;
+
+  let html = '';
+  const cat = String(category || meta.category || detail.category || '').trim();
+  if (cat) {
+    html += `<div style="margin-bottom:12px"><span class="detail-json-chip" style="font-size:12px">${esc(cat)}</span></div>`;
+  }
+  if (displayDesc) {
+    html += `<p style="color:var(--muted);font-size:13px;margin:0 0 12px">${esc(displayDesc)}</p>`;
+  }
+
+  if (detail.taskGoal) {
+    html += section(tl('skill_detail_task_goal', 'Task Goal'), `<p>${esc(detail.taskGoal)}</p>`);
+  }
+  if (Array.isArray(detail.taskDetails) && detail.taskDetails.length) {
+    const items = detail.taskDetails.map(d => `<li>${esc(d)}</li>`).join('');
+    html += section(tl('skill_detail_task_details', 'Task Details'), `<ol class="detail-json-list">${items}</ol>`);
+  }
+  if (detail.useMode) {
+    html += section(tl('skill_detail_use_mode', 'How to Use'), `<p>${esc(detail.useMode)}</p>`);
+  }
+  if (Array.isArray(detail.triggerKeywords) && detail.triggerKeywords.length) {
+    const chips = detail.triggerKeywords.map(k => `<span class="detail-json-chip">${esc(k)}</span>`).join('');
+    html += section(tl('skill_detail_trigger_keywords', 'Trigger Keywords'), `<div class="detail-json-chips">${chips}</div>`);
+  }
+  if (Array.isArray(detail.requiredInfo) && detail.requiredInfo.length) {
+    const items = detail.requiredInfo.map(item => {
+      const badge = item.required
+        ? '<span class="detail-json-badge required">Required</span>'
+        : '<span class="detail-json-badge optional">Optional</span>';
+      return `<li>${badge} ${esc(item.label || '')}</li>`;
+    }).join('');
+    html += section(tl('skill_detail_required_info', 'Required Info'), `<ul class="detail-json-list">${items}</ul>`);
+  }
+  if (detail.dialogExample && (detail.dialogExample.user || detail.dialogExample.assistant)) {
+    const ex = detail.dialogExample;
+    let chat = '<div class="detail-json-dialog">';
+    if (ex.user) chat += `<div class="detail-json-msg user"><span class="detail-json-role">${tl('skill_detail_user', 'User')}</span>${esc(ex.user)}</div>`;
+    if (ex.assistant) chat += `<div class="detail-json-msg assistant"><span class="detail-json-role">${tl('skill_detail_assistant', 'Assistant')}</span>${esc(ex.assistant)}</div>`;
+    chat += '</div>';
+    html += section(tl('skill_detail_dialog_example', 'Dialog Example'), chat);
+  }
+
+  // Rendered SKILL.md below structured detail
+  html += '<div class="detail-json-section"><div class="detail-json-label">SKILL.md</div>';
+  html += `<div class="preview-md">${renderMd(content || '(no content)')}</div>`;
+  html += '</div>';
+
+  // Linked files
+  const lf = linkedFiles || {};
+  const lfCats = Object.entries(lf).filter(([,files]) => files && files.length > 0);
+  if (lfCats.length) {
+    html += `<div class="skill-linked-files"><div style="font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">${esc(t('linked_files'))}</div>`;
+    for (const [catName, files] of lfCats) {
+      html += `<div class="skill-linked-section"><h4>${esc(catName)}</h4>`;
+      for (const f of files) {
+        html += `<a class="skill-linked-file" href="#" data-skill-name="${esc(name)}" data-skill-file="${esc(f)}">${esc(f)}</a>`;
+      }
+      html += '</div>';
+    }
+    html += '</div>';
+  }
+
+  body.innerHTML = `<div class="main-view-content skill-detail-content">${html}</div>`;
+  _enhanceSkillMarkdown(body);
+  body.querySelectorAll('.skill-linked-file').forEach(a => {
+    a.addEventListener('click', e => { e.preventDefault(); openSkillFile(a.dataset.skillName, a.dataset.skillFile); });
+  });
+  body.style.display = '';
+  if (empty) empty.style.display = 'none';
+  _skillMode = 'read';
+  _setSkillHeaderButtons('read');
+}
+
+function _renderSkillDetail(name, content, linkedFiles, category) {
+  const detail = _currentSkillDetail && _currentSkillDetail.detail_json;
+  if (detail && (detail.taskGoal || (Array.isArray(detail.taskDetails) && detail.taskDetails.length))) {
+    return _renderSkillDetailJson(name, detail, content, linkedFiles, category);
+  }
+  const meta = (_currentSkillDetail && _currentSkillDetail.detail_meta) || {};
+  const dj = (_currentSkillDetail && _currentSkillDetail.detail_json) || {};
+  const displayName = meta.display_name || dj.display_name || '';
   const title = $('skillDetailTitle');
   const body = $('skillDetailBody');
   const empty = $('skillDetailEmpty');
   const editBtn = $('btnEditSkillDetail');
   const delBtn = $('btnDeleteSkillDetail');
-  if (title) title.textContent = name;
+  if (title) title.textContent = displayName || name;
+  const displayDesc = meta.display_description || dj.display_description || '';
   const { frontmatter, body: markdownBody } = _stripYamlFrontmatter(content);
   let html = '';
+  const cat = String(category || (_currentSkillDetail && _currentSkillDetail.category) || '').trim();
+  if (cat) {
+    html += `<div style="margin-bottom:12px"><span class="detail-json-chip" style="font-size:12px">${esc(cat)}</span></div>`;
+  }
+  if (displayDesc) {
+    html += `<p style="color:var(--muted);font-size:13px;margin:0 0 12px">${esc(displayDesc)}</p>`;
+  }
   if (frontmatter) {
     html += `<details class="skill-frontmatter"><summary>${esc(t('skill_metadata'))}</summary><pre><code>${esc(frontmatter)}</code></pre></details>`;
   }
@@ -4011,22 +4112,27 @@ function _setSkillHeaderButtons(mode) {
   else { hide(editBtn); hide(delBtn); hide(cancelBtn); hide(saveBtn); }
 }
 
-async function openSkill(name, el) {
+async function openSkill(name, el, profileName) {
   // Highlight active skill in the sidebar list
   document.querySelectorAll('.skill-item').forEach(e => e.classList.remove('active'));
   if (el) el.classList.add('active');
   _skillPreFormDetail = null;
   _editingSkillName = null;
   try {
-    const data = await api(`/api/skills/content?name=${encodeURIComponent(name)}`);
+    let url = `/api/skills/content?name=${encodeURIComponent(name)}`;
+    if (profileName) url += `&profile=${encodeURIComponent(profileName)}`;
+    const data = await api(url);
     if (data && (data.success === false || data.error)) {
       const message = data.error || t('skill_load_failed');
       _renderSkillError(name, message);
       setStatus(t('skill_load_failed') + message);
       return;
     }
-    _currentSkillDetail = { name, content: data.content || '', linked_files: data.linked_files || {} };
-    _renderSkillDetail(name, data.content || '', data.linked_files || {});
+    // detail_json may be the full saved format (with detail_json nested) or the old flat format
+    const rawDetail = data.detail_json || null;
+    const structuredDetail = rawDetail && rawDetail.detail_json ? rawDetail.detail_json : rawDetail;
+    _currentSkillDetail = { name, content: data.content || '', linked_files: data.linked_files || {}, category: data.category || '', detail_json: structuredDetail, detail_meta: rawDetail };
+    _renderSkillDetail(name, data.content || '', data.linked_files || {}, data.category || '');
   } catch(e) { setStatus(t('skill_load_failed') + e.message); }
 }
 
@@ -4059,7 +4165,7 @@ async function openSkillFile(skillName, filePath) {
       a.addEventListener('click', e => {
         e.preventDefault();
         if (_currentSkillDetail && _currentSkillDetail.name === a.dataset.skillName) {
-          _renderSkillDetail(_currentSkillDetail.name, _currentSkillDetail.content, _currentSkillDetail.linked_files);
+          _renderSkillDetail(_currentSkillDetail.name, _currentSkillDetail.content, _currentSkillDetail.linked_files, _currentSkillDetail.category);
         } else {
           openSkill(a.dataset.skillName, null);
         }
@@ -4132,7 +4238,7 @@ function cancelSkillForm() {
     const snap = _skillPreFormDetail;
     _skillPreFormDetail = null;
     _currentSkillDetail = snap;
-    _renderSkillDetail(snap.name, snap.content || '', snap.linked_files || {});
+    _renderSkillDetail(snap.name, snap.content || '', snap.linked_files || {}, snap.category || '');
     return;
   }
   // Revert to empty state
@@ -5414,7 +5520,16 @@ function _renderProfileDetail(p, activeName){
   if (p.provider) rows.push(`<div class="detail-row"><div class="detail-row-label">Provider</div><div class="detail-row-value">${esc(p.provider)}</div></div>`);
   if (p.base_url) rows.push(`<div class="detail-row"><div class="detail-row-label">Base URL</div><div class="detail-row-value"><code>${esc(p.base_url)}</code></div></div>`);
   rows.push(`<div class="detail-row"><div class="detail-row-label">API key</div><div class="detail-row-value">${p.has_env ? esc(t('profile_api_keys_configured')) : '<span style="color:var(--muted)">Not configured</span>'}</div></div>`);
-  if (p.total_skills && p.total_skills > 0) rows.push(`<div class="detail-row"><div class="detail-row-label">Skills</div><div class="detail-row-value">${esc(t('profile_skill_count', p.total_skills).replace(String(p.total_skills), `${p.enabled_skills} / ${p.total_skills}`))}</div></div>`);
+  if (p.skills && p.skills.length > 0) {
+    const items = p.skills.map(s => {
+      const dn = s.display_name || s.name || '';
+      const dd = s.display_description || s.description || '';
+      return `<div class="profile-skill-item" data-skill-name="${esc(s.name)}"><span class="skill-name">${esc(dn)}</span>${dd ? `<span class="skill-desc">${esc(dd)}</span>` : ''}</div>`;
+    }).join('');
+    rows.push(`<div class="detail-row" style="flex-direction:column;align-items:stretch"><div class="detail-row-label">Skills (${p.skills.length})</div><div class="profile-skills-list" data-profile-name="${esc(p.name)}">${items}</div></div>`);
+  } else if (p.total_skills && p.total_skills > 0) {
+    rows.push(`<div class="detail-row"><div class="detail-row-label">Skills</div><div class="detail-row-value">${esc(t('profile_skill_count', p.total_skills).replace(String(p.total_skills), `${p.enabled_skills} / ${p.total_skills}`))}</div></div>`);
+  }
   if (p.default_workspace) rows.push(`<div class="detail-row"><div class="detail-row-label">Default space</div><div class="detail-row-value"><code>${esc(p.default_workspace)}</code></div></div>`);
   body.innerHTML = `
     <div class="main-view-content">
@@ -5459,6 +5574,21 @@ function openProfileDetail(name, el){
   _profilePreFormDetail = null;
   _renderProfileDetail(p, _profilesCache.active);
 }
+
+function openProfileSkill(skillName, profileName){
+  switchPanel('skills');
+  openSkill(skillName, null, profileName);
+}
+
+// Global delegated click handler for profile skill items
+document.addEventListener('click', e => {
+  const item = e.target.closest('.profile-skill-item');
+  if (!item) return;
+  const list = item.closest('.profile-skills-list');
+  const profileName = list ? list.dataset.profileName : '';
+  const skillName = item.dataset.skillName || '';
+  if (skillName) openProfileSkill(skillName, profileName);
+});
 
 function _clearProfileDetail(){
   _currentProfileDetail = null;

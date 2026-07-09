@@ -32,6 +32,8 @@
   let _skillhubMode = 'empty'; // 'empty' | 'read' | 'edit'
   let _skillhubPreFormDetail = null;
   let _searchTimer = null;
+  let _pendingUploadFile = null;
+  let _pendingDetailJson = null;
 
   function showSkillHubNav() {
     ['skillhubRailBtn', 'skillhubSidebarBtn'].forEach(id => {
@@ -327,7 +329,7 @@
       nameEl.textContent = skill.display_name || skill.install_name || skill.name;
       const descEl = document.createElement('span');
       descEl.className = 'skill-desc';
-      descEl.textContent = skill.description || '';
+      descEl.textContent = skill.display_description || skill.description || '';
       const body = document.createElement('div');
       body.className = 'skill-item-body';
       body.append(nameEl, descEl);
@@ -454,17 +456,124 @@
     }
   }
 
-  function _renderSkillhubDetailRead(name, doc, structure, isCustom) {
+  function _renderSkillhubDetailJson(name, detail, doc, structure, isCustom, detailMeta) {
     const title = $('skillhubDetailTitle');
     const body = $('skillhubDetailBody');
     const empty = $('skillhubDetailEmpty');
-    if (title && _currentSkillhubItem) {
-      title.textContent = _currentSkillhubItem.display_name || _currentSkillhubItem.name;
-    }
+    const meta = detailMeta || {};
+    const displayName = meta.display_name || (_currentSkillhubItem && _currentSkillhubItem.display_name) || '';
+    if (title) title.textContent = displayName || name;
+    const tl = (k, fb) => (typeof t === 'function' ? t(k) || fb : fb);
+    const displayDesc = meta.display_description || '';
+
     let html = '';
+    const category = String(meta.category || (_currentSkillhubItem && _currentSkillhubItem.category) || '').trim();
+    if (category) {
+      html += `<div style="margin-bottom:12px"><span class="detail-json-chip" style="font-size:12px">${esc(category)}</span></div>`;
+    }
+    if (isCustom) {
+      const hint = tl('skillhub_custom_hint', 'Local custom skill.');
+      html += `<p class="skillhub-custom-hint" style="color:var(--muted);font-size:12px;margin:0 0 12px">${esc(hint)}</p>`;
+    }
+    if (displayDesc) {
+      html += `<p style="color:var(--muted);font-size:13px;margin:0 0 12px">${esc(displayDesc)}</p>`;
+    }
+
+    const section = (label, content) => `<div class="detail-json-section"><div class="detail-json-label">${esc(label)}</div>${content}</div>`;
+
+    if (detail.taskGoal) {
+      html += section(tl('skill_detail_task_goal', 'Task Goal'), `<p>${esc(detail.taskGoal)}</p>`);
+    }
+
+    if (Array.isArray(detail.taskDetails) && detail.taskDetails.length) {
+      const items = detail.taskDetails.map(d => `<li>${esc(d)}</li>`).join('');
+      html += section(tl('skill_detail_task_details', 'Task Details'), `<ol class="detail-json-list">${items}</ol>`);
+    }
+
+    if (detail.useMode) {
+      html += section(tl('skill_detail_use_mode', 'How to Use'), `<p>${esc(detail.useMode)}</p>`);
+    }
+
+    if (Array.isArray(detail.triggerKeywords) && detail.triggerKeywords.length) {
+      const chips = detail.triggerKeywords.map(k => `<span class="detail-json-chip">${esc(k)}</span>`).join('');
+      html += section(tl('skill_detail_trigger_keywords', 'Trigger Keywords'), `<div class="detail-json-chips">${chips}</div>`);
+    }
+
+    if (Array.isArray(detail.requiredInfo) && detail.requiredInfo.length) {
+      const items = detail.requiredInfo.map(item => {
+        const badge = item.required
+          ? '<span class="detail-json-badge required">Required</span>'
+          : '<span class="detail-json-badge optional">Optional</span>';
+        return `<li>${badge} ${esc(item.label || '')}</li>`;
+      }).join('');
+      html += section(tl('skill_detail_required_info', 'Required Info'), `<ul class="detail-json-list">${items}</ul>`);
+    }
+
+    if (detail.dialogExample && (detail.dialogExample.user || detail.dialogExample.assistant)) {
+      const ex = detail.dialogExample;
+      let chat = '<div class="detail-json-dialog">';
+      if (ex.user) chat += `<div class="detail-json-msg user"><span class="detail-json-role">${tl('skill_detail_user', 'User')}</span>${esc(ex.user)}</div>`;
+      if (ex.assistant) chat += `<div class="detail-json-msg assistant"><span class="detail-json-role">${tl('skill_detail_assistant', 'Assistant')}</span>${esc(ex.assistant)}</div>`;
+      chat += '</div>';
+      html += section(tl('skill_detail_dialog_example', 'Dialog Example'), chat);
+    }
+
+    // Show rendered SKILL.md below the structured detail
+    if (typeof renderMd === 'function') {
+      html += '<div class="detail-json-section"><div class="detail-json-label">SKILL.md</div>';
+      html += renderMd(doc.content || '(no content)');
+      html += '</div>';
+    }
+
+    if (structure && (structure.scripts?.length || structure.references?.length)) {
+      html += '<div class="skillhub-structure"><div class="skillhub-structure-title">Files</div>';
+      const addLinks = (items, label) => {
+        if (!items || !items.length) return;
+        html += `<div class="skillhub-structure-section"><strong>${esc(label)}</strong>`;
+        for (const f of items) {
+          const p = f.path || f.name;
+          html += `<a href="#" class="skillhub-file-link" data-name="${esc(name)}" data-path="${esc(p)}">${esc(p)}</a>`;
+        }
+        html += '</div>';
+      };
+      addLinks(structure.scripts, 'Scripts');
+      addLinks(structure.references, 'References');
+      html += '</div>';
+    }
+
+    if (body) {
+      body.innerHTML = `<div class="main-view-content skill-detail-content">${html}</div>`;
+      body.style.display = '';
+      body.querySelectorAll('.skillhub-file-link').forEach(a => {
+        a.addEventListener('click', ev => {
+          ev.preventDefault();
+          openSkillHubFile(a.dataset.name, a.dataset.path);
+        });
+      });
+    }
+    if (empty) empty.style.display = 'none';
+    _skillhubMode = 'read';
+  }
+
+  function _renderSkillhubDetailRead(name, doc, structure, isCustom, detailMeta) {
+    const title = $('skillhubDetailTitle');
+    const body = $('skillhubDetailBody');
+    const empty = $('skillhubDetailEmpty');
+    const meta = detailMeta || {};
+    const displayName = meta.display_name || (_currentSkillhubItem && _currentSkillhubItem.display_name) || '';
+    if (title) title.textContent = displayName || name;
+    const displayDesc = meta.display_description || '';
+    let html = '';
+    const category = String(meta.category || (_currentSkillhubItem && _currentSkillhubItem.category) || '').trim();
+    if (category) {
+      html += `<div style="margin-bottom:12px"><span class="detail-json-chip" style="font-size:12px">${esc(category)}</span></div>`;
+    }
     if (isCustom) {
       const hint = typeof t === 'function' ? t('skillhub_custom_hint') : 'Local custom skill.';
       html += `<p class="skillhub-custom-hint" style="color:var(--muted);font-size:12px;margin:0 0 12px">${esc(hint)}</p>`;
+    }
+    if (displayDesc) {
+      html += `<p style="color:var(--muted);font-size:13px;margin:0 0 12px">${esc(displayDesc)}</p>`;
     }
     if (typeof renderMd === 'function') {
       html += renderMd(doc.content || '(no content)');
@@ -559,17 +668,44 @@
     const actions = _skillhubReadActions(skill);
     const scopeParam = _skillhubPreviewScopeParam(skill);
     try {
-      const [doc, structure] = await Promise.all([
+      const useLocalDetail = isCustom || (skill && skill.installed);
+      const detailPromise = useLocalDetail
+        ? api(`/api/skillhub/file?name=${encodeURIComponent(name)}&path=detail.json${scopeParam}`).catch(() => null)
+        : api(`/api/skillhub/detail?name=${encodeURIComponent(name)}`).catch(() => null);
+      const [doc, structure, detailResp] = await Promise.all([
         api(`/api/skillhub/content?name=${encodeURIComponent(name)}${scopeParam}`),
         api(`/api/skillhub/structure?name=${encodeURIComponent(name)}${scopeParam}`).catch(() => null),
+        detailPromise,
       ]);
+      let detailJson = null;
+      let detailMeta = null;
+      if (detailResp && !detailResp.error) {
+        if (useLocalDetail && detailResp.content) {
+          // Local file response: parse content string
+          try {
+            const parsed = JSON.parse(detailResp.content);
+            detailMeta = parsed;
+            detailJson = parsed && parsed.detail_json ? parsed.detail_json : parsed;
+          } catch (_) {}
+        } else if (!useLocalDetail) {
+          // Upstream detail response: already parsed
+          detailMeta = detailResp;
+          detailJson = detailResp.detail_json || detailResp;
+        }
+      }
       _skillhubPreFormDetail = {
         name,
         content: doc.content || '',
         structure: structure || null,
         isCustom,
+        detailJson,
+        detailMeta,
       };
-      _renderSkillhubDetailRead(name, doc, structure, isCustom);
+      if (detailJson) {
+        _renderSkillhubDetailJson(name, detailJson, doc, structure, isCustom, detailMeta);
+      } else {
+        _renderSkillhubDetailRead(name, doc, structure, isCustom, detailMeta);
+      }
       _setSkillhubHeaderButtons('read', actions);
       if ($('btnSkillhubUninstall') && actions.canDelete) {
         const tip = typeof t === 'function' ? t('delete_title') : 'Delete';
@@ -596,7 +732,11 @@
   function cancelEditForm() {
     if (_skillhubPreFormDetail) {
       const snap = _skillhubPreFormDetail;
-      _renderSkillhubDetailRead(snap.name, { content: snap.content }, snap.structure, snap.isCustom);
+      if (snap.detailJson) {
+        _renderSkillhubDetailJson(snap.name, snap.detailJson, { content: snap.content }, snap.structure, snap.isCustom, snap.detailMeta);
+      } else {
+        _renderSkillhubDetailRead(snap.name, { content: snap.content }, snap.structure, snap.isCustom, snap.detailMeta);
+      }
       _setSkillhubHeaderButtons('read', _skillhubReadActions(_currentSkillhubItem));
       return;
     }
@@ -789,6 +929,387 @@
     if (input) input.click();
   }
 
+  // ── AI-meta upload flow ──────────────────────────────────────────────
+
+  function _showAiModal(file) {
+    const overlay = document.createElement('div');
+    overlay.id = 'aiMetaModalOverlay';
+    overlay.className = 'app-dialog-overlay';
+    overlay.style.display = 'flex';
+    const nextLabel = typeof t === 'function' ? t('skillhub_next_step') : 'Next';
+    const titleLabel = typeof t === 'function' ? t('skillhub_upload') : 'Upload Skill';
+    const hintLabel = typeof t === 'function' ? t('skillhub_upload_drop_hint') : 'Select or drag a .md file';
+    overlay.innerHTML = `
+      <div class="app-dialog" role="dialog">
+        <div class="app-dialog-title">${esc(titleLabel)}</div>
+        <div class="app-dialog-desc" style="color:var(--muted);font-size:13px">${esc(hintLabel)}</div>
+        <div id="aiMetaFileArea" style="margin:16px 0;padding:24px;border:2px dashed var(--border);border-radius:8px;text-align:center;cursor:pointer;color:var(--muted);font-size:13px">
+          ${file ? esc(file.name) : (typeof t === 'function' ? t('skillhub_upload_browse') : 'Click to browse')}
+        </div>
+        <input type="file" id="aiMetaFileInput" accept=".md" style="display:none">
+        <div id="aiMetaProgress" style="display:none;text-align:center;padding:12px 0">
+          <div style="display:inline-block;width:24px;height:24px;border:3px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite"></div>
+          <div style="color:var(--muted);font-size:12px;margin-top:8px">${esc(typeof t === 'function' ? t('skillhub_ai_processing') : 'AI is analyzing...')}</div>
+        </div>
+        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">
+          <button type="button" class="btn" id="aiMetaCancelBtn">${esc(typeof t === 'function' ? t('cancel') : 'Cancel')}</button>
+          <button type="button" class="btn primary" id="aiMetaNextBtn">${esc(nextLabel)}</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+
+    let selectedFile = file;
+    const fileArea = overlay.querySelector('#aiMetaFileArea');
+    const fileInput = overlay.querySelector('#aiMetaFileInput');
+    const cancelBtn = overlay.querySelector('#aiMetaCancelBtn');
+    const nextBtn = overlay.querySelector('#aiMetaNextBtn');
+
+    fileArea.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', () => {
+      const f = fileInput.files && fileInput.files[0];
+      if (f) {
+        selectedFile = f;
+        fileArea.textContent = f.name;
+      }
+    });
+    let cancelled = false;
+    let abortCtrl = null;
+    cancelBtn.addEventListener('click', () => {
+      cancelled = true;
+      if (abortCtrl) abortCtrl.abort();
+      _hideAiModal();
+    });
+    nextBtn.addEventListener('click', async () => {
+      if (!selectedFile) {
+        const msg = typeof t === 'function' ? t('skillhub_upload_invalid_type') : 'Please select a .md file';
+        if (typeof showToast === 'function') showToast(msg);
+        return;
+      }
+      nextBtn.disabled = true;
+      fileArea.style.display = 'none';
+      overlay.querySelector('#aiMetaProgress').style.display = '';
+      abortCtrl = new AbortController();
+      await _processAiMetaUpload(selectedFile, () => cancelled, abortCtrl);
+      if (!cancelled) _hideAiModal();
+    });
+  }
+
+  function _hideAiModal() {
+    const overlay = document.getElementById('aiMetaModalOverlay');
+    if (overlay) overlay.remove();
+  }
+
+  async function _processAiMetaUpload(file, isCancelled, ac) {
+    const isMd = file.name.toLowerCase().endsWith('.md');
+    let content = '';
+
+    if (isCancelled()) return;
+    if (isMd) {
+      try {
+        content = await file.text();
+      } catch (e) {
+        if (isCancelled()) return;
+        _hideAiModal();
+        if (typeof showToast === 'function') showToast(e.message);
+        return;
+      }
+      if (!content.trim()) {
+        _hideAiModal();
+        const msg = typeof t === 'function' ? t('skillhub_upload_empty') : 'File is empty';
+        if (typeof showToast === 'function') showToast(msg);
+        return;
+      }
+    } else {
+      try {
+        const fd = new FormData();
+        fd.append('file', file, file.name);
+        const url = new URL('api/skillhub/extract', document.baseURI || location.href).href;
+        const res = await fetch(url, { method: 'POST', credentials: 'include', body: fd, signal: ac.signal });
+        content = (await res.json()).content || '';
+      } catch (e) {
+        if (isCancelled()) return;
+        _hideAiModal();
+        if (typeof showToast === 'function') showToast(e.message);
+        return;
+      }
+    }
+
+    if (isCancelled()) return;
+    _pendingUploadFile = file;
+
+    let meta = {};
+    if (content.trim()) {
+      // Extract name/description from frontmatter to skip LLM extraction
+      const fmMatch = content.match(/^---\s*\n([\s\S]*?)\n---/);
+      let extractedName = '', extractedDesc = '';
+      if (fmMatch) {
+        const fm = fmMatch[1];
+        const nameMatch = fm.match(/^name:\s*(.+)$/m);
+        if (nameMatch) extractedName = nameMatch[1].trim();
+        const descMatch = fm.match(/^description:\s*\|?\s*\n([\s\S]*?)(?=\n\w|\n---|\s*$)/m)
+          || fm.match(/^description:\s*(.+)$/m);
+        if (descMatch) extractedDesc = (descMatch[1] || '').trim().split('\n')[0].trim();
+      }
+      try {
+        meta = await api('/api/skillhub/skill/ai-meta', {
+          method: 'POST',
+          body: JSON.stringify({ skillMdContent: content, name: extractedName, description: extractedDesc }),
+          timeoutMs: 120000,
+          signal: ac.signal,
+        });
+      } catch (e) {
+        if (isCancelled()) return;
+        if (typeof showToast === 'function') {
+          const hint = typeof t === 'function' ? t('skillhub_ai_meta_failed') : 'AI extraction failed, filling manually';
+          showToast(hint);
+        }
+      }
+    }
+
+    if (isCancelled()) return;
+    _hideAiModal();
+    try {
+      await ensureCategories();
+    } catch (_) {}
+    if (!_skillhubCategories.length && Array.isArray(_skillhubData)) {
+      const cats = new Set();
+      for (const s of _skillhubData) {
+        const c = String(s.category || '').trim();
+        if (c) cats.add(c);
+      }
+      _skillhubCategories = [...cats].sort();
+    }
+    _showSkillCreateFormWithAiMeta(content, meta || {});
+  }
+
+  function _showSkillCreateFormWithAiMeta(content, meta) {
+    _pendingDetailJson = meta.detailJson || null;
+
+    const body = $('skillhubDetailBody');
+    const empty = $('skillhubDetailEmpty');
+    const title = $('skillhubDetailTitle');
+    if (!body || !title) return;
+
+    const nameLabel = typeof t === 'function' ? t('skill_name') : 'Name';
+    const descLabel = typeof t === 'function' ? t('skill_description') : 'Description';
+    const contentLabel = typeof t === 'function' ? t('skill_content') : 'SKILL.md content';
+    const saveLabel = typeof t === 'function' ? t('skills_save') || 'Save' : 'Save';
+    const cancelLabel = typeof t === 'function' ? t('cancel') : 'Cancel';
+    const displayNameLabel = typeof t === 'function' ? t('skill_display_name') : 'Display name';
+    const displayDescLabel = typeof t === 'function' ? t('skill_display_desc') : 'Display description';
+    const categoryLabel = typeof t === 'function' ? t('skill_category') : 'Category';
+
+    const catPlaceholder = typeof t === 'function' ? t('skill_category_placeholder') : 'Optional, e.g. devops';
+    let categoryHtml;
+    if (_skillhubCategories.length) {
+      const defaultCat = (_skillhubCategory && _skillhubCategory !== CATEGORY_ALL && _skillhubCategories.includes(_skillhubCategory))
+        ? _skillhubCategory : _skillhubCategories[0];
+      const catOptions = _skillhubCategories.map(c =>
+        `<option value="${esc(c)}" ${c === defaultCat ? 'selected' : ''}>${esc(c)}</option>`
+      ).join('');
+      categoryHtml = `<select id="aiMetaCategory" class="ai-meta-category-select">${catOptions}</select>`;
+    } else {
+      categoryHtml = `<input type="text" id="aiMetaCategory" value="" placeholder="${esc(catPlaceholder)}">`;
+    }
+
+    title.textContent = saveLabel;
+
+    body.innerHTML = `
+      <div class="main-view-content">
+        <form class="detail-form" id="aiMetaSkillForm" onsubmit="event.preventDefault()">
+          <div class="detail-form-row">
+            <label>${esc(nameLabel)} (EN)</label>
+            <input type="text" id="aiMetaName" value="${esc(meta.name || '')}" placeholder="english-slug" pattern="^[a-zA-Z0-9_-]+$" title="Only letters, numbers, underscores, and hyphens are allowed">
+          </div>
+          <div class="detail-form-row">
+            <label>${esc(descLabel)} (EN)</label>
+            <input type="text" id="aiMetaDesc" value="${esc(meta.description || '')}" placeholder="English description">
+          </div>
+          <div class="detail-form-row">
+            <label>${esc(displayNameLabel)} (CN)</label>
+            <input type="text" id="aiMetaSkillName" value="${esc(meta.skillName || '')}" placeholder="中文显示名">
+          </div>
+          <div class="detail-form-row">
+            <label>${esc(displayDescLabel)} (CN)</label>
+            <input type="text" id="aiMetaDisplayDesc" value="${esc(meta.displayDescription || '')}" placeholder="中文描述">
+          </div>
+          <div class="detail-form-row">
+            <label>${esc(categoryLabel)}</label>
+            ${categoryHtml}
+          </div>
+          <div class="detail-form-row">
+            <label>${esc(contentLabel)}</label>
+            <textarea id="aiMetaContent" rows="18" readonly>${esc(content || '')}</textarea>
+          </div>
+          <div id="aiMetaFormError" class="detail-form-error" style="display:none"></div>
+          <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">
+            <button type="button" class="btn" id="aiMetaFormCancelBtn">${esc(cancelLabel)}</button>
+            <button type="button" class="btn primary" id="aiMetaFormSubmitBtn">${esc(saveLabel)}</button>
+          </div>
+        </form>
+      </div>`;
+
+    body.style.display = '';
+    if (empty) empty.style.display = 'none';
+    _skillhubMode = 'edit';
+    _setSkillhubHeaderButtons('empty');
+
+    body.querySelector('#aiMetaFormCancelBtn').addEventListener('click', () => cancelAiMetaForm());
+    body.querySelector('#aiMetaFormSubmitBtn').addEventListener('click', () => submitAiMetaForm());
+  }
+
+  async function submitAiMetaForm() {
+    const errEl = $('aiMetaFormError');
+    const contentEl = $('aiMetaContent');
+    if (!contentEl) return;
+    if (errEl) errEl.style.display = 'none';
+
+    const content = contentEl.value;
+    if (!content.trim()) {
+      if (errEl) {
+        errEl.textContent = typeof t === 'function' ? t('content_required') || 'Content is required' : 'Content is required';
+        errEl.style.display = '';
+      }
+      return;
+    }
+
+    // Validate Name (EN): only letters, numbers, underscores, hyphens
+    const rawName = ($('aiMetaName') && $('aiMetaName').value || '').trim();
+    if (rawName && !/^[a-zA-Z0-9_-]+$/.test(rawName)) {
+      if (errEl) {
+        errEl.textContent = typeof t === 'function' ? t('skill_name_invalid') || 'Name (EN) can only contain letters, numbers, underscores, and hyphens' : 'Name (EN) can only contain letters, numbers, underscores, and hyphens';
+        errEl.style.display = '';
+      }
+      return;
+    }
+
+    // Check duplicate name / display_name
+    const formName = rawName.toLowerCase();
+    const formDisplayName = ($('aiMetaSkillName') && $('aiMetaSkillName').value || '').trim().toLowerCase();
+    if ((formName || formDisplayName) && Array.isArray(_skillhubData)) {
+      for (const s of _skillhubData) {
+        const existingName = String(s.name || '').trim().toLowerCase();
+        const existingDisplay = String(s.display_name || '').trim().toLowerCase();
+        if (formName && existingName && formName === existingName) {
+          if (errEl) {
+            errEl.textContent = (typeof t === 'function' ? t('skill_name_duplicate') || 'Duplicate name: ' : 'Duplicate name: ') + s.name;
+            errEl.style.display = '';
+          }
+          return;
+        }
+        if (formDisplayName && existingDisplay && formDisplayName === existingDisplay) {
+          if (errEl) {
+            errEl.textContent = (typeof t === 'function' ? t('skill_display_name_duplicate') || 'Duplicate display name: ' : 'Duplicate display name: ') + s.display_name;
+            errEl.style.display = '';
+          }
+          return;
+        }
+      }
+    }
+
+    const submitBtn = $('aiMetaFormSubmitBtn');
+    if (submitBtn) submitBtn.disabled = true;
+
+    try {
+      // Step 1: Upload file (deferred from "下一步")
+      let uploadedName = '';
+      let uploadedDirName = '';
+      if (_pendingUploadFile) {
+        const fd = new FormData();
+        fd.append('file', _pendingUploadFile, _pendingUploadFile.name);
+        const formCategory = ($('aiMetaCategory') && $('aiMetaCategory').value) || '';
+        if (formCategory) {
+          fd.append('category', formCategory);
+        }
+        if (_skillhubScope === 'custom') {
+          fd.append('overwrite', '1');
+        }
+        const checkName = ($('aiMetaName') && $('aiMetaName').value || '').trim();
+        const checkDisplay = ($('aiMetaSkillName') && $('aiMetaSkillName').value || '').trim();
+        // Always send name for directory naming and duplicate checking
+        if (checkName) {
+          fd.append('name', checkName);
+          fd.append('check_name', checkName);
+        }
+        if (checkDisplay) fd.append('check_display_name', checkDisplay);
+        const url = new URL('api/skillhub/upload', document.baseURI || location.href).href;
+        const res = await fetch(url, { method: 'POST', credentials: 'include', body: fd });
+        if (res.status === 401) {
+          window.location.href = 'login?next=' + encodeURIComponent(window.location.pathname + window.location.search);
+          return;
+        }
+        const text = await res.text();
+        let data = {};
+        try { data = JSON.parse(text); } catch (_) {}
+        if (!res.ok) {
+          const message = data.error || data.message || text || res.statusText;
+          throw new Error(message);
+        }
+        if (data.error) throw new Error(data.error);
+        const uploaded = Array.isArray(data.skills) ? data.skills[0] : null;
+        if (uploaded) {
+          uploadedName = uploaded.name || '';
+          uploadedDirName = uploaded.dir_name || '';
+        }
+      }
+
+      // Step 2: Save detail.json with full metadata (use actual uploaded name/dir_name)
+      const detailName = uploadedName || ($('aiMetaName') && $('aiMetaName').value) || '';
+      if (detailName) {
+        const detailPayload = {
+          name: ($('aiMetaName') && $('aiMetaName').value || '').trim(),
+          description: ($('aiMetaDesc') && $('aiMetaDesc').value || '').trim(),
+          display_name: ($('aiMetaSkillName') && $('aiMetaSkillName').value || '').trim(),
+          display_description: ($('aiMetaDisplayDesc') && $('aiMetaDisplayDesc').value || '').trim(),
+          category: ($('aiMetaCategory') && $('aiMetaCategory').value || '').trim(),
+          detail_json: _pendingDetailJson || null,
+        };
+        try {
+          await api('/api/skillhub/skill/detail', {
+            method: 'POST',
+            body: JSON.stringify({ name: detailName, dir_name: uploadedDirName, detail: detailPayload }),
+          });
+        } catch (detailErr) {
+          console.warn('[SkillHub] detail.json save failed:', detailErr);
+        }
+      }
+
+      _pendingUploadFile = null;
+      _pendingDetailJson = null;
+      _skillhubData = null;
+      _currentSkillhubItem = null;
+      if (typeof _invalidateSkillsDataCache === 'function') _invalidateSkillsDataCache();
+      await loadSkillHub(true);
+      if (typeof loadSkills === 'function') await loadSkills();
+
+      const savedName = uploadedName || detailName;
+      const savedDirName = uploadedDirName;
+      const savedItem =
+        (_skillhubData || []).find(s => s.name === savedName) ||
+        (_skillhubData || []).find(s => s.dir_name === savedDirName);
+      if (savedItem) {
+        await openSkillHubItem(savedItem, null);
+      }
+
+      if (typeof showToast === 'function') {
+        showToast(typeof t === 'function' ? t('skillhub_upload_ok') || 'Skill created' : 'Skill created');
+      }
+    } catch (e) {
+      if (errEl) {
+        errEl.textContent = (typeof t === 'function' ? t('error_prefix') || 'Error: ' : 'Error: ') + (e.message || String(e));
+        errEl.style.display = '';
+      }
+    } finally {
+      if (submitBtn) submitBtn.disabled = false;
+    }
+  }
+
+  function cancelAiMetaForm() {
+    _pendingUploadFile = null;
+    _pendingDetailJson = null;
+    clearDetail();
+  }
+
   async function handleUploadFile(file) {
     if (!file) return;
     if (!isAllowedSkillUploadFile(file)) {
@@ -796,18 +1317,10 @@
       if (typeof showToast === 'function') showToast(msg);
       return;
     }
-    setUploadDropzoneBusy(true);
-    try {
-      await uploadCustomSkill(file);
-    } catch (e) {
-      const msg =
-        (typeof t === 'function' ? t('skillhub_upload_failed') : 'Upload failed') +
-        (e.message ? ': ' + e.message : '');
-      if (typeof showToast === 'function') showToast(msg);
-    } finally {
-      setUploadDropzoneBusy(false);
-    }
+    _showAiModal(file);
   }
+
+
 
   async function uploadCustomSkill(file) {
     if (!file) return;
@@ -835,22 +1348,7 @@
       throw new Error(message);
     }
     if (data.error) throw new Error(data.error);
-    _skillhubData = null;
-    _currentSkillhubItem = null;
-    await loadSkillHub(true);
-    const imported = Array.isArray(data.skills) ? data.skills : [];
-    const skillCount = data.skill_count ?? imported.length ?? 0;
-    if (typeof showToast === 'function') {
-      const base = typeof t === 'function' ? t('skillhub_upload_ok') : 'Uploaded';
-      showToast(skillCount > 1 ? `${base} (${skillCount})` : base);
-    }
-    const first = imported[0];
-    if (first) {
-      const item =
-        (_skillhubData || []).find(s => s.dir_name === first.dir_name) ||
-        (_skillhubData || []).find(s => s.name === first.name);
-      if (item) openSkillHubItem(item);
-    }
+    return data;
   }
 
   function setScope(nextScope) {
@@ -979,6 +1477,8 @@
     pickUpload,
     uploadCustomSkill,
     handleUploadFile,
+    submitAiMetaForm,
+    cancelAiMetaForm,
   };
 
   // Sync skill lock state from Skills panel

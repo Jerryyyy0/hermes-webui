@@ -332,6 +332,17 @@ def _skills_list_from_dir(skills_dir: Path, category: str | None = None) -> dict
                     "disabled": name in disabled,
                     "hub_installed": hub_installed,
                 }
+                # Read display_name/display_description from detail metadata if present
+                from integration.skills.local_skills import read_detail_json
+
+                detail_data = read_detail_json(skill_dir)
+                if detail_data:
+                    dn = str(detail_data.get("display_name") or "").strip()
+                    dd = str(detail_data.get("display_description") or "").strip()
+                    if dn:
+                        entry["display_name"] = dn
+                    if dd:
+                        entry["display_description"] = dd
                 try:
                     from integration.skills.no_self_improve import apply_lock_fields
 
@@ -483,23 +494,47 @@ def _skill_view_from_file(skill_dir: Path | None, skill_md: Path) -> dict:
     except ValueError:
         path = str(skill_md)
 
+    # Read category from .category sidecar file or parent directory name
+    category = ""
+    if skill_dir:
+        cat_file = skill_dir / ".category"
+        if cat_file.is_file():
+            category = cat_file.read_text(encoding="utf-8").strip()
+        if not category:
+            parent = skill_dir.parent
+            if parent.name and parent.name not in (".", "skills"):
+                category = parent.name
+
+    # Read detail metadata if present (structured skill detail from SkillHub)
+    detail_json = None
+    if skill_dir:
+        from integration.skills.local_skills import read_detail_json
+
+        detail_json = read_detail_json(skill_dir)
+
     return {
         "success": True,
         "name": frontmatter.get("name", skill_md.stem if not skill_dir else skill_dir.name),
         "description": frontmatter.get("description", ""),
+        "category": category,
         "tags": tags,
         "related_skills": related_skills,
         "content": content,
         "path": path,
         "skill_dir": str(skill_dir) if skill_dir else None,
         "linked_files": _linked_files_for_skill(skill_dir),
+        "detail_json": detail_json,
     }
 
 
-def _skill_view_from_active_dir(name: str) -> dict:
+def _skill_view_from_active_dir(name: str, profile: str | None = None) -> dict:
     from tools.skills_tool import skill_view as _skill_view
 
-    skills_dir = _active_skills_dir()
+    if profile:
+        from integration.skills.paths import skills_dir_for_profile
+        skills_dir = skills_dir_for_profile(profile)
+    else:
+        skills_dir = _active_skills_dir()
     search_dirs = _active_skill_search_dirs(skills_dir)
     skill_dir, skill_md = _find_skill_in_dirs(name, search_dirs)
     if not skill_md:
@@ -6659,7 +6694,12 @@ def handle_get(handler, parsed) -> bool:
 
             if _re.search(r"[*?\[\]]", name):
                 return bad(handler, "Invalid skill name", 400)
-            skills_dir = _active_skills_dir()
+            profile = qs.get("profile", [""])[0].strip() or None
+            if profile:
+                from integration.skills.paths import skills_dir_for_profile
+                skills_dir = skills_dir_for_profile(profile)
+            else:
+                skills_dir = _active_skills_dir()
             skill_dir, _skill_md = _find_skill_in_dirs(
                 name, _active_skill_search_dirs(skills_dir)
             )
@@ -6676,7 +6716,8 @@ def handle_get(handler, parsed) -> bool:
                 handler,
                 {"content": target.read_text(encoding="utf-8"), "path": file_path},
             )
-        data = _skill_view_from_active_dir(name)
+        profile = qs.get("profile", [""])[0].strip() or None
+        data = _skill_view_from_active_dir(name, profile=profile)
         if not isinstance(data.get("linked_files"), dict):
             data["linked_files"] = {}
         return j(handler, data)

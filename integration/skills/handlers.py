@@ -60,6 +60,8 @@ def try_handle_post_early(handler, parsed) -> bool:
     path = parsed.path
     if path == "/api/skillhub/upload":
         return handle_skillhub_upload(handler)
+    if path == "/api/skillhub/extract":
+        return handle_skillhub_extract(handler)
     return False
 
 
@@ -114,6 +116,18 @@ def handle_skillhub_upload(handler) -> bool:
         explicit_dir_name = str(fields.get("dir_name", "") or "").strip()
         overwrite = _parse_upload_overwrite(fields)
 
+        # Always check duplicate for name and display_name
+        dup_check_name = str(fields.get("check_name", "") or request_name or "").strip()
+        dup_check_display = str(fields.get("check_display_name", "") or "").strip()
+        if dup_check_name or dup_check_display:
+            dup = local_skills.check_duplicate_skill(
+                name=dup_check_name,
+                display_name=dup_check_display,
+                exclude_dir_name=explicit_dir_name,
+            )
+            if dup.get("error"):
+                return _respond_bad(handler, dup["error"], int(dup.get("status") or 409))
+
         if suffix == ".zip":
             result = local_skills.upload_custom_skill(
                 request_name=request_name,
@@ -143,13 +157,29 @@ def handle_skillhub_upload(handler) -> bool:
         content = body.get("content")
         if content is None or (isinstance(content, str) and not content.strip()):
             return _respond_bad(handler, "缺少 content", 400)
+
+        request_name = str(body.get("name", "") or "").strip()
+        explicit_dir_name = str(body.get("dir_name", "") or "").strip()
+
+        # Always check duplicate for name and display_name
+        dup_check_name = str(body.get("check_name", "") or request_name or "").strip()
+        dup_check_display = str(body.get("check_display_name", "") or "").strip()
+        if dup_check_name or dup_check_display:
+            dup = local_skills.check_duplicate_skill(
+                name=dup_check_name,
+                display_name=dup_check_display,
+                exclude_dir_name=explicit_dir_name,
+            )
+            if dup.get("error"):
+                return _respond_bad(handler, dup["error"], int(dup.get("status") or 409))
+
         result = local_skills.upload_custom_skill(
-            request_name=str(body.get("name", "") or "").strip(),
+            request_name=request_name,
             category=str(body.get("category", "") or "").strip(),
             content=str(content),
             filename=None,
             overwrite=_parse_upload_overwrite(body),
-            explicit_dir_name=str(body.get("dir_name", "") or "").strip(),
+            explicit_dir_name=explicit_dir_name,
         )
 
     return _upload_result(handler, result)
@@ -159,6 +189,42 @@ def _upload_result(handler, result: dict) -> bool:
     status = int(result.get("status") or 0)
     if result.get("error"):
         return _respond_bad(handler, str(result["error"]), status or 400)
+    return _respond(handler, result)
+
+
+def handle_skillhub_extract(handler) -> bool:
+    """POST /api/skillhub/extract — extract SKILL.md content from zip without persisting."""
+    if not integration_enabled():
+        return _respond_bad(handler, "集成未启用", 404)
+
+    content_type = str(handler.headers.get("Content-Type", "") or "")
+    content_length = int(handler.headers.get("Content-Length", 0) or 0)
+    max_mb = MAX_BODY_BYTES // 1024 // 1024
+    if content_length > MAX_BODY_BYTES:
+        return _respond_bad(handler, f"请求体过大（最大 {max_mb}MB）", 413)
+
+    if "multipart/form-data" not in content_type:
+        return _respond_bad(handler, "需要 multipart/form-data", 400)
+
+    from api.upload import parse_multipart
+
+    try:
+        fields, files = parse_multipart(handler.rfile, content_type, content_length)
+    except ValueError as exc:
+        return _respond_bad(handler, _upload_multipart_error(exc), 400)
+
+    if "file" not in files:
+        return _respond_bad(handler, "缺少文件", 400)
+    upload_name, file_bytes = files["file"]
+    if not upload_name:
+        return _respond_bad(handler, "缺少文件名", 400)
+    suffix = Path(upload_name).suffix.lower()
+    if suffix != ".zip":
+        return _respond_bad(handler, "仅支持 .zip 文件", 400)
+
+    result = local_skills.extract_zip_skill_content(file_bytes)
+    if result.get("error"):
+        return _respond_bad(handler, result["error"], int(result.get("status") or 400))
     return _respond(handler, result)
 
 
@@ -177,6 +243,14 @@ def try_handle_post(handler, parsed, body: dict | None) -> bool:
         if not integration_enabled():
             return False
         return _post_no_self_improve_toggle(handler, body)
+    if path == "/api/skillhub/skill/ai-meta":
+        if not integration_enabled():
+            return False
+        return _post_skillhub_ai_meta(handler, body)
+    if path == "/api/skillhub/skill/detail":
+        if not integration_enabled():
+            return False
+        return _post_skillhub_detail(handler, body)
     if not skillhub_enabled():
         return False
     if path == "/api/skillhub/install":
@@ -461,3 +535,48 @@ def _put_no_self_improve(handler, body: dict) -> bool:
         handler,
         {"ok": True, "names": saved, "count": len(saved)},
     )
+
+
+def _post_skillhub_ai_meta(handler, body: dict) -> bool:
+    """POST /api/skillhub/skill/ai-meta — LLM-powered metadata extraction."""
+    skill_md_content = str(body.get("skillMdContent", "") or "").strip()
+    if not skill_md_content:
+        return _respond_bad(handler, "缺少 skillMdContent", 400)
+
+    name = str(body.get("name", "") or "").strip()
+    description = str(body.get("description", "") or "").strip()
+
+    try:
+        from integration.skills.ai_meta import generate_ai_meta
+
+        result = generate_ai_meta(
+            skill_md_content=skill_md_content,
+            name=name,
+            description=description,
+        )
+        import logging
+        _log = logging.getLogger(__name__)
+        detail_json = result.get("detailJson") if isinstance(result, dict) else None
+        _log.info("ai-meta detail_json: %s", detail_json)
+        return _respond(handler, result)
+    except Exception as exc:
+        import logging
+
+        logging.getLogger(__name__).warning("ai-meta endpoint error: %s", exc)
+        return _respond_bad(handler, str(exc), 500)
+
+
+def _post_skillhub_detail(handler, body: dict) -> bool:
+    """POST /api/skillhub/skill/detail — save detail.json for a skill."""
+    name = str(body.get("name", "") or "").strip()
+    if not name:
+        return _respond_bad(handler, "name required", 400)
+    detail = body.get("detail")
+    if not isinstance(detail, dict):
+        return _respond_bad(handler, "detail must be an object", 400)
+    dir_name = str(body.get("dir_name", "") or "").strip()
+    result = local_skills.save_skill_detail(name, detail, dir_name)
+    status = int(result.get("status") or 0)
+    if result.get("error"):
+        return _respond_bad(handler, result["error"], status or 400)
+    return _respond(handler, result)
