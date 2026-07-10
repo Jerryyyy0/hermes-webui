@@ -8,6 +8,8 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Added
 
+- **x_frontend Nginx reverse proxy** — `integration/frontend/nginx-x-frontend.conf` serves `x_frontend/dist` on `:8080` and proxies `/api/*` (SSE-safe) to WebUI `:8787`. No WebUI backend code changes. Local skip-login is nginx-only: JS `sub_filter` disables Casdoor redirect (`192.168.1.139:23008`), seeds `app_auth_session`, and mocks `webui_login` / `webui_logout`. See `integration/frontend/README.md`.
+
 - **Record scripts API** — 新增 `integration/record_scripts/` 本地存储接口：脚本 JSON 字符串 `save/list/update/delete` 与关联 CSV `upload/download/delete`。`relate_name` 由前端生成并作为稳定主键；文件落盘到 `{HERMES_WEBUI_STATE_DIR}/attachments/record_scripts/<relate_name>/`，脚本删除仅删除 `script.json`，不会清理关联 CSV。Swagger 与 `integration/README.md` 同步更新。
 
 - **Structured API error logging** — `j()` / `bad()` responses with `status >= 400` emit `[webui]` JSON `event=api_error` lines (method, path without query, status, error/message, optional traceback for 5xx). Unhandled exceptions in `server.py` use the same format (`source=unhandled`). Access logs may include `error_summary` when an API error was recorded. Module: `integration/request_logging/`. Env: `HERMES_WEBUI_API_ERROR_LOG` (default on), `HERMES_WEBUI_API_ERROR_LOG_MIN_STATUS` (default `400`). Errors are written only via `[webui]` stderr JSON (no duplicate `logging` mirror line).

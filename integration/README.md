@@ -399,6 +399,7 @@ Response includes global `stats`: `{ hub, installed, not_installed, custom }` ac
 | `swagger/openapi.json` | Integration API 规范（`GET /api/openapi.json` 动态 `servers`） |
 | `swagger/swagger_handler.py` | `GET /docs`、`GET /api/openapi.json` |
 | `assets/swagger-ui/` | 离线 Swagger UI（`swagger-ui-dist@5.18.2`，经 `/static/integration/swagger-ui/*` 提供） |
+| `frontend/` | Nginx 反代配置：用 `x_frontend/dist` 替代上游 `static/` UI（见 `frontend/README.md`） |
 | `CHANGELOG.md` | Fork 集成层发布说明（勿写入根目录 CHANGELOG） |
 
 ## Upstream seam files (only these should conflict on rebase)
