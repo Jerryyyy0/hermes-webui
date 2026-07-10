@@ -22,11 +22,11 @@ If you use a local HTTP proxy (`HTTP_PROXY`, e.g. Clash), add the SkillHub host 
 
 ### API error logging
 
-All JSON API responses with `status >= 400` (via `j()` / `bad()`) emit a structured `[webui]` log line with `event=api_error`. Unhandled handler exceptions use the same format with `source=unhandled`. The per-request access log may include `error_summary` when an API error was recorded.
+All JSON API responses with `status >= 400` (via `j()` / `bad()`) emit a timestamped, human-readable `[webui][api_error]` log line through the standard Python `logging` module. Unhandled handler exceptions use the same format with `source=unhandled`. The per-request access log may include an `error=...` summary when an API error was recorded.
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `HERMES_WEBUI_API_ERROR_LOG` | `1` | Set to `0` to disable structured API error logs |
+| `HERMES_WEBUI_API_ERROR_LOG` | `1` | Set to `0` to disable API error logs |
 | `HERMES_WEBUI_API_ERROR_LOG_MIN_STATUS` | `400` | Minimum HTTP status to log (e.g. `500` to skip 4xx noise) |
 
 Implementation: [`integration/request_logging/`](request_logging/).

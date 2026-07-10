@@ -38,6 +38,15 @@ from api.session_events import (
     subscribe_session_events,
     unsubscribe_session_events,
 )
+from api.stream_diagnostics import (
+    StreamDiag,
+    elapsed_ms as _stream_diag_elapsed_ms,
+    get_stream_summary as _get_stream_diag_summary,
+    log_event as _stream_diag_log_event,
+    monotonic_ms as _stream_diag_monotonic_ms,
+    safe_count as _stream_diag_safe_count,
+    safe_workspace_hash as _stream_diag_workspace_hash,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -9582,14 +9591,56 @@ def _stream_runner_run_events(handler, run_id: str, cursor: str | None = None) -
 def _handle_sse_stream(handler, parsed):
     qs = parse_qs(parsed.query)
     stream_id = qs.get("stream_id", [""])[0]
+    request_id = uuid.uuid4().hex[:12]
+    opened_ms = _stream_diag_monotonic_ms()
+    sent_events = 0
+    heartbeat_count = 0
+    event_counts = defaultdict(int)
+    last_event_type = ""
+    disconnect_reason = "unknown"
+    first_event_logged = False
+    first_token_logged = False
+    replay_requested = bool(
+        qs.get("replay", [""])[0]
+        or qs.get("after_seq", [None])[0] not in (None, "")
+        or qs.get("after_event_id", [None])[0]
+    )
+    _stream_diag_log_event(
+        "webui.stream.open",
+        "浏览器已连接聊天流，开始接收实时事件。",
+        stream_id=stream_id,
+        request_id=request_id,
+        after_seq=qs.get("after_seq", [""])[0],
+        after_event_id=qs.get("after_event_id", [""])[0],
+        replay_requested=replay_requested,
+    )
+    resolve_started = _stream_diag_monotonic_ms()
     stream = STREAMS.get(stream_id)
     if stream is None:
         if _stream_runner_run_events(handler, stream_id, _runner_stream_cursor_from_query(qs)):
+            _stream_diag_log_event(
+                "webui.stream.resolve",
+                "已解析聊天流来源，用于判断是实时流、重连回放还是流已不存在。",
+                stream_id=stream_id,
+                request_id=request_id,
+                source="runner",
+                journal_available=True,
+                elapsed_ms=_stream_diag_elapsed_ms(resolve_started),
+            )
             return True
         try:
             journal_available = bool(find_run_summary(stream_id)) if stream_id else False
         except Exception:
             journal_available = False
+        _stream_diag_log_event(
+            "webui.stream.resolve",
+            "已解析聊天流来源，用于判断是实时流、重连回放还是流已不存在。",
+            stream_id=stream_id,
+            request_id=request_id,
+            source="journal" if journal_available else "missing",
+            journal_available=journal_available,
+            elapsed_ms=_stream_diag_elapsed_ms(resolve_started),
+        )
         if not journal_available:
             return j(handler, {"error": "stream not found"}, status=404)
         handler.send_response(200)
@@ -9598,11 +9649,47 @@ def _handle_sse_stream(handler, parsed):
         handler.send_header("X-Accel-Buffering", "no")
         handler.send_header("Connection", "close")
         handler.end_headers()
+        replay_started = _stream_diag_monotonic_ms()
+        replayed_events = 0
         try:
-            _replay_run_journal(handler, stream_id, _parse_run_journal_after_seq(qs, stream_id))
+            replayed_events = _replay_run_journal(handler, stream_id, _parse_run_journal_after_seq(qs, stream_id)) or 0
+            disconnect_reason = "journal_replay_done"
         except _CLIENT_DISCONNECT_ERRORS:
-            pass
+            disconnect_reason = "client_disconnect"
+        finally:
+            _stream_diag_log_event(
+                "webui.stream.replay_done",
+                "历史事件回放完成，准备继续接收实时事件。",
+                stream_id=stream_id,
+                request_id=request_id,
+                replayed_events=replayed_events,
+                from_seq=qs.get("after_seq", [""])[0],
+                to_seq=None,
+                elapsed_ms=_stream_diag_elapsed_ms(replay_started),
+            )
+            _stream_diag_log_event(
+                "webui.stream.summary",
+                "聊天流连接结束，已汇总 SSE 发送、首事件、首 token 和后台执行耗时。",
+                stream_id=stream_id,
+                request_id=request_id,
+                duration_ms=_stream_diag_elapsed_ms(opened_ms),
+                sent_events=sent_events,
+                event_counts=dict(event_counts),
+                heartbeat_count=heartbeat_count,
+                last_event_type=last_event_type,
+                disconnect_reason=disconnect_reason,
+                worker_summary_available=False,
+            )
         return True
+    _stream_diag_log_event(
+        "webui.stream.resolve",
+        "已解析聊天流来源，用于判断是实时流、重连回放还是流已不存在。",
+        stream_id=stream_id,
+        request_id=request_id,
+        source="live",
+        journal_available=True,
+        elapsed_ms=_stream_diag_elapsed_ms(resolve_started),
+    )
     if hasattr(stream, "subscribe_with_snapshot"):
         subscriber, stream_snapshot = stream.subscribe_with_snapshot()
     else:
@@ -9615,11 +9702,13 @@ def _handle_sse_stream(handler, parsed):
     handler.send_header("Connection", "close")
     handler.end_headers()
     replay_cutoff_seq = None
-    if qs.get("replay", [""])[0] or qs.get("after_seq", [None])[0] not in (None, "") or qs.get("after_event_id", [None])[0]:
+    if replay_requested:
         snapshot_cutoff_seq = _run_journal_same_run_seq(
             str(stream_snapshot.get("last_event_id") or ""),
             stream_id,
         )
+        replay_started = _stream_diag_monotonic_ms()
+        replayed = 0
         try:
             replayed = _replay_run_journal(
                 handler,
@@ -9627,18 +9716,30 @@ def _handle_sse_stream(handler, parsed):
                 _parse_run_journal_after_seq(qs, stream_id),
                 max_seq=snapshot_cutoff_seq,
                 include_stale=False,
-            )
+            ) or 0
             if replayed:
                 replay_cutoff_seq = snapshot_cutoff_seq
         except _CLIENT_DISCONNECT_ERRORS:
             raise
         except Exception:
             logger.debug("Failed to replay active run journal for stream %s", stream_id, exc_info=True)
+        finally:
+            _stream_diag_log_event(
+                "webui.stream.replay_done",
+                "历史事件回放完成，准备继续接收实时事件。",
+                stream_id=stream_id,
+                request_id=request_id,
+                replayed_events=replayed,
+                from_seq=qs.get("after_seq", [""])[0],
+                to_seq=snapshot_cutoff_seq,
+                elapsed_ms=_stream_diag_elapsed_ms(replay_started),
+            )
     try:
         while True:
             try:
                 item = subscriber.get(timeout=_SSE_HEARTBEAT_INTERVAL_SECONDS)
             except queue.Empty:
+                heartbeat_count += 1
                 handler.wfile.write(b": heartbeat\n\n")
                 handler.wfile.flush()
                 continue
@@ -9647,28 +9748,67 @@ def _handle_sse_stream(handler, parsed):
             else:
                 event, data = item
                 queued_event_id = STREAM_LAST_EVENT_ID.get(stream_id)
-            # Stage-364: emit `id:` from STREAM_LAST_EVENT_ID side-channel so
-            # the frontend's `_lastRunJournalSeq` cursor advances during live
-            # streaming. Without this, mid-stream error→replay would arrive
-            # with after_seq=0 and double-render every journaled event.
             event_id = queued_event_id or STREAM_LAST_EVENT_ID.get(stream_id)
             event_seq = _run_journal_same_run_seq(event_id, stream_id)
             if replay_cutoff_seq is not None and event_seq is not None and event_seq <= replay_cutoff_seq:
                 continue
+            if not first_event_logged:
+                first_event_logged = True
+                _stream_diag_log_event(
+                    "webui.stream.first_event",
+                    "聊天流收到首个业务事件，可用于判断后台执行是否迟迟未产出。",
+                    stream_id=stream_id,
+                    request_id=request_id,
+                    event_type=event,
+                    wait_ms=_stream_diag_elapsed_ms(opened_ms),
+                )
+            if event == "token" and not first_token_logged:
+                first_token_logged = True
+                worker_summary = _get_stream_diag_summary(stream_id)
+                _stream_diag_log_event(
+                    "webui.stream.first_token",
+                    "聊天流收到首个模型文本片段，可用于定位首 token 延迟。",
+                    stream_id=stream_id,
+                    request_id=request_id,
+                    wait_ms=_stream_diag_elapsed_ms(opened_ms),
+                    worker_first_token_ms=worker_summary.get("first_token_ms"),
+                )
             if event_id:
                 _sse_with_id(handler, event, data, event_id)
             else:
                 _sse(handler, event, data)
+            sent_events += 1
+            event_counts[str(event)] += 1
+            last_event_type = str(event)
             if event in ("stream_end", "error", "cancel"):
+                disconnect_reason = str(event)
                 break
     except _CLIENT_DISCONNECT_ERRORS:
-        pass
+        disconnect_reason = "client_disconnect"
     finally:
         if subscriber is not stream and hasattr(stream, "unsubscribe"):
             try:
                 stream.unsubscribe(subscriber)
             except Exception:
                 pass
+        worker_summary = _get_stream_diag_summary(stream_id)
+        _stream_diag_log_event(
+            "webui.stream.summary",
+            "聊天流连接结束，已汇总 SSE 发送、首事件、首 token 和后台执行耗时。",
+            stream_id=stream_id,
+            request_id=request_id,
+            duration_ms=_stream_diag_elapsed_ms(opened_ms),
+            sent_events=sent_events,
+            event_counts=dict(event_counts),
+            heartbeat_count=heartbeat_count,
+            last_event_type=last_event_type,
+            disconnect_reason=disconnect_reason,
+            worker_summary_available=bool(worker_summary),
+            worker_total_ms=worker_summary.get("total_ms"),
+            agent_init_total_ms=worker_summary.get("agent_init_total_ms"),
+            run_conversation_ms=worker_summary.get("run_conversation_ms"),
+            final_save_ms=worker_summary.get("final_save_ms"),
+        )
     return True
 
 
@@ -12166,6 +12306,7 @@ def _start_chat_stream_for_session(
     goal_related: bool = False,
 ):
     """Persist pending state, register an SSE channel, and start an agent turn."""
+    _stream_diag_started = _stream_diag_monotonic_ms()
     attachments = attachments or []
     # Prevent duplicate runs in the same session while a stream is still active.
     # This commonly happens after page refresh/reconnect races and can produce
@@ -12268,6 +12409,18 @@ def _start_chat_stream_for_session(
     stream = create_stream_channel()
     with STREAMS_LOCK:
         STREAMS[stream_id] = stream
+    _stream_diag_log_event(
+        "webui.chat_start.stream_created",
+        "已创建聊天流并写入初始状态，后续日志将通过 stream_id 关联。",
+        stream_id=stream_id,
+        session_id=s.session_id,
+        profile=getattr(s, "profile", None),
+        effective_model=model,
+        effective_provider=model_provider,
+        workspace_hash=_stream_diag_workspace_hash(workspace),
+        backend="gateway" if webui_gateway_chat_enabled(get_config()) else "agent",
+        elapsed_ms=_stream_diag_elapsed_ms(_stream_diag_started),
+    )
     # #1932: mark stream as goal-related so the streaming hook evaluates the goal.
     if goal_related:
         STREAM_GOAL_RELATED[stream_id] = True
@@ -12284,6 +12437,14 @@ def _start_chat_stream_for_session(
         daemon=True,
     )
     thr.start()
+    _stream_diag_log_event(
+        "webui.chat_start.worker_dispatched",
+        "后台 Agent 执行线程已派发，聊天流进入异步执行阶段。",
+        stream_id=stream_id,
+        session_id=s.session_id,
+        dispatch_elapsed_ms=_stream_diag_elapsed_ms(_stream_diag_started),
+        status="started",
+    )
     response = {
         "stream_id": stream_id,
         "session_id": s.session_id,
@@ -12495,6 +12656,8 @@ def _handle_goal_command(handler, body):
 
 
 def _handle_chat_start(handler, body, diag=None):
+    _stream_diag_request_id = uuid.uuid4().hex[:12]
+    _stream_diag_started = _stream_diag_monotonic_ms()
     try:
         diag.stage("validate_session_id") if diag else None
         try:
@@ -12564,6 +12727,18 @@ def _handle_chat_start(handler, body, diag=None):
             model_provider,
             attachments,
             msg,
+        )
+        _stream_diag_log_event(
+            "webui.chat_start.accepted",
+            "已接收聊天启动请求，完成基础校验。",
+            request_id=_stream_diag_request_id,
+            session_id=getattr(s, "session_id", body.get("session_id")),
+            profile=requested_profile or getattr(s, "profile", None),
+            message_chars=len(msg),
+            attachments_count=_stream_diag_safe_count(attachments),
+            requested_model=requested_model,
+            requested_provider=requested_provider,
+            elapsed_ms=_stream_diag_elapsed_ms(_stream_diag_started),
         )
         from api.runtime_adapter import (
             LegacyJournalRuntimeAdapter,

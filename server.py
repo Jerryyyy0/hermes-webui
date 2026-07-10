@@ -104,7 +104,7 @@ logger = logging.getLogger(__name__)
 # Must run before `api.config` is imported so HOST/PORT pick up the values.
 if __name__ == "__main__":
     os.environ["HERMES_WEBUI_HOST"] = os.getenv("HERMES_WEBUI_HOST", "0.0.0.0")
-    os.environ["SKILLHUB_URL"] = os.getenv("SKILLHUB_URL", "http://192.168.1.137:18702/")
+    os.environ["SKILLHUB_URL"] = os.getenv("SKILLHUB_URL", "http://47.93.211.132:18702/")
     os.environ["HERMES_INTEGRATION"] = os.getenv("HERMES_INTEGRATION", "1")
     os.environ["ZHILING_CONTROL_PLANE_URL"] = os.getenv(
         "ZHILING_CONTROL_PLANE_URL", "http://192.168.1.139:23001/"
@@ -113,7 +113,7 @@ if __name__ == "__main__":
         "ZHILING_LOGOUT_API_URL", "http://auth-proxy:8080"
     )
     os.environ["KNOWLEDGE_BASE_URL"] = os.getenv(
-        "KNOWLEDGE_BASE_URL", "http://192.168.1.139:17862/"
+        "KNOWLEDGE_BASE_URL", "http://47.93.211.132:51419"
     )
     os.environ["BROWSER_PREVIEW_MODE"] = os.getenv(
         "BROWSER_PREVIEW_MODE", "legacy"
@@ -140,6 +140,7 @@ if __name__ == "__main__":
         "HERMES_EGRESS_POLICY_ENABLED", "1"
     )
     os.environ["HERMES_WEBUI_AGENT_DIR"] = os.getenv("HERMES_WEBUI_AGENT_DIR", "/Users/wzq/Downloads/NLP-PyProject/hermes-agent")
+    os.environ["HERMES_WEBUI_STREAM_DIAG"] = os.getenv("HERMES_WEBUI_STREAM_DIAG", "debug")
 
 from api.auth import check_auth
 from api.config import HOST, PORT, STATE_DIR, SESSION_DIR, DEFAULT_WORKSPACE
@@ -381,16 +382,21 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args): pass  # suppress default Apache-style log
 
     @staticmethod
-    def _safe_webui_print(message: str) -> None:
+    def _safe_webui_log(message: str) -> None:
         """Emit a request log line without letting logging break responses."""
         try:
-            print(message, flush=True)
+            from integration.request_logging.logger import console_info
+
+            console_info(message)
         except Exception:
             pass
 
+    _safe_webui_print = _safe_webui_log
+
     def log_request(self, code: str='-', size: str='-') -> None:
-        """Structured JSON logs for each request."""
-        import json as _json
+        """Human-readable request logs for each request."""
+        from integration.request_logging.formatting import format_request_line
+
         duration_ms = round((time.time() - getattr(self, '_req_t0', time.time())) * 1000, 1)
         remote = '-'
         try:
@@ -404,7 +410,7 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             forwarded_for = None
         record_data = {
-            'ts': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+            'ts': time.time(),
             'remote': remote,
             'method': getattr(self, 'command', None) or '-',
             'path': getattr(self, 'path', None) or '-',
@@ -416,8 +422,7 @@ class Handler(BaseHTTPRequestHandler):
         error_summary = getattr(self, '_api_error_summary', None)
         if error_summary:
             record_data['error_summary'] = error_summary
-        record = _json.dumps(record_data)
-        self._safe_webui_print(f'[webui] {record}')
+        self._safe_webui_log(format_request_line(record_data))
 
     @staticmethod
     def _log_unhandled_exception(handler) -> None:

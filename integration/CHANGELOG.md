@@ -8,7 +8,7 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Added
 
-- **Structured API error logging** — `j()` / `bad()` responses with `status >= 400` emit `[webui]` JSON `event=api_error` lines (method, path without query, status, error/message, optional traceback for 5xx). Unhandled exceptions in `server.py` use the same format (`source=unhandled`). Access logs may include `error_summary` when an API error was recorded. Module: `integration/request_logging/`. Env: `HERMES_WEBUI_API_ERROR_LOG` (default on), `HERMES_WEBUI_API_ERROR_LOG_MIN_STATUS` (default `400`). Errors are written only via `[webui]` stderr JSON (no duplicate `logging` mirror line).
+- **API error logging** — `j()` / `bad()` responses with `status >= 400` emit timestamped `[webui][api_error]` human-readable lines through the standard Python `logging` module (method, path without query, status, error/message, optional `traceback=yes` for 5xx). Unhandled exceptions in `server.py` use the same format (`source=unhandled`). Access logs may include `error=...` when an API error was recorded. Module: `integration/request_logging/`. Env: `HERMES_WEBUI_API_ERROR_LOG` (default on), `HERMES_WEBUI_API_ERROR_LOG_MIN_STATUS` (default `400`).
 
 ### Changed
 

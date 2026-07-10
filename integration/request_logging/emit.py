@@ -1,8 +1,7 @@
-"""Structured API error logging to the WebUI log stream."""
+"""Human-readable API error logging to the WebUI log stream."""
 
 from __future__ import annotations
 
-import json
 import sys
 import time
 import traceback
@@ -10,6 +9,8 @@ from typing import Any
 
 from api.helpers import _sanitize_error
 
+from integration.request_logging.formatting import format_api_error_line
+from integration.request_logging.logger import console_error, console_warning
 from integration.request_logging.policy import (
     request_forwarded_for,
     request_method,
@@ -21,20 +22,6 @@ from integration.request_logging.policy import (
 _SUMMARY_MAX = 240
 _MESSAGE_MAX = 500
 _TRACEBACK_MAX = 8000
-
-
-def _direct_write(text: str) -> None:
-    try:
-        stream = sys.stderr
-        if stream is None:
-            return
-        stream.write(text if text.endswith("\n") else text + "\n")
-        try:
-            stream.flush()
-        except Exception:
-            pass
-    except Exception:
-        pass
 
 
 def _bounded_text(value: str | None, limit: int) -> str | None:
@@ -80,7 +67,7 @@ def emit_api_error(
     exc_info=None,
     source: str = "j",
 ) -> None:
-    """Emit a structured ``api_error`` line. Never raises."""
+    """Emit a human-readable ``api_error`` line. Never raises."""
     if not should_log_api_error(status):
         return
 
@@ -89,7 +76,7 @@ def emit_api_error(
         safe_error = _bounded_text(error_code, 200)
         record: dict[str, Any] = {
             "event": "api_error",
-            "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "ts": time.time(),
             "method": request_method(handler),
             "path": request_path(handler),
             "status": status,
@@ -108,8 +95,13 @@ def emit_api_error(
         if tb_text:
             record["traceback"] = tb_text
 
-        line = f"[webui] {json.dumps(record, ensure_ascii=False)}"
-        _direct_write(line)
+        log_line = format_api_error_line(record)
+        if status >= 500:
+            console_error(log_line)
+        else:
+            console_warning(log_line)
+        if tb_text:
+            console_error(tb_text)
 
         log_message = _build_summary(status=status, error_code=safe_error, message=safe_message)
         try:
@@ -118,6 +110,6 @@ def emit_api_error(
             pass
     except Exception:
         try:
-            _direct_write("[webui] {\"event\":\"api_error\",\"message\":\"emit_api_error failed\"}")
+            console_error("[webui][api_error] emit failed")
         except Exception:
             pass
