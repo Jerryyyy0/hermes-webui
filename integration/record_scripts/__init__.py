@@ -1,0 +1,1 @@
+"""Record script integration endpoints."""

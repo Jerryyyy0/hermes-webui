@@ -268,6 +268,29 @@ curl -sS -X POST http://127.0.0.1:8787/api/integration/knowledge_base/list \
   -d '{"account":"admin","uuid":"aaaaaaaa0000aaaa0000aaaaaaaaaaaa","isPersonal":1}'
 ```
 
+### 录制脚本（`HERMES_INTEGRATION=1`）
+
+录制脚本使用前端生成的 `relate_name` 作为稳定资源 id。一个 `relate_name` 对应一份脚本 JSON 字符串和一份 CSV，落盘到 `{HERMES_WEBUI_STATE_DIR}/attachments/record_scripts/<relate_name>/`。
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| POST | `/api/integration/record_scripts/save` | 首次保存脚本 JSON 字符串到 `script.json` |
+| GET | `/api/integration/record_scripts/list` | 查询所有录制脚本，`script_json` 按字符串返回 |
+| POST | `/api/integration/record_scripts/update` | 按 `relate_name` 整体替换 `script.json` |
+| POST | `/api/integration/record_scripts/delete` | 删除 `script.json`，不清理关联 CSV |
+| POST | `/api/integration/record_scripts_csv/upload` | multipart 上传并覆盖 `data.csv` |
+| GET | `/api/integration/record_scripts_csv/download?relate_name=...` | 下载 `data.csv` 文件 |
+| POST | `/api/integration/record_scripts_csv/delete` | 删除 `data.csv`，保留脚本 JSON |
+
+```bash
+curl -sS -X POST http://127.0.0.1:8787/api/integration/record_scripts/save \
+  -H 'Content-Type: application/json' \
+  -d '{"relate_name":"demo_flow","script_json":"{\"steps\":[]}"}'
+
+curl -sS -F 'relate_name=demo_flow' -F 'file=@data.csv' \
+  http://127.0.0.1:8787/api/integration/record_scripts_csv/upload
+```
+
 ### 通知系统（`HERMES_INTEGRATION=1` + `KNOWLEDGE_BASE_URL`）
 
 完整 API 文档：[`docs/integration-notifications-api.md`](../docs/integration-notifications-api.md)。

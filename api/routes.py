@@ -6639,6 +6639,14 @@ def handle_get(handler, parsed) -> bool:
     except ImportError:
         pass
 
+    try:
+        from integration.record_scripts.handlers import try_handle_get as _record_scripts_try_get
+
+        if _record_scripts_try_get(handler, parsed) is True:
+            return True
+    except ImportError:
+        pass
+
     # ── Skills API (GET) ──
     if parsed.path == "/api/skills":
         qs = parse_qs(parsed.query)
@@ -7083,6 +7091,14 @@ def handle_post(handler, parsed) -> bool:
         from integration.knowledge_base.handlers import try_handle_post_early as _kb_try_post_early
 
         if _kb_try_post_early(handler, parsed) is True:
+            return True
+    except ImportError:
+        pass
+
+    try:
+        from integration.record_scripts.handlers import try_handle_post_early as _record_scripts_try_post_early
+
+        if _record_scripts_try_post_early(handler, parsed) is True:
             return True
     except ImportError:
         pass
@@ -8311,6 +8327,14 @@ def handle_post(handler, parsed) -> bool:
         from integration.knowledge_base.handlers import try_handle_post as _kb_try_post
 
         if _kb_try_post(handler, parsed, body) is True:
+            return True
+    except ImportError:
+        pass
+
+    try:
+        from integration.record_scripts.handlers import try_handle_post as _record_scripts_try_post
+
+        if _record_scripts_try_post(handler, parsed, body) is True:
             return True
     except ImportError:
         pass

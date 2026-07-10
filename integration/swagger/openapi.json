@@ -1,9 +1,9 @@
 {
   "openapi": "3.0.3",
   "info": {
-    "title": "Hermes WebUI API",
+    "title": "WebUI API",
     "version": "1.0.0",
-    "description": "Hermes WebUI 后端 REST API。所有端点均需通过认证（若已启用），SSE 流式端点除外。"
+    "description": "WebUI 后端 REST API。所有端点均需通过认证（若已启用），SSE 流式端点除外。"
   },
   "servers": [
     { "url": "/", "description": "由 GET /api/openapi.json 按当前请求动态覆盖" }
@@ -28,6 +28,7 @@
     { "name": "SkillHub",    "description": "SkillHub 远程技能市场代理（需 HERMES_INTEGRATION=1；市场类接口另需 SKILLHUB_URL）。安装/卸载/custom 读写均使用 shared_skills_dir（{HERMES_HOME}/skills，与 WebUI profile 无关）。" },
     { "name": "IntegrationCrons", "description": "跨 Profile 定时任务（需 HERMES_INTEGRATION=1）。列表/轮询用 GET /api/crons?all_profiles=1；创建用一个 profile 同时作为存储与执行 Profile；编辑/运行/删除/读取历史均用 profile 定位任务。" },
     { "name": "IntegrationKnowledgeBase", "description": "知识库下游 BFF 代理（需 HERMES_INTEGRATION=1 且 KNOWLEDGE_BASE_URL）。`account`/`uuid` 由调用方在请求体传入；成功时返回下游 `data` 字段内容。" },
+    { "name": "IntegrationRecordScripts", "description": "录制脚本与关联 CSV（需 HERMES_INTEGRATION=1）。`relate_name` 由前端生成，一个 relate_name 对应一份脚本 JSON 字符串和一份 CSV，存储于 {HERMES_WEBUI_STATE_DIR}/attachments/record_scripts/<relate_name>/。" },
     { "name": "IntegrationNotifications", "description": "通知系统（需 HERMES_INTEGRATION=1 且 KNOWLEDGE_BASE_URL）。知识库通知从下游 get_user_messages 实时聚合；notifications.db 表结构预留，HTTP 层当前不读写本地存储。" },
     { "name": "IntegrationMemory",   "description": "记忆统计（需 HERMES_INTEGRATION=1）。聚合展示会话天数、定时任务和记忆文件。" }
   ],
@@ -1373,6 +1374,109 @@
             }
           },
           "502": { "description": "下游不可达", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
+        }
+      }
+    },
+    "/api/integration/record_scripts/save": {
+      "post": {
+        "tags": ["IntegrationRecordScripts"],
+        "summary": "保存录制脚本 JSON 字符串",
+        "description": "首次保存录制脚本。`relate_name` 由前端生成且之后不修改；脚本内容按 `script_json` 字符串原样保存到 `{HERMES_WEBUI_STATE_DIR}/attachments/record_scripts/<relate_name>/script.json`。",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecordScriptSaveRequest" } } } },
+        "responses": {
+          "200": { "description": "保存成功", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecordScriptEntryResponse" } } } },
+          "400": { "description": "缺参、relate_name 无效或脚本已存在", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecordScriptError" } } } }
+        }
+      }
+    },
+    "/api/integration/record_scripts/list": {
+      "get": {
+        "tags": ["IntegrationRecordScripts"],
+        "summary": "录制脚本列表",
+        "description": "查询当前 WebUI 状态目录下所有录制脚本。脚本内容以 `script_json` 字符串返回。",
+        "responses": {
+          "200": { "description": "脚本列表", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecordScriptListResponse" } } } }
+        }
+      }
+    },
+    "/api/integration/record_scripts/update": {
+      "post": {
+        "tags": ["IntegrationRecordScripts"],
+        "summary": "整体替换录制脚本 JSON 字符串",
+        "description": "通过 `relate_name` 定位脚本，并用完整 `script_json` 字符串整体替换，不做局部 patch。",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecordScriptSaveRequest" } } } },
+        "responses": {
+          "200": { "description": "更新成功", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecordScriptEntryResponse" } } } },
+          "400": { "description": "缺参或 relate_name 无效", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecordScriptError" } } } },
+          "404": { "description": "脚本不存在", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecordScriptError" } } } }
+        }
+      }
+    },
+    "/api/integration/record_scripts/delete": {
+      "post": {
+        "tags": ["IntegrationRecordScripts"],
+        "summary": "删除录制脚本 JSON",
+        "description": "通过 `relate_name` 删除 `script.json`，不清理同目录下的关联 CSV。",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecordScriptRelateNameRequest" } } } },
+        "responses": {
+          "200": { "description": "删除成功", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecordScriptOkResponse" } } } },
+          "400": { "description": "缺参或 relate_name 无效", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecordScriptError" } } } },
+          "404": { "description": "脚本不存在", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecordScriptError" } } } }
+        }
+      }
+    },
+    "/api/integration/record_scripts_csv/upload": {
+      "post": {
+        "tags": ["IntegrationRecordScripts"],
+        "summary": "上传录制脚本关联 CSV",
+        "description": "multipart 上传 CSV。表单字段 `relate_name` 必填，文件字段名为 `file`。同一 `relate_name` 只保留一份 CSV，上传会写入或覆盖 `data.csv`。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": ["relate_name", "file"],
+                "properties": {
+                  "relate_name": { "type": "string" },
+                  "file": { "type": "string", "format": "binary", "description": "CSV 文件" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "上传成功", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecordScriptCsvUploadResponse" } } } },
+          "400": { "description": "缺参、格式无效或非 CSV 文件", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecordScriptError" } } } },
+          "404": { "description": "脚本不存在", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecordScriptError" } } } },
+          "413": { "description": "上传体过大", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecordScriptError" } } } }
+        }
+      }
+    },
+    "/api/integration/record_scripts_csv/download": {
+      "get": {
+        "tags": ["IntegrationRecordScripts"],
+        "summary": "下载录制脚本关联 CSV",
+        "parameters": [
+          { "name": "relate_name", "in": "query", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "CSV 文件", "content": { "text/csv": { "schema": { "type": "string", "format": "binary" } } } },
+          "400": { "description": "缺参或 relate_name 无效", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecordScriptError" } } } },
+          "404": { "description": "CSV 文件不存在", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecordScriptError" } } } }
+        }
+      }
+    },
+    "/api/integration/record_scripts_csv/delete": {
+      "post": {
+        "tags": ["IntegrationRecordScripts"],
+        "summary": "删除录制脚本关联 CSV",
+        "description": "通过 `relate_name` 删除 `data.csv`，保留同目录下的 `script.json`。",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecordScriptRelateNameRequest" } } } },
+        "responses": {
+          "200": { "description": "删除成功", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecordScriptOkResponse" } } } },
+          "400": { "description": "缺参或 relate_name 无效", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecordScriptError" } } } },
+          "404": { "description": "CSV 文件不存在", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecordScriptError" } } } }
         }
       }
     },
@@ -5655,6 +5759,75 @@
           "active":   { "type": "string" }
         },
         "required": ["profiles", "active"]
+      },
+      "RecordScriptRelateNameRequest": {
+        "type": "object",
+        "required": ["relate_name"],
+        "properties": {
+          "relate_name": { "type": "string", "description": "前端生成的稳定资源 id；允许字母、数字、下划线、点和连字符，最长 120 字符。" }
+        }
+      },
+      "RecordScriptSaveRequest": {
+        "allOf": [
+          { "$ref": "#/components/schemas/RecordScriptRelateNameRequest" },
+          {
+            "type": "object",
+            "required": ["script_json"],
+            "properties": {
+              "script_json": { "type": "string", "description": "录制脚本 JSON 字符串，接口层不做字段级解析。" }
+            }
+          }
+        ]
+      },
+      "RecordScriptEntry": {
+        "type": "object",
+        "required": ["relate_name", "script_json", "has_csv"],
+        "properties": {
+          "relate_name": { "type": "string" },
+          "script_json": { "type": "string" },
+          "has_csv": { "type": "boolean", "description": "是否存在关联 data.csv。" },
+          "updated_at": { "type": "number", "description": "script.json 的 mtime 秒级时间戳。" },
+          "size": { "type": "integer", "description": "script.json 字节数。" }
+        }
+      },
+      "RecordScriptEntryResponse": {
+        "allOf": [
+          { "type": "object", "required": ["ok"], "properties": { "ok": { "type": "boolean", "enum": [true] } } },
+          { "$ref": "#/components/schemas/RecordScriptEntry" }
+        ]
+      },
+      "RecordScriptListResponse": {
+        "type": "object",
+        "required": ["ok", "scripts"],
+        "properties": {
+          "ok": { "type": "boolean", "enum": [true] },
+          "scripts": { "type": "array", "items": { "$ref": "#/components/schemas/RecordScriptEntry" } }
+        }
+      },
+      "RecordScriptOkResponse": {
+        "type": "object",
+        "required": ["ok", "relate_name"],
+        "properties": {
+          "ok": { "type": "boolean", "enum": [true] },
+          "relate_name": { "type": "string" }
+        }
+      },
+      "RecordScriptCsvUploadResponse": {
+        "type": "object",
+        "required": ["ok", "relate_name", "filename", "size"],
+        "properties": {
+          "ok": { "type": "boolean", "enum": [true] },
+          "relate_name": { "type": "string" },
+          "filename": { "type": "string", "enum": ["data.csv"] },
+          "size": { "type": "integer" }
+        }
+      },
+      "RecordScriptError": {
+        "type": "object",
+        "required": ["error"],
+        "properties": {
+          "error": { "type": "string" }
+        }
       },
       "KnowledgeBaseError": {
         "type": "object",
