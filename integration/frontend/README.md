@@ -33,7 +33,7 @@ Open **http://127.0.0.1:8080** (SPA). Direct **http://127.0.0.1:8787** still sho
 
 1. Rewrite SPA JS — no `location.assign` to Casdoor; always mount the app shell
 2. Inject `app_auth_session` into `index.html`
-3. Mock `GET /api/integration/webui_login` and `POST /api/integration/webui_logout` with a synthetic `local` user (not proxied to WebUI)
+3. Mock `GET /api/integration/webui_login` from [`mock-webui-login.json`](mock-webui-login.json) and `POST /api/integration/webui_logout` (not proxied to WebUI)
 
 Hard-refresh the browser (or clear site data for `:8080`) after reload so cached JS is not reused.
 

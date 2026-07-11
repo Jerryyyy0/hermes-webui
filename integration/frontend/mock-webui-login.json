@@ -1,0 +1,42 @@
+{
+  "username": "jiangyan",
+  "display_name": "姜燕",
+  "organization": {
+    "id": "org-人工智能班组",
+    "name": "人工智能班组"
+  },
+  "positions": [
+    {
+      "id": "position-bu-men-fu-ze-ren",
+      "name": "部门负责人"
+    }
+  ],
+  "roles": [],
+  "is_admin": false,
+  "ithinktank": {
+    "account": "jiangyan",
+    "userId": "59ad571189ab4aaf9ebb614686c057fa",
+    "uuid": "59ad571189ab4aaf9ebb614686c057fa"
+  },
+  "ithinktank_account": "jiangyan",
+  "ithinktank_user_id": "59ad571189ab4aaf9ebb614686c057fa",
+  "timestamp": 1783773447,
+  "displayName": "姜燕",
+  "name": "姜燕",
+  "organization_name": "人工智能班组",
+  "organizationName": "人工智能班组",
+  "position_name": "部门负责人",
+  "positionName": "部门负责人",
+  "position_names": ["部门负责人"],
+  "positionNames": ["部门负责人"],
+  "knowledge_base": {
+    "account": "jiangyan",
+    "userId": "59ad571189ab4aaf9ebb614686c057fa",
+    "uuid": "59ad571189ab4aaf9ebb614686c057fa"
+  },
+  "knowledgeBase": {
+    "account": "jiangyan",
+    "userId": "59ad571189ab4aaf9ebb614686c057fa",
+    "uuid": "59ad571189ab4aaf9ebb614686c057fa"
+  }
+}
