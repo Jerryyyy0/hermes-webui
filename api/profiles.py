@@ -2482,4 +2482,10 @@ def delete_profile_api(name: str) -> dict:
     _SKILLS_STATS_CACHE.clear()
     _invalidate_list_profiles_cache()
     _invalidate_root_profile_cache()
+    try:
+        from integration.session_status.store import delete_profile_read_state
+
+        delete_profile_read_state(name)
+    except Exception:
+        logger.debug("Failed to clean session read state for deleted profile %s", name, exc_info=True)
     return {'ok': True, 'name': name}

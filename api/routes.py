@@ -3347,6 +3347,33 @@ _SESSION_DATE_RANGE_ERRORS = {
 }
 
 
+def _enrich_rows_with_session_status(rows: list[dict]) -> None:
+    try:
+        from integration.config import integration_enabled
+        from integration.session_status.compute import (
+            compute_session_status,
+            latest_activity_at,
+        )
+        from integration.session_status.store import (
+            get_read_until_map,
+            normalize_profile_key,
+        )
+    except ImportError:
+        return
+    if not integration_enabled():
+        return
+
+    read_map = get_read_until_map(rows)
+    for item in rows:
+        sid = str(item.get("session_id") or "").strip()
+        key = (normalize_profile_key(item.get("profile")), sid)
+        read_until = read_map.get(key)
+        if read_until is None:
+            read_until = latest_activity_at(item)
+        item.update(compute_session_status(item, read_until))
+        item.pop("last_error_at", None)
+
+
 def _redact_sidebar_session_rows(rows: list[dict]) -> list[dict]:
     safe_rows = []
     for session in rows:
@@ -3355,6 +3382,9 @@ def _redact_sidebar_session_rows(rows: list[dict]) -> list[dict]:
             item["title"] = _redact_text(item["title"])
         item["attention"] = _session_attention_summary(str(item.get("session_id") or ""))
         safe_rows.append(item)
+    _enrich_rows_with_session_status(safe_rows)
+    for item in safe_rows:
+        item.pop("last_error_at", None)
     return safe_rows
 
 
@@ -8314,6 +8344,14 @@ def handle_post(handler, parsed) -> bool:
         pass
 
     try:
+        from integration.session_status.handlers import try_handle_post as _session_status_try_post
+
+        if _session_status_try_post(handler, parsed, body) is True:
+            return True
+    except ImportError:
+        pass
+
+    try:
         from integration.egress.handlers import try_handle_post as _egress_try_post
 
         if _egress_try_post(handler, parsed, body) is True:
@@ -12126,6 +12164,7 @@ def _prepare_chat_start_session_for_stream(
     s.pending_user_message = msg
     s.pending_attachments = attachments
     s.pending_started_at = started_at if started_at is not None else time.time()
+    s.last_error_at = None
     current_title = getattr(s, "title", None)
     if _is_default_or_empty_session_title(current_title):
         provisional_title = _provisional_title_from_prompt(msg, current_title or "Untitled")
@@ -12139,6 +12178,14 @@ def _prepare_chat_start_session_for_stream(
             s.pending_started_at,
         )
     s.save()
+    try:
+        from integration.config import integration_enabled
+        from integration.session_status.store import advance_read_until
+
+        if integration_enabled():
+            advance_read_until(s.profile, s.session_id, s.pending_started_at)
+    except Exception:
+        logger.debug("failed to advance chat-start read cursor", exc_info=True)
 
 
 def _is_hidden_empty_session(s) -> bool:

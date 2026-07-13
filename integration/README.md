@@ -123,6 +123,25 @@ When integration is enabled, one-shot schedules (`30m`, absolute datetimes, etc.
 
 Cron session materialization also persists stable Session Manifest artifact decisions. Hermes Agent's exact max-iteration summary request may be stored as a `role=user` message, but it continues the current cron invocation rather than opening a new Manifest turn. The materialization hook removes that internal boundary from its cron-only Manifest view, stamps only real cron requests with contiguous keys (`turn:1`, `turn:2`, ...), saves those keys before writing decisions, and the GET Manifest path reuses the same normalized view. Ordinary WebUI sessions and historical cron decisions are unchanged.
 
+### 会话状态与已读游标（`HERMES_INTEGRATION=1`）
+
+`GET /api/sessions` 的每个会话行增加：
+
+- `status`：`error` / `in_progress` / `has_new_messages` / `ready`，优先级依次降低。
+- `is_unread`：最新消息或当前异常是否晚于服务端已读游标。异常已读后仍为 `status=error`，同时 `is_unread=false`。
+
+状态不直接持久化：运行状态来自 Session 的 stream/pending 字段，异常事实来自 Session sidecar 的 `last_error_at`，已读游标集中存放在 `{HERMES_WEBUI_STATE_DIR}/session_status.db`。全局表使用 `(profile, session_id)` 联合主键，避免 profile 间同名会话串读。老会话没有游标时默认已读；列表 GET 不创建或写入数据库。
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| POST | `/api/integration/sessions/mark_read` | 将当前 Profile 的指定会话标记为已读；body 只接受必填 `session_id`，游标由服务端根据当前会话计算 |
+
+```bash
+curl -sS -X POST 'http://127.0.0.1:8787/api/integration/sessions/mark_read' \
+  -H 'Content-Type: application/json' \
+  -d '{"session_id":"abc-123"}'
+```
+
 ### Egress policy (iptables)
 
 This is an **operator feature** that can modify the host firewall. It is **disabled by default**.
@@ -441,7 +460,10 @@ Response includes global `stats`: `{ hub, installed, not_installed, custom }` ac
 ## Upstream seam files (only these should conflict on rebase)
 
 - `server.py` — starts the fork-owned all-profile Gateway coordinator asynchronously; lifecycle logic remains in `integration/gateway_startup/`
-- `api/routes.py` — integration GET/POST dispatch, profiles enrich, static mapping, `__INTEGRATION_SKILLS__`, `__SKILLHUB_ENABLED__`; `GET /api/sessions` calls `_apply_integration_sidebar_session_filters` to drop cron execution rows when `HERMES_INTEGRATION=1`
+- `api/routes.py` — integration GET/POST dispatch, profiles enrich, static mapping, `__INTEGRATION_SKILLS__`, `__SKILLHUB_ENABLED__`; `GET /api/sessions` filters cron execution rows and injects session status fields when `HERMES_INTEGRATION=1`; chat start clears old error state and advances the user's own-message read cursor
+- `api/streaming.py` — provider-error persistence records the current session error timestamp used by `integration/session_status/`
+- `api/models.py` — Session sidecar persists the nullable `last_error_at` fact used to derive list status
+- `api/profiles.py` — profile deletion best-effort removes that profile's global session read cursors
 - `api/session_manifest.py` — after sidecar/state.db merge, cron-only GET normalization delegates to `integration.crons.hooks.normalize_cron_manifest_messages`; ordinary session turn extraction is unchanged
 - `static/index.html` — integration scripts + SkillHub panel markup
 - `static/panels.js` — `HermesProfiles` guard (`loadProfilesPanel`, `toggleProfileDropdown`, `renderProfileDetail`, `renderProfileForm`, `saveProfileForm`)

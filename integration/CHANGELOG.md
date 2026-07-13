@@ -8,6 +8,8 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Added
 
+- **Session status and unread cursors** — `GET /api/sessions` 在 integration 开启时为每行返回 `status`（`error` / `in_progress` / `has_new_messages` / `ready`）与独立 `is_unread`；`POST /api/integration/sessions/mark_read` 由服务端推进当前 Profile 会话的已读游标。游标集中存于 `{HERMES_WEBUI_STATE_DIR}/session_status.db`，以 `(profile, session_id)` 隔离；运行与异常事实仍由 Session sidecar 维护，不持久化派生 status。
+
 - **All-profile Gateway startup** — `server.py` 默认异步确保所有可见 Profile 的 Hermes Gateway 已运行，使各 Profile 的 Cron 在 WebUI 启动后自动恢复。命名 Profile 使用独立 Hermes service，已运行实例会跳过；default 开启 `gateway.multiplex_profiles` 时只启动 default；单 Profile 失败不阻塞 WebUI。可用 `HERMES_WEBUI_START_PROFILE_GATEWAYS=0` 关闭。Gateway lifecycle 现统一解析并验证 Agent 自身 launcher/venv，不再把 Agent 源码通过 `PYTHONPATH` 注入 WebUI/Anaconda Python，修复 `No module named hermes_cli` / `rich`。
 
 - **Direct `server.py` runtime log persistence** — 直接运行 `python server.py` 时，stdout/stderr 会同时输出到终端并落盘到 `{HERMES_WEBUI_STATE_DIR}/server-<port>.log`，主日志按大小轮转（默认 10 MiB，保留 5 份）。`faulthandler` / crash visibility 使用独立 `{HERMES_WEBUI_STATE_DIR}/server-<port>-crash.log`，避免主日志轮转影响 native crash 诊断。`bootstrap.py` 会显式设置 `HERMES_WEBUI_SERVER_LOG_EXTERNAL=1`，继续只使用既有 `bootstrap-<port>.log`，不重复写 `server-<port>.log`。配置见 `integration/README.md`。

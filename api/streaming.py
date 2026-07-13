@@ -6653,6 +6653,7 @@ def _run_agent_streaming(
                             _error_payload,
                             err_type=_classification['type'],
                         )
+                        s.last_error_at = time.time()
                         try:
                             s.save()
                         except Exception:
@@ -7569,6 +7570,7 @@ def _run_agent_streaming(
                     _error_payload,
                     err_type=_classification['type'],
                 )
+                s.last_error_at = time.time()
                 try:
                     s.save()
                 except Exception:

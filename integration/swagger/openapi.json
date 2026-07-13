@@ -184,7 +184,51 @@
           { "name": "end_at", "in": "query", "schema": { "type": "number" }, "description": "按 last_message_at 过滤的上界（Unix 秒，含边界）" },
           { "name": "project", "in": "query", "schema": { "type": "string" }, "description": "按项目过滤" }
         ],
-        "responses": { "200": { "description": "会话列表" } }
+        "responses": {
+          "200": {
+            "description": "会话列表；HERMES_INTEGRATION=1 时每行包含 status 与 is_unread",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "sessions": {
+                      "type": "array",
+                      "items": { "$ref": "#/components/schemas/SessionListRow" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/integration/sessions/mark_read": {
+      "post": {
+        "tags": ["Session"],
+        "summary": "将当前 Profile 的指定会话标记为已读",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/SessionMarkReadRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "已读游标更新成功",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/SessionMarkReadResponse" }
+              }
+            }
+          },
+          "400": { "description": "session_id 缺失" },
+          "404": { "description": "会话不存在或不属于当前 Profile" },
+          "503": { "description": "已读状态数据库暂不可用" }
+        }
       }
     },
     "/api/session": {
@@ -5026,6 +5070,39 @@
 
   "components": {
     "schemas": {
+      "SessionListRow": {
+        "type": "object",
+        "properties": {
+          "session_id": { "type": "string" },
+          "status": {
+            "type": "string",
+            "enum": ["error", "in_progress", "has_new_messages", "ready"],
+            "description": "业务状态，优先级 error > in_progress > has_new_messages > ready"
+          },
+          "is_unread": {
+            "type": "boolean",
+            "description": "最新消息或当前异常是否晚于服务端已读游标"
+          }
+        },
+        "additionalProperties": true
+      },
+      "SessionMarkReadRequest": {
+        "type": "object",
+        "required": ["session_id"],
+        "properties": {
+          "session_id": { "type": "string" }
+        },
+        "additionalProperties": false
+      },
+      "SessionMarkReadResponse": {
+        "type": "object",
+        "required": ["ok", "session_id", "read_until"],
+        "properties": {
+          "ok": { "type": "boolean", "enum": [true] },
+          "session_id": { "type": "string" },
+          "read_until": { "type": "number" }
+        }
+      },
       "McpServerSummary": {
         "type": "object",
         "required": ["name", "transport", "timeout", "connect_timeout", "enabled", "active", "status"],

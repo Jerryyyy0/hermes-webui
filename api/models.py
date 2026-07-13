@@ -970,6 +970,7 @@ class Session:
                  cache_read_tokens: int=0, cache_write_tokens: int=0,
                  personality=None,
                  active_stream_id: str=None,
+                 last_error_at=None,
                  pending_user_message: str=None,
                  pending_attachments=None,
                  pending_started_at=None,
@@ -1027,6 +1028,15 @@ class Session:
         self.cache_write_tokens = cache_write_tokens or 0
         self.personality = personality
         self.active_stream_id = active_stream_id
+        try:
+            parsed_last_error_at = float(last_error_at) if last_error_at is not None else None
+        except (TypeError, ValueError):
+            parsed_last_error_at = None
+        self.last_error_at = (
+            parsed_last_error_at
+            if parsed_last_error_at is not None and parsed_last_error_at >= 0
+            else None
+        )
         self.pending_user_message = pending_user_message
         self.pending_attachments = pending_attachments or []
         self.pending_started_at = pending_started_at
@@ -1109,7 +1119,7 @@ class Session:
             'pinned', 'pinned_at', 'archived', 'project_id', 'profile',
             'input_tokens', 'output_tokens', 'estimated_cost',
             'cache_read_tokens', 'cache_write_tokens',
-            'personality', 'active_stream_id',
+            'personality', 'active_stream_id', 'last_error_at',
             'pending_user_message', 'pending_attachments', 'pending_started_at', 'pending_user_source',
             'compression_anchor_visible_idx', 'compression_anchor_message_key',
             'compression_anchor_summary', 'pre_compression_snapshot',
@@ -1379,6 +1389,7 @@ class Session:
                 1 for message in self.messages if _message_role(message) == 'user'
             ) if isinstance(self.messages, list) else 0,
             'active_stream_id': self.active_stream_id,
+            'last_error_at': self.last_error_at,
             'pending_user_message': self.pending_user_message,
             'has_pending_user_message': has_pending_user_message,
             'is_cli_session': self.is_cli_session,
