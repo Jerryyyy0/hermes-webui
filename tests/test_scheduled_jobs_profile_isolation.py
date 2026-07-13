@@ -405,6 +405,93 @@ def test_streaming_cronjob_wrapper_uses_profile_context_only_for_tool_call(tmp_p
     ]
 
 
+def test_streaming_cronjob_create_persists_and_lists_under_session_profile(tmp_path, monkeypatch):
+    """A named-profile chat create must not write into the default cron store."""
+    import types
+
+    pytest.importorskip("cron.jobs")
+    from api import profiles as p
+    from api import streaming as st
+    from cron.jobs import create_job
+
+    default_home = tmp_path / "hermes"
+    profile_home = default_home / "profiles" / "abc"
+    _write_jobs(default_home, [])
+    _write_jobs(profile_home, [])
+    monkeypatch.setenv("HERMES_HOME", str(default_home))
+    monkeypatch.setattr(p, "_DEFAULT_HERMES_HOME", default_home)
+
+    import cron.jobs as cron_jobs
+
+    cron_jobs.HERMES_DIR = default_home
+    cron_jobs.CRON_DIR = default_home / "cron"
+    cron_jobs.JOBS_FILE = cron_jobs.CRON_DIR / "jobs.json"
+    cron_jobs.OUTPUT_DIR = cron_jobs.CRON_DIR / "output"
+
+    def create_handler(args, **kwargs):
+        return create_job(
+            prompt=args["prompt"],
+            schedule=args["schedule"],
+            name=args.get("name"),
+        )
+
+    class Entry:
+        name = "cronjob"
+        toolset = "cronjob"
+        schema = {"name": "cronjob"}
+        handler = staticmethod(create_handler)
+        check_fn = None
+        requires_env = []
+        is_async = False
+        description = ""
+        emoji = ""
+        max_result_size_chars = None
+        dynamic_schema_overrides = None
+
+    entry = Entry()
+
+    class Registry:
+        def get_entry(self, name):
+            assert name == "cronjob"
+            return entry
+
+        def register(self, **kwargs):
+            entry.handler = kwargs["handler"]
+
+    registry_mod = types.ModuleType("tools.registry")
+    registry_mod.__dict__["registry"] = Registry()
+    monkeypatch.setitem(sys.modules, "tools.registry", registry_mod)
+    monkeypatch.setattr(st, "_STREAMING_CRONJOB_WRAPPER_INSTALLED", False)
+
+    st._install_streaming_cronjob_profile_wrapper()
+    token = st._STREAMING_CRON_PROFILE_HOME.set(str(profile_home))
+    try:
+        created = entry.handler(
+            {"name": "drink-water", "prompt": "drink", "schedule": "1m"}
+        )
+    finally:
+        st._STREAMING_CRON_PROFILE_HOME.reset(token)
+
+    job_id = created["id"]
+    default_payload = json.loads((default_home / "cron" / "jobs.json").read_text())
+    profile_payload = json.loads((profile_home / "cron" / "jobs.json").read_text())
+    assert not any(job.get("id") == job_id for job in default_payload["jobs"])
+    assert any(job.get("id") == job_id for job in profile_payload["jobs"])
+
+    from integration.crons.listing import list_jobs_all_profiles
+
+    profile_rows = [
+        {"name": "default", "path": str(default_home)},
+        {"name": "abc", "path": str(profile_home)},
+    ]
+    with mock.patch("api.profiles.list_profiles_api", return_value=profile_rows):
+        grouped = list_jobs_all_profiles()
+
+    groups = {row["profile"]: row["jobs"] for row in grouped["profiles"]}
+    assert not any(job.get("id") == job_id for job in groups["default"])
+    assert any(job.get("id") == job_id for job in groups["abc"])
+
+
 def test_streaming_cronjob_wrapper_context_survives_threadpool_context_copy(tmp_path, monkeypatch):
     """Lock the cross-thread contextvar contract used by agent tool dispatch.
 
