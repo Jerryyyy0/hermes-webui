@@ -1,4 +1,4 @@
-"""Enrich GET /api/profiles with nested info.json, skills, and memory snapshots."""
+"""Enrich GET /api/profiles with nested profile info."""
 
 from __future__ import annotations
 
@@ -7,8 +7,6 @@ import json
 import logging
 import re
 from pathlib import Path
-
-from integration.profiles.memory_snapshot import load_memory_snapshot
 
 _log = logging.getLogger(__name__)
 
@@ -143,18 +141,6 @@ def _load_info_for_response(profile_path: str) -> dict:
     return out
 
 
-def _list_skills_for_profile(profile_name: str) -> list[dict]:
-    try:
-        from integration.skills import local_skills
-
-        payload = local_skills.list_installed(profile_name)
-        skills = payload.get("skills")
-        return skills if isinstance(skills, list) else []
-    except Exception as exc:
-        _log.debug("skills list failed for profile %s: %s", profile_name, exc)
-        return []
-
-
 def enrich_profiles_response(payload: dict) -> dict:
     profiles = payload.get("profiles")
     if not isinstance(profiles, list):
@@ -163,9 +149,6 @@ def enrich_profiles_response(payload: dict) -> dict:
         if not isinstance(entry, dict):
             continue
         path = str(entry.get("path") or "")
-        name = str(entry.get("name") or "")
         entry["info"] = _load_info_for_response(path)
-        entry["skills"] = _list_skills_for_profile(name) if name else []
-        entry["memory_snapshot"] = load_memory_snapshot(path)
     payload["profiles"] = sort_profiles_by_pin(profiles)
     return payload

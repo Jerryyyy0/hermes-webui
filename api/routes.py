@@ -234,16 +234,16 @@ def _active_profile_config_path() -> Path:
         return _get_config_path()
 
 
-def _get_disabled_skill_names_for_profile() -> set:
-    """Read disabled skill names from the active profile's config.yaml.
+def _get_disabled_skill_names_for_profile(config_path: Path | None = None) -> set:
+    """Read disabled skill names from a profile's config.yaml.
 
     Unlike ``tools.skills_tool._get_disabled_skill_names`` which reads from
-    the process-global ``HERMES_HOME``, this uses ``_get_config_path()`` which
-    resolves against the WebUI's active profile.  Checks
-    ``skills.platform_disabled.webui`` first, falling back to
-    ``skills.disabled``.
+    the process-global ``HERMES_HOME``, callers may provide the selected
+    profile's explicit config path. Without one, this resolves against the
+    active WebUI profile. Checks ``skills.platform_disabled.webui`` first,
+    falling back to ``skills.disabled``.
     """
-    config_path = _active_profile_config_path()
+    config_path = config_path or _active_profile_config_path()
     if not config_path.exists():
         return set()
     try:
@@ -271,7 +271,11 @@ def _normalize_disabled_set(values) -> set:
     return {str(v).strip() for v in values if str(v).strip()}
 
 
-def _skills_list_from_dir(skills_dir: Path, category: str | None = None) -> dict:
+def _skills_list_from_dir(
+    skills_dir: Path,
+    category: str | None = None,
+    config_path: Path | None = None,
+) -> dict:
     """List skills using an explicit local skills directory.
 
     This mirrors ``tools.skills_tool.skills_list`` closely, but keeps the local
@@ -298,7 +302,7 @@ def _skills_list_from_dir(skills_dir: Path, category: str | None = None) -> dict
 
     all_skills = []
     seen_names: set[str] = set()
-    disabled = _get_disabled_skill_names_for_profile()
+    disabled = _get_disabled_skill_names_for_profile(config_path)
     search_dirs = _active_skill_search_dirs(skills_dir)
 
     for scan_dir in search_dirs:
@@ -6651,7 +6655,16 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/skills":
         qs = parse_qs(parsed.query)
         category = qs.get("category", [None])[0]
-        data = _skills_list_from_dir(_active_skills_dir(), category=category)
+        profile_name = str(qs.get("profile", [""])[0] or "").strip()
+        skills_dir = _active_skills_dir()
+        config_path = None
+        if profile_name:
+            from api.profiles import get_hermes_home_for_profile
+
+            profile_home = get_hermes_home_for_profile(profile_name)
+            skills_dir = profile_home / "skills"
+            config_path = profile_home / "config.yaml"
+        data = _skills_list_from_dir(skills_dir, category=category, config_path=config_path)
         return j(handler, {"skills": data.get("skills", [])})
 
     if parsed.path == "/api/skills/usage":

@@ -21,9 +21,6 @@ def _profile_row(name: str, path: Path, *, is_default: bool = False) -> dict:
         "provider": None,
         "has_env": False,
         "visible": True,
-        "skill_count": 0,
-        "enabled_skills": 0,
-        "total_skills": 0,
     }
 
 
@@ -47,7 +44,6 @@ def _profile_patches(rows):
     return (
         patch("api.profiles.list_profiles_api", return_value=rows),
         patch("api.profiles.get_active_profile_name", return_value="default"),
-        patch("integration.skills.local_skills.list_installed", return_value={"skills": []}),
     )
 
 
@@ -55,7 +51,7 @@ def test_pin_and_unpin_writes_info_json(tmp_path):
     rows = _fake_profiles(tmp_path)
     target = next(r for r in rows if r["name"] == "alpha")
 
-    with _profile_patches(rows)[0], _profile_patches(rows)[1], _profile_patches(rows)[2]:
+    with _profile_patches(rows)[0], _profile_patches(rows)[1]:
         out = set_profile_pinned("alpha", True)
 
     info_path = Path(target["path"]) / "info.json"
@@ -68,7 +64,7 @@ def test_pin_and_unpin_writes_info_json(tmp_path):
     assert "pinned" not in out["profile"]
     assert "pin_order" not in out["profile"]
 
-    with _profile_patches(rows)[0], _profile_patches(rows)[1], _profile_patches(rows)[2]:
+    with _profile_patches(rows)[0], _profile_patches(rows)[1]:
         set_profile_pinned("alpha", False)
 
     assert not info_path.exists()
@@ -88,8 +84,7 @@ def test_enrich_sorts_default_then_pinned_then_alpha(tmp_path):
     )
 
     payload = {"profiles": list(rows), "active": "default"}
-    with patch("integration.profiles.enrich._list_skills_for_profile", return_value=[]):
-        out = enrich_profiles_response(payload)
+    out = enrich_profiles_response(payload)
 
     names = [p["name"] for p in out["profiles"]]
     assert names == ["gamma", "beta", "default", "alpha"]
@@ -107,7 +102,7 @@ def test_pin_limit_rejects_sixth(tmp_path):
     all_rows = rows + extra
 
     non_default = [r for r in all_rows if r["name"] != "default"]
-    with _profile_patches(all_rows)[0], _profile_patches(all_rows)[1], _profile_patches(all_rows)[2]:
+    with _profile_patches(all_rows)[0], _profile_patches(all_rows)[1]:
         for row in non_default[:PROFILE_PIN_LIMIT]:
             set_profile_pinned(row["name"], True)
         with pytest.raises(ValueError, match="Up to 5 profiles can be pinned"):
@@ -119,7 +114,7 @@ def test_new_pin_goes_to_top(tmp_path):
     alpha = next(r for r in rows if r["name"] == "alpha")
     beta = next(r for r in rows if r["name"] == "beta")
 
-    with _profile_patches(rows)[0], _profile_patches(rows)[1], _profile_patches(rows)[2]:
+    with _profile_patches(rows)[0], _profile_patches(rows)[1]:
         set_profile_pinned("alpha", True)
         set_profile_pinned("beta", True)
 
@@ -129,8 +124,7 @@ def test_new_pin_goes_to_top(tmp_path):
     assert alpha_info["pin_order"] == 2
 
     payload = {"profiles": list(rows), "active": "default"}
-    with patch("integration.profiles.enrich._list_skills_for_profile", return_value=[]):
-        out = enrich_profiles_response(payload)
+    out = enrich_profiles_response(payload)
     names = [p["name"] for p in out["profiles"]]
     assert names[:2] == ["beta", "alpha"]
 
@@ -138,7 +132,7 @@ def test_new_pin_goes_to_top(tmp_path):
 def test_pin_default_allowed(tmp_path):
     rows = _fake_profiles(tmp_path)
     default = next(r for r in rows if r["name"] == "default")
-    with _profile_patches(rows)[0], _profile_patches(rows)[1], _profile_patches(rows)[2]:
+    with _profile_patches(rows)[0], _profile_patches(rows)[1]:
         out = set_profile_pinned("default", True)
 
     info_path = Path(default["path"]) / "info.json"
@@ -163,8 +157,7 @@ def test_enrich_exposes_pin_fields_in_info(tmp_path):
         encoding="utf-8",
     )
     payload = {"profiles": list(rows), "active": "default"}
-    with patch("integration.profiles.enrich._list_skills_for_profile", return_value=[]):
-        out = enrich_profiles_response(payload)
+    out = enrich_profiles_response(payload)
 
     entry = next(p for p in out["profiles"] if p["name"] == "alpha")
     assert entry["info"]["pinned"] is True

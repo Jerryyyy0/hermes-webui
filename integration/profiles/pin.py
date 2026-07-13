@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from integration.profiles.memory_snapshot import load_memory_snapshot
 from integration.profiles.write import (
     _enriched_profile_entry,
     _read_info_file,
@@ -66,5 +65,4 @@ def set_profile_pinned(name: str, pinned: bool) -> dict:
             info_path.unlink()
 
     profile = _enriched_profile_entry(name, profile_path)
-    profile["memory_snapshot"] = load_memory_snapshot(str(profile_path))
     return {"ok": True, "profile": profile}

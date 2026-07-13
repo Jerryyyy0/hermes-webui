@@ -216,9 +216,21 @@
     return opts.join('');
   }
 
-  function profileRecord(name) {
-    const target = String(name || '').trim();
-    return (_profilesCache || []).find(p => String(p?.name || '').trim() === target) || null;
+  const _profileSkillsCache = new Map();
+
+  async function ensureProfileSkills(profile) {
+    const name = String(profile || '').trim();
+    if (!name) return [];
+    if (_profileSkillsCache.has(name)) return _profileSkillsCache.get(name);
+    try {
+      const data = await api(`/api/skills?profile=${encodeURIComponent(name)}`);
+      const skills = Array.isArray(data?.skills) ? data.skills : [];
+      _profileSkillsCache.set(name, skills);
+      return skills;
+    } catch (_) {
+      _profileSkillsCache.set(name, []);
+      return [];
+    }
   }
 
   function skillName(skill) {
@@ -227,9 +239,8 @@
     return String(skill.name || skill.dir_name || '').trim();
   }
 
-  function skillsForProfile(profile) {
-    const record = profileRecord(profile);
-    const skills = Array.isArray(record?.skills) ? record.skills : [];
+  async function skillsForProfile(profile) {
+    const skills = await ensureProfileSkills(profile);
     return skills
       .map(skill => ({ raw: skill, name: skillName(skill) }))
       .filter(skill => skill.name);
@@ -263,14 +274,16 @@
     const profileSelect = $('integrationCronFormProfile');
     if (!search || !dropdown) return;
     if (isEdit) return;
-    search.oninput = () => {
+    search.oninput = async () => {
       const profile = (profileSelect?.value || '').trim();
       const q = search.value.trim().toLowerCase();
       if (!profile || !q) {
         dropdown.style.display = 'none';
         return;
       }
-      const matches = skillsForProfile(profile)
+      const skills = await skillsForProfile(profile);
+      if (q !== search.value.trim().toLowerCase() || profile !== (profileSelect?.value || '').trim()) return;
+      const matches = skills
         .filter(skill => {
           const raw = skill.raw || {};
           const category = typeof raw === 'object' ? String(raw.category || '') : '';

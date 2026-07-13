@@ -11,7 +11,7 @@ export SKILLHUB_URL=http://127.0.0.1:8000   # optional; SkillHub market only (se
 
 `HERMES_INTEGRATION=1` enables:
 
-- **Profile enrich** — `GET /api/profiles` adds nested `info` (from `info.json`) and full `skills` array per profile. UI via `hermes_profiles.js` (logo picker, edit, create).
+- **Profile enrich** — `GET /api/profiles` adds nested `info` from `info.json`. UI via `hermes_profiles.js` (logo picker, edit, create).
 - **Cross-profile cron** — Cron Hub and grouped cron APIs across profiles.
 - **SkillHub** — UI and `/api/skillhub/*` routes are active only when `SKILLHUB_URL` is also set.
 - **Egress policy (iptables)** — gated API to apply iptables open/whitelist policies (see below). **Off by default**; requires `HERMES_EGRESS_POLICY_ENABLED=1`.
@@ -33,14 +33,12 @@ Implementation: [`integration/request_logging/`](request_logging/).
 
 ### Profile enrich (`info.json`)
 
-When integration is enabled, `GET /api/profiles` enriches each entry:
+When integration is enabled, `GET /api/profiles` enriches each entry with profile presentation metadata. Skill lists and memory contents are intentionally excluded; callers use the dedicated skills and memory APIs instead.
 
 | Response field | Source |
 |----------------|--------|
 | `info` | `{profile.path}/info.json` (missing file → `{}`) |
 | `info.logo` | Data URI base64 in info.json; PNG/JPEG/GIF/WebP/SVG, invalid/over 10MB omitted from response |
-| `skills` | Installed skills for that profile (`local_skills.list_installed`) |
-| `memory_snapshot` | `{path}/memories/MEMORY.md`, `USER.md`, and `{path}/SOUL.md` (same fields as `GET /api/memory`, redacted) |
 | `info.pinned` | `info.json` → `pinned: true`（仅置顶时返回） |
 | `info.pin_order` | `info.json` → 置顶组内排序（越小越靠前；仅置顶时返回） |
 

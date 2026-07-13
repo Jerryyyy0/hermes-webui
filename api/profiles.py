@@ -1842,7 +1842,6 @@ def _build_profile_rows_fast() -> list | None:
             gateway_running = _check_gateway_running(home)
         except Exception:
             gateway_running = False
-        enabled_count, total_count = _get_profile_skills_stats(home)
         return {
             'name': name,
             'path': str(home),
@@ -1853,9 +1852,6 @@ def _build_profile_rows_fast() -> list | None:
             'provider': provider,
             'has_env': (home / '.env').exists(),
             'visible': _profile_visible_from_meta(home),
-            'skill_count': enabled_count,
-            'enabled_skills': enabled_count,
-            'total_skills': total_count,
         }
 
     rows: list = []
@@ -1910,7 +1906,6 @@ def list_profiles_api() -> list:
                 except OSError:
                     same_home = False
                 if p.name == active and same_home:
-                    enabled_count, total_count = _get_profile_skills_stats(p.path)
                     return [{
                         'name': p.name,
                         'path': str(p.path),
@@ -1921,14 +1916,10 @@ def list_profiles_api() -> list:
                         'provider': p.provider,
                         'has_env': p.has_env,
                         'visible': _profile_visible_from_meta(p.path),
-                        'skill_count': enabled_count,
-                        'enabled_skills': enabled_count,
-                        'total_skills': total_count,
                     }]
         except (ImportError, OSError, PermissionError):
             pass
         # Fallback: construct profile dict with actual active name and hermes_home path
-        enabled_count, total_count = _get_profile_skills_stats(hermes_home)
         return [{
             'name': active,
             'path': str(hermes_home),
@@ -1939,9 +1930,6 @@ def list_profiles_api() -> list:
             'provider': None,
             'has_env': (hermes_home / '.env').exists(),
             'visible': _profile_visible_from_meta(hermes_home),
-            'skill_count': enabled_count,
-            'enabled_skills': enabled_count,
-            'total_skills': total_count,
         }]
 
     # Single-flight the build (#5364): hold the cache lock across the row build
@@ -1975,7 +1963,6 @@ def list_profiles_api() -> list:
         active = get_active_profile_name()
         result = []
         for p in infos:
-            enabled_count, total_count = _get_profile_skills_stats(p.path)
             result.append({
                 'name': p.name,
                 'path': str(p.path),
@@ -1986,9 +1973,6 @@ def list_profiles_api() -> list:
                 'provider': p.provider,
                 'has_env': p.has_env,
                 'visible': _profile_visible_from_meta(p.path),
-                'skill_count': enabled_count,
-                'enabled_skills': enabled_count,
-                'total_skills': total_count,
             })
         return result
 
@@ -2013,7 +1997,6 @@ def _profile_visible_from_meta(profile_path: Path) -> bool:
 
 def _default_profile_dict() -> dict:
     """Fallback profile dict when hermes_cli is not importable."""
-    enabled_count, compatible_count = _get_profile_skills_stats(_DEFAULT_HERMES_HOME)
     return {
         'name': 'default',
         'path': str(_DEFAULT_HERMES_HOME),
@@ -2024,9 +2007,6 @@ def _default_profile_dict() -> dict:
         'provider': None,
         'has_env': (_DEFAULT_HERMES_HOME / '.env').exists(),
         'visible': True,
-        'skill_count': enabled_count,
-        'enabled_skills': enabled_count,
-        'total_skills': compatible_count,
     }
 
 
@@ -2462,9 +2442,6 @@ def create_profile_api(name: str, clone_from: str = None,
         'model': None,
         'provider': None,
         'has_env': (profile_path / '.env').exists(),
-        'skill_count': 0,
-        'enabled_skills': 0,
-        'total_skills': 0,
     }
 
 

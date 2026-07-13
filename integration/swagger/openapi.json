@@ -1670,7 +1670,7 @@
       "get": {
         "tags": ["Profiles"],
         "summary": "获取 Profile 列表",
-        "description": "当 `HERMES_INTEGRATION=1` 时，每条 profile 附加嵌套 `info`（来自 info.json）、完整 `skills` 数组，以及 `memory_snapshot`（MEMORY.md / USER.md / SOUL.md，字段与 GET /api/memory 一致，含脱敏）。",
+        "description": "返回 Profile 基础运行时信息；当 `HERMES_INTEGRATION=1` 时，每条 profile 附加来自 info.json 的嵌套 `info`。响应不包含技能或记忆信息。",
         "responses": {
           "200": {
             "description": "Profile 列表",
@@ -5626,7 +5626,7 @@
       },
       "ProfileListItem": {
         "type": "object",
-        "description": "Profile 运行时字段由 WebUI core 提供；integration 启用时附加 info、skills 与 memory_snapshot。",
+        "description": "Profile 运行时字段由 WebUI core 提供；integration 启用时附加 info。响应不包含技能或记忆信息。",
         "properties": {
           "name":             { "type": "string" },
           "path":             { "type": "string" },
@@ -5636,7 +5636,6 @@
           "model":            { "type": "string" },
           "provider":         { "type": "string" },
           "has_env":          { "type": "boolean" },
-          "skill_count":      { "type": "integer" },
           "info": {
             "type": "object",
             "description": "profile/info.json 内容；logo 为 PNG/JPEG/GIF/WebP/SVG Data URI base64，单图 raw ≤ 10MB；置顶字段 pinned/pin_order 亦在此返回",
@@ -5648,52 +5647,7 @@
               "pin_order":    { "type": "integer", "description": "置顶组内排序，越小越靠前；新置顶为 1 并顺延其余；仅 pinned=true 时返回" }
             },
             "additionalProperties": true
-          },
-          "skills": {
-            "type": "array",
-            "items": { "$ref": "#/components/schemas/ProfileSkillItem" }
-          },
-          "memory_snapshot": {
-            "$ref": "#/components/schemas/ProfileMemorySnapshot",
-            "description": "该 profile HERMES_HOME 下的 MEMORY.md / USER.md / SOUL.md（与 GET /api/memory 字段一致，不含 external_notes_enabled）"
           }
-        },
-        "additionalProperties": true
-      },
-      "ProfileMemorySnapshot": {
-        "type": "object",
-        "description": "单条 profile 的记忆文件快照；内容经 api_redact_enabled 脱敏。",
-        "properties": {
-          "memory":       { "type": "string", "description": "MEMORY.md 正文" },
-          "user":         { "type": "string", "description": "USER.md 正文" },
-          "soul":         { "type": "string", "description": "SOUL.md 正文" },
-          "memory_path":  { "type": "string" },
-          "user_path":    { "type": "string" },
-          "soul_path":    { "type": "string" },
-          "memory_mtime": { "type": "number", "nullable": true },
-          "user_mtime":   { "type": "number", "nullable": true },
-          "soul_mtime":   { "type": "number", "nullable": true }
-        },
-        "required": [
-          "memory", "user", "soul",
-          "memory_path", "user_path", "soul_path",
-          "memory_mtime", "user_mtime", "soul_mtime"
-        ]
-      },
-      "ProfileSkillItem": {
-        "type": "object",
-        "properties": {
-          "name":          { "type": "string" },
-          "full_name":     { "type": "string" },
-          "description":   { "type": "string" },
-          "category":      { "type": "string" },
-          "version":       { "type": "string" },
-          "author":        { "type": "string" },
-          "hub_installed": { "type": "boolean" },
-          "can_delete":    { "type": "boolean" },
-          "install_name":  { "type": "string" },
-          "installed":     { "type": "boolean" },
-          "disabled":      { "type": "boolean" }
         },
         "additionalProperties": true
       },

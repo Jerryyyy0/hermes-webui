@@ -167,21 +167,6 @@
     }
   }
 
-  function skillsDetailHtml(p) {
-    const skills = Array.isArray(p.skills) ? p.skills : [];
-    if (!skills.length) return '';
-    const rows = skills.map(s => {
-      const disabled = s.disabled ? ` <span class="detail-badge">${esc('disabled')}</span>` : '';
-      const desc = s.description ? `<div class="profile-skill-desc">${esc(s.description)}</div>` : '';
-      return `<div class="profile-skill-row"><div class="profile-skill-name">${esc(s.name || '')}${disabled}</div>${desc}</div>`;
-    }).join('');
-    return `
-      <div class="detail-card" style="margin-top:12px">
-        <div class="detail-card-title">Skills</div>
-        ${rows}
-      </div>`;
-  }
-
   async function loadProfilesPanel() {
     const panel = $('profilesPanel');
     if (!panel) return;
@@ -220,7 +205,6 @@
         const meta = [];
         if (p.model) meta.push(p.model.split('/').pop());
         if (p.provider) meta.push(p.provider);
-        if (p.skill_count) meta.push(typeof t === 'function' ? t('profile_skill_count', p.skill_count) : `${p.skill_count} skills`);
         const gwDot = p.gateway_running
           ? `<span class="profile-opt-badge running"></span>`
           : `<span class="profile-opt-badge stopped"></span>`;
@@ -274,7 +258,6 @@
       const { title, sub } = profileTitle(p);
       const meta = [];
       if (p.model) meta.push(p.model.split('/').pop());
-      if (p.skill_count) meta.push(typeof t === 'function' ? t('profile_skill_count', p.skill_count) : String(p.skill_count));
       const gwDot = `<span class="profile-opt-badge ${p.gateway_running ? 'running' : 'stopped'}"></span>`;
       const checkmark = p.name === active ? ' <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--link)" stroke-width="3" style="vertical-align:-1px"><polyline points="20 6 9 17 4 12"/></svg>' : '';
       const defaultBadge = p.is_default ? ` <span style="opacity:.5;font-weight:400">${esc(typeof t === 'function' ? t('profile_default_label') : 'default')}</span>` : '';
@@ -349,7 +332,6 @@
     if (p.provider) rows.push(`<div class="detail-row"><div class="detail-row-label">Provider</div><div class="detail-row-value">${esc(p.provider)}</div></div>`);
     if (p.base_url) rows.push(`<div class="detail-row"><div class="detail-row-label">Base URL</div><div class="detail-row-value"><code>${esc(p.base_url)}</code></div></div>`);
     rows.push(`<div class="detail-row"><div class="detail-row-label">API key</div><div class="detail-row-value">${p.has_env ? esc(typeof t === 'function' ? t('profile_api_keys_configured') : 'Configured') : '<span style="color:var(--muted)">Not configured</span>'}</div></div>`);
-    if (typeof p.skill_count === 'number') rows.push(`<div class="detail-row"><div class="detail-row-label">Skills</div><div class="detail-row-value">${esc(typeof t === 'function' ? t('profile_skill_count', p.skill_count) : String(p.skill_count))}</div></div>`);
     if (p.default_workspace) rows.push(`<div class="detail-row"><div class="detail-row-label">Default space</div><div class="detail-row-value"><code>${esc(p.default_workspace)}</code></div></div>`);
     const headerLogo = logoImg(p, 'profile-detail-logo');
     const headerBlock = (headerLogo || sub)
@@ -368,7 +350,6 @@
         ${descBlock}
         ${rows.join('')}
       </div>
-      ${skillsDetailHtml(p)}
     </div>`;
     body.style.display = '';
     if (empty) empty.style.display = 'none';

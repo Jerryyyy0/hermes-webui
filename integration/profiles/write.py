@@ -52,13 +52,6 @@ def _enriched_profile_entry(name: str, profile_path: Path) -> dict:
             base = dict(p)
             break
     base["info"] = _load_info_for_response(str(profile_path))
-    try:
-        from integration.skills import local_skills
-
-        payload = local_skills.list_installed(name)
-        base["skills"] = payload.get("skills") or []
-    except Exception:
-        base["skills"] = []
     base["is_active"] = name == active
     return base
 

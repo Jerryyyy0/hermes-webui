@@ -29,12 +29,10 @@ def test_save_profile_info_display_and_preset(tmp_path):
     preset_id = list_logo_presets()["presets"][0]["id"]
 
     def fake_list():
-        return [{"name": "work", "path": str(profile_dir), "skill_count": 0}]
+        return [{"name": "work", "path": str(profile_dir)}]
 
     with patch("api.profiles.list_profiles_api", fake_list), patch(
         "api.profiles.get_active_profile_name", return_value="work"
-    ), patch(
-        "integration.skills.local_skills.list_installed", return_value={"skills": []}
     ):
         out = save_profile_info(
             "work",
@@ -55,7 +53,7 @@ def test_save_profile_info_mutually_exclusive(tmp_path):
     profile_dir.mkdir()
 
     def fake_list():
-        return [{"name": "x", "path": str(profile_dir), "skill_count": 0}]
+        return [{"name": "x", "path": str(profile_dir)}]
 
     with patch("api.profiles.list_profiles_api", fake_list):
         with pytest.raises(ValueError, match="mutually exclusive"):
@@ -74,12 +72,10 @@ def test_save_remove_logo(tmp_path):
     )
 
     def fake_list():
-        return [{"name": "work", "path": str(profile_dir), "skill_count": 0}]
+        return [{"name": "work", "path": str(profile_dir)}]
 
     with patch("api.profiles.list_profiles_api", fake_list), patch(
         "api.profiles.get_active_profile_name", return_value="work"
-    ), patch(
-        "integration.skills.local_skills.list_installed", return_value={"skills": []}
     ):
         save_profile_info("work", {"remove_logo": True})
 

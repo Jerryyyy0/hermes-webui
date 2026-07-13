@@ -134,7 +134,7 @@ X-Hermes-CSRF-Token: <csrf token>
 
 ### 4.2 GET `/api/profiles`
 
-加载 Profile 列表，用于 Cron Hub 的筛选下拉、新建任务 Profile 下拉，以及按所选 Profile 展示可选 skills。
+加载 Profile 列表，用于 Cron Hub 的筛选下拉和新建任务 Profile 下拉。
 
 响应示例：
 
@@ -147,7 +147,7 @@ X-Hermes-CSRF-Token: <csrf token>
 }
 ```
 
-integration 开启后，Profile 条目可能包含 `info`、`skills`、`memory_snapshot` 等扩展字段。Cron Hub 依赖 `name` 渲染 Profile 下拉，并在新建任务时读取所选 Profile 的 `skills` 作为技能选择器数据源。
+integration 开启后，Profile 条目可能包含 `info` 扩展字段。`/api/profiles` 不返回技能或记忆信息；Cron Hub 仅依赖 `name` 渲染 Profile 下拉。
 
 ### 4.3 GET `/api/crons/history`
 
@@ -721,7 +721,7 @@ WebUI 后仍可保留未读游标。
 
 **Cron Hub 差异**：
 
-- 创建表单的 skills 来自所选 Profile 的 `GET /api/profiles` 扩展数据，不单独调用 `GET /api/skills`。
+- 创建表单按所选 Profile 请求 `GET /api/skills?profile=<name>`，不再从 `GET /api/profiles` 读取技能数据。
 - `POST /api/integration/crons/create` 支持 body 中的 `skills`；编辑已有任务时 skill 选择器 disabled（skills 创建后不可改）。
 
 ## 7. 与 Tasks 面板接口差异
@@ -736,7 +736,7 @@ WebUI 后仍可保留未读游标。
 | 暂停 / 恢复 | `POST /api/integration/crons/pause|resume` | `POST /api/crons/pause|resume` |
 | 历史 / 输出 | `profile` 指定任务 Profile | 当前活跃 Profile |
 | 投递渠道选项 | 表单硬编码 | `GET /api/crons/delivery-options` |
-| Skills 选择 | `GET /api/profiles` 扩展数据（创建时） | `GET /api/skills`（创建时） |
+| Skills 选择 | `GET /api/skills?profile=<name>`（创建时） | `GET /api/skills`（创建时） |
 | 手动运行状态 | 不轮询 status | `GET /api/crons/status` |
 | Gateway 提示 | 不展示 | `GET /api/gateway/status` |
 | 运行输出读取 | 仅 `history` 元数据 | `history` + `run`（Tasks） |

@@ -16,6 +16,8 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Changed
 
+- **Profile list response minimization** — `GET /api/profiles` no longer returns `skills`, `skill_count`, `enabled_skills`, `total_skills`, or `memory_snapshot`. Profile UI keeps runtime and `info.json` metadata only; Cron Hub now loads a selected Profile's skills on demand through `GET /api/skills?profile=<name>`.
+
 - **Knowledge base upload_docs raw passthrough** — `POST /api/integration/knowledge_base/upload_docs` now forwards the incoming multipart body and `Content-Type` to downstream `upload_docs` unchanged. WebUI no longer parses/rebuilds multipart (fixes multi-file uploads where duplicate `files` parts were dropped), does not validate form fields locally, and does not inject `chunkSize`/`chunkOverlap` defaults or a WebUI-side upload size cap. Transport errors only: invalid `Content-Length`, incomplete body, downstream unreachable (502).
 
 ### Added

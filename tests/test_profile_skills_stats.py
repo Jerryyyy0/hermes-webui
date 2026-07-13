@@ -40,8 +40,8 @@ def test_get_profile_skills_stats(tmp_path):
     assert compatible == 2
 
 @requires_agent_modules
-def test_list_profiles_api_contains_formatted_skills(monkeypatch, tmp_path):
-    """list_profiles_api() formats skill counts for each profile.
+def test_list_profiles_api_omits_skill_metadata(monkeypatch, tmp_path):
+    """list_profiles_api() does not expose skill metadata for each profile.
 
     Drives the fast path (``_build_profile_rows_fast``), which discovers
     profiles via the cheap upstream helpers and skips the alias scan, so this
@@ -80,15 +80,10 @@ def test_list_profiles_api_contains_formatted_skills(monkeypatch, tmp_path):
     assert "default" in by_name
     assert "fintech" in by_name
 
-    # backward-compatible skill_count as an integer:
-    assert by_name["default"]["skill_count"] == 1
-    assert by_name["fintech"]["skill_count"] == 1
-
-    # new enabled_skills and total_skills integer fields:
-    assert by_name["default"]["enabled_skills"] == 1
-    assert by_name["default"]["total_skills"] == 2
-    assert by_name["fintech"]["enabled_skills"] == 1
-    assert by_name["fintech"]["total_skills"] == 3
+    for entry in by_name.values():
+        assert "skill_count" not in entry
+        assert "enabled_skills" not in entry
+        assert "total_skills" not in entry
 
     # the base home is surfaced as the default profile
     assert by_name["default"]["is_default"] is True
