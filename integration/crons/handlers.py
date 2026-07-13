@@ -224,7 +224,13 @@ def _handle_run(handler, body):
 
     _mark_cron_running(body["job_id"])
     storage_home = get_hermes_home_for_profile(profile)
-    job = {**job, "profile": profile}
+    from integration.crons.execution_model import prepare_cron_hub_execution_job
+
+    job = prepare_cron_hub_execution_job(
+        {**job, "profile": profile},
+        profile,
+        storage_home,
+    )
     execution_home = storage_home
     threading.Thread(
         target=_run_cron_tracked,

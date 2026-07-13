@@ -362,6 +362,8 @@ WebUI 后仍可保留未读游标。
 }
 ```
 
+未提交任务级 `model` 时，创建接口仍会保存任务；具体模型由 Hermes Agent 在执行时按任务覆盖、运行环境和所选 Profile 的 `config.yaml` 默认值解析，与原生 `/api/crons` 一致。
+
 ### 5.2 POST `/api/integration/crons/update`
 
 更新指定 `profile` 下的任务。Cron Hub 不支持把任务迁移到另一个 Profile；`profile` 必须指向该任务当前所在的 Profile。
@@ -401,7 +403,7 @@ WebUI 后仍可保留未读游标。
 }
 ```
 
-任务不存在时返回 404。
+任务不存在时返回 404。更新接口不预检模型可用性，模型解析由实际执行阶段负责。
 
 ### 5.3 POST `/api/integration/crons/run`
 
@@ -437,7 +439,7 @@ WebUI 后仍可保留未读游标。
 }
 ```
 
-Cron Hub 当前不会像 Tasks 面板一样轮询 `/api/crons/status`，运行完成状态主要依赖全局 `/api/crons/recent` 轮询刷新。
+手动运行接口启动后台线程并返回 `running`。执行模型优先使用任务覆盖、运行环境或 Profile 配置；对于未固定 `provider`/`model` 的任务，`POST /api/integration/crons/run` 将当前 Profile 的模型与 Provider 注入本次执行副本，并清除该副本的创建时推理快照，表示本次手动运行接受当前配置；Profile 未配置模型时，再按该 Profile 的 `/api/models` 目录顺序选取第一个模型；命名 Profile 仍无候选时，继续回退到 root/default Profile 的当前推理配置或模型目录首项。上述修改均不写入 `jobs.json`。原生 `/api/crons/run` 和自动 scheduler 不使用此兜底。模型发现为空或失败时，该次运行仍会异步失败并写入运行历史。Cron Hub 当前不会像 Tasks 面板一样轮询 `/api/crons/status`，运行完成状态主要依赖全局 `/api/crons/recent` 轮询刷新。
 
 ### 5.4 POST `/api/integration/crons/pause`
 

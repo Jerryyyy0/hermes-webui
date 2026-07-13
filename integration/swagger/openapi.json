@@ -820,7 +820,7 @@
             }
           }
         },
-        "responses": { "200": { "description": "{ ok, profile, job }" }, "400": { "description": "校验失败" } }
+        "responses": { "200": { "description": "{ ok, profile, job }" }, "400": { "description": "请求校验失败" } }
       }
     },
     "/api/integration/crons/update": {
@@ -870,7 +870,7 @@
     "/api/integration/crons/run": {
       "post": {
         "tags": ["IntegrationCrons"],
-        "summary": "在指定 profile 下手动运行任务",
+        "summary": "在指定 profile 下手动运行任务（未固定任务使用当前 Profile 推理配置，缺少模型时使用目录首项）",
         "requestBody": {
           "required": true,
           "content": {
@@ -886,7 +886,7 @@
             }
           }
         },
-        "responses": { "200": { "description": "running 或 already_running" } }
+        "responses": { "200": { "description": "running 或 already_running" }, "404": { "description": "任务不存在" } }
       }
     },
     "/api/integration/workspace/files": {
