@@ -7,6 +7,7 @@ import types
 
 import api.gateway_restart as gateway_restart
 import api.routes as routes
+from api.agent_cli_runtime import AgentCliInvocation
 
 
 class MockPopen:
@@ -78,7 +79,7 @@ def test_restart_active_profile_gateway_success_uses_active_profile_home(monkeyp
     gateway_restart._GATEWAY_RESTART_LOCK = threading.Lock()
     called = {}
 
-    def fake_popen(args, stdout=None, stderr=None, text=True, env=None):
+    def fake_popen(args, stdout=None, stderr=None, text=True, env=None, cwd=None):
         called["args"] = args
         called["env"] = env
         return MockPopen(
@@ -89,7 +90,11 @@ def test_restart_active_profile_gateway_success_uses_active_profile_home(monkeyp
         )
 
     monkeypatch.setattr(gateway_restart, "get_active_hermes_home", lambda: "/mock/hermes/home")
-    monkeypatch.setattr(gateway_restart.shutil, "which", lambda cmd: "/mock/bin/hermes")
+    monkeypatch.setattr(
+        gateway_restart,
+        "resolve_agent_cli_runtime",
+        lambda: AgentCliInvocation(("/mock/bin/hermes",), "/safe/home", {}, "launcher"),
+    )
     monkeypatch.setattr(gateway_restart.subprocess, "Popen", fake_popen)
 
     result = gateway_restart.restart_active_profile_gateway()
@@ -105,11 +110,15 @@ def test_restart_active_profile_gateway_failure_preserves_empty_output_contract(
     gateway_restart._GATEWAY_RESTART_LOCK = threading.Lock()
 
     monkeypatch.setattr(gateway_restart, "get_active_hermes_home", lambda: "/mock/hermes/home")
-    monkeypatch.setattr(gateway_restart.shutil, "which", lambda cmd: "/mock/bin/hermes")
+    monkeypatch.setattr(
+        gateway_restart,
+        "resolve_agent_cli_runtime",
+        lambda: AgentCliInvocation(("/mock/bin/hermes",), "/safe/home", {}, "launcher"),
+    )
     monkeypatch.setattr(
         gateway_restart.subprocess,
         "Popen",
-        lambda args, stdout=None, stderr=None, text=True, env=None: MockPopen(
+        lambda args, stdout=None, stderr=None, text=True, env=None, cwd=None: MockPopen(
             args,
             returncode=7,
             env=env,
@@ -133,7 +142,11 @@ def test_restart_active_profile_gateway_timeout_releases_lock_after_background_w
     )
 
     monkeypatch.setattr(gateway_restart, "get_active_hermes_home", lambda: "/mock/hermes/home")
-    monkeypatch.setattr(gateway_restart.shutil, "which", lambda cmd: "/mock/bin/hermes")
+    monkeypatch.setattr(
+        gateway_restart,
+        "resolve_agent_cli_runtime",
+        lambda: AgentCliInvocation(("/mock/bin/hermes",), "/safe/home", {}, "launcher"),
+    )
     monkeypatch.setattr(gateway_restart.subprocess, "Popen", lambda *args, **kwargs: proc)
     monkeypatch.setattr(gateway_restart.threading, "Thread", InlineThread)
 

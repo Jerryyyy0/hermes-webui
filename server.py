@@ -715,6 +715,20 @@ def main() -> None:
     SESSION_DIR.mkdir(parents=True, exist_ok=True)
     DEFAULT_WORKSPACE.mkdir(parents=True, exist_ok=True)
 
+    def _ensure_profile_gateways_safe() -> None:
+        try:
+            from integration.gateway_startup import ensure_all_profile_gateways
+
+            ensure_all_profile_gateways()
+        except Exception as e:
+            print(f'[!!] WARNING: Profile gateway startup failed: {e}', flush=True)
+
+    threading.Thread(
+        target=_ensure_profile_gateways_safe,
+        name="profile-gateway-startup",
+        daemon=True,
+    ).start()
+
     try:
         from api.gateway_watcher import start_watcher
 

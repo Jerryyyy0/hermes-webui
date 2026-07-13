@@ -4,29 +4,15 @@ from __future__ import annotations
 
 import logging
 import os
-import shutil
 import subprocess
-import sys
 import threading
-from pathlib import Path
 
+from api.agent_cli_runtime import resolve_agent_cli_runtime
 from api.profiles import get_active_hermes_home
 
 logger = logging.getLogger(__name__)
 
 _GATEWAY_RESTART_LOCK = threading.Lock()
-
-
-def _resolve_hermes_command() -> str:
-    """Resolve the CLI path used for active-profile gateway restarts."""
-    hermes_cmd = shutil.which("hermes")
-    if hermes_cmd:
-        return hermes_cmd
-
-    sibling = Path(sys.executable).parent / "hermes"
-    if sibling.exists():
-        return str(sibling)
-    return "hermes"
 
 
 def _consume_stream(stream) -> None:
@@ -67,21 +53,21 @@ def restart_active_profile_gateway(
 
     try:
         active_home = get_active_hermes_home()
-        env = os.environ.copy()
+        runtime = resolve_agent_cli_runtime()
+        env = runtime.env.copy()
         env["HERMES_HOME"] = str(active_home)
-        hermes_cmd = _resolve_hermes_command()
 
         logger.info(
-            "Restarting gateway service via CLI command: %s gateway restart (HERMES_HOME=%s)",
-            hermes_cmd,
-            active_home,
+            "Restarting active-profile gateway via verified Hermes CLI runtime (%s)",
+            runtime.kind,
         )
         proc = subprocess.Popen(
-            [hermes_cmd, "gateway", "restart"],
+            runtime.command("gateway", "restart"),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
             env=env,
+            cwd=runtime.cwd,
         )
 
         try:

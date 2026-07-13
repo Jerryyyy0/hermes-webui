@@ -6,6 +6,45 @@ If your symptom isn't listed and the diagnostics don't narrow it down, file a bu
 
 ---
 
+## A Profile's scheduled jobs do not fire
+
+**Symptom.** A Cron job remains enabled, but `next_run_at` is in the past and `last_run_at` does not advance.
+
+WebUI starts every visible Profile Gateway by default. Verify Gateway and ticker state from an accessible directory:
+
+```bash
+cd ~
+hermes profile list
+hermes -p <profile> gateway status
+hermes -p <profile> cron status
+```
+
+For the root/default Profile, omit `-p default` and use `hermes gateway status` / `hermes cron status`. Gateway logs are stored below the corresponding Profile home, typically `~/.hermes/logs/` for default and `~/.hermes/profiles/<profile>/logs/` for named Profiles.
+
+If startup reports `No module named hermes_cli`, `rich`, or `yaml`, the command is using a Python environment that does not belong to the Hermes Agent installation. Do not install Agent dependencies into Anaconda or the WebUI venv as a workaround. Check the official launcher and its pinned interpreter:
+
+```bash
+command -v hermes
+hermes --version
+head -n 5 "$(command -v hermes)"
+```
+
+WebUI normally resolves the discovered Agent installation's own launcher/venv. When multiple Hermes installations exist, set an absolute trusted launcher explicitly:
+
+```bash
+HERMES_WEBUI_HERMES_EXECUTABLE="$HOME/.local/bin/hermes"
+```
+
+If automatic startup was intentionally disabled, remove the override or set:
+
+```bash
+HERMES_WEBUI_START_PROFILE_GATEWAYS=1
+```
+
+Then restart WebUI. Set it to `0` when an external supervisor owns Gateway startup. If the default config enables `gateway.multiplex_profiles`, only the default Gateway should run; it serves the named Profiles too.
+
+---
+
 ## "AIAgent not available -- check that hermes-agent is on sys.path"
 
 **Symptom.** WebUI starts, shows the chat interface, but every chat request fails immediately with this error in the response or the server log. As of v0.51.6 the error includes a diagnostic block with the running Python interpreter, the relevant `sys.path` entries, and the most-common fix; on older versions the message is bare.
