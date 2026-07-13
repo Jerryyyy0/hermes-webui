@@ -28,7 +28,6 @@ from api.session_manifest import (
     _normalize_manifest_path,
     _paths_from_assistant_media,
     _paths_from_last_assistant_message,
-    _paths_from_assistant_prose,
     _public_todo_items,
     _resolve_manifest_path,
     _rows_to_wire,
@@ -43,6 +42,11 @@ from api.session_manifest import (
     turn_artifacts_for_wire,
     _turn_message_slice,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_manifest_store(tmp_path, monkeypatch):
+    monkeypatch.setattr('api.session_manifest_store.STATE_DIR', tmp_path / 'state')
 
 
 def test_normalize_manifest_path_strips_noise():
@@ -126,7 +130,7 @@ def test_extract_artifacts_and_references(tmp_path):
     ]
     artifacts, references = _extract_artifacts_and_references(events, workspace)
     assert [row['path'] for row in artifacts] == ['src/new.py']
-    assert [row['path'] for row in references] == ['README.md']
+    assert references == []
 
 
 def test_serialize_manifest_row_shape():
@@ -193,7 +197,7 @@ def test_build_session_manifest_marks_deleted_artifact_expired(tmp_path, monkeyp
     assert manifest['turns'][0]['artifacts'][0]['status'] == 'expired'
 
 
-def test_rows_to_wire_references_missing_marked_expired(tmp_path):
+def test_rows_to_wire_references_drops_missing_file_rows(tmp_path):
     workspace = tmp_path / 'ws'
     workspace.mkdir()
     rows = [{
@@ -203,15 +207,10 @@ def test_rows_to_wire_references_missing_marked_expired(tmp_path):
         'entry_kind': 'file',
     }]
     wired = _rows_to_wire(rows, workspace, collection='references')
-    assert wired == [{
-        'path': 'missing.txt',
-        'preview': MANIFEST_PREVIEW_FILE,
-        'source_tool': 'read_file',
-        'status': 'expired',
-    }]
+    assert wired == []
 
 
-def test_read_file_reference_exists_no_status(tmp_path):
+def test_rows_to_wire_references_drops_existing_file_rows(tmp_path):
     workspace = tmp_path / 'ws'
     workspace.mkdir()
     target = workspace / 'notes.txt'
@@ -223,11 +222,7 @@ def test_read_file_reference_exists_no_status(tmp_path):
         'entry_kind': 'file',
     }]
     wired = _rows_to_wire(rows, workspace, collection='references')
-    assert wired == [{
-        'path': 'notes.txt',
-        'preview': MANIFEST_PREVIEW_FILE,
-        'source_tool': 'read_file',
-    }]
+    assert wired == []
 
 
 def test_rows_to_wire_artifacts_require_turn_key_for_expired(tmp_path):
@@ -457,18 +452,15 @@ def test_build_session_manifest_persists_workspace_files(tmp_path, monkeypatch):
     assert 'session_id' not in manifest
     assert 'counts' not in manifest
     assert len(manifest['artifacts']) == 1
-    assert len(manifest['references']) == 1
+    assert len(manifest['references']) == 0
     artifact = manifest['artifacts'][0]
     assert artifact == {
         'path': 'notes.txt',
         'preview': 'file',
         'source_tool': 'write_file',
     }
-    assert manifest['references'][0] == {
-        'path': 'notes.txt',
-        'preview': 'file',
-        'source_tool': 'read_file',
-    }
+    for turn in manifest['turns']:
+        assert all(row.get('path') != 'notes.txt' for row in turn.get('references') or [])
 
 
 def test_build_session_manifest_prefers_store_artifacts(tmp_path, monkeypatch):
@@ -634,7 +626,17 @@ def test_skill_view_becomes_skill_reference(tmp_path, monkeypatch):
     skills_dir = tmp_path / 'profile-home' / 'skills'
     _write_local_skill(skills_dir, 'my-skill')
     events = [
-        ToolEvent(name='skill_view', args={'name': 'my-skill'}, assistant_msg_idx=1),
+        ToolEvent(
+            name='skill_view',
+            args={'name': 'my-skill'},
+            assistant_msg_idx=1,
+            status='completed',
+            result=json.dumps({
+                'success': True,
+                'name': 'my-skill',
+                'path': str(skills_dir / 'my-skill' / 'SKILL.md'),
+            }),
+        ),
     ]
     monkeypatch.setattr('api.session_manifest._skillhub_preview_available', lambda: True)
 
@@ -654,7 +656,16 @@ def test_skill_view_reference_missing_marked_expired(tmp_path, monkeypatch):
     skills_dir = tmp_path / 'profile-home' / 'skills'
     skills_dir.mkdir(parents=True)
     events = [
-        ToolEvent(name='skill_view', args={'name': 'missing-skill'}, assistant_msg_idx=1),
+        ToolEvent(
+            name='skill_view',
+            args={'name': 'missing-skill'},
+            assistant_msg_idx=1,
+            status='completed',
+            result=json.dumps({
+                'success': True,
+                'name': 'missing-skill',
+            }),
+        ),
     ]
     monkeypatch.setattr('api.session_manifest._skillhub_preview_available', lambda: True)
 
@@ -667,6 +678,71 @@ def test_skill_view_reference_missing_marked_expired(tmp_path, monkeypatch):
         'source_tool': 'skill_view',
         'status': 'expired',
     }]
+
+
+def test_build_session_manifest_skips_failed_ambiguous_skill_view_reference(tmp_path, monkeypatch):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    skills_dir = tmp_path / 'profile-home' / 'skills'
+    _write_local_skill(skills_dir, 'knowledge-base-service', rel_path='ai-与机器学习/knowledge-base-service')
+    _write_local_skill(skills_dir, 'knowledge-base-service', rel_path='ops/knowledge-base-service')
+    session = Session(
+        session_id='manifestambiguousskill01',
+        workspace=str(workspace),
+        profile='default',
+        messages=[
+            {'role': 'user', 'content': 'inspect kb skill', '_turn_key': 'turn:1'},
+            {
+                'role': 'assistant',
+                'tool_calls': [
+                    {
+                        'id': 'c1',
+                        'function': {
+                            'name': 'skill_view',
+                            'arguments': json.dumps({'name': 'knowledge-base-service'}),
+                        },
+                    },
+                    {
+                        'id': 'c2',
+                        'function': {
+                            'name': 'skill_view',
+                            'arguments': json.dumps({'name': 'ai-与机器学习/knowledge-base-service'}),
+                        },
+                    },
+                ],
+            },
+            {
+                'role': 'tool',
+                'tool_call_id': 'c1',
+                'content': json.dumps({
+                    'success': False,
+                    'error': "Ambiguous skill name 'knowledge-base-service': 2 skills match",
+                }),
+            },
+            {
+                'role': 'tool',
+                'tool_call_id': 'c2',
+                'content': json.dumps({
+                    'success': True,
+                    'name': 'knowledge-base-service',
+                    'path': str(skills_dir / 'ai-与机器学习' / 'knowledge-base-service' / 'SKILL.md'),
+                }),
+            },
+        ],
+        tool_calls=[],
+    )
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('api.session_manifest._skills_dir_for_session', lambda s: skills_dir)
+    monkeypatch.setattr('api.session_manifest._skillhub_preview_available', lambda: True)
+
+    manifest = build_session_manifest(session)
+
+    assert manifest['references'] == [{
+        'path': 'ai-与机器学习/knowledge-base-service',
+        'preview': MANIFEST_PREVIEW_SKILL,
+        'source_tool': 'skill_view',
+    }]
+    assert manifest['turns'][0]['references'] == manifest['references']
 
 
 def _write_local_skill(
@@ -741,7 +817,7 @@ def test_skill_manage_artifact_deleted_marked_expired(tmp_path, monkeypatch):
     }]
 
 
-def test_extract_manifest_delta_file_reference_expired(tmp_path, monkeypatch):
+def test_extract_manifest_delta_read_file_has_no_public_reference(tmp_path, monkeypatch):
     workspace = tmp_path / 'ws'
     workspace.mkdir()
     event = ToolEvent(
@@ -758,11 +834,86 @@ def test_extract_manifest_delta_file_reference_expired(tmp_path, monkeypatch):
         turn_key='turn:0',
         sequence=1,
     )
-    assert delta['references'] == [{
-        'path': 'missing.txt',
+    assert delta['references'] == []
+    assert delta['artifacts'] == []
+
+
+def test_read_evidence_suppresses_only_final_assistant_prose(tmp_path, monkeypatch):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    target = workspace / 'input.md'
+    target.write_text('input', encoding='utf-8')
+    session = Session(
+        session_id='read_evidence_prose01',
+        workspace=str(workspace),
+        messages=[
+            {'role': 'user', 'content': 'inspect', '_turn_key': 'turn:0'},
+            {
+                'role': 'assistant',
+                'tool_calls': [{
+                    'id': 'read-1',
+                    'function': {'name': 'read_file', 'arguments': json.dumps({'path': 'input.md'})},
+                }],
+            },
+            {'role': 'tool', 'tool_call_id': 'read-1', 'name': 'read_file', 'content': 'input'},
+            {'role': 'assistant', 'content': 'See `input.md`.'},
+        ],
+        tool_calls=[],
+    )
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('api.session_manifest_store.load_manifest_records', lambda *a, **k: [])
+    monkeypatch.setattr('api.session_manifest_store.load_manifest_decided_turn_keys', lambda *a, **k: set())
+    monkeypatch.setattr('api.session_manifest_store.repair_empty_manifest_turns', lambda *a, **k: 0)
+    monkeypatch.setattr('api.session_manifest_store.backfill_missing_manifest_records', lambda *a, **k: {'source': 'derived'})
+
+    manifest = build_session_manifest(session)
+
+    assert manifest['artifacts'] == []
+    assert manifest['references'] == []
+
+
+def test_read_then_edit_same_path_keeps_mutation_artifact(tmp_path, monkeypatch):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    (workspace / 'report.md').write_text('updated', encoding='utf-8')
+    session = Session(
+        session_id='read_edit_artifact01',
+        workspace=str(workspace),
+        messages=[
+            {'role': 'user', 'content': 'update', '_turn_key': 'turn:0'},
+            {
+                'role': 'assistant',
+                'tool_calls': [{
+                    'id': 'read-1',
+                    'function': {'name': 'read_file', 'arguments': json.dumps({'path': 'report.md'})},
+                }],
+            },
+            {'role': 'tool', 'tool_call_id': 'read-1', 'name': 'read_file', 'content': 'old'},
+            {
+                'role': 'assistant',
+                'tool_calls': [{
+                    'id': 'edit-1',
+                    'function': {'name': 'edit_file', 'arguments': json.dumps({'path': 'report.md'})},
+                }],
+            },
+            {'role': 'tool', 'tool_call_id': 'edit-1', 'name': 'edit_file', 'content': 'updated'},
+            {'role': 'assistant', 'content': 'Updated `report.md`.'},
+        ],
+        tool_calls=[],
+    )
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('api.session_manifest_store.load_manifest_records', lambda *a, **k: [])
+    monkeypatch.setattr('api.session_manifest_store.load_manifest_decided_turn_keys', lambda *a, **k: set())
+    monkeypatch.setattr('api.session_manifest_store.repair_empty_manifest_turns', lambda *a, **k: 0)
+    monkeypatch.setattr('api.session_manifest_store.backfill_missing_manifest_records', lambda *a, **k: {'source': 'derived'})
+
+    manifest = build_session_manifest(session)
+
+    assert manifest['references'] == []
+    assert manifest['artifacts'] == [{
+        'path': 'report.md',
         'preview': MANIFEST_PREVIEW_FILE,
-        'source_tool': 'read_file',
-        'status': 'expired',
+        'source_tool': 'edit_file',
     }]
 
 
@@ -777,6 +928,7 @@ def test_extract_manifest_delta_skill_reference_expired(tmp_path, monkeypatch):
         args={'name': 'missing-skill'},
         assistant_msg_idx=1,
         status='completed',
+        result=json.dumps({'success': True, 'name': 'missing-skill'}),
     )
     delta = extract_manifest_delta_from_tool_event(
         event,
@@ -1401,11 +1553,7 @@ def test_manifest_delta_extracts_todo_and_artifact(tmp_path):
     )
 
     assert todo_delta['todos']['items'] == [{'id': 't1', 'content': 'Ship', 'status': 'unknown'}]
-    assert write_delta['artifacts'] == [{
-        'path': 'notes.txt',
-        'preview': 'file',
-        'source_tool': 'write_file',
-    }]
+    assert write_delta['artifacts'] == []
 
 
 def test_merge_manifest_delta_is_idempotent_by_path():
@@ -1621,9 +1769,155 @@ def test_paths_from_last_assistant_message_accepts_tilde_workspace_path(tmp_path
     artifact = workspace / 'OpenAI最新模型定价.docx'
     artifact.write_text('docx-like', encoding='utf-8')
     monkeypatch.setenv('HOME', str(fake_home))
-    text = '结果如下：~/workspace/OpenAI最新模型定价.docx'
+    text = '文件位置：~/workspace/OpenAI最新模型定价.docx'
     paths = _paths_from_last_assistant_message(text, workspace)
     assert paths == ['OpenAI最新模型定价.docx']
+
+
+def test_paths_from_last_assistant_message_scans_final_assistant_text(tmp_path):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    (workspace / '1.docx').write_text('docx-like', encoding='utf-8')
+    (workspace / 'report.docx').write_text('docx-like', encoding='utf-8')
+
+    text = 'I checked 1.docx and 已生成：report.docx.'
+    assert _paths_from_last_assistant_message(text, workspace) == ['1.docx', 'report.docx']
+
+
+def test_paths_from_last_assistant_message_scans_file_label_without_delivery_regex(tmp_path):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    (workspace / '2026世界杯_7月10日今日战况.docx').write_text('docx-like', encoding='utf-8')
+
+    text = 'Word 文档已生成！📄\n\n文件： 2026世界杯_7月10日今日战况.docx（38KB）'
+
+    assert _paths_from_last_assistant_message(text, workspace) == ['2026世界杯_7月10日今日战况.docx']
+
+
+def test_build_session_manifest_does_not_promote_skill_or_terminal_tool_result_text(tmp_path, monkeypatch):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    (workspace / 'SKILL.md').write_text('# skill mention', encoding='utf-8')
+    (workspace / '1.docx').write_text('docx-like', encoding='utf-8')
+    skills_dir = tmp_path / 'skills'
+    _write_local_skill(skills_dir, 'diagnose')
+    session = Session(
+        session_id='manifestfalseartifact01',
+        workspace=str(workspace),
+        profile='ops',
+        messages=[
+            {'role': 'user', 'content': 'inspect skill and terminal', '_turn_key': 'turn:0'},
+            {
+                'role': 'assistant',
+                'content': [
+                    {
+                        'type': 'tool_use',
+                        'id': 'toolu_skill',
+                        'name': 'skill_view',
+                        'input': {'name': 'diagnose'},
+                    },
+                ],
+            },
+            {'role': 'tool', 'tool_call_id': 'toolu_skill', 'content': json.dumps({
+                'success': True,
+                'name': 'diagnose',
+                'path': str(skills_dir / 'diagnose' / 'SKILL.md'),
+            }) + '\nRead SKILL.md and 1.docx references.'},
+            {
+                'role': 'assistant',
+                'content': [
+                    {
+                        'type': 'tool_use',
+                        'id': 'toolu_terminal',
+                        'name': 'terminal',
+                        'input': {'command': 'printf "wrote 1.docx"'},
+                    },
+                ],
+            },
+            {'role': 'tool', 'tool_call_id': 'toolu_terminal', 'content': 'wrote 1.docx'},
+            {'role': 'assistant', 'content': 'I inspected the skill and terminal output.'},
+        ],
+        tool_calls=[],
+    )
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('api.session_manifest._skills_dir_for_session', lambda s: skills_dir)
+    monkeypatch.setattr('api.session_manifest._skillhub_preview_available', lambda: True)
+    monkeypatch.setattr('api.session_manifest_store.load_manifest_records', lambda *args, **kwargs: [])
+    monkeypatch.setattr('api.session_manifest_store.load_manifest_decided_turn_keys', lambda *args, **kwargs: set())
+
+    manifest = build_session_manifest(session)
+
+    assert manifest['artifacts'] == []
+    assert manifest['references'] == [{
+        'path': 'diagnose',
+        'preview': MANIFEST_PREVIEW_SKILL,
+        'source_tool': 'skill_view',
+    }]
+
+
+def test_build_session_manifest_store_empty_decision_skips_reconcile(tmp_path, monkeypatch):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    (workspace / 'report.docx').write_text('docx-like', encoding='utf-8')
+    session = Session(
+        session_id='manifestemptydecision01',
+        workspace=str(workspace),
+        profile='ops',
+        messages=[
+            {'role': 'user', 'content': 'make report', '_turn_key': 'turn:0'},
+            {'role': 'assistant', 'content': '文件位置：report.docx'},
+        ],
+        tool_calls=[],
+    )
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('api.session_manifest_store.load_manifest_records', lambda *args, **kwargs: [])
+    monkeypatch.setattr('api.session_manifest_store.load_manifest_decided_turn_keys', lambda *args, **kwargs: {'turn:0'})
+
+    manifest = build_session_manifest(session)
+
+    assert manifest['artifacts'] == []
+    assert manifest['turns'][0]['artifacts'] == []
+
+
+def test_build_session_manifest_partial_store_decision_skips_whole_session_reconcile(tmp_path, monkeypatch):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    (workspace / 'stored.docx').write_text('stored', encoding='utf-8')
+    (workspace / 'missing-turn.docx').write_text('new', encoding='utf-8')
+    session = Session(
+        session_id='manifestpartialdecision01',
+        workspace=str(workspace),
+        profile='ops',
+        messages=[
+            {'role': 'user', 'content': 'first', '_turn_key': 'turn:0'},
+            {'role': 'assistant', 'content': '文件：stored.docx'},
+            {'role': 'user', 'content': 'second', '_turn_key': 'turn:2'},
+            {'role': 'assistant', 'content': '文件：missing-turn.docx'},
+        ],
+        tool_calls=[],
+    )
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr(
+        'api.session_manifest_store.load_manifest_records',
+        lambda *args, **kwargs: [{
+            'path': 'stored.docx',
+            'source_tool': 'assistant_prose',
+            'preview': 'file',
+            'profile': 'ops',
+            'turn_key': 'turn:0',
+        }],
+    )
+    monkeypatch.setattr('api.session_manifest_store.load_manifest_decided_turn_keys', lambda *args, **kwargs: {'turn:0'})
+
+    manifest = build_session_manifest(session)
+
+    assert [row['path'] for row in manifest['artifacts']] == ['stored.docx']
+    turn_artifacts = {
+        turn['turn_key']: [row['path'] for row in turn.get('artifacts') or []]
+        for turn in manifest['turns']
+    }
+    assert turn_artifacts['turn:0'] == ['stored.docx']
+    assert turn_artifacts['turn:2'] == []
 
 
 def test_collect_media_artifact_events_from_assistant_only(tmp_path):
@@ -1939,11 +2233,8 @@ def test_build_session_manifest_reconcile_excludes_read_file_path(tmp_path, monk
     monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
     manifest = build_session_manifest(session)
     assert manifest['artifacts'] == []
-    assert manifest['references'] == [{
-        'path': 'readme.md',
-        'preview': MANIFEST_PREVIEW_FILE,
-        'source_tool': 'read_file',
-    }]
+    assert manifest['references'] == []
+    assert manifest['turns'][0]['references'] == []
 
 
 def test_extract_manifest_delta_from_turn_reconcile_turn_scope(tmp_path):
@@ -2018,14 +2309,43 @@ def test_merge_manifest_delta_turn_reconcile_idempotent(tmp_path):
     assert merged['artifacts'] == []
 
 
-def test_paths_from_assistant_prose_labeled_unicode_path(tmp_path):
+def test_paths_from_last_assistant_message_accepts_unicode_filename_without_delivery_label(tmp_path):
     workspace = tmp_path / 'ws'
     workspace.mkdir()
     docx = workspace / 'AI热点top10-2026-06.docx'
     docx.write_bytes(b'fake-docx')
-    labeled = f'📄 文件位置：{docx}'
-    paths = _paths_from_assistant_prose(labeled, workspace)
+
+    paths = _paths_from_last_assistant_message(f'| `{docx.name}` | Word |', workspace)
+
     assert paths == ['AI热点top10-2026-06.docx']
+
+
+def test_only_final_assistant_prose_contributes_artifacts(tmp_path, monkeypatch):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    intermediate = workspace / 'intermediate.md'
+    final = workspace / 'final.md'
+    intermediate.write_text('draft', encoding='utf-8')
+    final.write_text('done', encoding='utf-8')
+    session = Session(
+        session_id='final_assistant_only01',
+        workspace=str(workspace),
+        messages=[
+            {'role': 'user', 'content': 'generate', '_turn_key': 'turn:0'},
+            {'role': 'assistant', 'content': f'文件路径：{intermediate}'},
+            {'role': 'assistant', 'content': '| file |\n| --- |\n| `final.md` |'},
+        ],
+        tool_calls=[],
+    )
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('api.session_manifest_store.load_manifest_records', lambda *a, **k: [])
+    monkeypatch.setattr('api.session_manifest_store.load_manifest_decided_turn_keys', lambda *a, **k: set())
+    monkeypatch.setattr('api.session_manifest_store.repair_empty_manifest_turns', lambda *a, **k: 0)
+    monkeypatch.setattr('api.session_manifest_store.backfill_missing_manifest_records', lambda *a, **k: {'source': 'derived'})
+
+    manifest = build_session_manifest(session)
+
+    assert [row['path'] for row in manifest['artifacts']] == ['final.md']
 
 
 def test_build_session_manifest_reconcile_assistant_prose_delivery(tmp_path, monkeypatch):
@@ -2060,6 +2380,79 @@ def test_build_session_manifest_reconcile_assistant_prose_delivery(tmp_path, mon
         'preview': MANIFEST_PREVIEW_FILE,
         'source_tool': ASSISTANT_PROSE_ARTIFACT_SOURCE,
     }]
+
+
+def test_assistant_prose_reference_paths_are_not_artifacts(tmp_path):
+    workspace = tmp_path / 'ws'
+    uploads = workspace / 'uploads' / '47e623586a81'
+    uploads.mkdir(parents=True)
+    source_docs = [
+        uploads / '供应链人工智能运营工作方案_改.docx',
+        uploads / '对应功能清单.docx',
+    ]
+    for source_doc in source_docs:
+        source_doc.write_bytes(b'uploaded-reference')
+
+    text = (
+        '我先读取两份参考文档，了解现有内容后再设计方案：\n'
+        f'- {source_docs[0]}\n'
+        f'- {source_docs[1]}'
+    )
+
+    assert _paths_from_last_assistant_message(text, workspace) == []
+
+
+def test_turn_reconcile_keeps_deliveries_but_excludes_uploaded_references(tmp_path):
+    workspace = tmp_path / 'ws'
+    uploads = workspace / 'uploads' / '47e623586a81'
+    uploads.mkdir(parents=True)
+    source_docs = [
+        uploads / '供应链人工智能运营工作方案_改.docx',
+        uploads / '对应功能清单.docx',
+    ]
+    for source_doc in source_docs:
+        source_doc.write_bytes(b'uploaded-reference')
+    output_html = workspace / '供应链AI运营方案框架设计.html'
+    output_pdf = workspace / '供应链AI运营方案框架设计.pdf'
+    output_html.write_text('<html></html>', encoding='utf-8')
+    output_pdf.write_bytes(b'fake-pdf')
+
+    messages = [
+        {
+            'role': 'user',
+            'content': (
+                '参考以上文档设计方案\n\n'
+                f'[Attached files: {source_docs[0]}, {source_docs[1]}]'
+            ),
+        },
+        {
+            'role': 'assistant',
+            'content': (
+                '我先读取两份参考文档：\n'
+                f'{source_docs[0]}\n{source_docs[1]}'
+            ),
+        },
+        {
+            'role': 'assistant',
+            'content': (
+                '两份文件已生成完毕：\n'
+                f'MEDIA:{output_html}\n'
+                f'MEDIA:{output_pdf}'
+            ),
+        },
+    ]
+
+    delta = extract_manifest_delta_from_turn_reconcile(
+        messages,
+        workspace,
+        turn_key='turn:0',
+        sequence=1,
+    )
+
+    assert [row['path'] for row in delta['artifacts']] == [
+        '供应链AI运营方案框架设计.html',
+        '供应链AI运营方案框架设计.pdf',
+    ]
 
 
 def test_build_session_manifest_reconcile_assistant_prose_skips_missing_file(tmp_path, monkeypatch):
@@ -2415,8 +2808,12 @@ def test_build_session_manifest_terminal_pandoc_output_arg_artifact(tmp_path, mo
     monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
     monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
     manifest = build_session_manifest(session)
-    assert manifest['artifacts'] == []
-    assert manifest['turns'][0]['artifacts'] == []
+    assert manifest['artifacts'] == [{
+        'path': 'notes/report.docx',
+        'preview': MANIFEST_PREVIEW_FILE,
+        'source_tool': 'terminal',
+    }]
+    assert manifest['turns'][0]['artifacts'] == manifest['artifacts']
 
 
 def test_build_session_manifest_terminal_ls_path_candidate_not_artifact(tmp_path, monkeypatch):
@@ -2458,6 +2855,60 @@ def test_build_session_manifest_terminal_ls_path_candidate_not_artifact(tmp_path
         for row in manifest['artifacts']
     )
     assert manifest['turns'][0]['artifacts']
+
+
+def test_build_session_manifest_terminal_output_requires_success_and_workspace_file(tmp_path, monkeypatch):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    report = workspace / 'report.pdf'
+    report.write_bytes(b'pdf')
+    session = Session(
+        session_id='terminal_output_failure01',
+        workspace=str(workspace),
+        messages=[
+            {'role': 'user', 'content': '导出 PDF'},
+            {'role': 'assistant', 'tool_calls': [{
+                'id': 'c1',
+                'function': {'name': 'terminal', 'arguments': json.dumps({
+                    'command': 'pandoc report.md --output report.pdf',
+                })},
+            }]},
+            {'role': 'tool', 'tool_call_id': 'c1', 'name': 'terminal', 'content': json.dumps({
+                'status': 'failed', 'exit_code': 1,
+            })},
+        ],
+        tool_calls=[],
+    )
+    session.save()
+    monkeypatch.setattr('api.models.SESSION_DIR', tmp_path)
+    monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    assert build_session_manifest(session)['artifacts'] == []
+
+
+def test_build_session_manifest_terminal_output_rejects_external_and_dynamic_paths(tmp_path, monkeypatch):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    session = Session(
+        session_id='terminal_output_boundary01',
+        workspace=str(workspace),
+        messages=[
+            {'role': 'user', 'content': '导出 PDF'},
+            {'role': 'assistant', 'tool_calls': [{
+                'id': 'c1',
+                'function': {'name': 'terminal', 'arguments': json.dumps({
+                    'command': 'pandoc input.md -o /tmp/report.pdf && pandoc input.md -o "$OUT"',
+                })},
+            }]},
+            {'role': 'tool', 'tool_call_id': 'c1', 'name': 'terminal', 'content': 'ok'},
+        ],
+        tool_calls=[],
+    )
+    session.save()
+    monkeypatch.setattr('api.models.SESSION_DIR', tmp_path)
+    monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    assert build_session_manifest(session)['artifacts'] == []
 
 
 def test_build_session_manifest_execute_code_delivery_output(tmp_path, monkeypatch):
@@ -2575,8 +3026,8 @@ def test_build_session_manifest_absolute_path_without_delivery_context(tmp_path,
     )
 
 
-def test_build_session_manifest_relative_path_without_delivery_context(tmp_path, monkeypatch):
-    """相对路径（无交付关键词，不提及绝对路径）→ 不出 artifacts"""
+def test_build_session_manifest_final_relative_path_without_delivery_context(tmp_path, monkeypatch):
+    """最后一条 assistant 中的既存相对路径不依赖交付关键词。"""
     workspace = tmp_path / 'ws'
     workspace.mkdir()
     src_dir = workspace / 'src'
@@ -2601,14 +3052,14 @@ def test_build_session_manifest_relative_path_without_delivery_context(tmp_path,
     monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
     monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
     manifest = build_session_manifest(session)
-    assert not any(
+    assert any(
         row['path'] == 'src/main.py' and row['source_tool'] == ASSISTANT_PROSE_ARTIFACT_SOURCE
         for row in manifest['artifacts']
     )
 
 
-def test_build_session_manifest_code_span_path_without_delivery_context(tmp_path, monkeypatch):
-    """代码块裸文件名（反引号，无绝对路径）→ 不出 artifacts"""
+def test_build_session_manifest_final_code_span_without_delivery_context(tmp_path, monkeypatch):
+    """最后一条 assistant 中的既存反引号文件名成为 artifact。"""
     workspace = tmp_path / 'ws'
     workspace.mkdir()
     result_json = workspace / 'result.json'
@@ -2631,14 +3082,14 @@ def test_build_session_manifest_code_span_path_without_delivery_context(tmp_path
     monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
     monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
     manifest = build_session_manifest(session)
-    assert not any(
+    assert any(
         row['path'] == 'result.json' and row['source_tool'] == ASSISTANT_PROSE_ARTIFACT_SOURCE
         for row in manifest['artifacts']
     )
 
 
-def test_build_session_manifest_basename_no_delivery_context_not_artifact(tmp_path, monkeypatch):
-    """裸基名（无路径分隔符）在 assistant 正文中，无交付关键词，文件存在 → 不出 artifacts"""
+def test_build_session_manifest_final_basename_without_delivery_context_is_artifact(tmp_path, monkeypatch):
+    """最后一条 assistant 中的既存裸文件名成为 artifact。"""
     workspace = tmp_path / 'ws'
     workspace.mkdir()
     data_csv = workspace / 'data.csv'
@@ -2661,7 +3112,11 @@ def test_build_session_manifest_basename_no_delivery_context_not_artifact(tmp_pa
     monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
     monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
     manifest = build_session_manifest(session)
-    assert manifest['artifacts'] == []
+    assert manifest['artifacts'] == [{
+        'path': 'data.csv',
+        'preview': MANIFEST_PREVIEW_FILE,
+        'source_tool': ASSISTANT_PROSE_ARTIFACT_SOURCE,
+    }]
 
 
 def test_build_session_manifest_path_missing_file_not_artifact(tmp_path, monkeypatch):
@@ -2689,11 +3144,11 @@ def test_build_session_manifest_path_missing_file_not_artifact(tmp_path, monkeyp
     assert manifest['artifacts'] == []
 
 
-# ── read_file 等读取类工具产出 references（缺失标 expired）──
+# ── 文件读取仅作为瞬态 artifact 排除证据，不公开为 reference ──
 
 
-def test_build_session_manifest_read_file_becomes_reference(tmp_path, monkeypatch):
-    """read_file 读取存在的文件 → references，不进 artifacts"""
+def test_build_session_manifest_read_file_is_not_public_reference(tmp_path, monkeypatch):
+    """成功 read_file 不进入公开 references 或 artifacts。"""
     workspace = tmp_path / 'ws'
     workspace.mkdir()
     (workspace / 'config.yaml').write_text('key: val', encoding='utf-8')
@@ -2723,16 +3178,12 @@ def test_build_session_manifest_read_file_becomes_reference(tmp_path, monkeypatc
     monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
     manifest = build_session_manifest(session)
     assert manifest['artifacts'] == []
-    assert manifest['references'] == [{
-        'path': 'config.yaml',
-        'preview': MANIFEST_PREVIEW_FILE,
-        'source_tool': 'read_file',
-    }]
+    assert manifest['references'] == []
     assert manifest['turns'][0]['artifacts'] == []
-    assert manifest['turns'][0]['references'] == manifest['references']
+    assert manifest['turns'][0]['references'] == []
 
 
-def test_build_session_manifest_read_file_missing_marked_expired(tmp_path, monkeypatch):
+def test_build_session_manifest_missing_read_file_has_no_expired_reference(tmp_path, monkeypatch):
     workspace = tmp_path / 'ws'
     workspace.mkdir()
     sid = 'read_file_expired01'
@@ -2760,12 +3211,8 @@ def test_build_session_manifest_read_file_missing_marked_expired(tmp_path, monke
     monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
     monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
     manifest = build_session_manifest(session)
-    assert manifest['references'] == [{
-        'path': 'gone.yaml',
-        'preview': MANIFEST_PREVIEW_FILE,
-        'source_tool': 'read_file',
-        'status': 'expired',
-    }]
+    assert manifest['references'] == []
+    assert manifest['turns'][0]['references'] == []
 
 
 def test_build_session_manifest_list_dir_no_reference(tmp_path, monkeypatch):
@@ -2968,7 +3415,7 @@ def test_turn_artifacts_for_wire_filters_missing_files(tmp_path):
         'turn:1': [{'path': 'report.md', 'source_tool': 'write_file', 'preview': MANIFEST_PREVIEW_FILE}],
         'turn:2': [{'path': 'report.md', 'source_tool': 'write_file', 'preview': MANIFEST_PREVIEW_FILE}],
     }
-    assert session.compact()['turn_artifacts'] == wired
+    assert 'turn_artifacts' not in session.compact()
 
 
 def test_build_session_manifest_turn_artifacts_match_wire(tmp_path, monkeypatch):
@@ -3044,7 +3491,11 @@ def test_build_session_manifest_groups_references_by_turn(tmp_path, monkeypatch)
                     },
                 }],
             },
-            {'role': 'tool', 'tool_call_id': 'c1', 'content': 'ok'},
+            {'role': 'tool', 'tool_call_id': 'c1', 'content': json.dumps({
+                'success': True,
+                'name': 'skill-a',
+                'path': str(skills_dir / 'skill-a' / 'SKILL.md'),
+            })},
             {'role': 'user', 'content': 'read b', '_turn_key': 'turn:2'},
             {
                 'role': 'assistant',
@@ -3056,7 +3507,11 @@ def test_build_session_manifest_groups_references_by_turn(tmp_path, monkeypatch)
                     },
                 }],
             },
-            {'role': 'tool', 'tool_call_id': 'c2', 'content': 'ok'},
+            {'role': 'tool', 'tool_call_id': 'c2', 'content': json.dumps({
+                'success': True,
+                'name': 'skill-b',
+                'path': str(skills_dir / 'skill-b' / 'SKILL.md'),
+            })},
         ],
         tool_calls=[],
     )
@@ -3074,7 +3529,7 @@ def test_build_session_manifest_groups_references_by_turn(tmp_path, monkeypatch)
     assert {row['path'] for row in manifest['references']} == {'skill-a', 'skill-b'}
 
 
-def test_persist_turn_artifact_paths_filters_missing_files(tmp_path):
+def test_persist_turn_artifact_paths_filters_missing_files(tmp_path, monkeypatch):
     from api.streaming import _persist_turn_artifact_paths
 
     workspace = tmp_path / 'ws'
@@ -3112,17 +3567,20 @@ def test_persist_turn_artifact_paths_filters_missing_files(tmp_path):
         tool_calls=[],
     )
 
+    monkeypatch.setattr('api.session_manifest_store.STATE_DIR', tmp_path / 'state')
+
     _persist_turn_artifact_paths(session)
 
-    assert session.turn_artifacts['turn:2'] == [{
-        'path': 'deliver.docx',
-        'source_tool': 'write_file',
-        'preview': MANIFEST_PREVIEW_FILE,
-    }]
-    assert 'turn:1' not in session.turn_artifacts
+    from api.session_manifest_store import load_manifest_records
+
+    records = load_manifest_records(session)
+    assert [(row['turn_key'], row['path'], row['source_tool'], row['preview']) for row in records] == [
+        ('turn:2', 'deliver.docx', 'write_file', MANIFEST_PREVIEW_FILE),
+    ]
+    assert session.turn_artifacts == {}
 
 
-def test_persist_turn_artifact_paths_scopes_session_tool_calls(tmp_path):
+def test_persist_turn_artifact_paths_scopes_session_tool_calls(tmp_path, monkeypatch):
     from api.streaming import _persist_turn_artifact_paths
 
     workspace = tmp_path / 'ws'
@@ -3154,16 +3612,20 @@ def test_persist_turn_artifact_paths_scopes_session_tool_calls(tmp_path):
         ],
     )
 
+    monkeypatch.setattr('api.session_manifest_store.STATE_DIR', tmp_path / 'state')
+
     _persist_turn_artifact_paths(session)
 
-    assert session.turn_artifacts == {'turn:2': [{
-        'path': 'deliver.docx',
-        'source_tool': 'write_file',
-        'preview': MANIFEST_PREVIEW_FILE,
-    }]}
+    from api.session_manifest_store import load_manifest_records
+
+    records = load_manifest_records(session)
+    assert [(row['turn_key'], row['path'], row['source_tool'], row['preview']) for row in records] == [
+        ('turn:2', 'deliver.docx', 'write_file', MANIFEST_PREVIEW_FILE),
+    ]
+    assert session.turn_artifacts == {}
 
 
-def test_persist_turn_artifact_paths_keeps_same_path_across_turns(tmp_path):
+def test_persist_turn_artifact_paths_keeps_same_path_across_turns(tmp_path, monkeypatch):
     from api.streaming import _persist_turn_artifact_paths
 
     workspace = tmp_path / 'ws'
@@ -3183,19 +3645,22 @@ def test_persist_turn_artifact_paths_keeps_same_path_across_turns(tmp_path):
         tool_calls=[],
     )
 
+    monkeypatch.setattr('api.session_manifest_store.STATE_DIR', tmp_path / 'state')
+
     _persist_turn_artifact_paths(session, 'turn:1')
     _persist_turn_artifact_paths(session, 'turn:2')
 
-    expected = [{
-        'path': 'worldcup-poster.png',
-        'source_tool': 'assistant_prose',
-        'preview': MANIFEST_PREVIEW_FILE,
-    }]
-    assert session.turn_artifacts['turn:1'] == expected
-    assert session.turn_artifacts['turn:2'] == expected
+    from api.session_manifest_store import load_manifest_records
+
+    records = load_manifest_records(session)
+    assert [(row['turn_key'], row['path'], row['source_tool'], row['preview']) for row in records] == [
+        ('turn:1', 'worldcup-poster.png', MEDIA_ARTIFACT_SOURCE, MANIFEST_PREVIEW_FILE),
+        ('turn:2', 'worldcup-poster.png', MEDIA_ARTIFACT_SOURCE, MANIFEST_PREVIEW_FILE),
+    ]
+    assert session.turn_artifacts == {}
 
 
-def test_session_get_turn_artifacts_matches_manifest_via_routes(tmp_path, monkeypatch):
+def test_session_get_omits_turn_artifacts_and_manifest_is_authoritative(tmp_path, monkeypatch):
     from urllib.parse import urlparse
 
     import api.routes as routes
@@ -3226,6 +3691,7 @@ def test_session_get_turn_artifacts_matches_manifest_via_routes(tmp_path, monkey
     monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
     monkeypatch.setattr('api.session_manifest._skills_dir_for_session', lambda s: tmp_path / 'skills')
     monkeypatch.setattr('api.session_manifest._skillhub_preview_available', lambda: False)
+    monkeypatch.setattr('api.session_manifest_store.STATE_DIR', tmp_path / 'state')
 
     session_resp = routes.handle_get(
         object(),
@@ -3236,14 +3702,11 @@ def test_session_get_turn_artifacts_matches_manifest_via_routes(tmp_path, monkey
         urlparse('/api/session/manifest?session_id=http_align01'),
     )
 
-    wired = session_resp['session']['turn_artifacts']
+    assert 'turn_artifacts' not in session_resp['session']
+    assert manifest_resp['manifest_source'] == 'backfill'
     manifest_by_turn = {
         turn['turn_key']: turn['artifacts']
         for turn in manifest_resp['manifest']['turns']
-    }
-    assert wired == {
-        'turn:1': [{'path': 'report.md', 'source_tool': 'write_file', 'preview': MANIFEST_PREVIEW_FILE}],
-        'turn:2': [{'path': 'deliver.docx', 'source_tool': 'write_file', 'preview': MANIFEST_PREVIEW_FILE}],
     }
     assert [row['path'] for row in manifest_by_turn['turn:1']] == ['missing.py', 'report.md']
     assert manifest_by_turn['turn:1'][0]['status'] == 'expired'
@@ -3286,7 +3749,11 @@ def test_build_session_manifest_multi_turn_mixed_artifacts_and_references(tmp_pa
                     },
                 }],
             },
-            {'role': 'tool', 'tool_call_id': 'c2', 'content': 'ok'},
+            {'role': 'tool', 'tool_call_id': 'c2', 'content': json.dumps({
+                'success': True,
+                'name': 'docx-generation',
+                'path': str(skills_dir / 'docx-generation' / 'SKILL.md'),
+            })},
         ],
         turn_artifacts={
             'turn:1': ['report.md', 'missing.py'],
@@ -3360,14 +3827,17 @@ def test_persist_turn_artifact_paths_includes_skill_manage(tmp_path, monkeypatch
     )
     monkeypatch.setattr('api.session_manifest._skills_dir_for_session', lambda s: skills_dir)
     monkeypatch.setattr('api.session_manifest._skillhub_preview_available', lambda: True)
+    monkeypatch.setattr('api.session_manifest_store.STATE_DIR', tmp_path / 'state')
 
     _persist_turn_artifact_paths(session, 'turn:1')
 
-    assert session.turn_artifacts['turn:1'] == [{
-        'path': 'research/foo',
-        'source_tool': 'skill_manage',
-        'preview': MANIFEST_PREVIEW_SKILL,
-    }]
+    from api.session_manifest_store import load_manifest_records
+
+    records = load_manifest_records(session)
+    assert [(row['turn_key'], row['path'], row['source_tool'], row['preview']) for row in records] == [
+        ('turn:1', 'research/foo', 'skill_manage', MANIFEST_PREVIEW_SKILL),
+    ]
+    assert session.turn_artifacts == {}
 
 
 def test_persist_turn_artifact_paths_empty_turn_not_stored(tmp_path, monkeypatch):
@@ -3385,9 +3855,14 @@ def test_persist_turn_artifact_paths_empty_turn_not_stored(tmp_path, monkeypatch
         tool_calls=[],
     )
     monkeypatch.setattr('api.session_manifest._skills_dir_for_session', lambda s: tmp_path / 'skills')
+    monkeypatch.setattr('api.session_manifest_store.STATE_DIR', tmp_path / 'state')
 
     _persist_turn_artifact_paths(session, 'turn:1')
 
+    from api.session_manifest_store import load_manifest_decided_turn_keys, load_manifest_records
+
+    assert load_manifest_records(session) == []
+    assert load_manifest_decided_turn_keys(session) == {'turn:1'}
     assert session.turn_artifacts == {}
 
 
@@ -3481,13 +3956,21 @@ def test_build_session_manifest_skill_view_deduped_when_artifact(tmp_path, monke
                     },
                 ],
             },
-            {'role': 'tool', 'tool_call_id': 'c1', 'content': 'ok'},
+            {'role': 'tool', 'tool_call_id': 'c1', 'content': json.dumps({
+                'success': True,
+                'name': 'hermes-agent-skill-authoring',
+                'path': str(skills_dir / 'hermes-agent-skill-authoring' / 'SKILL.md'),
+            })},
             {
                 'role': 'tool',
                 'tool_call_id': 'c2',
                 'content': json.dumps({'success': True, 'path': 'research/ai-news-top10'}),
             },
-            {'role': 'tool', 'tool_call_id': 'c3', 'content': 'ok'},
+            {'role': 'tool', 'tool_call_id': 'c3', 'content': json.dumps({
+                'success': True,
+                'name': 'ai-news-top10',
+                'path': str(skills_dir / 'research' / 'ai-news-top10' / 'SKILL.md'),
+            })},
         ],
         tool_calls=[],
     )
@@ -3510,6 +3993,309 @@ def test_canonical_skill_path_normalization(tmp_path, monkeypatch):
 
     skills_dir = tmp_path / 'profile-home' / 'skills'
     _write_local_skill(skills_dir, 'ai-news-top10', rel_path='research/ai-news-top10')
+    _write_local_skill(skills_dir, 'excalidraw', rel_path='creative/excalidraw')
 
     assert _canonical_skill_manifest_path('ai-news-top10', skills_dir) == 'research/ai-news-top10'
     assert _canonical_skill_manifest_path('research/ai-news-top10', skills_dir) == 'research/ai-news-top10'
+    assert _canonical_skill_manifest_path('creative/excalidraw/SKILL.md', skills_dir) == 'creative/excalidraw'
+    assert _canonical_skill_manifest_path(
+        str(skills_dir / 'creative' / 'excalidraw' / 'SKILL.md'),
+        skills_dir,
+    ) == 'creative/excalidraw'
+    assert _canonical_skill_manifest_path(
+        'home/hermeswebui/.hermes/skills/creative/excalidraw/SKILL.md',
+        skills_dir,
+    ) == 'creative/excalidraw'
+
+
+def test_canonical_manifest_file_key_normalizes_without_existence(tmp_path):
+    from api.session_manifest import _canonical_manifest_file_key
+
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    assert _canonical_manifest_file_key('`./notes.txt`', workspace) == 'notes.txt'
+    assert _canonical_manifest_file_key('file://notes.txt', workspace) == 'notes.txt'
+    assert _canonical_manifest_file_key(str(workspace / 'gone.excalidraw'), workspace) == 'gone.excalidraw'
+    external = tmp_path / 'outside' / 'report.md'
+    assert _canonical_manifest_file_key(str(external), workspace) == external.resolve().as_posix()
+
+
+def test_build_session_manifest_drops_reference_when_same_file_is_artifact(tmp_path, monkeypatch):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    target = workspace / 'chart.excalidraw'
+    target.write_text('{}', encoding='utf-8')
+    session = Session(
+        session_id='manifestdedupefile01',
+        workspace=str(workspace),
+        messages=[
+            {'role': 'user', 'content': 'draw chart', '_turn_key': 'turn:1'},
+            {
+                'role': 'assistant',
+                'tool_calls': [
+                    {
+                        'id': 'c1',
+                        'function': {
+                            'name': 'write_file',
+                            'arguments': json.dumps({'path': 'chart.excalidraw'}),
+                        },
+                    },
+                    {
+                        'id': 'c2',
+                        'function': {
+                            'name': 'read_file',
+                            'arguments': json.dumps({'path': 'chart.excalidraw'}),
+                        },
+                    },
+                ],
+            },
+            {'role': 'tool', 'tool_call_id': 'c1', 'content': 'ok'},
+            {'role': 'tool', 'tool_call_id': 'c2', 'content': '{}'},
+        ],
+        tool_calls=[],
+    )
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+
+    manifest = build_session_manifest(session)
+
+    assert manifest['artifacts'] == [{
+        'path': 'chart.excalidraw',
+        'preview': MANIFEST_PREVIEW_FILE,
+        'source_tool': 'write_file',
+    }]
+    assert manifest['references'] == []
+    assert manifest['turns'][0]['references'] == []
+
+
+def test_build_session_manifest_drops_persisted_artifact_file_from_references(tmp_path, monkeypatch):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    target = workspace / 'chart.excalidraw'
+    target.write_text('{}', encoding='utf-8')
+    session = Session(
+        session_id='manifestdedupefile02',
+        workspace=str(workspace),
+        profile='default',
+        messages=[
+            {'role': 'user', 'content': 'verify chart', '_turn_key': 'turn:1'},
+            {
+                'role': 'assistant',
+                'tool_calls': [{
+                    'id': 'c1',
+                    'function': {
+                        'name': 'read_file',
+                        'arguments': json.dumps({'path': 'chart.excalidraw'}),
+                    },
+                }],
+            },
+            {'role': 'tool', 'tool_call_id': 'c1', 'content': '{}'},
+        ],
+        tool_calls=[],
+    )
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr(
+        'api.session_manifest_store.load_manifest_records',
+        lambda s, include_lineage=True: [{
+            'session_id': s.session_id,
+            'lineage_key': s.session_id,
+            'profile': 'default',
+            'turn_key': 'turn:1',
+            'record_kind': 'artifact',
+            'path': 'chart.excalidraw',
+            'preview': 'file',
+            'source_tool': 'assistant_prose',
+        }],
+    )
+    monkeypatch.setattr(
+        'api.session_manifest_store.load_manifest_decided_turn_keys',
+        lambda *args, **kwargs: {'turn:1'},
+    )
+
+    manifest = build_session_manifest(session)
+
+    assert manifest['artifacts'] == [{
+        'path': 'chart.excalidraw',
+        'preview': MANIFEST_PREVIEW_FILE,
+        'source_tool': 'assistant_prose',
+        'profile': 'default',
+    }]
+    assert manifest['references'] == []
+    assert manifest['turns'][0]['references'] == []
+
+
+def test_skill_view_failed_with_warning_does_not_create_reference(tmp_path, monkeypatch):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    skills_dir = tmp_path / 'profile-home' / 'skills'
+    _write_local_skill(skills_dir, 'excalidraw', rel_path='creative/excalidraw')
+    _write_local_skill(skills_dir, 'excalidraw', rel_path='excalidraw')
+    session = Session(
+        session_id='manifestskillwarn01',
+        workspace=str(workspace),
+        messages=[
+            {'role': 'user', 'content': 'open skill', '_turn_key': 'turn:1'},
+            {
+                'role': 'assistant',
+                'tool_calls': [{
+                    'id': 'c1',
+                    'function': {
+                        'name': 'skill_view',
+                        'arguments': json.dumps({'name': 'excalidraw'}),
+                    },
+                }],
+            },
+            {
+                'role': 'tool',
+                'tool_call_id': 'c1',
+                'content': (
+                    json.dumps({
+                        'success': False,
+                        'error': "Ambiguous skill name 'excalidraw': 2 skills match",
+                    })
+                    + '\n[Tool loop warning: repeated similar calls]'
+                ),
+            },
+        ],
+        tool_calls=[],
+    )
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('api.session_manifest._skills_dir_for_session', lambda s: skills_dir)
+    monkeypatch.setattr('api.session_manifest._skillhub_preview_available', lambda: True)
+
+    manifest = build_session_manifest(session)
+
+    assert manifest['references'] == []
+    assert manifest['turns'][0]['references'] == []
+
+
+def test_skill_view_success_keeps_canonical_skill_reference(tmp_path, monkeypatch):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    skills_dir = tmp_path / 'profile-home' / 'skills'
+    _write_local_skill(skills_dir, 'excalidraw', rel_path='creative/excalidraw')
+    session = Session(
+        session_id='manifestskillsuccess01',
+        workspace=str(workspace),
+        messages=[
+            {'role': 'user', 'content': 'open skill', '_turn_key': 'turn:1'},
+            {
+                'role': 'assistant',
+                'tool_calls': [{
+                    'id': 'c1',
+                    'function': {
+                        'name': 'skill_view',
+                        'arguments': json.dumps({'name': 'creative/excalidraw'}),
+                    },
+                }],
+            },
+            {
+                'role': 'tool',
+                'tool_call_id': 'c1',
+                'content': json.dumps({
+                    'success': True,
+                    'name': 'excalidraw',
+                    'path': str(skills_dir / 'creative' / 'excalidraw' / 'SKILL.md'),
+                }),
+            },
+        ],
+        tool_calls=[],
+    )
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('api.session_manifest._skills_dir_for_session', lambda s: skills_dir)
+    monkeypatch.setattr('api.session_manifest._skillhub_preview_available', lambda: True)
+
+    manifest = build_session_manifest(session)
+
+    assert manifest['references'] == [{
+        'path': 'creative/excalidraw',
+        'preview': MANIFEST_PREVIEW_SKILL,
+        'source_tool': 'skill_view',
+    }]
+
+
+def test_skill_view_dedupes_bare_and_skill_md_paths_to_one_canonical_reference(tmp_path, monkeypatch):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    skills_dir = tmp_path / 'profile-home' / 'skills'
+    _write_local_skill(skills_dir, 'excalidraw', rel_path='creative/excalidraw')
+    _write_local_skill(skills_dir, 'excalidraw', rel_path='excalidraw')
+    session = Session(
+        session_id='manifestskilldedupe01',
+        workspace=str(workspace),
+        messages=[
+            {'role': 'user', 'content': 'open skill', '_turn_key': 'turn:1'},
+            {
+                'role': 'assistant',
+                'tool_calls': [
+                    {
+                        'id': 'c1',
+                        'function': {
+                            'name': 'skill_view',
+                            'arguments': json.dumps({'name': 'excalidraw'}),
+                        },
+                    },
+                    {
+                        'id': 'c2',
+                        'function': {
+                            'name': 'skill_view',
+                            'arguments': json.dumps({'name': 'creative/excalidraw'}),
+                        },
+                    },
+                    {
+                        'id': 'c3',
+                        'function': {
+                            'name': 'skill_view',
+                            'arguments': json.dumps({
+                                'name': 'home/hermeswebui/.hermes/skills/excalidraw/SKILL.md',
+                            }),
+                        },
+                    },
+                ],
+            },
+            {
+                'role': 'tool',
+                'tool_call_id': 'c1',
+                'content': (
+                    json.dumps({
+                        'success': False,
+                        'error': "Ambiguous skill name 'excalidraw': 2 skills match",
+                    })
+                    + '\n[Tool loop warning: repeated similar calls]'
+                ),
+            },
+            {
+                'role': 'tool',
+                'tool_call_id': 'c2',
+                'content': json.dumps({
+                    'success': True,
+                    'name': 'excalidraw',
+                    'path': str(skills_dir / 'creative' / 'excalidraw' / 'SKILL.md'),
+                }),
+            },
+            {
+                'role': 'tool',
+                'tool_call_id': 'c3',
+                'content': (
+                    json.dumps({
+                        'success': False,
+                        'error': 'skill not found',
+                    })
+                    + '\n[Tool loop warning: repeated similar calls]'
+                ),
+            },
+        ],
+        tool_calls=[],
+    )
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('api.session_manifest._skills_dir_for_session', lambda s: skills_dir)
+    monkeypatch.setattr('api.session_manifest._skillhub_preview_available', lambda: True)
+
+    manifest = build_session_manifest(session)
+
+    assert manifest['references'] == [{
+        'path': 'creative/excalidraw',
+        'preview': MANIFEST_PREVIEW_SKILL,
+        'source_tool': 'skill_view',
+    }]
+    assert all('SKILL.md' not in row['path'] for row in manifest['references'])
+    assert all(row['path'] != 'excalidraw' for row in manifest['references'])

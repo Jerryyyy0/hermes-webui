@@ -6,6 +6,7 @@ import json
 import copy
 import logging
 import re
+import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -26,13 +27,18 @@ ARTIFACT_MUTATION_TOOLS = frozenset({
     'mcp_filesystem_edit_file',
 })
 
-REFERENCE_READ_TOOLS = frozenset({
+# General execution tools are not mutation tools. Their artifacts require a
+# successful completion plus an explicit, statically-resolvable output operand.
+EXECUTION_ARTIFACT_TOOLS = frozenset({'terminal'})
+_MAX_TERMINAL_COMMAND_LENGTH = 16 * 1024
+_MAX_TERMINAL_SEGMENTS = 32
+_MAX_EXECUTION_ARTIFACTS = 16
+
+ARTIFACT_EXCLUSION_READ_TOOLS = frozenset({
     'read_file',
     'open_file',
     'view_file',
-    'list_dir',
     'mcp_filesystem_read_file',
-    'mcp_filesystem_list_directory',
 })
 
 REFERENCE_DISCOVERY_TOOLS = frozenset({
@@ -42,11 +48,6 @@ REFERENCE_DISCOVERY_TOOLS = frozenset({
     'search',
     'semantic_search',
     'mcp_filesystem_search_files',
-})
-
-REFERENCE_DIR_TOOLS = frozenset({
-    'list_dir',
-    'mcp_filesystem_list_directory',
 })
 
 REFERENCE_SKILL_TOOLS = frozenset({
@@ -70,10 +71,7 @@ MANIFEST_STATUS_EXPIRED = 'expired'
 MEDIA_ARTIFACT_SOURCE = 'media'
 ASSISTANT_PROSE_ARTIFACT_SOURCE = 'assistant_prose'
 TURN_RECONCILE_SOURCE = 'reconcile'
-_MEDIA_TOKEN_RE = re.compile(r'MEDIA:([^\s\)\]]+)')
-_CODE_SPAN_RE = re.compile(r'`([^`\n]+)`')
-_MARKDOWN_LINK_LABEL_RE = re.compile(r'\[([^\]]+)\]\([^)]+\)')
-_BROAD_ABSOLUTE_PATH_RE = re.compile(r'(/[^\s`\'"<>|，,；;。：)\]]+\.[A-Za-z0-9][A-Za-z0-9]+)')
+_MEDIA_TOKEN_RE = re.compile(r'MEDIA:([^\s\]]+)')
 _BROAD_FILENAME_EXT_RE = re.compile(
     r'([\w\u4e00-\u9fff/._\-\(\)（）]{1,240}\.[A-Za-z0-9]{2,8})'
 )
@@ -81,7 +79,7 @@ _LAST_ASSISTANT_TILDE_PATH_RE = re.compile(
     r'(~/[^\s`\'"<>|，,；;。：)\]]{1,240}\.[A-Za-z0-9]{2,8})'
 )
 _REFERENCE_ONLY_TOOLS = (
-    REFERENCE_READ_TOOLS
+    ARTIFACT_EXCLUSION_READ_TOOLS
     | REFERENCE_DISCOVERY_TOOLS
     | REFERENCE_SKILL_TOOLS
 )
@@ -120,15 +118,6 @@ class ToolEvent:
     source: str = 'message'
 
 
-@dataclass
-class PathCandidate:
-    path: str
-    raw: str
-    source: str
-    confidence: str
-    context: str = ''
-
-
 def _normalize_tool_name(name: str | None) -> str:
     return str(name or '').replace('functions.', '').strip().lower()
 
@@ -150,123 +139,49 @@ def _paths_from_assistant_media(text: str, workspace: Path) -> list[str]:
     for ref in _MEDIA_TOKEN_RE.findall(text):
         if '://' in ref:
             continue
-        normalized = _resolve_manifest_path(workspace, ref)
+        raw_ref = ref
+        if raw_ref.endswith(')'):
+            try:
+                raw_path = Path(raw_ref).expanduser()
+                stripped_path = Path(raw_ref[:-1]).expanduser()
+                if not raw_path.exists() and stripped_path.exists():
+                    raw_ref = raw_ref[:-1]
+            except (OSError, ValueError):
+                pass
+        normalized = _resolve_manifest_path(workspace, raw_ref)
         if normalized and normalized not in seen:
             seen.add(normalized)
             paths.append(normalized)
     return paths
 
 
-def _path_candidates_from_text(
-    text: str,
-    workspace: Path,
-    *,
-    source: str = 'text',
-) -> list[PathCandidate]:
-    """Collect broad path-like candidates; callers decide whether to promote."""
-    if not text or not isinstance(text, str):
-        return []
-    candidates: list[PathCandidate] = []
-    seen: set[tuple[str, str]] = set()
-
-    def add(raw: str, candidate_source: str, context: str, confidence: str) -> None:
-        raw = str(raw or '').strip()
-        if not raw:
-            return
-        normalized = _resolve_manifest_path(workspace, raw)
-        if not normalized:
-            return
-        key = (normalized, candidate_source)
-        if key in seen:
-            return
-        seen.add(key)
-        candidates.append(PathCandidate(
-            path=normalized,
-            raw=raw,
-            source=f'{source}:{candidate_source}',
-            confidence=confidence,
-            context=context,
-        ))
-
-    for line in text.splitlines():
-        context = line.strip()
-        if not context:
-            continue
-        for match in _CODE_SPAN_RE.finditer(context):
-            add(match.group(1), 'code_span', context, 'explicit')
-        for match in _MARKDOWN_LINK_LABEL_RE.finditer(context):
-            add(match.group(1), 'markdown_link_label', context, 'explicit')
-        for match in _BROAD_ABSOLUTE_PATH_RE.finditer(context):
-            add(match.group(1), 'absolute_path', context, 'broad')
-    return candidates
-
-
-
-
-def _paths_from_assistant_prose(text: str, workspace: Path) -> list[str]:
-    """Extract file paths from assistant prose via broad regex scan.
-
-    Only absolute paths (starting with ``/``) are promoted — bare filenames in
-    code spans or table cells are just casual mentions, not artifact deliveries.
-    """
-    if not text or not isinstance(text, str):
-        return []
-    paths: list[str] = []
-    seen: set[str] = set()
-    for candidate in _path_candidates_from_text(text, workspace, source='assistant_prose'):
-        if candidate.path not in seen and candidate.confidence != 'contextual':
-            if not candidate.raw.startswith('/'):
-                continue
-            seen.add(candidate.path)
-            paths.append(candidate.path)
-    return paths
-
-
 def _paths_from_last_assistant_message(text: str, workspace: Path) -> list[str]:
-    """Extract workspace-relative file paths from the final assistant message.
-
-    This is a narrow, per-turn-only scan designed for the last assistant
-    message of the current turn — typically a delivery summary.  A broad
-    regex accepts relative paths and bare filenames (including CJK), then
-    workspace-existence checking filters out false positives.
-
-    Unlike ``_paths_from_assistant_prose``, this function does **not**
-    require absolute paths — it trusts the downstream ``_artifact_path_is_real``
-    gate to discard casual mentions that do not resolve to real files.
-    """
+    """Extract existing workspace files mentioned in the final assistant message."""
     if not text or not isinstance(text, str):
         return []
     paths: list[str] = []
     seen: set[str] = set()
-    # Keep MEDIA token extraction first so complex filenames (for example CJK
-    # names with full-width parentheses) do not depend on the broad fallback
-    # regex shape.
-    for normalized in _paths_from_assistant_media(text, workspace):
-        if normalized not in seen and _artifact_path_is_real(workspace, normalized):
-            seen.add(normalized)
-            paths.append(normalized)
-    for match in _BROAD_FILENAME_EXT_RE.finditer(text):
-        raw = match.group(1)
-        if '://' in raw:
-            continue
+
+    def add(raw: str) -> None:
+        if not raw or '://' in raw or len(paths) >= _MAX_EXECUTION_ARTIFACTS:
+            return
         normalized = _resolve_manifest_path(workspace, raw)
-        if not normalized or normalized in seen:
-            continue
+        if not normalized or normalized in seen or normalized.startswith('uploads/'):
+            return
+        try:
+            candidate = (workspace.expanduser().resolve() / normalized).resolve()
+            candidate.relative_to(workspace.expanduser().resolve())
+        except (OSError, ValueError):
+            return
         if not _artifact_path_is_real(workspace, normalized):
-            continue
+            return
         seen.add(normalized)
         paths.append(normalized)
-    # Keep this scoped to the "last assistant message" pipeline only:
-    # support ~/... paths without broadening global prose extraction.
-    for match in _LAST_ASSISTANT_TILDE_PATH_RE.finditer(text):
-        raw = match.group(1)
-        normalized = _resolve_manifest_path(workspace, raw)
-        if not normalized or normalized in seen:
-            continue
-        if not _artifact_path_is_real(workspace, normalized):
-            continue
-        seen.add(normalized)
-        paths.append(normalized)
+
+    for filename_match in _BROAD_FILENAME_EXT_RE.finditer(text):
+        add(filename_match.group(1))
+    for tilde_match in _LAST_ASSISTANT_TILDE_PATH_RE.finditer(text):
+        add(tilde_match.group(1))
     return paths
 
 
@@ -322,41 +237,35 @@ def _collect_media_artifact_events(messages: list, workspace: Path, *, turn_key:
                 source='assistant_media',
             ))
     return events
-def _collect_assistant_prose_artifact_events(
+def _collect_final_assistant_artifact_events(
     messages: list,
     workspace: Path,
     *,
     turn_key: str = '',
 ) -> list[ToolEvent]:
-    events: list[ToolEvent] = []
-    seen: set[tuple[str, int]] = set()
-    indices: list[int] = []
-    if turn_key:
-        indices = _assistant_message_indices_for_turn(messages, turn_key)
-    else:
-        indices = [
+    indices = (
+        _assistant_message_indices_for_turn(messages, turn_key)
+        if turn_key
+        else [
             idx for idx, message in enumerate(messages or [])
             if isinstance(message, dict) and message.get('role') == 'assistant'
         ]
-    for msg_idx in indices:
-        message = messages[msg_idx]
-        text = _message_text(message.get('content'))
-        # Skip context-compaction messages — those are system-generated
-        # handoffs, not artifacts produced during the turn.
-        if text.startswith('[CONTEXT COMPACTION \u2014 REFERENCE ONLY]'):
-            continue
-        for path in _paths_from_assistant_prose(text, workspace):
-            key = (path, msg_idx)
-            if key in seen:
-                continue
-            seen.add(key)
-            events.append(ToolEvent(
-                name=ASSISTANT_PROSE_ARTIFACT_SOURCE,
-                args={'path': path},
-                assistant_msg_idx=msg_idx,
-                source='assistant_prose',
-            ))
-    return events
+    )
+    if not indices:
+        return []
+    msg_idx = indices[-1]
+    text = _message_text(messages[msg_idx].get('content'))
+    if text.startswith('[CONTEXT COMPACTION \u2014 REFERENCE ONLY]'):
+        return []
+    return [
+        ToolEvent(
+            name=ASSISTANT_PROSE_ARTIFACT_SOURCE,
+            args={'path': path},
+            assistant_msg_idx=msg_idx,
+            source='assistant_prose',
+        )
+        for path in _paths_from_last_assistant_message(text, workspace)
+    ]
 
 
 def _parse_json_object(content: Any) -> dict | None:
@@ -372,6 +281,27 @@ def _parse_json_object(content: Any) -> dict | None:
             return None
         return parsed if isinstance(parsed, dict) else None
     return None
+
+
+def _parse_leading_json_object(content: Any) -> dict | None:
+    """Parse a leading JSON object, allowing trailing non-JSON text.
+
+    Used for tool results such as ``{"success": false, ...}\\n[Tool loop warning: ...]``.
+    """
+    direct = _parse_json_object(content)
+    if direct is not None:
+        return direct
+    if not isinstance(content, str):
+        return None
+    text = content.strip()
+    if not text or text[0] != '{':
+        return None
+    decoder = json.JSONDecoder()
+    try:
+        parsed, _end = decoder.raw_decode(text)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
 
 
 def _todo_items_from_payload(payload: dict | None) -> list[dict[str, str]]:
@@ -551,6 +481,50 @@ def _normalize_manifest_path(raw: str | None) -> str:
     return path
 
 
+def _canonical_manifest_file_key(path: str, workspace: Path | None = None) -> str:
+    """Return an existence-independent key for artifact dedupe and read evidence."""
+    text = str(path or '').strip().strip('`"\'')
+    if not text:
+        return ''
+    if text.lower().startswith('file://'):
+        text = text[7:]
+    text = text.replace('\\', '/')
+    while text.startswith('./'):
+        text = text[2:]
+    is_absolute = text.startswith('/')
+    parts: list[str] = []
+    for part in text.split('/'):
+        if part in ('', '.'):
+            continue
+        if part == '..':
+            if parts:
+                parts.pop()
+            continue
+        parts.append(part)
+    normalized = '/'.join(parts)
+    if is_absolute:
+        normalized = f'/{normalized}' if normalized else '/'
+    if not normalized or normalized == '/':
+        return ''
+    if is_absolute:
+        try:
+            # Resolve parents for symlink-stable keys without requiring the leaf file.
+            normalized = Path(normalized).expanduser().resolve().as_posix()
+        except (OSError, ValueError):
+            pass
+    if workspace is not None:
+        try:
+            ws_key = Path(workspace).expanduser().resolve().as_posix().rstrip('/')
+            if is_absolute and (normalized == ws_key or normalized.startswith(f'{ws_key}/')):
+                return normalized[len(ws_key):].lstrip('/')
+            if is_absolute:
+                return normalized
+        except (OSError, ValueError):
+            if is_absolute:
+                return normalized
+    return normalized.lstrip('/')
+
+
 def _resolve_manifest_path(workspace: Path, raw: str | None) -> str:
     """Return a display path for a tool-referenced file.
 
@@ -624,12 +598,110 @@ def _paths_from_diff_text(text: str, workspace: Path) -> list[str]:
     return paths
 
 
+def _tool_event_succeeded(event: ToolEvent) -> bool:
+    """Accept completed tool events unless their structured result reports failure."""
+    if str(event.status or '').strip().lower() != 'completed':
+        return False
+    payload = _parse_json_object(event.result)
+    if not payload:
+        return True
+    if payload.get('success') is False:
+        return False
+    status = str(payload.get('status') or '').strip().lower()
+    if status in {'error', 'failed', 'failure', 'cancelled', 'canceled'}:
+        return False
+    exit_code = payload.get('exit_code')
+    if isinstance(exit_code, int) and not isinstance(exit_code, bool):
+        return exit_code == 0
+    return True
+
+
+def _execution_event_succeeded(event: ToolEvent) -> bool:
+    return _tool_event_succeeded(event)
+
+
+def _terminal_output_paths(command: str, workspace: Path) -> list[str]:
+    """Return explicit ``-o``/``--output`` operands for a conservative shell subset."""
+    if not isinstance(command, str) or not command or len(command) > _MAX_TERMINAL_COMMAND_LENGTH:
+        return []
+    if any(marker in command for marker in ('$', '`', '*', '?', '$(', '<(', '>(', '\\n')):
+        return []
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=';&|')
+        lexer.whitespace_split = True
+        tokens = list(lexer)
+    except ValueError:
+        return []
+    if len(tokens) > _MAX_TERMINAL_SEGMENTS * 16:
+        return []
+
+    workspace = workspace.expanduser().resolve()
+    cwd = workspace
+    paths: list[str] = []
+    seen: set[str] = set()
+    segment: list[str] = []
+
+    def add_output(raw: str, command_cwd: Path) -> None:
+        if not raw or raw.startswith('-') or '://' in raw:
+            return
+        try:
+            candidate = Path(raw).expanduser()
+            candidate = candidate.resolve() if candidate.is_absolute() else (command_cwd / candidate).resolve()
+            rel = candidate.relative_to(workspace).as_posix()
+        except (OSError, ValueError):
+            return
+        if not rel or ARTIFACT_IGNORE_RE.search(rel) or rel in seen:
+            return
+        seen.add(rel)
+        paths.append(rel)
+
+    def process_segment(values: list[str]) -> None:
+        nonlocal cwd
+        if not values:
+            return
+        if values[0] == 'cd' and len(values) == 2:
+            try:
+                next_cwd = Path(values[1]).expanduser()
+                cwd = next_cwd.resolve() if next_cwd.is_absolute() else (cwd / next_cwd).resolve()
+                cwd.relative_to(workspace)
+            except (OSError, ValueError):
+                cwd = workspace
+            return
+        for index, token in enumerate(values):
+            raw = ''
+            if token in ('-o', '--output') and index + 1 < len(values):
+                raw = values[index + 1]
+            elif token.startswith('--output='):
+                raw = token.split('=', 1)[1]
+            if raw:
+                add_output(raw, cwd)
+                if len(paths) >= _MAX_EXECUTION_ARTIFACTS:
+                    return
+
+    for token in tokens + [';']:
+        if token in (';', '&&', '|', '||'):
+            process_segment(segment)
+            if len(paths) >= _MAX_EXECUTION_ARTIFACTS:
+                break
+            segment = []
+        else:
+            segment.append(token)
+    return paths
+
+
+def _execution_artifact_paths(event: ToolEvent, workspace: Path) -> list[str]:
+    if event.name not in EXECUTION_ARTIFACT_TOOLS or not _execution_event_succeeded(event):
+        return []
+    command = event.args.get('command') if isinstance(event.args, dict) else None
+    return _terminal_output_paths(command, workspace)
+
+
 def _collect_turn_artifact_entries_from_events(
     events: list[ToolEvent],
     workspace: Path,
     skills_dir: Path | None = None,
 ) -> list[dict[str, str]]:
-    """Extract file and skill artifact entries from scoped tool events."""
+    """Extract file and skill artifact entries from scoped tool/prose events."""
     entries: list[dict[str, str]] = []
     seen: set[str] = set()
 
@@ -670,6 +742,14 @@ def _collect_turn_artifact_entries_from_events(
             skill_name = _skill_manifest_name_from_manage_event(ev, skills_dir)
             if skill_name:
                 add_skill(skill_name, SKILL_MANAGE_TOOL)
+            continue
+        if ev.name in EXECUTION_ARTIFACT_TOOLS:
+            for raw_path in _execution_artifact_paths(ev, workspace):
+                add_file(raw_path, ev.name)
+            continue
+        if ev.name in (MEDIA_ARTIFACT_SOURCE, ASSISTANT_PROSE_ARTIFACT_SOURCE):
+            for raw_path in _paths_from_args(ev.args, workspace):
+                add_file(raw_path, ev.name)
     return entries
 
 
@@ -730,6 +810,8 @@ def _extract_turn_artifact_entries(
         end_msg_idx=end_msg_idx,
     )
     events = _collect_tool_events(turn_messages, scoped_tool_calls)
+    events.extend(_collect_media_artifact_events(turn_messages, workspace))
+    events.extend(_collect_final_assistant_artifact_events(turn_messages, workspace))
     return _collect_turn_artifact_entries_from_events(events, workspace, skills_dir=skills_dir)
 
 
@@ -918,6 +1000,34 @@ def _skill_manifest_name_from_manage_event(event: ToolEvent, skills_dir: Path | 
     return _skill_name_from_args(event.args if isinstance(event.args, dict) else None)
 
 
+def _skill_manifest_name_from_view_event(event: ToolEvent, skills_dir: Path | None = None) -> str:
+    """Return the canonical skill manifest path for a successful skill_view event.
+
+    Only explicit ``success is True`` results produce a reference. Failed,
+    ambiguous, empty, or unparseable results never fall back to args alone.
+    """
+    if str(event.status or '').strip().lower() != 'completed':
+        return ''
+    payload = _parse_leading_json_object(str(event.result or ''))
+    if not isinstance(payload, dict) or payload.get('success') is not True:
+        return ''
+    for key in ('path', 'skill_path', 'manifest_path'):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            canonical = _skill_manifest_name_from_skill_dir_path(value, skills_dir)
+            if canonical:
+                return canonical
+            return _canonical_skill_manifest_path(value, skills_dir)
+    result_name = _skill_name_from_args(payload)
+    if result_name:
+        return _canonical_skill_manifest_path(result_name, skills_dir)
+    # Args are only a last resort when the successful result omitted path/name.
+    args_name = _skill_name_from_args(event.args if isinstance(event.args, dict) else None)
+    if args_name:
+        return _canonical_skill_manifest_path(args_name, skills_dir)
+    return ''
+
+
 def _skill_manifest_name_from_skill_dir_path(raw_path: str, skills_dir: Path | None) -> str:
     """Return skills_dir-relative name for a skill directory or its SKILL.md."""
     if skills_dir is None:
@@ -933,7 +1043,7 @@ def _skill_manifest_name_from_skill_dir_path(raw_path: str, skills_dir: Path | N
         candidates = [raw_candidate]
         if not raw_candidate.is_absolute():
             candidates.append(root / path_text)
-            if path_text.startswith(('Users/', 'private/', 'tmp/', 'var/')):
+            if path_text.startswith(('Users/', 'private/', 'tmp/', 'var/', 'home/')):
                 candidates.append(Path('/' + path_text).expanduser())
         for candidate in candidates:
             resolved = candidate.resolve()
@@ -949,6 +1059,23 @@ def _skill_manifest_name_from_skill_dir_path(raw_path: str, skills_dir: Path | N
     except (ImportError, OSError, ValueError):
         return ''
     return ''
+
+
+def _skill_path_string_normalize(raw: str) -> str:
+    """Normalize skill path forms to a skills_dir-relative name without FS checks."""
+    text = str(raw or '').strip().replace('\\', '/').strip('/')
+    if not text:
+        return ''
+    if text.endswith('/SKILL.md'):
+        text = text[: -len('/SKILL.md')]
+    elif text.endswith('SKILL.md') and '/' in text:
+        text = text.rsplit('/', 1)[0]
+    search = text if text.startswith('/') else f'/{text}'
+    marker = '/skills/'
+    idx = search.lower().rfind(marker)
+    if idx >= 0:
+        text = search[idx + len(marker):]
+    return text.strip('/')
 
 
 def _skill_manifest_name_from_skills_path(raw_path: str, skills_dir: Path | None) -> str:
@@ -979,6 +1106,18 @@ def _is_skill_manifest_row(row: dict) -> bool:
     if row.get('kind') == 'skill' or row.get('resource_type') == 'skill':
         return True
     return str(row.get('preview') or '').strip() == MANIFEST_PREVIEW_SKILL
+
+
+def _is_file_manifest_row(row: dict) -> bool:
+    if not isinstance(row, dict) or _is_skill_manifest_row(row):
+        return False
+    preview = str(row.get('preview') or '').strip()
+    if preview == MANIFEST_PREVIEW_FILE:
+        return True
+    if preview and preview != MANIFEST_PREVIEW_FILE:
+        return False
+    kind = str(row.get('kind') or row.get('entry_kind') or '').strip()
+    return kind in ('', 'file')
 
 
 def _skill_artifact_needs_wire_gate(source_tool: str, row: dict) -> bool:
@@ -1041,19 +1180,24 @@ def _skill_exists_in_dir(skills_dir: Path | None, name: str) -> bool:
 def _canonical_skill_manifest_path(name: str, skills_dir: Path | None) -> str:
     """Resolve bare name or category/name to skills_dir-relative manifest path."""
     raw_text = str(name or '').strip()
-    raw = raw_text.strip('/')
-    if not raw:
+    if not raw_text:
+        return ''
+    cleaned = _skill_path_string_normalize(raw_text)
+    if not cleaned:
         return ''
     if skills_dir is None:
-        return raw
+        return cleaned
     from_path = _skill_manifest_name_from_skill_dir_path(raw_text, skills_dir)
+    if from_path:
+        return from_path
+    from_path = _skill_manifest_name_from_skill_dir_path(cleaned, skills_dir)
     if from_path:
         return from_path
     try:
         from integration.skills.local_skills import _find_skill
 
         root = Path(skills_dir).expanduser().resolve()
-        skill_dir, skill_md = _find_skill(raw, root)
+        skill_dir, skill_md = _find_skill(cleaned, root)
         if skill_md is not None and skill_dir is not None:
             rel = skill_dir.relative_to(root)
             rel_str = rel.as_posix()
@@ -1061,7 +1205,7 @@ def _canonical_skill_manifest_path(name: str, skills_dir: Path | None) -> str:
                 return rel_str
     except (ImportError, OSError, ValueError):
         pass
-    return raw
+    return cleaned
 
 
 def _merge_file_records(
@@ -1290,6 +1434,23 @@ def _extract_manifest_records(
     turns = _message_turns(messages or [])
     turn_rows: dict[str, dict] = {turn['turn_key']: {**turn, 'artifacts': {}, 'references': {}} for turn in turns}
 
+    # A replayed transcript can contain the same completed tool call on both
+    # sides of a later user boundary. Keep its latest occurrence; recovery
+    # restamps replay rows after the current turn and that is the canonical tail.
+    execution_turn_owners: dict[str, str | None] = {}
+    read_evidence_by_turn: dict[str, set[str]] = {}
+    for event in events:
+        event_turn_key = _turn_key_for_event(event, turns)
+        execution_key = str(event.tid or '').strip()
+        if execution_key:
+            execution_turn_owners[execution_key] = event_turn_key
+        if event.name in ARTIFACT_EXCLUSION_READ_TOOLS and _tool_event_succeeded(event):
+            evidence = read_evidence_by_turn.setdefault(str(event_turn_key or ''), set())
+            for path in _paths_from_args(event.args, workspace):
+                key = _canonical_manifest_file_key(path, workspace)
+                if key:
+                    evidence.add(key)
+
     for event in events:
         name = event.name
         args_paths = _paths_from_args(event.args, workspace)
@@ -1305,24 +1466,19 @@ def _extract_manifest_records(
         for blob in text_blobs:
             diff_paths.extend(_paths_from_diff_text(blob, workspace))
         turn_key = _turn_key_for_event(event, turns)
+        execution_key = str(event.tid or '').strip()
+        replayed_execution = bool(
+            execution_key and execution_turn_owners.get(execution_key) != turn_key
+        )
         turn = turn_rows.get(turn_key or '')
 
         def add_artifact(path: str) -> None:
             _merge_file_records(
                 artifacts, kind='artifact', path=path, event=event, entry_kind='file', workspace=workspace,
             )
-            if turn is not None:
+            if turn is not None and not replayed_execution:
                 _merge_file_records(
                     turn['artifacts'], kind='artifact', path=path, event=event, entry_kind='file', workspace=workspace,
-                )
-
-        def add_reference(path: str, entry_kind: str) -> None:
-            _merge_file_records(
-                references, kind='reference', path=path, event=event, entry_kind=entry_kind, workspace=workspace,
-            )
-            if turn is not None:
-                _merge_file_records(
-                    turn['references'], kind='reference', path=path, event=event, entry_kind=entry_kind, workspace=workspace,
                 )
 
         def add_skill_artifact(path: str) -> None:
@@ -1330,10 +1486,10 @@ def _extract_manifest_records(
             if not skill_name:
                 return
             _merge_skill_records(artifacts, skill_name=skill_name, event=event)
-            if turn is not None:
+            if turn is not None and not replayed_execution:
                 _merge_skill_records(turn['artifacts'], skill_name=skill_name, event=event)
 
-        if name in ARTIFACT_MUTATION_TOOLS:
+        if name in ARTIFACT_MUTATION_TOOLS and _tool_event_succeeded(event):
             artifact_paths = args_paths + diff_paths
             artifact_paths.extend(_paths_from_diff_text(event.result, workspace))
             for path in artifact_paths:
@@ -1342,16 +1498,22 @@ def _extract_manifest_records(
                 else:
                     add_artifact(path)
 
-        if name == MEDIA_ARTIFACT_SOURCE:
-            for path in args_paths:
+        if name in EXECUTION_ARTIFACT_TOOLS:
+            for path in _execution_artifact_paths(event, workspace):
                 add_artifact(path)
 
-        if name in REFERENCE_READ_TOOLS and name not in REFERENCE_DIR_TOOLS:
+        if name in (MEDIA_ARTIFACT_SOURCE, ASSISTANT_PROSE_ARTIFACT_SOURCE):
             for path in args_paths:
-                add_reference(path, 'file')
+                if (
+                    name == ASSISTANT_PROSE_ARTIFACT_SOURCE
+                    and _canonical_manifest_file_key(path, workspace)
+                    in read_evidence_by_turn.get(str(turn_key or ''), set())
+                ):
+                    continue
+                add_artifact(path)
 
         if name in REFERENCE_SKILL_TOOLS:
-            skill_name = _skill_name_from_args(event.args)
+            skill_name = _skill_manifest_name_from_view_event(event, skills_dir)
             if skill_name:
                 canonical = _canonical_skill_manifest_path(skill_name, skills_dir)
                 if canonical:
@@ -1367,11 +1529,12 @@ def _extract_manifest_records(
                         }
                     if canonical in session_skill_keys or canonical in turn_skill_keys:
                         continue
+                    skill_name = canonical
                 _merge_skill_records(references, skill_name=skill_name, event=event)
                 if turn is not None:
                     _merge_skill_records(turn['references'], skill_name=skill_name, event=event)
 
-        if _is_skill_manage_mutation_event(event):
+        if _is_skill_manage_mutation_event(event) and _tool_event_succeeded(event):
             skill_name = _skill_manifest_name_from_manage_event(event, skills_dir)
             if skill_name:
                 _merge_skill_records(artifacts, skill_name=skill_name, event=event)
@@ -1448,6 +1611,9 @@ def filter_existing_turn_artifact_entries(
             if not canonical or not _skill_exists_in_dir(skills_dir, canonical):
                 continue
             path = canonical
+        elif source_tool == MEDIA_ARTIFACT_SOURCE:
+            if not _artifact_path_is_real(workspace, path) and not _session_media_preview_path(workspace, path, MANIFEST_PREVIEW_FILE):
+                continue
         elif not _artifact_path_is_real(workspace, path):
             continue
         seen.add(path)
@@ -1630,11 +1796,7 @@ def _drop_reference_skills_in_artifacts(
 
 
 def turn_artifacts_for_wire(session) -> dict[str, list[dict[str, str]]]:
-    """Return turn_artifacts with only existing previewable file and skill entries.
-
-    Supports legacy format (list[str]) and new format (list[dict] with
-    ``path``, ``source_tool``, and optional ``preview``).
-    """
+    """Return legacy turn_artifacts with only existing previewable entries."""
     workspace = Path(str(getattr(session, 'workspace', '') or '')).expanduser().resolve()
     skills_dir = _skills_dir_for_session(session)
     raw = getattr(session, 'turn_artifacts', None) or {}
@@ -1654,6 +1816,36 @@ def turn_artifacts_for_wire(session) -> dict[str, list[dict[str, str]]]:
         if filtered:
             out[tk] = filtered
     return out
+
+
+def extract_turn_artifact_entries_for_manifest(session, turn_key: str) -> list[dict[str, str]]:
+    """Extract previewable artifact entries for one turn using the shared manifest rules."""
+    messages = list(getattr(session, 'messages', None) or [])
+    key = str(turn_key or '').strip()
+    if not messages or not key:
+        return []
+    turn_slice = _turn_message_slice(messages, key)
+    if not turn_slice:
+        return []
+    turn_bounds = next(
+        (
+            (turn.get('start_msg_idx'), turn.get('end_msg_idx'))
+            for turn in _message_turns(messages)
+            if str(turn.get('turn_key') or '') == key
+        ),
+        None,
+    )
+    workspace = Path(str(getattr(session, 'workspace', '') or '')).expanduser().resolve()
+    skills_dir = _skills_dir_for_session(session)
+    entries = _extract_turn_artifact_entries(
+        turn_slice,
+        getattr(session, 'tool_calls', None),
+        workspace,
+        start_msg_idx=turn_bounds[0] if turn_bounds else None,
+        end_msg_idx=turn_bounds[1] if turn_bounds else None,
+        skills_dir=skills_dir,
+    )
+    return filter_existing_turn_artifact_entries(workspace, skills_dir, entries)
 
 
 def _turn_message_slice(messages: list, turn_key: str) -> list:
@@ -1720,7 +1912,9 @@ def _reconcile_candidate_paths(event: ToolEvent, workspace: Path) -> list[str]:
         return args_paths
     if name == ASSISTANT_PROSE_ARTIFACT_SOURCE:
         return args_paths
-    if name in REFERENCE_READ_TOOLS:
+    if name in EXECUTION_ARTIFACT_TOOLS:
+        return _execution_artifact_paths(event, workspace)
+    if name in ARTIFACT_EXCLUSION_READ_TOOLS:
         return []
     if _is_reference_only_tool(name):
         return []
@@ -1745,7 +1939,6 @@ def _merge_reconcile_artifacts_for_turn(
         return
 
     turn_artifact_records = _records_by_path(turn_record.get('artifacts'))
-    turn_reference_paths = set(_records_by_path(turn_record.get('references')).keys())
     scoped_tool_calls = _tool_calls_for_turn(
         tool_calls,
         start_msg_idx=turn_record.get('start_msg_idx'),
@@ -1754,7 +1947,15 @@ def _merge_reconcile_artifacts_for_turn(
     events = _collect_tool_events(turn_messages, scoped_tool_calls)
     # turn_messages is already sliced; scan all assistant rows in the slice (not global turn_key).
     events.extend(_collect_media_artifact_events(turn_messages, workspace))
-    events.extend(_collect_assistant_prose_artifact_events(turn_messages, workspace))
+    events.extend(_collect_final_assistant_artifact_events(turn_messages, workspace))
+    read_evidence_keys = {
+        key
+        for event in events
+        if event.name in ARTIFACT_EXCLUSION_READ_TOOLS and _tool_event_succeeded(event)
+        for path in _paths_from_args(event.args, workspace)
+        for key in [_canonical_manifest_file_key(path, workspace)]
+        if key
+    }
     local_turn_record = {
         'turn_key': turn_key,
         'start_msg_idx': 0,
@@ -1768,7 +1969,10 @@ def _merge_reconcile_artifacts_for_turn(
         if event.name == 'todo':
             continue
         for path in _reconcile_candidate_paths(event, workspace):
-            if path in turn_reference_paths:
+            if (
+                event.name == ASSISTANT_PROSE_ARTIFACT_SOURCE
+                and _canonical_manifest_file_key(path, workspace) in read_evidence_keys
+            ):
                 continue
             if not _artifact_path_is_real(workspace, path):
                 continue
@@ -1807,8 +2011,12 @@ def _apply_turn_reconcile_to_manifest_records(
     *,
     skills_dir: Path | None = None,
     tool_calls: list | None = None,
+    skip_turn_keys: set[str] | None = None,
 ) -> None:
+    skip = {str(key or '').strip() for key in (skip_turn_keys or set()) if str(key or '').strip()}
     for turn in turn_records:
+        if str(turn.get('turn_key') or '').strip() in skip:
+            continue
         _merge_reconcile_artifacts_for_turn(
             artifact_records,
             turn,
@@ -1839,7 +2047,7 @@ def reconcile_turn_artifact_events(
     )
     events = _collect_tool_events(turn_messages, scoped_tool_calls)
     events.extend(_collect_media_artifact_events(turn_messages, workspace))
-    events.extend(_collect_assistant_prose_artifact_events(turn_messages, workspace))
+    events.extend(_collect_final_assistant_artifact_events(turn_messages, workspace))
     return events
 
 
@@ -1998,7 +2206,7 @@ def _row_to_wire(
     skills_dir: Path | None = None,
     *,
     default_profile: str = '',
-    collection: str = 'references',
+    collection: str = 'artifacts',
 ) -> dict[str, str] | None:
     source_tool = str(row.get('source_tool') or '').strip()
     if not source_tool:
@@ -2007,7 +2215,12 @@ def _row_to_wire(
         profile = str(row.get('profile') or '').strip()
     else:
         profile = str(default_profile or '').strip()
-    if _is_skill_manifest_row(row):
+    is_skill_row = _is_skill_manifest_row(row)
+    if collection == 'references' and (
+        not is_skill_row or _normalize_tool_name(source_tool) not in REFERENCE_SKILL_TOOLS
+    ):
+        return None
+    if is_skill_row:
         skill_name = str(row.get('skill_name') or row.get('path') or '').strip()
         if not skill_name or not _skillhub_preview_available():
             return None
@@ -2039,18 +2252,6 @@ def _row_to_wire(
             return _serialize_manifest_row(
                 media_path, MANIFEST_PREVIEW_FILE, source_tool, profile=profile,
             )
-    normalized_tool = _normalize_tool_name(source_tool)
-    if collection == 'references' and normalized_tool in REFERENCE_READ_TOOLS:
-        expired_path = _expired_workspace_file_wire_path(workspace, rel, entry_kind)
-        if expired_path:
-            return _serialize_manifest_row(
-                expired_path,
-                MANIFEST_PREVIEW_FILE,
-                source_tool,
-                profile=profile,
-                status=MANIFEST_STATUS_EXPIRED,
-            )
-        return None
     if collection == 'artifacts':
         # Scheme A: only emit expired rows when the artifact has per-turn
         # provenance (store/turn_artifacts). This avoids surfacing
@@ -2080,7 +2281,7 @@ def _rows_to_wire(
     skills_dir: Path | None = None,
     *,
     default_profile: str = '',
-    collection: str = 'references',
+    collection: str = 'artifacts',
 ) -> list[dict[str, str]]:
     out: list[dict[str, str]] = []
     seen: set[str] = set()
@@ -2179,6 +2380,38 @@ def _merge_turn_rows(existing_turns: list | None, incoming_turns: list | None) -
     return sorted(turns.values(), key=lambda turn: _turn_sort_key(turn.get('turn_key')))
 
 
+def _drop_wire_skill_references_in_artifacts(manifest: dict[str, Any]) -> None:
+    artifact_keys = {
+        (str(row.get('profile') or '').strip(), str(row.get('path') or '').strip())
+        for row in manifest.get('artifacts') or []
+        if isinstance(row, dict) and row.get('preview') == MANIFEST_PREVIEW_SKILL
+    }
+    manifest['references'] = [
+        row for row in manifest.get('references') or []
+        if not (
+            isinstance(row, dict)
+            and row.get('preview') == MANIFEST_PREVIEW_SKILL
+            and (str(row.get('profile') or '').strip(), str(row.get('path') or '').strip()) in artifact_keys
+        )
+    ]
+    for turn in manifest.get('turns') or []:
+        if not isinstance(turn, dict):
+            continue
+        turn_artifact_keys = {
+            (str(row.get('profile') or '').strip(), str(row.get('path') or '').strip())
+            for row in turn.get('artifacts') or []
+            if isinstance(row, dict) and row.get('preview') == MANIFEST_PREVIEW_SKILL
+        }
+        turn['references'] = [
+            row for row in turn.get('references') or []
+            if not (
+                isinstance(row, dict)
+                and row.get('preview') == MANIFEST_PREVIEW_SKILL
+                and (str(row.get('profile') or '').strip(), str(row.get('path') or '').strip()) in turn_artifact_keys
+            )
+        ]
+
+
 def merge_manifest_delta(base: dict[str, Any] | None, delta: dict[str, Any] | None, scope: str = 'live') -> dict[str, Any]:
     """Merge one live manifest delta into a manifest-shaped payload.
 
@@ -2208,6 +2441,7 @@ def merge_manifest_delta(base: dict[str, Any] | None, delta: dict[str, Any] | No
             'references': delta.get('references') or [],
         }]
     base_manifest['turns'] = _merge_turn_rows(base_manifest.get('turns'), incoming_turns)
+    _drop_wire_skill_references_in_artifacts(base_manifest)
     if delta.get('stream_id'):
         base_manifest['live'] = {
             'stream_id': delta.get('stream_id'),
@@ -2239,9 +2473,12 @@ def extract_manifest_delta_from_tool_event(
         status=str(event.status or 'completed'),
         source=event.source or 'stream',
     )
-    artifacts, references = _extract_artifacts_and_references(
-        [normalized_event], workspace, skills_dir=skills_dir,
-    )
+    if normalized_event.status != 'completed':
+        artifacts, references = [], []
+    else:
+        artifacts, references = _extract_artifacts_and_references(
+            [normalized_event], workspace, skills_dir=skills_dir,
+        )
     payload: dict[str, Any] = {
         'version': 1,
         'session_id': str(session_id or ''),
@@ -2263,7 +2500,7 @@ def extract_manifest_delta_from_tool_event(
     }
     if sequence is not None:
         payload['sequence'] = sequence
-    if normalized_event.name == 'todo' and normalized_event.status != 'in_progress':
+    if normalized_event.name == 'todo' and normalized_event.status == 'completed':
         items = _todo_items_from_text(normalized_event.result)
         if items:
             payload['todos'] = {
@@ -2372,15 +2609,28 @@ def _load_display_messages(session) -> list:
         cli_messages = get_cli_session_messages(sid)
         return _merged_session_messages_for_display(session, cli_messages)
     state_db_messages = get_state_db_session_messages(sid, profile=profile)
-    return merge_session_messages_append_only(
+    messages = merge_session_messages_append_only(
         session.messages,
         state_db_messages,
         truncation_watermark=getattr(session, 'truncation_watermark', None),
     )
+    if str(getattr(session, 'source_tag', '') or '').strip().lower() == 'cron':
+        try:
+            from integration.crons.hooks import normalize_cron_manifest_messages
+
+            messages = normalize_cron_manifest_messages(
+                messages,
+                require_stable_real_turn=True,
+            )
+        except Exception:
+            logger.debug("failed to normalize cron manifest messages", exc_info=True)
+    return messages
 
 
-def build_session_manifest(session) -> dict[str, Any]:
+def build_session_manifest(session, source_info: dict[str, str] | None = None) -> dict[str, Any]:
     """Build structured todos, artifacts, and references for one session."""
+    if source_info is not None:
+        source_info['manifest_source'] = 'derived'
     messages = _load_display_messages(session)
     messages = _ensure_turn_keys(messages)
     tool_calls = list(getattr(session, 'tool_calls', None) or [])
@@ -2389,43 +2639,66 @@ def build_session_manifest(session) -> dict[str, Any]:
     default_profile = str(getattr(session, 'profile', None) or '').strip()
     events = _collect_tool_events(messages, tool_calls)
     events.extend(_collect_media_artifact_events(messages, workspace))
+    events.extend(_collect_final_assistant_artifact_events(messages, workspace))
     todos = _extract_latest_todos(messages)
     artifacts, references, turns = _extract_manifest_records(
         events, workspace, messages, skills_dir=skills_dir,
     )
-    artifact_records = _records_by_path(artifacts)
-    _apply_turn_reconcile_to_manifest_records(
-        artifact_records,
-        turns,
-        messages,
-        workspace,
-        skills_dir=skills_dir,
-        tool_calls=tool_calls,
-    )
 
     store_rows: list[dict[str, Any]] = []
+    decided_turn_keys: set[str] = set()
     try:
         from api.session_manifest_store import (
-            backfill_from_session_turn_artifacts,
+            backfill_missing_manifest_records,
+            load_manifest_decided_turn_keys,
             load_manifest_records,
+            repair_empty_manifest_turns,
         )
 
+        repair_empty_manifest_turns(session)
         store_rows = load_manifest_records(session, include_lineage=True)
-        if not store_rows and isinstance(getattr(session, 'turn_artifacts', None), dict):
-            backfill_from_session_turn_artifacts(session)
+        decided_turn_keys = load_manifest_decided_turn_keys(session, include_lineage=True)
+        if decided_turn_keys:
+            if source_info is not None:
+                source_info['manifest_source'] = 'db'
+        else:
+            backfill_result = backfill_missing_manifest_records(session)
             store_rows = load_manifest_records(session, include_lineage=True)
+            decided_turn_keys = load_manifest_decided_turn_keys(session, include_lineage=True)
+            if source_info is not None:
+                if store_rows or decided_turn_keys:
+                    source_info['manifest_source'] = str(backfill_result.get('source') or 'backfill')
+                else:
+                    source_info['manifest_source'] = str(backfill_result.get('source') or 'derived')
     except Exception:
         logger.debug("failed to read session manifest store", exc_info=True)
+
+    artifact_records = {} if decided_turn_keys else _records_by_path(artifacts)
+    if decided_turn_keys:
+        for turn in turns:
+            turn['artifacts'] = []
+    else:
+        _apply_turn_reconcile_to_manifest_records(
+            artifact_records,
+            turns,
+            messages,
+            workspace,
+            skills_dir=skills_dir,
+            tool_calls=tool_calls,
+            skip_turn_keys=decided_turn_keys,
+        )
 
     # Prefer persisted turn_artifacts over reconcile results.
     # When the streaming pipeline persists artifact paths at turn completion,
     # those paths are more reliable than the reconcile pass (which can suffer
     # from cross-turn prose contamination — see docs/turn-key-backend.md §8.3).
     persisted = getattr(session, 'turn_artifacts', None)
-    if isinstance(persisted, dict) and persisted:
+    if not decided_turn_keys and isinstance(persisted, dict) and persisted:
         default_profile = str(getattr(session, 'profile', None) or '').strip()
         for turn in turns:
             tk = turn.get('turn_key', '')
+            if str(tk or '').strip() in decided_turn_keys:
+                continue
             if tk not in persisted:
                 continue
             entries = persisted[tk]

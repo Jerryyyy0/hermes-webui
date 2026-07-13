@@ -110,6 +110,22 @@ class TestMergeToolCallsEndToEnd:
         result = merge_session_messages_append_only(sidecar, state)
         assert len(result) == 1, f"expected 1 (deduped), got {len(result)}"
 
+    def test_replayed_tool_execution_with_restamped_timestamp_merges_to_one(self):
+        """A replay cannot become a second execution merely by being restamped."""
+        sidecar_call = _assistant_tc("call_1", "write_file", timestamp=1000)
+        sidecar_result = _tool_result("call_1", "write_file", "saved")
+        sidecar_result["timestamp"] = 1000.1
+        state_call = _assistant_tc("call_1", "write_file", timestamp=2000)
+        state_result = _tool_result("call_1", "write_file", "saved")
+        state_result["timestamp"] = 2000.1
+
+        result = merge_session_messages_append_only(
+            [sidecar_call, sidecar_result], [state_call, state_result],
+        )
+
+        assert [m.get("tool_call_id") for m in result if m.get("role") == "tool"] == ["call_1"]
+        assert len([m for m in result if m.get("tool_calls")]) == 1
+
     def test_different_tool_calls_sidecar_and_state_both_preserved(self):
         """Sidecar and state.db have assistant messages with different
         tool_calls → merge must preserve both (they are distinct turns)."""

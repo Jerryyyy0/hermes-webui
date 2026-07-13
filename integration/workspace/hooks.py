@@ -79,8 +79,11 @@ def install_workspace_integration_hooks() -> None:
 
     Session.save = patched_save
 
-    threading.Thread(
-        target=_run_profile_backfill,
-        name="workspace-profile-backfill",
-        daemon=True,
-    ).start()
+    # Historical manifest artifact backfill is intentionally disabled for now.
+    # Keep the helper above available for explicit/manual use, but do not run it
+    # automatically on service startup.
+    # threading.Thread(
+    #     target=_run_profile_backfill,
+    #     name="workspace-profile-backfill",
+    #     daemon=True,
+    # ).start()

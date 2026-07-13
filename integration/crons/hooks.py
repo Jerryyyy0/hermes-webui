@@ -9,6 +9,129 @@ logger = logging.getLogger(__name__)
 
 _installed = False
 
+_MAX_ITERATION_SUMMARY_REQUEST = (
+    "You've reached the maximum number of tool-calling iterations allowed. "
+    "Please provide a final response summarizing what you've found and accomplished so far, "
+    "without calling any more tools."
+)
+
+
+def _normalized_message_text(message: dict) -> str:
+    return " ".join(str(message.get("content") or "").split())
+
+
+def _is_max_iteration_summary_request(messages: list, index: int) -> bool:
+    """Recognize the exact internal summary request in a cron execution trace."""
+    if index <= 0 or index >= len(messages):
+        return False
+    message = messages[index]
+    if not isinstance(message, dict) or message.get("role") != "user":
+        return False
+    if _normalized_message_text(message) != _MAX_ITERATION_SUMMARY_REQUEST:
+        return False
+
+    previous_user_index = next(
+        (
+            candidate
+            for candidate in range(index - 1, -1, -1)
+            if isinstance(messages[candidate], dict)
+            and messages[candidate].get("role") == "user"
+        ),
+        None,
+    )
+    if previous_user_index is None:
+        return False
+
+    has_tool_activity = any(
+        isinstance(candidate, dict)
+        and (
+            candidate.get("role") == "tool"
+            or (
+                candidate.get("role") == "assistant"
+                and bool(candidate.get("tool_calls") or candidate.get("_partial_tool_calls"))
+            )
+        )
+        for candidate in messages[previous_user_index + 1:index]
+    )
+    if not has_tool_activity:
+        return False
+
+    return any(
+        isinstance(candidate, dict) and candidate.get("role") == "assistant"
+        for candidate in messages[index + 1:]
+    )
+
+
+def normalize_cron_manifest_messages(
+    messages: list,
+    *,
+    require_stable_real_turn: bool = False,
+) -> list:
+    """Return the cron transcript view used by manifest persistence and GET.
+
+    Hermes Agent's max-iteration fallback is persisted as a user-role request.
+    It drives a final summary but is not a new cron invocation, so it must not
+    split the manifest turn. Historical transcripts are left untouched on GET:
+    the read path opts in only when a real user row already has a stable key and
+    recognized internal rows have never been assigned one.
+    """
+    source = list(messages or [])
+    internal_indexes = {
+        index
+        for index in range(len(source))
+        if _is_max_iteration_summary_request(source, index)
+    }
+    if not internal_indexes:
+        return source
+
+    if require_stable_real_turn:
+        stable_real_turn = any(
+            isinstance(message, dict)
+            and message.get("role") == "user"
+            and index not in internal_indexes
+            and str(message.get("_turn_key") or "").strip()
+            for index, message in enumerate(source)
+        )
+        internal_was_stamped = any(
+            str(source[index].get("_turn_key") or "").strip()
+            for index in internal_indexes
+            if isinstance(source[index], dict)
+        )
+        if not stable_real_turn or internal_was_stamped:
+            return source
+
+    return [
+        message
+        for index, message in enumerate(source)
+        if index not in internal_indexes
+    ]
+
+
+def _stamp_cron_manifest_turn_keys(messages: list) -> list:
+    """Stamp missing real cron user rows with stable sequential turn keys."""
+    stamped = list(messages or [])
+    max_turn = 0
+    for message in stamped:
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        key = str(message.get("_turn_key") or "").strip()
+        if not key.startswith("turn:"):
+            continue
+        try:
+            max_turn = max(max_turn, int(key.split(":", 1)[1]))
+        except (TypeError, ValueError):
+            continue
+
+    next_turn = max_turn + 1
+    for message in stamped:
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        if str(message.get("_turn_key") or "").strip():
+            continue
+        message["_turn_key"] = f"turn:{next_turn}"
+        next_turn += 1
+    return stamped
+
 
 def materialize_after_cron_run(
     job: dict,
@@ -53,7 +176,7 @@ def materialize_after_cron_run(
 
 
 def _persist_cron_turn_artifacts(sid: str) -> None:
-    """Persist turn_artifacts for a materialized cron session.
+    """Persist manifest artifact records for a materialized cron session.
 
     Cron sessions originate from hermes-agent's scheduler, which does not call
     _persist_turn_artifact_paths (that's a WebUI streaming-pipeline function).
@@ -62,8 +185,8 @@ def _persist_cron_turn_artifacts(sid: str) -> None:
 
     This function loads the materialized sidecar, stamps _turn_key on user
     messages that lack one, then calls _persist_turn_artifact_paths for each
-    turn — the same function the streaming pipeline uses — to write both
-    s.turn_artifacts (sidecar JSON) and session_manifest_records (SQLite table).
+    turn so session_manifest_records receives stable turn decisions. The sidecar
+    JSON is still saved for _turn_key stamps, not for artifact ownership.
     """
     from api.models import Session
 
@@ -71,41 +194,25 @@ def _persist_cron_turn_artifacts(sid: str) -> None:
     if s is None or not getattr(s, "messages", None):
         return
 
-    from api.session_manifest import _ensure_turn_keys, _message_turns
+    from api.session_manifest import _message_turns
     from api.streaming import _persist_turn_artifact_paths
 
-    # state.db messages don't carry _turn_key. _ensure_turn_keys won't stamp
-    # anything when NO message has one (it treats all-or-none as a compatibility
-    # contract). _message_turns falls back to index-based keys (turn:0, turn:1,
-    # …) in that case, which is fine for artifact persistence.
-    has_any_turn_key = any(
-        isinstance(m, dict)
-        and m.get("role") == "user"
-        and str(m.get("_turn_key", "") or "").strip()
-        for m in s.messages
+    s.messages = _stamp_cron_manifest_turn_keys(
+        normalize_cron_manifest_messages(s.messages)
     )
-    if not has_any_turn_key:
-        # Stamp _turn_key ourselves so persisted records have stable keys that
-        # survive future message insertions (index-based keys would shift).
-        from api.session_manifest import _next_turn_key
 
-        seen: list = []
-        for m in s.messages:
-            if isinstance(m, dict) and m.get("role") == "user":
-                m["_turn_key"] = _next_turn_key(seen)
-            seen.append(m)
-    else:
-        _ensure_turn_keys(s.messages)
+    # Match the normal WebUI durability order: stable transcript keys must be
+    # durable before the manifest store accepts artifact or empty decisions.
+    try:
+        s.save()
+    except Exception:
+        logger.debug("Failed to save cron session %s before artifact persist", sid, exc_info=True)
+        return
 
     for turn in _message_turns(s.messages):
         tk = str(turn.get("turn_key") or "").strip()
         if tk:
             _persist_turn_artifact_paths(s, tk)
-
-    try:
-        s.save()
-    except Exception:
-        logger.debug("Failed to save cron session %s after artifact persist", sid, exc_info=True)
 
 
 def _cron_repeat_limit_will_delete(job: dict) -> bool:

@@ -8,6 +8,10 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Added
 
+- **All-profile Gateway startup** — `server.py` 默认异步确保所有可见 Profile 的 Hermes Gateway 已运行，使各 Profile 的 Cron 在 WebUI 启动后自动恢复。命名 Profile 使用独立 Hermes service，已运行实例会跳过；default 开启 `gateway.multiplex_profiles` 时只启动 default；单 Profile 失败不阻塞 WebUI。可用 `HERMES_WEBUI_START_PROFILE_GATEWAYS=0` 关闭。Gateway lifecycle 现统一解析并验证 Agent 自身 launcher/venv，不再把 Agent 源码通过 `PYTHONPATH` 注入 WebUI/Anaconda Python，修复 `No module named hermes_cli` / `rich`。
+
+- **Direct `server.py` runtime log persistence** — 直接运行 `python server.py` 时，stdout/stderr 会同时输出到终端并落盘到 `{HERMES_WEBUI_STATE_DIR}/server-<port>.log`，主日志按大小轮转（默认 10 MiB，保留 5 份）。`faulthandler` / crash visibility 使用独立 `{HERMES_WEBUI_STATE_DIR}/server-<port>-crash.log`，避免主日志轮转影响 native crash 诊断。`bootstrap.py` 会显式设置 `HERMES_WEBUI_SERVER_LOG_EXTERNAL=1`，继续只使用既有 `bootstrap-<port>.log`，不重复写 `server-<port>.log`。配置见 `integration/README.md`。
+
 - **x_frontend Nginx reverse proxy** — `integration/frontend/nginx-x-frontend.conf` serves `x_frontend/dist` on `:8080` and proxies `/api/*` (SSE-safe) to WebUI `:8787`. No WebUI backend code changes. Local skip-login is nginx-only: JS `sub_filter` disables Casdoor redirect (`192.168.1.139:23008`), seeds `app_auth_session`, and mocks `webui_login` / `webui_logout`. See `integration/frontend/README.md`.
 
 - **Record scripts API** — 新增 `integration/record_scripts/` 本地存储接口：脚本 JSON 字符串 `save/list/update/delete` 与关联 CSV `upload/download/delete`。`relate_name` 由前端生成并作为稳定主键；文件落盘到 `{HERMES_WEBUI_STATE_DIR}/attachments/record_scripts/<relate_name>/`，脚本删除仅删除 `script.json`，不会清理关联 CSV。Swagger 与 `integration/README.md` 同步更新。
@@ -17,6 +21,8 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 ### Changed
 
 - **Profile list response minimization** — `GET /api/profiles` no longer returns `skills`, `skill_count`, `enabled_skills`, `total_skills`, or `memory_snapshot`. Profile UI keeps runtime and `info.json` metadata only; Cron Hub now loads a selected Profile's skills on demand through `GET /api/skills?profile=<name>`.
+
+- **Session manifest artifact authority** — `/api/session` no longer exposes `turn_artifacts`; `/api/session/manifest` is the single turn artifact display source and returns minimal `manifest_source`. New turn artifacts write only to `session_manifest.db`; legacy session JSON `turn_artifacts` is read only when the DB has no existing decision for that session/lineage, then backfilled into the DB.
 
 - **Knowledge base upload_docs raw passthrough** — `POST /api/integration/knowledge_base/upload_docs` now forwards the incoming multipart body and `Content-Type` to downstream `upload_docs` unchanged. WebUI no longer parses/rebuilds multipart (fixes multi-file uploads where duplicate `files` parts were dropped), does not validate form fields locally, and does not inject `chunkSize`/`chunkOverlap` defaults or a WebUI-side upload size cap. Transport errors only: invalid `Content-Length`, incomplete body, downstream unreachable (502).
 
@@ -28,11 +34,13 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Fixed
 
+- **Cron Manifest turn 序号与 artifact 归属** — Hermes Agent 达到工具迭代上限时写入的内部总结请求不再被 materialized cron 会话识别为新的 user turn，避免出现 `turn:47`、`turn:224` 等按消息索引生成的伪 turn。新 cron 会话只为真实请求保存连续稳定 key；sidecar 先于 artifact decision 持久化，GET Manifest 复用同一 cron-only 规范化视图，使顶层与 per-turn artifacts 对齐。普通 WebUI 会话和历史 cron decisions 不变。
+- **聊天定时任务 Profile 归属** — 命名 Profile 的 WebUI 会话通过 `cronjob` 工具创建任务时，现在仅在单次工具调用边界绑定该会话的 Hermes home，任务会写入对应 Profile 的 `cron/jobs.json`，不再误落到 `default`；调用结束后立即恢复 cron 路径缓存，避免并发 Profile 串写。
+- **Cron Hub 手动运行动态推理配置** — `POST /api/integration/crons/run` 对未固定任务注入当前 Profile 的模型与 Provider，并清除本次执行副本的创建时推理快照，使手动运行明确接受当前配置而不触发漂移保护；Profile 未配置模型时，按该 Profile 的 `/api/models` 目录顺序选取首个模型；命名 Profile 仍无候选时回退到 root/default Profile 的当前推理配置或目录首项。所有变更仅作用于执行副本，不写入 `jobs.json`。原生 `/api/crons/run` 和自动 scheduler 保持不变；发现为空或失败时沿用 Agent 的异步失败记录。
 - **Chat apperror HTTP 状态码子串误判** — `classify_provider_error` 此前用 `'404' in err_str` / `'401' in err_str` / `'429' in err_str` 纯子串匹配，会命中 chatcmpl/UUID 里的随机数字（如 `chatcmpl-95c64d9f-8364-4bd4-a89e-d06404ddf433` 中的 `404`），把 `data_inspection_failed` 的 400 错误误分类为 `model_not_found`。新增 `_has_http_status()` 用正则要求 3 位状态码前后有定界符（`HTTP ` 前缀 / 空格 / 冒号 / 行首），不匹配 UUID 子串。同时调整 return 顺序：`quota_exhausted` → `compression_exhausted` → `content_filtered` → `rate_limit` → `auth_mismatch` → `model_not_found`，provider 专有 code 优先于弱状态码/文本匹配。回归测试覆盖含 `404`/`401`/`429` 的 chatcmpl ID 与真实 `HTTP 404`/`401`/`429` 两类。
 - **Knowledge base get_joinkb_applications passthrough** — `POST /api/integration/knowledge_base/get_joinkb_applications` proxies downstream `POST /knowledge_base/get_joinkb_applications` verbatim (no field validation). Typical body: `userId`, `uuid`, `kbName`.
 - **Knowledge base mark_message_read passthrough** — `POST /api/integration/knowledge_base/mark_message_read` proxies downstream `POST /knowledge_base/mark_message_read` verbatim (no field validation). Typical body: `messageId` (integer array).
 - **Knowledge base remove_from_myshkb passthrough** — `POST /api/integration/knowledge_base/remove_from_myshkb` proxies downstream `POST /knowledge_base/remove_from_myshkb` verbatim (no field validation). Typical body: `account`, `uuid`, `kbName`.
-- **聊天定时任务 Profile 归属** — 命名 Profile 的 WebUI 会话通过 `cronjob` 工具创建任务时，现在仅在单次工具调用边界绑定该会话的 Hermes home，任务会写入对应 Profile 的 `cron/jobs.json`，不再误落到 `default`；调用结束后立即恢复 cron 路径缓存，避免并发 Profile 串写。
 - **Knowledge base user_exit_shkb passthrough** — `POST /api/integration/knowledge_base/user_exit_shkb` proxies downstream `POST /knowledge_base/user_exit_shkb` verbatim (no field validation). Typical body: `account`, `uuid`, `kbName`.
 - **Knowledge base delete_readed_message passthrough** — `POST /api/integration/knowledge_base/delete_readed_message` proxies downstream `POST /knowledge_base/delete_readed_message` verbatim. Typical body: `messageId` (integer array).
 - **Knowledge base download_doc passthrough** — `POST /api/integration/knowledge_base/download_doc` proxies downstream `POST /knowledge_base/download_doc` verbatim (no field validation). Typical body: `knowledge_base_name`, `file_name`. Binary file passthrough when upstream returns non-JSON content. Document list filtering continues to use existing `POST /api/integration/knowledge_base/documents` (same downstream endpoint).

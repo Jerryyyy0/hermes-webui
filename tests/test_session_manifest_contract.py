@@ -9,6 +9,7 @@ def test_routes_expose_session_manifest_endpoint():
     routes = (REPO / 'api' / 'routes.py').read_text(encoding='utf-8')
     assert '"/api/session/manifest"' in routes
     assert 'build_session_manifest' in routes
+    assert 'manifest_source' in routes
     assert '"/api/file/allowlisted"' not in routes
 
 
@@ -62,8 +63,10 @@ def test_ui_js_renders_turn_artifacts():
 def test_session_manifest_module_has_extractors():
     src = (REPO / 'api' / 'session_manifest.py').read_text(encoding='utf-8')
     assert 'ARTIFACT_MUTATION_TOOLS' in src
-    assert 'REFERENCE_READ_TOOLS' in src
+    assert 'ARTIFACT_EXCLUSION_READ_TOOLS' in src
     assert 'REFERENCE_SKILL_TOOLS' in src
+    assert 'EXECUTION_ARTIFACT_TOOLS' in src
+    assert 'def _terminal_output_paths' in src
     assert 'def _serialize_manifest_row' in src
     assert 'def _rows_to_wire' in src
     assert 'def _extract_latest_todos' in src
@@ -86,6 +89,7 @@ def test_session_manifest_store_module_contract():
     assert 'def resolve_manifest_lineage_key' in src
     assert 'def upsert_manifest_records' in src
     assert 'def load_manifest_records' in src
+    assert 'def backfill_missing_manifest_records' in src
     assert 'def delete_session_manifest_records' in src
     assert 'def delete_session_manifest_turns' in src
     assert 'ASSISTANT_PROSE_SOURCE_TOOL = "assistant_prose"' in src
@@ -106,19 +110,44 @@ def test_streaming_manifest_turn_key_fallback_uses_last_user_key_first():
     assert last_user_lookup < next_key_lookup
     assert "_m.get('role') == 'user'" in fallback_block
     assert "_m.get('_turn_key', '')" in fallback_block
+    persist_block = src.split('def _persist_turn_artifact_paths', 1)[1].split('\ndef ', 1)[0]
+    assert 'upsert_manifest_records' in persist_block
+    assert 'turn_artifacts' not in persist_block
 
 
-def test_session_manifest_doc_defines_sse_contract_and_tool_matrix():
-    doc = (REPO / 'docs' / 'session-inspector-manifest.md').read_text(encoding='utf-8')
-    assert 'manifest_delta' in doc
-    assert '"version": 1' in doc
-    assert '"sequence": 7' in doc
-    assert '"turn_key": "turn:' in doc
-    assert 'done' in doc
-    assert '聊天区' in doc
-    assert '## 工具解析矩阵' in doc
-    assert '`tool_start`' in doc
-    assert '`tool_complete`' in doc
-    assert '`todo`' in doc
-    assert '`write_file`' in doc
-    assert '`read_file`' in doc
+def test_completed_transcript_is_saved_before_manifest_decision_and_journal():
+    src = (REPO / 'api' / 'streaming.py').read_text(encoding='utf-8')
+    block = src.split('Make the completed transcript durable before publishing', 1)[1]
+    save_index = block.index('s.save()')
+    manifest_index = block.index('_persist_turn_artifact_paths(s, _manifest_turn_key)')
+    completed_index = block.index('"event": "completed"')
+    assert save_index < manifest_index < completed_index
+
+
+def test_session_manifest_docs_separate_product_api_and_artifact_contracts():
+    product = (REPO / 'docs' / 'session-inspector-manifest.md').read_text(encoding='utf-8')
+    api = (REPO / 'docs' / 'session-manifest-api.md').read_text(encoding='utf-8')
+    artifacts = (REPO / 'docs' / 'session-manifest-artifacts.md').read_text(encoding='utf-8')
+
+    assert '派生索引' in product
+    assert '核心不变量' in product
+    assert 'session-manifest-api.md' in product
+    assert 'session-manifest-artifacts.md' in product
+
+    assert 'GET `/api/session/manifest`' in api
+    assert '"version": 1' in api
+    assert '"sequence": 7' in api
+    assert '"turn_key": "turn:' in api
+    assert '`tool_start`、`tool_complete` 或 `turn_complete`' in api
+
+    assert 'Decision-first 构建流程' in artifacts
+    assert 'write_file' in artifacts
+    assert '`terminal`' in artifacts
+    assert 'stdout' in artifacts
+    assert '最后一条 assistant' in artifacts
+    assert 'ARTIFACT_EXCLUSION_READ_TOOLS' in artifacts
+    assert '不进入顶层/per-turn references' in artifacts
+    assert '只抑制同 turn、同 path 的 `assistant_prose`' in artifacts
+
+    assert not (REPO / 'docs' / 'session-manifest-artifact-regex.md').exists()
+    assert not (REPO / 'docs' / 'session-manifest-artifacts-entry.md').exists()

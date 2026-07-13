@@ -548,6 +548,7 @@ def main() -> int:
     os.environ.setdefault("HERMES_WEBUI_STATE_DIR", str(state_dir))
     if agent_dir:
         os.environ["HERMES_WEBUI_AGENT_DIR"] = str(agent_dir)
+    os.environ["HERMES_WEBUI_SERVER_LOG_EXTERNAL"] = "1"
 
     # Let operators move fallback relative writes out of a read-only agent dir.
     server_cwd = os.environ.get("HERMES_WEBUI_SERVER_CWD", "").strip() or str(agent_dir or REPO_ROOT)

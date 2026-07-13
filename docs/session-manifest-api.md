@@ -1,43 +1,22 @@
-# Session Manifest 接口文档
+# Session Manifest HTTP/SSE 契约
 
-本文档描述 **待办（Tasks）**、**成果（Artifacts）**、**参考（References）** 与 **轮次（Turns）** 的 HTTP/SSE 接口、字段契约与合并规则。产品语义与边界见 [session-inspector-manifest.md](./session-inspector-manifest.md)。
+本文定义 Session Manifest 的对外 HTTP/SSE 字段、合并和生命周期契约。产品语义见 [session-inspector-manifest.md](./session-inspector-manifest.md)；Artifacts 内部提取与持久化见 [session-manifest-artifacts.md](./session-manifest-artifacts.md)。
 
-实现入口：`api/session_manifest.py`（构建与 delta）、`api/routes.py`（HTTP）、`api/streaming.py` / `api/gateway_chat.py`（SSE）、`static/workspace.js`（前端缓存）。
+实现入口：`api/routes.py`（HTTP）、`api/session_manifest.py`（构建与 delta）、`api/streaming.py` / `api/gateway_chat.py`（SSE）、`static/workspace.js`（前端缓存）。
 
----
+## 1. GET `/api/session/manifest`
 
-## 1. 概览
-
-**Session Manifest** 是会话工具活动的**派生索引**，不替代 transcript，也不扫描整个 workspace。
-
-| 字段 | 含义 | 唯一数据来源 |
-| --- | --- | --- |
-| `todos` | 待办最新快照 | `todo` 工具结果 JSON 顶层 `todos[]` |
-| `artifacts` | 写入类工具创建/修改过的路径，及明确交付的文件 | `session_manifest.db` 中的 artifact store；transcript/tool/prose reconcile 仅作缺失记录 backfill |
-| `references` | 实际读取/打开的内容来源 | 读取/列目录工具白名单 |
-| `turns[]` | 按 user 消息划分的轮次视图 | 同上，归属 `turn:<user_msg_idx>` |
-
-**明确不算入**：助手正文**普通提及**的路径（无明确交付关键词）、搜索命中但未读取的文件、目录列表中的子文件名、跨字段推断补全。助手**明确交付语句**（如 `文件路径：...`、`已保存: ...`）且 workspace 内文件真实存在时，进入 `artifacts[]`，不进入 `references[]`。
-
----
-
-## 2. HTTP：获取持久化 Manifest
-
-### `GET /api/session/manifest`
-
-#### 请求
+### 请求
 
 | 参数 | 位置 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `session_id` | query | 是 | 会话 ID |
 
-示例：
-
 ```http
 GET /api/session/manifest?session_id=abc123
 ```
 
-#### 成功响应 `200`
+### 成功响应 `200`
 
 ```json
 {
@@ -49,14 +28,15 @@ GET /api/session/manifest?session_id=abc123
     },
     "artifacts": [
       {
-        "path": "api/session_manifest.py",
+        "path": "reports/result.md",
         "preview": "file",
-        "source_tool": "write_file"
+        "source_tool": "write_file",
+        "profile": "ops"
       }
     ],
     "references": [
       {
-        "path": "my-skill",
+        "path": "research-skill",
         "preview": "skill",
         "source_tool": "skill_view"
       }
@@ -69,18 +49,24 @@ GET /api/session/manifest?session_id=abc123
       }
     ]
   },
-  "live": {
-    "stream_id": "stream-xyz",
-    "source": "active_stream"
-  }
+  "manifest_source": "db"
 }
 ```
 
-`live` 仅在有活跃流式 manifest 时出现；否则为 `{ "manifest": { ... } }`。
+响应不包含顶层 `session_id`、`workspace`、`counts` 或独立 `live` 字段。活跃 stream 的乐观 manifest 会在服务端合并进 `manifest` 后返回。
 
-**不包含**：`session_id`、`workspace`（请求参数 / session 对象已有）、`counts`（前端用数组长度）。
+### `manifest_source`
 
-#### 错误响应
+| 值 | 含义 |
+| --- | --- |
+| `db` | 使用 artifact store 中的非空或 empty decision；empty turn 可能执行严格 read-repair |
+| `backfill` | 当前 lineage 原先完全无 decision，本次从 legacy JSON 或 transcript 写回 |
+| `derived` | 无法写入 DB，仅临时从 transcript 派生 |
+| `unknown` | 异常或无法判断 |
+
+GET read-repair 不得更新 session `updated_at`、sidebar recency，也不得发布 session-list 变更事件。
+
+### 错误响应
 
 | 状态码 | 条件 |
 | --- | --- |
@@ -88,39 +74,70 @@ GET /api/session/manifest?session_id=abc123
 | `404` | 会话不存在 |
 | `500` | 构建 manifest 失败 |
 
-#### 服务端构建流程（权威态）
+## 2. Manifest schema
 
-1. 加载会话展示用消息 + `session.tool_calls`，收集 `ToolEvent`。
-2. **Todos**：仅在**当前轮**（最后一个 `role=user` 之后）的 `role=tool` 消息中解析顶层 `todos[]`，按 `id` 合并；同轮内 `content` 为空或为 `(no description)` 时保留旧 `content`。对外下发的 `todos.items` 只包含带可展示 `content` 的条目（无则 `items: []`）。
-3. **Artifacts**：优先读取 profile-aware artifact store；store 已有记录是权威来源。缺失时才从工具白名单、`MEDIA:`、assistant 交付 prose 和旧 `turn_artifacts` 回填，回填不得覆盖 store 记录。
-4. **References**：按读取/技能工具白名单从 transcript/tool events 派生。
-5. **Turns**：每个 `role=user` 开启一轮，`turn_key = turn:<user_msg_idx>`。
-6. 过滤并序列化为可预览行（仅 `path`、`preview`、`source_tool`，有明确 profile 时包含 `profile`）。
+### `todos`
 
-Artifact store 规则：
+```json
+{
+  "items": [
+    { "id": "plan", "content": "Implement", "status": "completed" }
+  ]
+}
+```
 
-- v1 只持久化 artifacts，不持久化 todos/references。
-- artifact 身份键为 `lineage_key + profile + turn_key + record_kind + path`。
-- 一个 WebUI session 正常只归属一个 profile；写入 store 时只读取 `session.profile`，缺失写 `""`，不从 active profile、parent、workspace 或 path 推断。
-- `source_tool` 不允许为空；assistant prose/旧空值统一为 `"assistant_prose"`。
-- profile 缺失时 wire 输出不包含 `profile` 字段。
-- `GET /api/session/manifest` 可执行 read-repair 写回缺失 artifacts，但不得更新 session `updated_at`、sidebar recency 或发布 session-list 变更事件。
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `id` | string | 合并键 |
+| `content` | string | 可展示任务说明；空值不出站 |
+| `status` | string | `pending`、`in_progress`、`completed`、`cancelled` 或 `unknown` |
 
-#### 前端拉取时机
+Todos 是当前轮最新快照，不是历史流水。GET 中不包含 SSE 专用的 `mode`。
 
-- 打开或切换会话；
-- 本轮对话 `done` 后（`scheduleRefreshSessionManifest`，约 120ms 防抖）；
-- 离开会话时清空缓存（`clearSessionManifest`）。
+### Artifact/reference row
 
-本轮 `done` 后必须以本接口结果**覆盖**所有 SSE 乐观合并结果。
+References 仅允许 canonical skill row：`preview="skill"`、`source_tool="skill_view"`。文件读取不进入 GET/SSE/per-turn references，也不产生 file reference `expired`。
 
----
+基础字段：
 
-## 3. SSE：流式增量 `manifest_delta`
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `path` | string | workspace 相对路径、允许的 media 绝对路径或 canonical skill 名 |
+| `preview` | string | `file` 或 `skill` |
+| `source_tool` | string | 明确 provenance，不为空 |
 
-与聊天流共用 SSE 连接；事件名：`manifest_delta`（`static/messages.js` 订阅，经 `HermesSessionInspector.applyDelta` 合并）。
+可选字段：
 
-### 3.1 载荷结构（`version: 1`）
+| 字段 | 适用范围 | 说明 |
+| --- | --- | --- |
+| `profile` | artifacts | 来自 `session.profile`；无明确值时省略 |
+| `status` | artifacts/references | 当前仅 `expired`，表示有历史 provenance 但不可预览 |
+
+Manifest 不返回文件或技能正文。非 expired 且 `preview` 为 `file`/`skill` 的条目可由 `HermesSessionInspector.openManifestPreview(item)` 打开；expired 条目不可预览。
+
+文件预览使用 integration workspace file API，skill 预览使用 SkillHub content API，workspace 外 `MEDIA:` 使用 session media API。具体接口与部署约束见 [integration/README.md](../integration/README.md)。
+
+### `turns[]`
+
+```json
+{
+  "turn_key": "turn:4",
+  "artifacts": [
+    {
+      "path": "notes.txt",
+      "preview": "file",
+      "source_tool": "write_file"
+    }
+  ],
+  "references": []
+}
+```
+
+`turn_key` 格式为 `turn:<user_msg_idx>`，与 SSE 和聊天 `data-turn-key` 一致。聊天区 per-turn chips 只消费 `turns[].artifacts`。
+
+## 3. SSE `manifest_delta`
+
+与聊天流共用 SSE 连接，事件名为 `manifest_delta`。
 
 ```json
 {
@@ -137,13 +154,13 @@ Artifact store 规则：
   },
   "todos": {
     "items": [
-      { "id": "plan", "content": "Plan implementation", "status": "completed" }
+      { "id": "plan", "content": "Implement", "status": "completed" }
     ],
     "mode": "replace_latest"
   },
   "artifacts": [
     {
-      "path": "api/session_manifest.py",
+      "path": "reports/result.md",
       "preview": "file",
       "source_tool": "write_file"
     }
@@ -151,390 +168,68 @@ Artifact store 规则：
   "references": []
 }
 ```
-
-SSE 行级形状与 GET manifest **相同**（三字段）。`todos.mode` 仅出现在 SSE delta，不出现在 GET `manifest.todos`。
-
-### 3.2 顶层字段
 
 | 字段 | 说明 |
 | --- | --- |
 | `version` | 协议版本，当前为 `1` |
 | `session_id` | 前端丢弃非当前会话事件 |
-| `stream_id` | 配合 `sequence` 做幂等与过期流过滤 |
-| `turn_key` | 后端在 stream 启动时确定，格式 `turn:<user_msg_idx>`；前端不得从 `stream_id` 推断 |
+| `stream_id` | 配合 `sequence` 做幂等和过期流过滤 |
+| `turn_key` | stream 启动时确定；前端不得从 `stream_id` 推断 |
 | `sequence` | 单 stream 内单调递增 |
-| `source` | `tool_start` 或 `tool_complete`；`tool`、`tid` 仅用于展示与去重 |
-| `todos` | 可选；仅 `todo` 完成时；服务端发出前常与 live manifest 合并 |
-| `artifacts` / `references` | 可选；本次工具事件解析出的增量行 |
+| `source.kind` | `tool_start`、`tool_complete` 或 `turn_complete` |
+| `source.tool` / `tid` / `status` | provenance、展示和去重信息 |
+| `todos` | 可选；SSE 可额外含 `mode: "replace_latest"` |
+| `artifacts` / `references` | 可选；row schema 与 GET 相同 |
 
-若 `todos`、`artifacts`、`references` 均为空，服务端**不发送**该事件。
+`todos`、`artifacts`、`references` 均为空时不发送 delta。
 
-### 3.3 发射时机
+### 发射阶段
 
 | 阶段 | Tasks | Artifacts | References |
 | --- | --- | --- | --- |
-| `tool_start` | 不发射 | 写入工具参数路径 → `status: in_progress` | 读取工具参数路径 → `status: in_progress` |
-| `tool_complete` | 解析结果顶层 `todos[]` | 参数 + 结果 + diff/patch → `completed` / `error` | 参数确认 → `completed` |
-| `turn_complete`（`done` 前） | 不发射 | 本轮 transcript reconcile（见 §4.2）→ `source.tool: reconcile` | 不发射 |
+| `tool_start` | 不发射 | 不发射工具 artifact | 不发射 |
+| `tool_complete` | 成功 `todo` 顶层 `todos[]` | 仅成功工具的参数、结果、diff 或 terminal 输出操作数 | 仅明确 `success: true` 的 `skill_view` |
+| `turn_complete` | 不发射 | 工具强证据、`MEDIA:` 与最后一条 assistant 的严格 workspace 文件提取 | 不发射 |
 
-### 3.4 与 HTTP 的关系
+SSE 是乐观派生状态，不写入 transcript，不进入模型上下文，只更新 Inspector；不直接生成聊天区 per-turn chips。
 
-- SSE 为**乐观派生状态**，不写入 transcript，不进入模型上下文。
-- 不替代 `GET /api/session/manifest`。
-- 可通过 run journal 回放；前端须幂等合并。
-- **仅更新侧栏 Inspector**；不触发聊天区 per-turn 成果 chips。
-
----
-
-## 4. 三类数据：字段契约
-
-### 4.1 待办 `manifest.todos`
-
-**解析工具**：仅 `todo`。
-
-**容器字段（GET manifest）**
-
-| 字段 | 类型 | 说明 |
-| --- | --- | --- |
-| `items` | `object[]` | 当前任务列表快照 |
-
-SSE delta 的 `todos` 可额外含 `mode: "replace_latest"`（合并语义，不下发到 GET）。
-
-**`items[]` 每项**
-
-| 字段 | 来源 | 说明 |
-| --- | --- | --- |
-| `id` | 工具结果 | 必填；合并键 |
-| `content` | 工具结果 | 空或 `(no description)` 时保留旧值 |
-| `status` | 工具结果 | `pending` \| `in_progress` \| `completed` \| `cancelled`；其它非空 → `unknown` |
-
-**语义**：最新快照，非历史流水。多轮 `todo` 按 `id` 合并。
-
-**展示**：Workspace **Tasks** tab；Control Center **Todos**（优先 manifest）。
-
----
-
-### 4.2 成果 `manifest.artifacts[]`
-
-#### 写入工具白名单
-
-**Workspace 文件**：`write_file`, `create_file`, `edit_file`, `patch`, `apply_patch`, `mcp_filesystem_write_file`, `mcp_filesystem_edit_file`
-
-**Skill 成果**：
-
-1. **Hermes Agent `skill_manager_tool`**：`skill_manage`，且 `action` 为 `create` / `edit` / `patch` / `write_file` — 从 args 的 `name` 取技能名；`tool_complete` 后若 result JSON 含 `success` 与 `path`，优先用 `path`（如 `github/github-trending`）。
-2. **通用文件写入工具**：上述 workspace 写入类工具（如 `write_file`、`edit_file`）直接写入 session profile 的 `{HERMES_HOME}/skills/.../SKILL.md` 时，manifest `path` 为相对 skills 根的技能名（如 `my-skill` 或 `github/github-trending`）。
-
-两种来源均为 `preview: "skill"`。须 `HERMES_INTEGRATION=1`、SkillHub 可用，且 profile skills 目录下已存在对应 `SKILL.md`（`in_progress` 不出现在 wire）。skills 目录下非 `SKILL.md` 文件不算 skill 成果。
-
-Skill 成果示例：
-
-```json
-{
-  "path": "deep-research-zh",
-  "preview": "skill",
-  "source_tool": "skill_manage"
-}
-```
-
-#### 路径来源
-
-- 参数：`path`, `file_path`, `target`, `destination`, `filename`, `paths[]`, `edits[].path` 等；
-- Unified diff：`+++ b/path` / `--- a/path`；
-- ApplyPatch：`*** Add File:` / `*** Update File:`；
-- assistant 正文：`MEDIA:<local-path>`（`source_tool: "media"`；仅 `role=assistant`；跳过 `MEDIA:https://...`）；
-- **turn_complete reconcile**（`done` 前 SSE + `GET` 重建）：从本轮 tool args/result/diff、`MEDIA:` 与 **assistant 交付 prose**（如 `文件位置：` 后的路径）保守正则提取候选路径；**须通过 `_file_preview_path`（workspace 内真实存在、可预览）** 才可 wire；`source.kind: turn_complete`、`source.tool: reconcile`；prose 行 `source_tool: assistant_prose`；各行 `source_tool` 仍为实际工具名或 `media`/`assistant_prose`。
-
-#### 单条结构（与 references 共用）
-
-```json
-{
-  "path": "api/session_manifest.py",
-  "preview": "file",
-  "source_tool": "write_file",
-  "profile": "ops",
-  "status": "expired"
-}
-```
-
-`profile`（可选）：成果所属 WebUI profile，来自 `session.profile`；无明确值时省略。仅 `artifacts[]` 携带，不在 `references[]` 中。
-
-`status`（可选，`artifacts[]` / `references[]` / `turns[]` 对应子数组）：`expired` 表示该路径曾由明确工具活动记录，但当前 workspace / skills 目录内已不存在或不可预览；省略时表示当前可预览。文件类 artifact 的 `expired` 仍要求 per-turn 归属（`turn_key` / store）；reference 与 skill 行以 `source_tool` 白名单作为 provenance，不要求 `turn_key`。
-
-**成果列表**：可预览文件正常展示；已删除的历史成果保留并标 `status: expired`（不可再预览）。不可预览且从未入库的路径（目录、过大、cruft 等）仍不出现。预览接口与路由见 [§4.5 预览逻辑](#45-预览逻辑file--skill)。
-
-#### 排除
-
-只读工具、无 `MEDIA:` 标记的助手 prose、`role=user` 中的 `MEDIA:`、远程 `MEDIA:` URL、工具 JSON 的 `file_path`/`media_tag`、全 workspace 扫描、workspace 外写入类工具路径（workspace 外仅 `source_tool=media` 可列出）。
-
-#### SSE `turn_complete`（reconcile）
-
-assistant 消息持久化后、`done` 前可发送 `manifest_delta`：`source.kind = "turn_complete"`，`source.tool = "reconcile"`。载荷含本轮 transcript 补全成果（含 `MEDIA:`、assistant 交付 prose、非白名单写入工具的 args/result/diff 路径）；**候选路径须 workspace 内真实存在且可预览**，文本命中但文件不存在一律丢弃。prose 路径使用 `source_tool: assistant_prose`。仅更新侧栏 Inspector；per-turn chips 仍以 turn `done` 后的 `GET /api/session/manifest` 为准。
-
-#### 展示
-
-- 右侧 **Artifacts** tab：全会话按 `path` 聚合；
-- 聊天区：每轮 `done` 后展示 `turns[].artifacts` chips（含 `preview: "skill"` 的 skill 成果）。
-
-#### Turn 持久化（`session.turn_artifacts`）
-
-Turn 完成时（`api/streaming.py` `_persist_turn_artifact_paths`），除 workspace 写入工具外，**`skill_manage` mutation** 与写入 profile skills 目录 `SKILL.md` 的 mutation 工具也会写入 `session.turn_artifacts[turn_key]`，条目含 `{path, source_tool, preview}`（skill 为 `preview: "skill"`）。空 turn 不写入 key。`build_session_manifest` 合并 persisted 与 transcript 推导的 skill 行；path 统一为 skills 根相对路径（如 `research/ai-news-top10`）。
-
----
-
-### 4.3 参考 `manifest.references[]`
-
-#### 读取工具白名单
-
-`read_file`, `open_file`, `view_file`, `mcp_filesystem_read_file`, `skill_view`
-
-#### 发现类工具（默认不进 References）
-
-`glob`, `rg`, `grep`, `search`, `semantic_search`, `mcp_filesystem_search_files`, `list_dir`, `mcp_filesystem_list_directory`（目录不可预览，过滤）
-
-#### 单条结构
-
-与 artifacts **相同三字段**（可选 `status: "expired"`）。读文件工具**不保存**文件正文。`skill_view` 条目 `preview` 为 `"skill"`，预览见 [§4.5](#45-预览逻辑file--skill)。
-
-**存在性**：wire 阶段校验 workspace 内文件或 profile skills 目录下 `SKILL.md`；存在则正常列出，缺失则保留行并标 `status: expired`（`in_progress` 工具事件仍不 wire）。
-
-#### 排除
-
-已写入路径（归 artifacts）、**已在 artifacts 中的 skill（含 `skill_view` 验证刚创建的技能，按 canonical path 去重）**、搜索命中未读、list 目录、助手提到的路径、workspace 外路径。
-
-#### 展示
-
-右侧 **Refs** tab；聊天区当前不展示 per-turn references。
-
----
-
-### 4.4 轮次 `manifest.turns[]`
-
-```json
-{
-  "turn_key": "turn:0",
-  "artifacts": [
-    {
-      "path": "notes.txt",
-      "preview": "file",
-      "source_tool": "write_file"
-    }
-  ],
-  "references": []
-}
-```
-
-| 字段 | 说明 |
-| --- | --- |
-| `turn_key` | `turn:<user_msg_idx>`，与 SSE、聊天 `data-turn-key` 一致 |
-| `artifacts` / `references` | 本轮可预览子集，元素形状同上 |
-
-聊天区 per-turn 成果仅使用 `turns[].artifacts`。
-
----
-
-### 4.5 预览逻辑（file / skill）
-
-Manifest **只负责列出可预览项并给出路由标识** `preview`；**不返回文件/技能正文**。用户点击 Artifacts、References 或聊天区 turn chips 时，前端 `HermesSessionInspector.openManifestPreview(item)` 仅根据 `item.preview` 选择下方两条路径之一。
-
-#### 端到端流程
-
-```mermaid
-flowchart TD
-  click[用户点击 manifest 行]
-  click --> check{item.preview}
-  check -->|file| pathShape{path 形态}
-  pathShape -->|相对路径| fileApi[integration workspace file API]
-  pathShape -->|绝对路径| mediaApi["/api/media + session_id"]
-  check -->|skill| skillApi[skillhub content API]
-  fileApi --> panel[右侧 Workspace 预览区]
-  mediaApi --> panel
-  skillApi --> panel
-```
-
-| 步骤 | 说明 |
-| --- | --- |
-| 1. 服务端构建 | `api/session_manifest.py` 从工具事件归纳路径；**仅可预览**者进入 `artifacts[]` / `references[]`，并写入 `preview: "file"` 或 `"skill"` |
-| 2. 前端展示 | 侧栏 / turn chips 渲染 `path` + `source_tool`；列表内条目均可点击（无 `previewable` 字段） |
-| 3. 用户点击 | `openManifestPreview({ path, preview, source_tool })` |
-| 4. 拉取内容 | `preview === "file"` 且 `path` 为相对路径 → integration 文件接口；`path` 为绝对路径（`source_tool=media`）→ `/api/media?path=&session_id=`；`preview === "skill"` → SkillHub 正文接口 |
-| 5. 渲染 | 同一套 Workspace 预览区（`previewArea`），按扩展名或 Markdown 选择 code / md / pdf / html / 媒体等模式 |
-
-**Manifest 预览不走** session 级 `GET /api/file?session_id=`，也**不走**已移除的 `GET /api/file/allowlisted`。右侧文件树手动浏览仍可用 session `/api/file`（与 manifest 预览相互独立）。
-
-#### 部署前提（file 预览）
-
-Integration 文件接口根目录为 **`HERMES_WEBUI_DEFAULT_WORKSPACE`**，**无 `session_id` 参数**。因此：
-
-- 仅当 **session workspace 与 `DEFAULT_WORKSPACE` 一致** 时，manifest 中的 workspace 相对 `path` 与 integration 读盘根目录一致；
-- 若两者不一致，manifest 可能仍列出 session workspace 内文件，但点击预览会读到错误路径或 404。
-
-#### 服务端：何时写入 `preview`
-
-| `preview` | 写入条件 |
-| --- | --- |
-| `"file"`（References） | 读取白名单工具（`read_file` 等）命中 workspace 内相对路径；存在且可预览 → 正常行；曾读取但已缺失 → `status: expired` |
-| `"file"`（Artifacts） | 写入/MEDIA 命中路径；存在且可预览 → 正常行；曾入库（`turn_key`）但已缺失 → `status: expired` |
-| `"skill"`（References） | `skill_view` + integration 可用；`SKILL.md` 存在 → 正常行；曾查看但已缺失 → `status: expired` |
-| `"skill"`（Artifacts） | `skill_manage` 写入类或 `SKILL.md` 写入工具；`SKILL.md` 存在且非 `in_progress` → 正常行；曾生成但已缺失 → `status: expired` |
-
-**不写入、不出现在列表**：目录、`list_dir` 路径、无明确工具来源的候选、非 MEDIA 的 workspace 外路径、profile 记忆文件（`MEMORY.md` 等）、过大文件、integration 不可用时的 skill 行、`in_progress` 工具事件、远程 `MEDIA:` URL。
-
-#### `preview: "file"` — workspace 文件
-
-**接口**（需 `HERMES_INTEGRATION=1`）：
-
-| 方法 | 路径 | 参数 |
-| --- | --- | --- |
-| `GET` | `/api/integration/workspace/file` | `path` = manifest 行的 workspace **相对路径**（POSIX） |
-
-**成功 `200`**：原始文件字节；`Content-Type` 按扩展名；`Cache-Control: no-store`；**不设** `Content-Disposition`。支持 `Range` 字节范围。
-
-**错误**：`{ "error": "<message>" }` — `400` 缺 `path`；`404` 不存在 / 非文件 / cruft。
-
-**前端按扩展名渲染**（`static/workspace.js` → `openIntegrationFilePreview`）：统一 `GET /file?path=`；文本/md/html 用 `fetch` → `text()`；媒体/PDF 可用直链 URL；Office/压缩包等 `fetch` blob 后 `<a download>`；HTML 用 sandbox `srcdoc`。
-
-**示例**：
-
-```http
-GET /api/integration/workspace/file?path=docs/readme.md
-GET /api/integration/workspace/file?path=assets/logo.png
-```
-
-实现入口：[`integration/workspace/handlers.py`](../integration/workspace/handlers.py)；与左侧 integration 文件栏共用同一 API。
-
-#### `preview: "skill"` — 技能正文
-
-**来源**：仅 **`skill_view`** 工具；manifest 行 `path` = **技能名**（不是磁盘路径），`source_tool` = `skill_view`。
-
-**接口**（需 SkillHub / integration 技能模块可用）：
-
-| 方法 | 路径 | 参数 |
-| --- | --- | --- |
-| `GET` | `/api/skillhub/content` | `name` = manifest 行的 `path`（技能名）；可选 `scope`（默认 **`auto`**：本地 `{HERMES_HOME}/skills` 优先，否则 SkillHub `/doc`；`custom` / `hub` 强制仅本地 / 仅上游） |
-
-**成功 `200`**：
-
-| 字段 | 类型 | 必填 | 说明 |
-| --- | --- | --- | --- |
-| `name` | string | 是 | 技能名 |
-| `content` | string | 是 | SKILL.md 全文 |
-| `linked_files` | object | 否 | hub 常为 `{}` |
-
-```json
-{
-  "name": "my-skill",
-  "content": "---\nname: my-skill\n---\n\n# Skill body...",
-  "linked_files": {}
-}
-```
-
-**错误**：`400` 缺 `name`；`404`（`scope=custom` 或 `auto` 且本地与上游均不可用）；`502` hub 上游失败。体为 `{ "error": "..." }`。
-
-**前端行为**（`openSkillContentPreview`）：
-
-1. `GET /api/skillhub/content?name={path}`
-2. 标题栏显示 `data.name` 或技能名
-3. 正文按 Markdown 渲染（与 `.md` 文件预览相同逻辑）；过大则纯文本 code 模式
-
-**Manifest 预览不包含**：`/api/skillhub/structure`（目录树）、`/api/skillhub/file`（技能包内单文件）。当前产品只预览 **SKILL 主文档正文**。
-
-#### 前端分发（契约）
-
-```javascript
-// static/workspace.js — 逻辑摘要
-async function openManifestPreview(item) {
-  if (!item?.path || !item.preview) return;
-  if (item.preview === 'skill') return openSkillContentPreview(item.path);
-  if (item.preview === 'file') return openIntegrationFilePreview(item.path);
-}
-
-function isManifestPreviewable(item) {
-  return item?.preview === 'file' || item?.preview === 'skill';
-}
-```
-
-| manifest 字段 | file 预览 | skill 预览 |
-| --- | --- | --- |
-| `path` | 传给 `?path=` / raw 的相对路径 | 传给 `?name=` 的技能名 |
-| `preview` | 必须为 `"file"` | 必须为 `"skill"` |
-| `source_tool` | 仅展示（如 `write_file`、`read_file`） | 通常为 `skill_view` |
-
-#### 与 SSE delta 的关系
-
-流式 `manifest_delta` 中 `artifacts[]` / `references[]` **行形状与 GET 相同**（三字段）。若某次工具事件尚不可预览（例如 `write_file` 进行中文件尚未落盘），该路径**不会**出现在 delta 中；本轮 `done` 后 `GET /api/session/manifest` 权威重建列表。
-
----
-
-## 5. 工具解析矩阵
-
-| 类型 | 工具 | `tool_start` | `tool_complete` | `GET /api/session/manifest` |
-| --- | --- | --- | --- | --- |
-| Tasks | `todo` | 不解析 | 顶层 `todos[]` → SSE（可展示 content） | 当前轮 tool 消息，按 `id` 合并 |
-| Artifacts | 写入白名单 | 参数路径（可预览则入列表） | 参数+结果+diff | 持久化消息重建，过滤不可预览 |
-| References | 读取+列目录白名单 | 参数路径（可预览则入列表） | 确认完成 | 持久化消息重建，过滤不可预览 |
-| 排除 | 发现类搜索 | — | 不进 References | — |
-
-扩展工具别名时须同步更新 [session-inspector-manifest.md](./session-inspector-manifest.md) 矩阵与 `tests/test_session_manifest*.py`。
-
----
-
-## 6. 合并与幂等
+## 4. 合并、去重与幂等
 
 | 对象 | 规则 |
 | --- | --- |
-| `artifacts` / `references`（会话级） | 按 `path` 去重；同 path 后者覆盖 `source_tool` |
-| `turns[].artifacts` / `turns[].references` | 按 `turn_key` 合并；轮次内按 `path` 去重 |
-| `todos` | 仅当前轮；按 `id` 合并；live 可含 id-only；SSE/GET 出站前过滤为可展示 `content` |
+| Session artifacts | 按 profile + canonical path 去重 |
+| Session references | 只接受 canonical skill identity |
+| Turn artifacts/references | 按 `turn_key` 合并；artifact 按 path、reference 按 canonical skill 去重 |
+| Skills | 同技能 artifact 优先于 skill reference |
+| Todos | 当前轮按 `id` 合并；出站前过滤无展示内容项 |
 | 缺失字段 | 保持空或跳过，不跨字段推断 |
-| 幂等 | 重复 `stream_id:sequence` 忽略 |
+| SSE 幂等 | 重复 `stream_id:sequence` 忽略 |
+| Store replay | 稳定 `tool_call_id` 不得跨 turn 重复归属 |
 
----
+## 5. 生命周期
 
-## 7. 生命周期
-
-| 阶段 | 侧栏 Tasks / Artifacts / Refs | 聊天区 turn 成果 chips |
+| 阶段 | Inspector | 聊天区 chips |
 | --- | --- | --- |
-| 流式进行中 | `manifest_delta` 乐观更新 | 不展示 |
-| 本轮 `done` 后 | `GET /api/session/manifest` 覆盖 SSE | `refreshTurnArtifactsInChat()` |
+| 流式进行中 | 合并 `manifest_delta` 乐观更新 | 不展示 |
+| 本轮 `done` 后 | `GET /api/session/manifest` 覆盖 SSE | 使用 `manifest.turns[].artifacts` 刷新 |
+| 切换/打开会话 | 拉取 GET manifest | 按 GET 结果渲染 |
+| 离开会话 | 清空前端 manifest cache | 清理当前会话绑定 |
 
----
+## 6. 浏览器 API
 
-## 8. 前端 API（浏览器）
-
-全局对象 `window.HermesSessionInspector`（`static/workspace.js`）：
+`window.HermesSessionInspector`（`static/workspace.js`）：
 
 | 方法 | 说明 |
 | --- | --- |
-| `refresh()` | 调用 `loadSessionManifest()` |
+| `refresh()` | 拉取 GET manifest |
 | `clear()` | 清空缓存 |
-| `applyDelta(delta)` | 合并 SSE `manifest_delta` |
-| `openManifestPreview(item)` | 按 `preview`：`file` → integration 文件 API；`skill` → skillhub content（见 [§4.5](#45-预览逻辑file--skill)） |
-| `isManifestPreviewable(item)` | `preview === 'file' \|\| preview === 'skill'` |
+| `applyDelta(delta)` | 幂等合并 SSE delta |
+| `getTurnArtifacts(turnKey)` | 获取某轮 artifacts |
+| `openManifestPreview(item)` | 非 expired 条目按 `preview` 分发 |
+| `isManifestPreviewable(item)` | 排除 expired，并检查 `file`/`skill` |
 
-内部缓存：`_sessionManifest`、`_sessionManifestSid`；切换会话后 sid 不匹配则视为无 manifest。
-
----
-
-## 9. 设计约束（实现须遵守）
-
-1. **派生而非权威**：不替代 transcript；不以 manifest 驱动 Agent。
-2. **Artifacts**：仅写入工具产物；跨轮聚合；不含只读访问。
-3. **References**：仅实际读取/打开来源；搜索命中、目录子项、prose 路径默认不算。
-4. **Tasks**：仅当前轮 `todo` 快照；同轮局部更新按 `id`；出站须有可展示 `content`。
-5. **路径安全**：仅 workspace 内可预览文件进入列表；外路径过滤。
-6. **字段诚实**：无明确来源则不推断、不复制相似字段。
-7. **SSE 为乐观态**：本轮完成后以 `GET /api/session/manifest` 为准。
-
----
-
-## 10. 相关测试
-
-- `tests/test_session_manifest.py` — 构建、合并、HTTP 路由
-- `tests/test_session_manifest_contract.py` — 路由与前端监听契约
-
-本地验证示例（隔离状态目录见 `AGENTS.md`）：
+## 7. 验证
 
 ```bash
-python3 -m pytest tests/test_session_manifest.py tests/test_session_manifest_contract.py -q
+./scripts/test.sh tests/test_session_manifest.py tests/test_session_manifest_store.py tests/test_session_manifest_contract.py tests/test_session_manifest_replay.py -q
 ```

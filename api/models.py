@@ -1329,7 +1329,6 @@ class Session:
         last_message_at = _last_message_timestamp(self.messages) or self.updated_at
         if has_pending_user_message and self.pending_started_at:
             last_message_at = self.pending_started_at
-        from api.session_manifest import turn_artifacts_for_wire
         return {
             'session_id': self.session_id,
             'title': self.title,
@@ -1390,7 +1389,6 @@ class Session:
             'read_only': self.read_only,
             'enabled_toolsets': self.enabled_toolsets,
             'composer_draft': self.composer_draft if isinstance(self.composer_draft, dict) else {},
-            'turn_artifacts': turn_artifacts_for_wire(self),
             'is_streaming': _is_streaming_session(
                 self.active_stream_id, active_stream_ids
             ) if include_runtime else False,
@@ -6321,6 +6319,34 @@ def _message_timestamp_as_float(msg):
         return None
 
 
+def _tool_execution_identity(msg: dict):
+    """Return a stable identity for one tool-call or tool-result message.
+
+    Compaction recovery can restamp an already-emitted tool row. Tool call IDs
+    name executions, unlike timestamps, so they are safe to deduplicate across
+    replay while ordinary conversational messages retain their exact-timestamp
+    semantics.
+    """
+    if not isinstance(msg, dict):
+        return None
+    role = str(msg.get('role') or '').lower()
+    if role == 'tool':
+        tid = str(msg.get('tool_call_id') or msg.get('tool_use_id') or '').strip()
+        return ('tool_result', tid) if tid else None
+    if role != 'assistant':
+        return None
+    ids = []
+    for call in msg.get('tool_calls') or []:
+        if not isinstance(call, dict):
+            continue
+        tid = str(call.get('id') or call.get('call_id') or '').strip()
+        if tid:
+            ids.append(tid)
+    if not ids:
+        return None
+    return ('tool_call', tuple(ids))
+
+
 def _session_message_merge_key(msg: dict):
     if not isinstance(msg, dict):
         return ("non_dict", repr(msg))
@@ -6920,6 +6946,7 @@ def merge_session_messages_append_only(
     merged_by_message_key = {}
     merged_by_dedup_key = {}
     merged_by_visible_key = {}
+    merged_by_tool_execution = {}
     max_sidecar_timestamp = None
 
     def _remember_merged_message(message):
@@ -6928,6 +6955,9 @@ def merge_session_messages_append_only(
         merged_by_message_key.setdefault(_session_message_merge_key(message), message)
         merged_by_dedup_key.setdefault(_session_message_dedup_key(message), message)
         merged_by_visible_key.setdefault(_session_message_visible_key(message), message)
+        execution_key = _tool_execution_identity(message)
+        if execution_key is not None:
+            merged_by_tool_execution.setdefault(execution_key, message)
 
     for msg in sidecar_messages:
         timestamp = _message_timestamp_as_float(msg)
@@ -6965,6 +6995,10 @@ def merge_session_messages_append_only(
     for msg in state_messages:
         timestamp = _message_timestamp_as_float(msg)
         key = _session_message_merge_key(msg)
+        execution_key = _tool_execution_identity(msg)
+        if execution_key is not None and execution_key in merged_by_tool_execution:
+            _merge_session_display_metadata(merged_by_tool_execution[execution_key], msg)
+            continue
         visible_key = _session_message_visible_key(msg)
         replays_sidecar_prefix = False
         replay_target = None

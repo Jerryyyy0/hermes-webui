@@ -1,54 +1,49 @@
 # Session Inspector Manifest
 
-Session Inspector Manifest 是从会话工具活动派生出的轻量索引，用于右侧
-Workspace Inspector 的 Tasks、Artifacts、References 面板，以及聊天区每轮的
-artifact chips。它不是 transcript、执行 journal，也不是 workspace 全量文件列表。
+Session Inspector Manifest 是从会话活动派生出的轻量索引，用于右侧 Workspace Inspector 的 Tasks、Artifacts、References 面板，以及聊天区每轮的 artifact chips。它不是 transcript、执行 journal，也不是 workspace 全量文件列表。
 
-## HTTP 与 SSE
+对外 HTTP/SSE 字段见 [session-manifest-api.md](./session-manifest-api.md)；Artifacts 的工具证据、路径过滤、持久化和 read-repair 见 [session-manifest-artifacts.md](./session-manifest-artifacts.md)。
 
-持久化视图由 `GET /api/session/manifest?session_id=<sid>` 返回。流式过程中，
-后端会通过聊天 SSE 发送 `manifest_delta`，前端先乐观合并，`done` 后再以 HTTP
-manifest 覆盖。
+## 数据语义
 
-`manifest_delta` 示例：
+| 数据 | 含义 | 明确排除 |
+| --- | --- | --- |
+| Tasks | 当前轮 `todo` 工具产生的最新任务快照 | 历史流水、助手正文中的列表 |
+| Artifacts | 当前会话通过明确成果证据创建、修改或交付的文件/技能 | 搜索命中、目录列表、输入文件、跨字段推断 |
+| References | 明确成功 `skill_view` 的 canonical 技能 | 文件读取、搜索、列目录、助手普通提及 |
+| Turns | 按 user 消息划分的 per-turn artifacts/skill references 视图 | transcript 或完整执行历史 |
 
-```json
-{
-  "version": 1,
-  "session_id": "abc123",
-  "stream_id": "stream-xyz",
-  "turn_key": "turn:4",
-  "sequence": 7,
-  "source": {
-    "kind": "tool_complete",
-    "tool": "write_file",
-    "tid": "call-1",
-    "status": "completed"
-  },
-  "artifacts": [
-    {
-      "path": "report.md",
-      "preview": "file",
-      "source_tool": "write_file"
-    }
-  ],
-  "references": []
-}
-```
+同一资源在一个 manifest 结果中只保留一个主归类，优先级为 `artifacts > references`。缺失字段保持为空或跳过，不从相似字段推断、复制或补全。
 
-## 聊天区
+## Artifact 证据边界
 
-聊天区使用 `turn_key` 将 `manifest.turns[]` 的 artifacts 渲染到对应轮次。
-SSE delta 只更新 Inspector 的乐观状态；最终展示以 `done` 后的 HTTP manifest
-为准。
+Artifacts 可来自成功写入工具的结构化参数/diff、成功 terminal 的受控输出操作数、显式 `MEDIA:`、成功 skill mutation，以及当前轮最后一条 assistant 中经严格验证的 workspace 文件。成功文件读取路径仅作为同 turn 的瞬态 read evidence，抑制同路径 `assistant_prose` 弱候选；不公开、不持久化，也不抑制强工具/MEDIA artifact。中间 assistant prose 不提取路径。
 
-## 工具解析矩阵
+最终 assistant 候选必须位于 workspace、真实存在且可预览；不存在的文件不会因正文声称已交付而进入 Manifest。Terminal 不扫描 stdout、目录列表、heredoc 源码或整个 workspace。
 
-| 事件 | Tasks | Artifacts | References |
-| --- | --- | --- | --- |
-| `tool_start` | 不更新 | 写入工具可预告路径 | 读取工具可预告路径 |
-| `tool_complete` | `todo` 工具解析 `todos[]` | `write_file`、`edit_file`、`patch`、`MEDIA:` 等写入或交付文件 | `read_file`、技能查看等实际读取来源 |
-| `turn_complete` | 不更新 | 本轮缺失 artifact 可由 reconcile/backfill 补齐 | 不更新 |
+具体工具白名单与算法只有 [session-manifest-artifacts.md](./session-manifest-artifacts.md) 是权威来源。
 
-Artifacts 的权威持久化来源是 profile-aware artifact store。Transcript/tool/prose
-回扫只用于缺失记录的 backfill，不覆盖 store 已有记录。
+## 状态生命周期
+
+- 流式过程中，聊天 SSE 可发送 `manifest_delta`，Inspector 乐观合并。
+- SSE delta 不写入 transcript，也不替代持久化 Manifest。
+- 本轮 `done` 后，前端重新请求 `GET /api/session/manifest` 并覆盖乐观状态。
+- 聊天区每轮成果 chips 只使用 GET 返回的 `manifest.turns[].artifacts`，不直接使用 SSE delta。
+- Artifacts 的持久化权威来源是 profile-aware artifact store；transcript/tool/prose 只用于受控 backfill 或 empty-decision read-repair。
+
+## UI 消费
+
+- **Tasks**：Workspace Inspector 与 Control Center Todos。
+- **Artifacts**：Workspace Inspector 全会话聚合，以及聊天区 per-turn chips。
+- **References**：Workspace Inspector；聊天区当前不展示 per-turn references。
+- **Expired**：具有历史 provenance 但当前不可预览的条目可保留为 `status: "expired"`，不可点击预览。
+
+## 核心不变量
+
+1. Manifest 是派生索引，不驱动 Agent，也不替代 transcript/journal。
+2. 工具来源只接受成功 completed 事件；References 只来自明确成功的 `skill_view`。
+3. 每个 turn 只从最后一条 assistant prose 提取 artifact 路径；中间 assistant prose 不提取。
+4. 不扫描整个 workspace，不把搜索命中或目录子项提升为成果/参考。
+5. SSE 是乐观态；`done` 后 GET 是展示权威态。
+6. Store 中已有非空 artifact decision 的 turn 不重扫、不覆盖；empty decision 只允许严格同轮修复。
+7. 重放同一稳定 `tool_call_id` 不得产生第二次执行或跨 turn artifact 归属。

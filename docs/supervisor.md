@@ -38,6 +38,13 @@ In foreground mode, ``bootstrap.py`` does its setup work and then calls
 sees the long-lived server as the original child. ``KeepAlive=true`` /
 ``Restart=always`` work correctly.
 
+``server.py`` has its own direct-entry log sink for manual ``python server.py``
+runs, but ``bootstrap.py`` marks stdout/stderr as externally captured before
+launching the server. Under bootstrap or a supervisor, keep using the
+supervisor/bootstrap stdout/stderr log target described below; WebUI will not
+also create a duplicate ``server-<port>.log`` unless you explicitly unset that
+external-capture marker.
+
 ## launchd (macOS)
 
 ``~/Library/LaunchAgents/com.example.hermes-webui.plist``:

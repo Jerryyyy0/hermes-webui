@@ -31,6 +31,42 @@ All JSON API responses with `status >= 400` (via `j()` / `bad()`) emit a structu
 
 Implementation: [`integration/request_logging/`](request_logging/).
 
+### Direct `server.py` runtime logs
+
+When you run `python server.py` directly, WebUI persists stdout and stderr to a size-rotated log file while still teeing output to the terminal. The default paths are:
+
+- Main log: `{HERMES_WEBUI_STATE_DIR}/server-<port>.log`
+- Crash diagnostics: `{HERMES_WEBUI_STATE_DIR}/server-<port>-crash.log`
+
+The main log includes startup prints, structured request logs, API error logs, and Python traceback output. Crash diagnostics use a separate append-only stream for `faulthandler` and crash-visibility hooks so native crash output remains stable even when the main log rotates.
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `HERMES_WEBUI_SERVER_LOG` | `1` | Set to `0` to disable direct-entry runtime log persistence |
+| `HERMES_WEBUI_SERVER_LOG_PATH` | `{state_dir}/server-<port>.log` | Override the main log path |
+| `HERMES_WEBUI_SERVER_CRASH_LOG_PATH` | beside the main log | Override the crash diagnostic log path |
+| `HERMES_WEBUI_SERVER_LOG_MAX_BYTES` | `10485760` | Rotate the main log before a write would exceed this size |
+| `HERMES_WEBUI_SERVER_LOG_BACKUP_COUNT` | `5` | Number of rotated main log files to keep |
+| `HERMES_WEBUI_SERVER_LOG_EXTERNAL` | unset | Set to `1` when stdout/stderr are already captured by `bootstrap.py` or a supervisor |
+
+`bootstrap.py` sets `HERMES_WEBUI_SERVER_LOG_EXTERNAL=1` for the launched server so its existing `bootstrap-<port>.log` remains the single bootstrap-managed log file and direct-entry logging does not duplicate it.
+
+Implementation: [`integration/runtime_logging/`](runtime_logging/).
+
+### All-profile Gateway startup
+
+WebUI startup ensures every visible Hermes Profile Gateway is running by default. The coordinator runs asynchronously, uses Hermes Agent's idempotent service lifecycle (`gateway start`), and never stops gateways when WebUI exits, so scheduled jobs remain independent of the WebUI process.
+
+- Root/default uses `hermes gateway start`; named profiles use `hermes -p <name> gateway start`.
+- Already-running gateways are skipped. Per-profile failures and timeouts are logged but never block the HTTP server.
+- When the default profile enables `gateway.multiplex_profiles`, only the default Gateway is started because it serves all profiles.
+- Isolated-profile deployments only enumerate and start their pinned profile.
+- Set `HERMES_WEBUI_START_PROFILE_GATEWAYS=0` to disable this default behavior. Starting gateways can activate scheduled model calls and configured messaging/API platforms.
+- Gateway lifecycle commands resolve a dependency-complete Hermes runtime: optional absolute `HERMES_WEBUI_HERMES_EXECUTABLE`, then the discovered Agent installation's own `venv` launcher/Python, then a verified `hermes` on `PATH`. No system/WebUI Python fallback is used.
+- Do not combine an arbitrary Python with an Agent checkout through `PYTHONPATH`; source visibility does not install CLI dependencies such as `rich`.
+
+Implementation: [`integration/gateway_startup/`](gateway_startup/) with the shared runtime boundary in [`api/agent_cli_runtime.py`](../api/agent_cli_runtime.py). The only upstream seam is the asynchronous startup hook in `server.py`.
+
 ### Profile enrich (`info.json`)
 
 When integration is enabled, `GET /api/profiles` enriches each entry with profile presentation metadata. Skill lists and memory contents are intentionally excluded; callers use the dedicated skills and memory APIs instead.
@@ -81,9 +117,11 @@ Cron and Kanban profile pickers still show profile `name` only (by design).
 | POST | `/api/integration/crons/update\|delete\|run\|pause\|resume` | Same; all require `profile` + `job_id`; delete also clears that job's materialized sessions, state rows, and `cron/output/<job_id>/` history |
 | POST | `/api/integration/crons/unread/read` | Mark one Cron Hub job's current runs as read (`profile` + `job_id`) |
 
-UI: **Cron Hub** rail/sidebar (`integrationCrons`) via `hermes_integration_crons.js`. Upstream **Tasks** panel unchanged (single active profile). Cron Hub creation requires one explicit Profile, stores the task there, runs it there, and can attach skills from that Profile. Global cron polling uses `all_profiles=1` when the flag is on.
+UI: **Cron Hub** rail/sidebar (`integrationCrons`) via `hermes_integration_crons.js`. Upstream **Tasks** panel unchanged (single active profile). Cron Hub creation requires one explicit Profile, stores the task there, runs it there, and can attach skills from that Profile. Agent tasks normally defer model resolution to Hermes Agent: job override, runtime environment, then the selected Profile's `config.yaml` default. Cron Hub's `POST /api/integration/crons/run` adds one execution-only fallback: when all three are empty, it uses the first model in that Profile's `/api/models` catalog order; if a named Profile still has no candidate, it falls back to the root/default Profile's current inference configuration or first catalog model. For an unpinned job, the current Profile model/provider (or the catalog fallback) is injected into the manual-run copy and its creation-time inference snapshots are cleared on that copy, so an explicit Cron Hub run accepts the current configuration without triggering Agent drift protection. Nothing is written to `jobs.json`; upstream `/api/crons/run` and automatic schedulers are unchanged. If discovery is empty or fails, the Agent records the existing asynchronous model-resolution failure. Global cron polling uses `all_profiles=1` when the flag is on.
 
 When integration is enabled, one-shot schedules (`30m`, absolute datetimes, etc.) are kept in `jobs.json` after they finish (`enabled=false`, `state=completed`) instead of being auto-removed by Hermes Agent. Output history and Cron Hub listing remain available until you explicitly delete the job via `POST /api/integration/crons/delete` or upstream `POST /api/crons/delete`.
+
+Cron session materialization also persists stable Session Manifest artifact decisions. Hermes Agent's exact max-iteration summary request may be stored as a `role=user` message, but it continues the current cron invocation rather than opening a new Manifest turn. The materialization hook removes that internal boundary from its cron-only Manifest view, stamps only real cron requests with contiguous keys (`turn:1`, `turn:2`, ...), saves those keys before writing decisions, and the GET Manifest path reuses the same normalized view. Ordinary WebUI sessions and historical cron decisions are unchanged.
 
 ### Egress policy (iptables)
 
@@ -402,7 +440,9 @@ Response includes global `stats`: `{ hub, installed, not_installed, custom }` ac
 
 ## Upstream seam files (only these should conflict on rebase)
 
+- `server.py` — starts the fork-owned all-profile Gateway coordinator asynchronously; lifecycle logic remains in `integration/gateway_startup/`
 - `api/routes.py` — integration GET/POST dispatch, profiles enrich, static mapping, `__INTEGRATION_SKILLS__`, `__SKILLHUB_ENABLED__`; `GET /api/sessions` calls `_apply_integration_sidebar_session_filters` to drop cron execution rows when `HERMES_INTEGRATION=1`
+- `api/session_manifest.py` — after sidecar/state.db merge, cron-only GET normalization delegates to `integration.crons.hooks.normalize_cron_manifest_messages`; ordinary session turn extraction is unchanged
 - `static/index.html` — integration scripts + SkillHub panel markup
 - `static/panels.js` — `HermesProfiles` guard (`loadProfilesPanel`, `toggleProfileDropdown`, `renderProfileDetail`, `renderProfileForm`, `saveProfileForm`)
 - `requirements.txt` — `httpx`

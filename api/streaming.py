@@ -954,18 +954,11 @@ def _finalize_cancelled_turn(session, *, ephemeral: bool = False, message: str =
 
 
 def _persist_turn_artifact_paths(s, turn_key: str = '') -> None:
-    """Extract and persist artifact paths produced by tools in the current turn.
-
-    Called after display/context messages are merged and _turn_key is stamped,
-    but before s.save(). This freezes artefact attribution at turn-completion
-    time, eliminating the cross-turn prose contamination that plagues the
-    reconcile-based manifest pass.
-    """
+    """Persist current-turn artifact decisions to the manifest store."""
     if not getattr(s, 'messages', None):
         return
     _turn_key = str(turn_key or '').strip()
     if not _turn_key:
-        # Legacy fallback for non-stream callers.
         for _m in reversed(s.messages):
             if isinstance(_m, dict) and _m.get('role') == 'user':
                 _turn_key = str(_m.get('_turn_key', '') or '')
@@ -973,68 +966,11 @@ def _persist_turn_artifact_paths(s, turn_key: str = '') -> None:
                     break
     if not _turn_key:
         return
-    # Slice the turn's messages and extract tool-produced paths.
-    from pathlib import Path as _Path
-    from api.session_manifest import (
-        _extract_turn_artifact_entries,
-        _message_text,
-        _message_turns,
-        _paths_from_last_assistant_message,
-        _skills_dir_for_session,
-        _turn_message_slice,
-        filter_existing_turn_artifact_entries,
-    )
-    _slice = _turn_message_slice(s.messages, _turn_key)
-    if not _slice:
-        return
-    _turn_bounds = next(
-        (
-            (turn.get('start_msg_idx'), turn.get('end_msg_idx'))
-            for turn in _message_turns(s.messages)
-            if str(turn.get('turn_key') or '') == _turn_key
-        ),
-        None,
-    )
-    _workspace = _Path(str(getattr(s, 'workspace', '') or '')).expanduser().resolve()
-    _skills_dir = _skills_dir_for_session(s)
-    _entries = _extract_turn_artifact_entries(
-        _slice,
-        getattr(s, 'tool_calls', None),
-        _workspace,
-        start_msg_idx=_turn_bounds[0] if _turn_bounds else None,
-        end_msg_idx=_turn_bounds[1] if _turn_bounds else None,
-        skills_dir=_skills_dir,
-    )
-
-    # Also scan the last assistant message for relative-path/bare-filename
-    # deliveries (e.g. markdown table cells with `华为官网当季新品摘要.md`).
-    # Only paths that actually exist in the workspace are kept.
-    _last_assistant_text = ''
-    for _m in reversed(_slice):
-        if isinstance(_m, dict) and _m.get('role') == 'assistant':
-            _last_assistant_text = _message_text(_m.get('content'))
-            break
-    if _last_assistant_text:
-        _entry_paths = set(e['path'] for e in _entries)
-        _prose_paths = _paths_from_last_assistant_message(_last_assistant_text, _workspace)
-        for _pp in _prose_paths:
-            # Keep per-turn attribution: dedupe only within the current turn.
-            if _pp not in _entry_paths:
-                _entries.append({
-                    'path': _pp,
-                    'source_tool': 'assistant_prose',
-                    'preview': 'file',
-                })
-
-    _entries = filter_existing_turn_artifact_entries(_workspace, _skills_dir, _entries)
-
-    if not hasattr(s, 'turn_artifacts'):
-        s.turn_artifacts = {}
-    if _entries:
-        s.turn_artifacts[_turn_key] = _entries
     try:
+        from api.session_manifest import extract_turn_artifact_entries_for_manifest
         from api.session_manifest_store import upsert_manifest_records
 
+        _entries = extract_turn_artifact_entries_for_manifest(s, _turn_key)
         _store_entries = [
             {
                 'path': entry.get('path'),
@@ -1044,6 +980,8 @@ def _persist_turn_artifact_paths(s, turn_key: str = '') -> None:
             for entry in _entries
             if isinstance(entry, dict)
         ]
+        if not _store_entries:
+            _store_entries = [{'path': '', 'source_tool': 'assistant_prose', 'preview': 'file'}]
         upsert_manifest_records(s, _turn_key, _store_entries)
     except Exception:
         logger.debug("Failed to persist turn artifacts to manifest store", exc_info=True)
@@ -4896,7 +4834,6 @@ def _run_agent_streaming(
             return
         event_id = None
         if run_journal is not None:
-    _streaming_cron_profile_home_token = None
             try:
                 journaled = run_journal.append_sse_event(event, data)
                 # Carry the exact journal id for this queued frame. A global
@@ -4930,7 +4867,6 @@ def _run_agent_streaming(
         _message = str(message or '').strip()
         _kind = str(kind or '').strip().lower()
         if not _message:
-            _streaming_cron_profile_home_token = _STREAMING_CRON_PROFILE_HOME.set(_profile_home)
             return
         _lower = _message.lower()
         _is_compression_start = (
@@ -4960,6 +4896,7 @@ def _run_agent_streaming(
     _checkpoint_stop = None
     _ckpt_thread = None
     _agent_lock = None
+    _streaming_cron_profile_home_token = None
     try:
         s = get_session(session_id)
         update_active_run(stream_id, phase="running", session_id=session_id)
@@ -4978,7 +4915,6 @@ def _run_agent_streaming(
         if cancel_event.is_set():
             with _agent_lock:
                 _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.')
-        _install_streaming_cronjob_profile_wrapper()
             put('cancel', {'message': 'Cancelled before start'})
             return
 
@@ -4994,6 +4930,7 @@ def _run_agent_streaming(
             )
             _profile_home_path = get_hermes_home_for_profile(getattr(s, 'profile', None))
             _profile_home = str(_profile_home_path)
+            _streaming_cron_profile_home_token = _STREAMING_CRON_PROFILE_HOME.set(_profile_home)
             _profile_runtime_env = get_profile_runtime_env(_profile_home_path)
         except ImportError:
             _profile_home = os.environ.get('HERMES_HOME', '')
@@ -5041,6 +4978,7 @@ def _run_agent_streaming(
         # first-time module initialisation (which can be slow) does not
         # block other concurrent sessions waiting on _ENV_LOCK (#2024).
         _prewarm_skill_tool_modules()
+        _install_streaming_cronjob_profile_wrapper()
         # Still set process-level env as fallback for tools that bypass thread-local
         # Acquire lock only for the env mutation, then release before the agent runs.
         # The finally block re-acquires to restore — keeping critical sections short
@@ -7119,10 +7057,10 @@ def _run_agent_streaming(
                         logger.debug("Failed to append cancelled turn journal event", exc_info=True)
                     put('cancel', {'message': 'Cancelled by user'})
                     return
-                # Persist per-turn artifact paths so the manifest can skip the
-                # error-prone prose-reconcile pass (cross-turn contamination).
-                _persist_turn_artifact_paths(s, _manifest_turn_key)
+                # Make the completed transcript durable before publishing the
+                # manifest decision derived from its final assistant message.
                 s.save()
+                _persist_turn_artifact_paths(s, _manifest_turn_key)
                 if cancel_event.is_set():
                     _finalize_cancelled_turn(s, ephemeral=False)
                     try:
@@ -7603,8 +7541,6 @@ def _run_agent_streaming(
             err_str or _classification.get('message') or _classification['label'],
             _classification,
         )
-        if _streaming_cron_profile_home_token is not None:
-            _STREAMING_CRON_PROFILE_HOME.reset(_streaming_cron_profile_home_token)
         if s is not None:
             if _checkpoint_stop is not None:
                 _checkpoint_stop.set()
@@ -7667,6 +7603,8 @@ def _run_agent_streaming(
             update_active_run(stream_id, phase="finalizing")
             _last_resort_sync_from_core(s, stream_id, _agent_lock)
         _clear_thread_env()  # TD1: always clear thread-local context
+        if _streaming_cron_profile_home_token is not None:
+            _STREAMING_CRON_PROFILE_HOME.reset(_streaming_cron_profile_home_token)
         with STREAMS_LOCK:
             STREAMS.pop(stream_id, None)
             CANCEL_FLAGS.pop(stream_id, None)

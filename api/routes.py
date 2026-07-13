@@ -6072,7 +6072,8 @@ def handle_get(handler, parsed) -> bool:
         try:
             from api.session_manifest import build_session_manifest, merge_manifest_delta, _wire_todos
             session = get_session(sid)
-            manifest = build_session_manifest(session)
+            source_info = {}
+            manifest = build_session_manifest(session, source_info=source_info)
             stream_id = getattr(session, "active_stream_id", None)
             live_manifest = None
             if stream_id:
@@ -6082,7 +6083,7 @@ def handle_get(handler, parsed) -> bool:
                 manifest = merge_manifest_delta(manifest, live_manifest, scope="active_stream")
                 if isinstance(manifest.get("todos"), dict):
                     manifest["todos"] = _wire_todos(manifest["todos"])
-            return j(handler, {"manifest": manifest})
+            return j(handler, {"manifest": manifest, "manifest_source": source_info.get("manifest_source") or "unknown"})
         except KeyError:
             return bad(handler, "Session not found", 404)
         except Exception as exc:

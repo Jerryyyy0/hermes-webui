@@ -94,6 +94,7 @@ def clean_env(monkeypatch):
         "HERMES_WEBUI_AGENT_DIR",
         "HERMES_WEBUI_STATE_DIR",
         "HERMES_WEBUI_SERVER_CWD",
+        "HERMES_WEBUI_SERVER_LOG_EXTERNAL",
         "HERMES_HOME",
     ):
         monkeypatch.delenv(name, raising=False)
@@ -247,8 +248,9 @@ class TestMainForegroundRouting:
         (tmp_path / "agent").mkdir(parents=True, exist_ok=True)
         return bs
 
-    def test_default_path_uses_popen(self, stub_main_dependencies, clean_env, monkeypatch):
+    def test_default_path_uses_popen(self, stub_main_dependencies, clean_env, monkeypatch, tmp_path):
         bs = stub_main_dependencies
+        monkeypatch.setenv("HERMES_WEBUI_STATE_DIR", str(tmp_path / "state"))
         monkeypatch.setattr(sys, "argv", ["bootstrap.py", "--no-browser"])
 
         execv_calls = []
@@ -265,6 +267,7 @@ class TestMainForegroundRouting:
         assert rc == 0
         assert len(popen_calls) == 1, "Default path should call subprocess.Popen exactly once"
         assert len(execv_calls) == 0, "Default path must NOT call os.execv"
+        assert popen_calls[0][1]["env"]["HERMES_WEBUI_SERVER_LOG_EXTERNAL"] == "1"
 
     def test_foreground_flag_uses_execv(self, stub_main_dependencies, clean_env, monkeypatch):
         bs = stub_main_dependencies
@@ -433,6 +436,7 @@ class TestForegroundEnvAndCwd:
         bs, _agent_dir = setup
         workspace = tmp_path / "workspace-win"
         workspace.mkdir()
+        monkeypatch.setenv("HERMES_WEBUI_STATE_DIR", str(tmp_path / "state"))
         monkeypatch.setenv("HERMES_WEBUI_SERVER_CWD", str(workspace))
         monkeypatch.setattr(sys, "argv", ["bootstrap.py", "--foreground"])
         monkeypatch.setattr(sys, "platform", "win32")
@@ -471,6 +475,7 @@ class TestForegroundEnvAndCwd:
         assert os.environ["HERMES_WEBUI_HOST"] == "0.0.0.0"
         assert os.environ["HERMES_WEBUI_PORT"] == "9119"
         assert os.environ["HERMES_WEBUI_AGENT_DIR"] == str(agent_dir)
+        assert os.environ["HERMES_WEBUI_SERVER_LOG_EXTERNAL"] == "1"
         # state-dir was already set by the fixture; verify it survived.
         assert "HERMES_WEBUI_STATE_DIR" in os.environ
 

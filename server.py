@@ -632,12 +632,15 @@ def main() -> None:
     from api.config import print_startup_config, verify_hermes_imports, _HERMES_FOUND
     from integration.config import print_version_txt
 
+    from integration.runtime_logging import setup_runtime_logging
+
+    runtime_log = setup_runtime_logging(state_dir=STATE_DIR, port=PORT)
     print_version_txt()
     # Crash visibility FIRST (issue #4633): enable faulthandler + excepthooks +
     # exit audit before any heavy startup work so a native crash or a daemon /
     # handler-thread exception during startup or serving produces a diagnostic
     # instead of a silent death. The paired memory root-cause is #4765.
-    install_crash_visibility()
+    install_crash_visibility(stream=runtime_log.crash_stream)
 
     print_startup_config()
 

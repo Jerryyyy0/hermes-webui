@@ -215,7 +215,7 @@ def _normalize_record(session, turn_key: str, row: dict[str, Any], record_kind: 
         raise ValueError("session manifest store v1 only supports artifact records")
     path = str(row.get("path") or "").strip()
     tk = str(turn_key or row.get("turn_key") or "").strip()
-    if not path or not tk:
+    if not tk:
         return None
     return {
         "session_id": str(getattr(session, "session_id", "") or "").strip(),
@@ -290,6 +290,85 @@ def upsert_manifest_records(
     return records
 
 
+def replace_manifest_turn_records(
+    session,
+    turn_key: str,
+    rows: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+    *,
+    db_path: Path | str | None = None,
+) -> list[dict[str, Any]]:
+    """Atomically replace one lineage/profile/turn artifact decision."""
+    tk = str(turn_key or "").strip()
+    records = [
+        record
+        for row in rows or []
+        if isinstance(row, dict)
+        for record in [_normalize_record(session, tk, row, ARTIFACT_RECORD_KIND)]
+        if record
+    ]
+    if not tk or not records:
+        return []
+    lineage_key = resolve_manifest_lineage_key(session)
+    profile = _profile_for_session(session)
+    now = time.time()
+    try:
+        with closing(_connect(db_path)) as conn:
+            with conn:
+                conn.execute(
+                    """
+                    DELETE FROM session_manifest_records
+                    WHERE lineage_key = ? AND profile = ? AND turn_key = ? AND record_kind = ?
+                    """,
+                    (lineage_key, profile, tk, ARTIFACT_RECORD_KIND),
+                )
+                for record in records:
+                    conn.execute(
+                        """
+                        INSERT INTO session_manifest_records (
+                          session_id, lineage_key, profile, turn_key, record_kind,
+                          path, preview, source_tool, created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            record["session_id"], record["lineage_key"], record["profile"],
+                            record["turn_key"], record["record_kind"], record["path"],
+                            record["preview"], record["source_tool"], now, now,
+                        ),
+                    )
+    except (sqlite3.Error, OSError, ValueError):
+        logger.debug("failed to replace session manifest turn records", exc_info=True)
+        return []
+    return records
+
+
+def repair_empty_manifest_turns(
+    session,
+    *,
+    db_path: Path | str | None = None,
+) -> int:
+    """Replace empty decisions when the completed transcript now proves artifacts."""
+    empty_turn_keys = load_manifest_empty_turn_keys(session, include_lineage=True, db_path=db_path)
+    if not empty_turn_keys:
+        return 0
+    from api.session_manifest import extract_turn_artifact_entries_for_manifest
+
+    repaired = 0
+    for turn_key in sorted(empty_turn_keys):
+        entries = extract_turn_artifact_entries_for_manifest(session, turn_key)
+        rows = [
+            {
+                "path": str(entry.get("path") or "").strip(),
+                "source_tool": str(entry.get("source_tool") or ASSISTANT_PROSE_SOURCE_TOOL).strip(),
+                "preview": str(entry.get("preview") or MANIFEST_PREVIEW_FILE).strip(),
+            }
+            for entry in entries
+            if isinstance(entry, dict) and str(entry.get("path") or "").strip()
+        ]
+        if rows and replace_manifest_turn_records(session, turn_key, rows, db_path=db_path):
+            repaired += 1
+    return repaired
+
+
 def load_manifest_records(
     session,
     *,
@@ -310,7 +389,7 @@ def load_manifest_records(
                 SELECT session_id, lineage_key, profile, turn_key, record_kind,
                        path, preview, source_tool, created_at, updated_at
                 FROM session_manifest_records
-                WHERE {where} AND record_kind = ?
+                WHERE {where} AND record_kind = ? AND path != ''
                 ORDER BY turn_key ASC, path ASC
                 """,
                 (*params, ARTIFACT_RECORD_KIND),
@@ -319,6 +398,68 @@ def load_manifest_records(
     except (sqlite3.Error, OSError):
         logger.debug("failed to load session manifest records", exc_info=True)
         return []
+
+
+def load_manifest_empty_turn_keys(
+    session,
+    *,
+    include_lineage: bool = True,
+    db_path: Path | str | None = None,
+) -> set[str]:
+    sid = str(getattr(session, "session_id", "") or "").strip()
+    if not _is_safe_session_id(sid):
+        return set()
+    profile = _profile_for_session(session)
+    lineage_key = resolve_manifest_lineage_key(session)
+    where = "lineage_key = ? AND profile = ?" if include_lineage else "session_id = ? AND profile = ?"
+    params = (lineage_key if include_lineage else sid, profile)
+    try:
+        with closing(_connect(db_path)) as conn:
+            rows = conn.execute(
+                f"""
+                SELECT turn_key
+                FROM session_manifest_records
+                WHERE {where} AND record_kind = ?
+                GROUP BY turn_key
+                HAVING COUNT(*) = 1 AND MAX(path) = ''
+                ORDER BY turn_key ASC
+                """,
+                (*params, ARTIFACT_RECORD_KIND),
+            ).fetchall()
+            return {str(row["turn_key"] or "").strip() for row in rows if str(row["turn_key"] or "").strip()}
+    except (sqlite3.Error, OSError):
+        logger.debug("failed to load empty session manifest turn keys", exc_info=True)
+        return set()
+
+
+def load_manifest_decided_turn_keys(
+    session,
+    *,
+    include_lineage: bool = True,
+    db_path: Path | str | None = None,
+) -> set[str]:
+    sid = str(getattr(session, "session_id", "") or "").strip()
+    if not _is_safe_session_id(sid):
+        return set()
+    profile = _profile_for_session(session)
+    lineage_key = resolve_manifest_lineage_key(session)
+    where = "lineage_key = ? AND profile = ?" if include_lineage else "session_id = ? AND profile = ?"
+    params = (lineage_key if include_lineage else sid, profile)
+    try:
+        with closing(_connect(db_path)) as conn:
+            rows = conn.execute(
+                f"""
+                SELECT DISTINCT turn_key
+                FROM session_manifest_records
+                WHERE {where} AND record_kind = ?
+                ORDER BY turn_key ASC
+                """,
+                (*params, ARTIFACT_RECORD_KIND),
+            ).fetchall()
+            return {str(row["turn_key"] or "").strip() for row in rows if str(row["turn_key"] or "").strip()}
+    except (sqlite3.Error, OSError):
+        logger.debug("failed to load decided session manifest turn keys", exc_info=True)
+        return set()
 
 
 def get_artifact_profile_index(
@@ -466,25 +607,12 @@ def backfill_session_artifacts(
 ) -> dict[str, int]:
     """Extract and persist artifact records for a session lacking them.
 
-    Targets B-class missing profiles: files on disk that have no artifact row
-    in the store. Mirrors the streaming pipeline's ``_persist_turn_artifact_paths``
-    exactly — per-turn ``_extract_turn_artifact_entries`` (write_file/edit_file/…
-    tool args) plus the prose-path scan of the last assistant message (bare
-    filenames / relative paths / media tokens delivered in prose), so files
-    produced by non-mutation tools or delivered only in assistant prose are
-    also captured. Stored path/source_tool/preview/turn_key match the live
-    pipeline's format.
-
-    Re-extracts artifact records from messages and upserts them, mirroring the
-    streaming pipeline's ``_persist_turn_artifact_paths`` (per-turn
-    ``_extract_turn_artifact_entries`` + prose-path scan + disk-text supplement).
-    Sessions are never skipped wholesale — even sessions with a ``turn_artifacts``
-    dict or existing store rows may have files that the streaming pipeline missed
-    (e.g. paths listed in tool results by non-mutation tools).
-    ``upsert_manifest_records``'s ON CONFLICT keeps existing rows untouched while
-    adding any missing ones; this complements, never conflicts with, the lazy
-    ``backfill_from_session_turn_artifacts`` path in ``/api/session/manifest``
-    (which only fires when the store has zero rows).
+    Targets sessions that do not yet have any manifest turn decision in the
+    store. Once a session has at least one decided turn, the store is treated as
+    authoritative for that session and historical transcript backfill is skipped.
+    For undecided sessions, extraction is limited to mutation-tool arguments plus
+    file names/paths in the last assistant message. Tool result text and
+    whole-turn basename scans are intentionally ignored.
     """
     sid = str(getattr(session, "session_id", "") or "").strip()
     if not _is_safe_session_id(sid):
@@ -495,35 +623,13 @@ def backfill_session_artifacts(
         return {"written": 0, "skipped": 1, "turns": 0}
 
     from api.session_manifest import (
-        _extract_turn_artifact_entries,
-        _message_text,
         _message_turns,
-        _paths_from_last_assistant_message,
-        _skills_dir_for_session,
-        _turn_message_slice,
-        filter_existing_turn_artifact_entries,
+        extract_turn_artifact_entries_for_manifest,
     )
 
-    workspace = Path(str(getattr(session, "workspace", "") or "")).expanduser().resolve()
-    skills_dir = _skills_dir_for_session(session)
-    tool_calls = list(getattr(session, "tool_calls", None) or [])
-
-    # Build a workspace disk-file index once for the disk-text supplement pass
-    # below. Capped to avoid pathological workspaces; the common case is a few
-    # hundred files. Both relative posix paths and basenames are tracked so
-    # absolute-path tool results (e.g. "/Users/.../报告.md") can still match
-    # via their basename.
-    disk_basenames: dict[str, str] = {}
-    try:
-        from api.workspace import is_workspace_cruft_basename
-        for p in workspace.rglob("*"):
-            if not p.is_file() or p.is_symlink():
-                continue
-            if is_workspace_cruft_basename(p.name):
-                continue
-            disk_basenames.setdefault(p.name, p.relative_to(workspace).as_posix())
-    except (OSError, ValueError):
-        pass
+    decided_turn_keys = load_manifest_decided_turn_keys(session, db_path=db_path)
+    if decided_turn_keys:
+        return {"written": 0, "skipped": 1, "turns": 0}
 
     turns = _message_turns(messages)
     written = 0
@@ -532,54 +638,22 @@ def backfill_session_artifacts(
         tk = str(turn.get("turn_key") or "").strip()
         if not tk:
             continue
-        slc = _turn_message_slice(messages, tk)
-        if not slc:
+        if tk in decided_turn_keys:
             continue
-        entries = _extract_turn_artifact_entries(
-            slc,
-            tool_calls,
-            workspace,
-            start_msg_idx=turn.get("start_msg_idx"),
-            end_msg_idx=turn.get("end_msg_idx"),
-            skills_dir=skills_dir,
-        )
-        # Mirror _persist_turn_artifact_paths: also scan the last assistant
-        # message in the turn for relative-path/bare-filename deliveries (e.g.
-        # markdown table cells mentioning `报告.md`). Only paths that actually
-        # exist on disk survive the filter below. Dedupe within the turn only.
-        last_assistant_text = ""
-        for _m in reversed(slc):
-            if isinstance(_m, dict) and _m.get("role") == "assistant":
-                last_assistant_text = _message_text(_m.get("content"))
-                break
-        if last_assistant_text:
-            entry_paths = {str(e.get("path") or "") for e in entries if isinstance(e, dict)}
-            for _pp in _paths_from_last_assistant_message(last_assistant_text, workspace):
-                if _pp and _pp not in entry_paths:
-                    entries.append({
-                        "path": _pp,
-                        "source_tool": ASSISTANT_PROSE_SOURCE_TOOL,
-                        "preview": MANIFEST_PREVIEW_FILE,
-                    })
-        # Backfill-only disk-text supplement: scan the whole turn slice (tool
-        # results included, not just assistant prose) for any disk file basename.
-        # This catches files listed by non-mutation tools (e.g. a glob/read tool
-        # returning absolute paths) that the streaming pipeline intentionally
-        # skips. ``filter_existing_turn_artifact_entries`` below keeps it safe.
-        if disk_basenames:
-            entry_paths = {str(e.get("path") or "") for e in entries if isinstance(e, dict)}
-            import json as _json
-            slice_text = _json.dumps(slc, ensure_ascii=False)
-            for basename, rel in disk_basenames.items():
-                if rel in entry_paths or basename not in slice_text:
-                    continue
-                entries.append({
-                    "path": rel,
-                    "source_tool": ASSISTANT_PROSE_SOURCE_TOOL,
-                    "preview": MANIFEST_PREVIEW_FILE,
-                })
-        entries = filter_existing_turn_artifact_entries(workspace, skills_dir, entries)
+        entries = extract_turn_artifact_entries_for_manifest(session, tk)
         if not entries:
+            try:
+                records = upsert_manifest_records(
+                    session,
+                    tk,
+                    [{"path": "", "source_tool": ASSISTANT_PROSE_SOURCE_TOOL, "preview": MANIFEST_PREVIEW_FILE}],
+                    db_path=db_path,
+                )
+                if records:
+                    written += len(records)
+                    turns_with_artifacts += 1
+            except Exception:
+                logger.debug("failed to upsert empty manifest decision for session %s turn %s", sid, tk, exc_info=True)
             continue
         turns_with_artifacts += 1
         rows = [
@@ -600,6 +674,43 @@ def backfill_session_artifacts(
             logger.debug("failed to upsert manifest rows for session %s turn %s", sid, tk, exc_info=True)
 
     return {"written": written, "skipped": 0, "turns": turns_with_artifacts}
+
+
+def backfill_missing_manifest_records(
+    session,
+    *,
+    db_path: Path | str | None = None,
+) -> dict[str, Any]:
+    """Backfill artifact records only when a session lineage has no DB decision.
+
+    Existing artifact rows and empty decisions make the DB authoritative for the
+    session/lineage. Historical scans are intentionally all-or-nothing at the
+    lineage level to avoid polluting old sessions whose DB already captured the
+    artifact turns but not every empty turn.
+    """
+    decided_turn_keys = load_manifest_decided_turn_keys(session, include_lineage=True, db_path=db_path)
+    if decided_turn_keys:
+        return {"source": "db", "written": 0, "skipped": 1, "turns": 0}
+
+    written = 0
+    turns = 0
+    legacy_rows = backfill_from_session_turn_artifacts(session, db_path=db_path)
+    if legacy_rows:
+        return {
+            "source": "backfill",
+            "written": len(legacy_rows),
+            "skipped": 0,
+            "turns": len({str(row.get("turn_key") or "").strip() for row in legacy_rows if str(row.get("turn_key") or "").strip()}),
+        }
+
+    result = backfill_session_artifacts(session, db_path=db_path)
+    written = int(result.get("written") or 0)
+    turns = int(result.get("turns") or 0)
+    if written:
+        return {"source": "backfill", "written": written, "skipped": 0, "turns": turns}
+    if int(result.get("skipped") or 0):
+        return {"source": "derived", "written": 0, "skipped": 1, "turns": 0}
+    return {"source": "derived", "written": 0, "skipped": 0, "turns": turns}
 
 
 def backfill_workspace_artifacts_from_sessions(
