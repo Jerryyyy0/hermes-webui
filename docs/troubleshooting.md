@@ -29,7 +29,9 @@ hermes --version
 head -n 5 "$(command -v hermes)"
 ```
 
-WebUI normally resolves the discovered Agent installation's own launcher/venv. When multiple Hermes installations exist, set an absolute trusted launcher explicitly:
+WebUI normally resolves the discovered Agent installation's own launcher/venv. Custom containers that launch Hermes modules from either the discovered Agent source root or the WebUI repository root can also use the running WebUI Python when both the dependency import probe and `python -m hermes_cli.main --version` succeed from that root. The verified working directory is retained for later Gateway lifecycle commands, while `PYTHONPATH` and `PYTHONHOME` remain cleared. WebUI and Agent locations are independent: run the actual WebUI checkout's `server.py` directly (for example `/app/server.py`). Agent discovery uses `HERMES_WEBUI_AGENT_DIR` first and `${HERMES_HOME}/hermes-agent` second, so a container with `HERMES_HOME=/home/hermeswebui/.hermes` needs no `~/.hermes/hermes-webui` symlink.
+
+When multiple Hermes installations exist, set an absolute trusted launcher explicitly:
 
 ```bash
 HERMES_WEBUI_HERMES_EXECUTABLE="$HOME/.local/bin/hermes"

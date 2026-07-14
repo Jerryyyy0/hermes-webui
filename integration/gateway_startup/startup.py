@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import importlib
 import logging
 import os
 import subprocess
@@ -22,13 +23,29 @@ _started = False
 _running = False
 
 
+def _running_in_container() -> bool:
+    if os.environ.get("container", "").strip():
+        return True
+    return Path("/.within_container").is_file() or Path("/.dockerenv").is_file()
+
+
+def _s6_service_manager_available() -> bool:
+    try:
+        service_manager = importlib.import_module("hermes_cli.service_manager")
+        return service_manager.detect_service_manager() == "s6"
+    except Exception:
+        return False
+
+
 def gateway_autostart_enabled() -> bool:
     raw = os.environ.get("HERMES_WEBUI_START_PROFILE_GATEWAYS", "").strip().lower()
-    if not raw:
-        return True
-    if raw in _FALSE_VALUES:
+    if raw:
+        if raw in _FALSE_VALUES:
+            return False
+        return raw in _TRUE_VALUES
+    if _running_in_container() and not _s6_service_manager_available():
         return False
-    return raw in _TRUE_VALUES
+    return True
 
 
 def _multiplex_enabled(default_home: Path) -> bool:
@@ -56,7 +73,7 @@ def _start_profile_gateway(
         return {"profile": name, "status": "already_running"}
 
     try:
-        from api.agent_cli_runtime import (
+        from integration.gateway_startup.runtime import (
             AgentCliRuntimeUnavailable,
             build_gateway_command,
             resolve_agent_cli_runtime,

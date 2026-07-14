@@ -61,11 +61,24 @@ WebUI startup ensures every visible Hermes Profile Gateway is running by default
 - Already-running gateways are skipped. Per-profile failures and timeouts are logged but never block the HTTP server.
 - When the default profile enables `gateway.multiplex_profiles`, only the default Gateway is started because it serves all profiles.
 - Isolated-profile deployments only enumerate and start their pinned profile.
-- Set `HERMES_WEBUI_START_PROFILE_GATEWAYS=0` to disable this default behavior. Starting gateways can activate scheduled model calls and configured messaging/API platforms.
-- Gateway lifecycle commands resolve a dependency-complete Hermes runtime: optional absolute `HERMES_WEBUI_HERMES_EXECUTABLE`, then the discovered Agent installation's own `venv` launcher/Python, then a verified `hermes` on `PATH`. No system/WebUI Python fallback is used.
-- Do not combine an arbitrary Python with an Agent checkout through `PYTHONPATH`; source visibility does not install CLI dependencies such as `rich`.
+- Native hosts and s6 containers enable the WebUI coordinator by default. Plain containers without s6 disable it automatically because Hermes `gateway start` is a successful no-op there; `run_container_services.sh` owns those Gateway processes instead. `HERMES_WEBUI_START_PROFILE_GATEWAYS=0` / `1` remains an explicit override when needed. Starting gateways can activate scheduled model calls and configured messaging/API platforms.
+- Gateway lifecycle commands resolve a dependency-complete Hermes runtime: optional absolute `HERMES_WEBUI_HERMES_EXECUTABLE`, then the discovered Agent installation's own `venv` launcher/Python, then the running WebUI Python from the discovered Agent source root or WebUI repository root, and finally a verified `hermes` on `PATH`.
+- The source-root runtimes support custom containers that already launch `python -m hermes_cli.main` from `/home/hermeswebui/.hermes/hermes-agent` or `/app`. A candidate is accepted only when a clean subprocess can import `hermes_cli.main`, `rich`, and `yaml` and run `--version`; lifecycle commands retain that verified working directory.
+- Do not combine an arbitrary Python with an Agent checkout through `PYTHONPATH`; runtime probes remove `PYTHONPATH` and `PYTHONHOME` before validation.
 
-Implementation: [`integration/gateway_startup/`](gateway_startup/) with the shared runtime boundary in [`api/agent_cli_runtime.py`](../api/agent_cli_runtime.py). The only upstream seam is the asynchronous startup hook in `server.py`.
+Plain containers without s6/systemd must not use `gateway start`: Hermes treats that command as a successful no-op because the container runtime is expected to own the long-lived process. The project-owned [`run_container_services.sh`](gateway_startup/run_container_services.sh) handles **Profile Gateways only**: it discovers Profiles through `hermes_cli.profiles.list_profiles()`, runs each required `gateway run` process, writes per-Profile `logs/gateway.log`, honors multiplex mode, forwards termination, and exits if a managed Gateway exits. It does not locate, configure, or start WebUI.
+
+Start it as a dedicated supervised process alongside WebUI. The outer container entrypoint or supervisor starts both processes; WebUI automatically skips its service-lifecycle coordinator in a plain non-s6 container:
+
+```bash
+"${HERMES_HOME%/}/hermes-webui/integration/gateway_startup/run_container_services.sh" &
+cd "${HERMES_HOME%/}/hermes-webui"
+exec /usr/local/bin/python3 server.py
+```
+
+The script defaults to `${HERMES_HOME}/hermes-agent`; `HERMES_WEBUI_AGENT_DIR` and `HERMES_PYTHON_PATH` override that runtime. Do not separately launch the default Gateway when using it.
+
+Implementation: [`integration/gateway_startup/`](gateway_startup/), including the runtime boundary in [`integration/gateway_startup/runtime.py`](gateway_startup/runtime.py). `api/agent_cli_runtime.py` only preserves compatibility for existing core callers. The WebUI code root is derived from module locations, so local checkouts and containers can run `server.py` directly without a `~/.hermes/hermes-webui` symlink. Agent discovery prefers `HERMES_WEBUI_AGENT_DIR`, then `${HERMES_HOME}/hermes-agent`, then the existing `api.config` discovery fallbacks. The only startup seam is the asynchronous hook in `server.py`.
 
 ### Profile enrich (`info.json`)
 

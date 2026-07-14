@@ -14,6 +14,8 @@ from integration.gateway_startup import startup
 def reset_startup(monkeypatch):
     startup._reset_startup_state_for_tests()
     monkeypatch.delenv("HERMES_WEBUI_START_PROFILE_GATEWAYS", raising=False)
+    monkeypatch.setattr(startup, "_running_in_container", lambda: False)
+    monkeypatch.setattr(startup, "_s6_service_manager_available", lambda: False)
     monkeypatch.setattr(startup, "_multiplex_enabled", lambda _home: False)
     yield
     startup._reset_startup_state_for_tests()
@@ -44,6 +46,38 @@ def test_explicit_disable_skips_enumeration(monkeypatch):
     result = startup.ensure_all_profile_gateways(list_profiles=lambda: pytest.fail("must not enumerate"))
 
     assert result == {"enabled": False, "results": []}
+
+
+def test_plain_container_disables_webui_gateway_coordinator(monkeypatch):
+    monkeypatch.setattr(startup, "_running_in_container", lambda: True)
+    monkeypatch.setattr(startup, "_s6_service_manager_available", lambda: False)
+
+    result = startup.ensure_all_profile_gateways(list_profiles=lambda: pytest.fail("must not enumerate"))
+
+    assert result == {"enabled": False, "results": []}
+
+
+def test_s6_container_keeps_webui_gateway_coordinator_enabled(monkeypatch):
+    monkeypatch.setattr(startup, "_running_in_container", lambda: True)
+    monkeypatch.setattr(startup, "_s6_service_manager_available", lambda: True)
+    seen = []
+
+    result = startup.ensure_all_profile_gateways(
+        list_profiles=profiles,
+        start_profile=lambda profile: seen.append(profile["name"])
+        or {"profile": profile["name"], "status": "started"},
+    )
+
+    assert sorted(seen) == ["abc", "default"]
+    assert result["counts"] == {"started": 2}
+
+
+def test_explicit_enable_overrides_plain_container_detection(monkeypatch):
+    monkeypatch.setenv("HERMES_WEBUI_START_PROFILE_GATEWAYS", "1")
+    monkeypatch.setattr(startup, "_running_in_container", lambda: True)
+    monkeypatch.setattr(startup, "_s6_service_manager_available", lambda: False)
+
+    assert startup.gateway_autostart_enabled() is True
 
 
 def test_multiplex_starts_only_default(monkeypatch):
@@ -89,7 +123,7 @@ def test_only_runs_once_per_process():
 
 
 def test_start_uses_verified_runtime_and_does_not_mutate_home(monkeypatch):
-    from api import agent_cli_runtime
+    from integration.gateway_startup import runtime as agent_cli_runtime
 
     original_home = os.environ.get("HERMES_HOME")
     verified_env = {"PYTHONUTF8": "1"}
@@ -114,7 +148,7 @@ def test_start_uses_verified_runtime_and_does_not_mutate_home(monkeypatch):
 
 
 def test_timeout_is_classified(monkeypatch):
-    from api import agent_cli_runtime
+    from integration.gateway_startup import runtime as agent_cli_runtime
 
     monkeypatch.setattr(
         agent_cli_runtime,
@@ -131,7 +165,7 @@ def test_timeout_is_classified(monkeypatch):
 
 
 def test_runtime_unavailable_is_classified(monkeypatch):
-    from api import agent_cli_runtime
+    from integration.gateway_startup import runtime as agent_cli_runtime
 
     def unavailable():
         raise agent_cli_runtime.AgentCliRuntimeUnavailable("No verified runtime")
