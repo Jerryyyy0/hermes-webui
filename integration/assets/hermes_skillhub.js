@@ -36,6 +36,7 @@
   let _pendingDetailJson = null;
   let _batchMode = false;
   let _selectedSkills = new Set();
+  let _uploadProfilesCache = null;
 
   function showSkillHubNav() {
     ['skillhubRailBtn', 'skillhubSidebarBtn'].forEach(id => {
@@ -693,13 +694,13 @@
     try {
       // Custom skills: always use local detail. Others: try upstream first, fall back to local.
       const detailPromise = isCustom
-        ? api(`/api/skillhub/file?name=${encodeURIComponent(name)}&path=detail.json${scopeParam}`)
+        ? api(`/api/skillhub/file?name=${encodeURIComponent(name)}&path=.detail.json${scopeParam}`)
             .then(resp => ({ source: 'local', data: resp }))
             .catch(() => null)
         : api(`/api/skillhub/detail?name=${encodeURIComponent(name)}`)
             .then(resp => ({ source: 'upstream', data: resp }))
             .catch(() => (skill && skill.installed)
-              ? api(`/api/skillhub/file?name=${encodeURIComponent(name)}&path=detail.json${scopeParam}`)
+              ? api(`/api/skillhub/file?name=${encodeURIComponent(name)}&path=.detail.json${scopeParam}`)
                   .then(resp => ({ source: 'local', data: resp }))
                   .catch(() => null)
               : null
@@ -1448,6 +1449,7 @@
     try {
       const resp = await api('/api/profiles');
       const profiles = resp.profiles || [];
+      _uploadProfilesCache = profiles;
       if (!profiles.length) { container.innerHTML = ''; return; }
       const label = typeof t === 'function' ? t('install_select_profiles') || 'Install to Assistants' : 'Install to Assistants';
       const hint = typeof t === 'function' ? t('install_default_hint') || 'Default is pre-selected. Uncheck to skip.' : 'Default is pre-selected. Uncheck to skip.';
@@ -1571,26 +1573,40 @@
       return;
     }
 
-    // Check duplicate name / display_name
+    // Check selected profiles for existing skills with same name/display_name
     const formName = rawName.toLowerCase();
     const formDisplayName = ($('aiMetaSkillName') && $('aiMetaSkillName').value || '').trim().toLowerCase();
-    if ((formName || formDisplayName) && Array.isArray(_skillhubData)) {
-      for (const s of _skillhubData) {
-        const existingName = String(s.name || '').trim().toLowerCase();
-        const existingDisplay = String(s.display_name || '').trim().toLowerCase();
-        if (formName && existingName && formName === existingName) {
-          if (errEl) {
-            errEl.textContent = (typeof t === 'function' ? t('skill_name_duplicate') || 'Duplicate name: ' : 'Duplicate name: ') + s.name;
-            errEl.style.display = '';
+    if ((formName || formDisplayName) && _uploadProfilesCache) {
+      // Determine target profiles: use checked ones, fallback to "default"
+      let targetProfileNames = [];
+      document.querySelectorAll('.ai-meta-profile-cb:checked').forEach(cb => {
+        targetProfileNames.push(cb.value);
+      });
+      if (targetProfileNames.length === 0) {
+        targetProfileNames = ['default'];
+      }
+      for (const pname of targetProfileNames) {
+        const profile = _uploadProfilesCache.find(p => p.name === pname);
+        if (!profile) continue;
+        const profileSkills = profile.skills || [];
+        for (const ps of profileSkills) {
+          const psName = String(ps.name || '').trim().toLowerCase();
+          const psDisplay = String(ps.display_name || '').trim().toLowerCase();
+          const profileLabel = (profile.info && profile.info.display_name) || pname;
+          if (formName && psName && formName === psName) {
+            if (errEl) {
+              errEl.textContent = profileLabel + ' 已内置技能 ' + ps.name + '，请重新选择助理';
+              errEl.style.display = '';
+            }
+            return;
           }
-          return;
-        }
-        if (formDisplayName && existingDisplay && formDisplayName === existingDisplay) {
-          if (errEl) {
-            errEl.textContent = (typeof t === 'function' ? t('skill_display_name_duplicate') || 'Duplicate display name: ' : 'Duplicate display name: ') + s.display_name;
-            errEl.style.display = '';
+          if (formDisplayName && psDisplay && formDisplayName === psDisplay) {
+            if (errEl) {
+              errEl.textContent = profileLabel + ' 已内置技能 ' + (ps.display_name || ps.name) + '，请重新选择助理';
+              errEl.style.display = '';
+            }
+            return;
           }
-          return;
         }
       }
     }
@@ -1664,7 +1680,7 @@
 
       // Step 3: Install/uninstall to match selected profiles
       // Upload always writes to shared_skills_dir (default profile).
-      // If default is unchecked, remove it from default after copying elsewhere.
+      // If default is unchecked AND skill is new (not re-upload), remove from default.
       try {
         const selectedProfiles = [];
         document.querySelectorAll('.ai-meta-profile-cb:checked').forEach(cb => {
@@ -1676,7 +1692,10 @@
         }
         const defaultSelected = selectedProfiles.includes('default');
         const installProfiles = selectedProfiles.filter(p => p !== 'default');
-        const uninstallProfiles = defaultSelected ? [] : ['default'];
+        // Detect re-upload: skill already exists in default → don't uninstall from default
+        const skillNameForCheck = uploadedName || detailName;
+        const existingInDefault = Array.isArray(_skillhubData) && _skillhubData.some(s => s.name === skillNameForCheck);
+        const uninstallProfiles = (defaultSelected || existingInDefault) ? [] : ['default'];
         if (installProfiles.length > 0 || uninstallProfiles.length > 0) {
           const skillName = uploadedName || detailName;
           const displayN = ($('aiMetaSkillName') && $('aiMetaSkillName').value || '').trim();
@@ -1699,6 +1718,7 @@
 
       _pendingUploadFile = null;
       _pendingDetailJson = null;
+      _uploadProfilesCache = null;
       _skillhubData = null;
       _currentSkillhubItem = null;
       if (typeof _invalidateSkillsDataCache === 'function') _invalidateSkillsDataCache();
@@ -1730,6 +1750,7 @@
   function cancelAiMetaForm() {
     _pendingUploadFile = null;
     _pendingDetailJson = null;
+    _uploadProfilesCache = null;
     clearDetail();
   }
 

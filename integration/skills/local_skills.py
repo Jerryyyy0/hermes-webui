@@ -22,7 +22,7 @@ from integration.skills.zip_import import discover_skill_roots
 _log = logging.getLogger(__name__)
 
 _SKILL_META_EXCLUDE = frozenset(
-    {".hub_installed", ".category", ".install_name", ".hub_catalog_name", ".user_created"}
+    {".hub_installed", ".category", ".install_name", ".hub_catalog_name", ".user_created", ".detail.json"}
 )
 _SKILL_ORIGIN_SIDECAR = ".skill-origin.json"
 _UPLOAD_COPY_EXCLUDE = _SKILL_META_EXCLUDE | {_SKILL_ORIGIN_SIDECAR}
@@ -63,7 +63,7 @@ def collect_skill_zip_files(
         except (ValueError, OSError):
             continue
         for name in names:
-            if name in _SKILL_META_EXCLUDE:
+            if name in _UPLOAD_COPY_EXCLUDE:
                 continue
             fp = root_path / name
             if fp.is_symlink():
@@ -111,8 +111,8 @@ def prepare_skill_download(name: str, dir_name: str = "") -> dict:
     leaf = normalize_dir_name(list_name)
     if validate_dir_name(leaf) is not None:
         leaf = skill_dir.name
-    dir_name = _skill_dir_rel_path(skill_dir, skills_dir)
-    stored_category = _stored_category_for_dir(skill_dir, skills_dir, "")
+    # dir_name = _skill_dir_rel_path(skill_dir, skills_dir)
+    # stored_category = _stored_category_for_dir(skill_dir, skills_dir, "")
     files, total_bytes, limit_hit = collect_skill_zip_files(
         skill_dir,
         max_bytes,
@@ -135,22 +135,22 @@ def prepare_skill_download(name: str, dir_name: str = "") -> dict:
         }
 
     zip_basename = f"{leaf}.zip"
-    sidecar_payload = {
-        "version": 1,
-        "dir_name": dir_name,
-        "category": stored_category,
-        "name": list_name,
-    }
-    sidecar_arcname = f"{leaf}/{_SKILL_ORIGIN_SIDECAR}"
-    sidecar_bytes = (json.dumps(sidecar_payload, ensure_ascii=False, indent=2) + "\n").encode(
-        "utf-8"
-    )
+    # sidecar_payload = {
+    #     "version": 1,
+    #     "dir_name": dir_name,
+    #     "category": stored_category,
+    #     "name": list_name,
+    # }
+    # sidecar_arcname = f"{leaf}/{_SKILL_ORIGIN_SIDECAR}"
+    # sidecar_bytes = (json.dumps(sidecar_payload, ensure_ascii=False, indent=2) + "\n").encode(
+    #     "utf-8"
+    # )
     return {
         "ok": True,
         "skill_dir": skill_dir,
         "zip_basename": zip_basename,
         "files": files,
-        "extra_zip_entries": [(sidecar_bytes, sidecar_arcname)],
+        "extra_zip_entries": [],
         "total_bytes": total_bytes,
     }
 
@@ -1044,18 +1044,17 @@ def _write_category_marker(skill_dir: Path, cat_seg: str) -> None:
 
 
 def read_detail_json(skill_dir: Path) -> dict | None:
-    """Read detail metadata, preferring detail.meta.json over detail.json."""
+    """Read detail metadata from .detail.json (hidden file)."""
     import json as _json
 
-    for name in ("detail.meta.json", "detail.json"):
-        p = skill_dir / name
-        if p.is_file():
-            try:
-                data = _json.loads(p.read_text(encoding="utf-8"))
-                if isinstance(data, dict):
-                    return data
-            except Exception:
-                pass
+    p = skill_dir / ".detail.json"
+    if p.is_file():
+        try:
+            data = _json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
     return None
 
 
@@ -1070,7 +1069,7 @@ def _skill_upload_entry(
         "dir_name": _skill_dir_rel_path(skill_dir, skills_dir),
         "category": stored_category,
         "custom": True,
-        "has_detail": (skill_dir / "detail.json").is_file(),
+        "has_detail": (skill_dir / ".detail.json").is_file(),
     }
 
 
@@ -1154,6 +1153,9 @@ def _plan_zip_import(
             continue
         use_explicit = str(request_name or "").strip() != ""
         sidecar = read_skill_origin_sidecar(skill_root)
+        # When user provides request_name, ignore sidecar dir_name to avoid overriding user's choice
+        if use_explicit and sidecar:
+            sidecar = {k: v for k, v in sidecar.items() if k != "dir_name"}
         resolved = resolve_upload_target(
             skills_dir,
             category=category,
@@ -1200,6 +1202,17 @@ def _upload_zip_skills(
         roots = discover_skill_roots(temp_dir)
         if not roots:
             return {"error": "压缩包内需包含 SKILL.md", "status": 400}
+
+        # Rename skill root directories to use request_name as outermost dir name,
+        # avoiding conflicts from unpredictable zip directory names.
+        req_name = str(request_name or "").strip()
+        if req_name and len(roots) == 1:
+            root = roots[0]
+            if root != temp_dir:
+                new_root = temp_dir / normalize_dir_name(req_name)
+                if new_root != root and not new_root.exists():
+                    root.rename(new_root)
+                    roots = [new_root]
 
         planned, errors, err_status = _plan_zip_import(
             skills_dir,
@@ -1495,7 +1508,7 @@ def delete_local_skill(name: str, dir_name: str = "") -> dict:
 
 
 def save_skill_detail(name: str, detail: dict, dir_name: str = "") -> dict:
-    """Write detail.json into the skill directory."""
+    """Write .detail.json into the skill directory."""
     skill_name = str(name or "").strip()
     if not skill_name:
         return {"error": "缺少 name", "status": 400}
@@ -1506,12 +1519,7 @@ def save_skill_detail(name: str, detail: dict, dir_name: str = "") -> dict:
     if not skill_dir or not skill_dir.is_dir():
         return {"error": "Skill not found", "status": 404}
     try:
-        # When detail.json already exists (e.g. from zip), save AI data separately
-        # to avoid overwriting the author's original metadata.
-        if (skill_dir / "detail.json").is_file():
-            dest = skill_dir / "detail.meta.json"
-        else:
-            dest = skill_dir / "detail.json"
+        dest = skill_dir / ".detail.json"
         with open(dest, "w", encoding="utf-8") as f:
             json.dump(detail, f, ensure_ascii=False, indent=2)
     except Exception as exc:
