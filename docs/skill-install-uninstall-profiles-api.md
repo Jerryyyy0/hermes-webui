@@ -263,3 +263,206 @@ Profile 与技能的关联是文件系统层面的：每个 profile 拥有独立
 | `POST /api/skillhub/sync-profiles` | 指定 profiles | 新接口，同步安装+卸载，用于管理助理 |
 
 原有接口保留不变，新接口在前端安装/卸载/管理流程中替代原有接口。
+
+---
+
+## 批量接口
+
+### 4. POST `/api/skillhub/batch-install` — 批量安装多个技能到指定助理
+
+将多个技能一次性安装到用户选择的助理列表。支持市场技能和自建技能混合操作。
+
+**Request Body**:
+
+```json
+{
+  "skills": [
+    {
+      "name": "skill-a",
+      "display_name": "技能A",
+      "category": "devops",
+      "is_custom": false
+    },
+    {
+      "name": "my-custom-skill",
+      "display_name": "自建技能",
+      "category": "",
+      "is_custom": true
+    }
+  ],
+  "profiles": ["default", "researcher", "writer"]
+}
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `skills` | object[] | 是 | 技能列表（非空） |
+| `skills[].name` | string | 是 | 技能逻辑名 |
+| `skills[].display_name` | string | 否 | 显示名称 |
+| `skills[].category` | string | 否 | 分类，市场技能缺省时从上游 detail 补齐 |
+| `skills[].is_custom` | boolean | 否 | 是否为自建技能（默认 `false`） |
+| `profiles` | string[] | 是 | 目标 profile 名称列表（非空） |
+
+**成功响应** (200):
+
+```json
+{
+  "ok": true,
+  "results": [
+    { "name": "skill-a", "profile": "default", "ok": true, "dir_name": "devops/skill-a" },
+    { "name": "skill-a", "profile": "researcher", "ok": true, "dir_name": "devops/skill-a" },
+    { "name": "skill-a", "profile": "writer", "ok": true, "skipped": true },
+    { "name": "my-custom-skill", "profile": "default", "ok": true, "dir_name": "my-custom-skill" },
+    { "name": "my-custom-skill", "profile": "researcher", "ok": true, "dir_name": "my-custom-skill" }
+  ]
+}
+```
+
+| 字段 | 说明 |
+|------|------|
+| `results[].name` | 技能名称 |
+| `results[].profile` | 目标 profile 名称 |
+| `results[].ok` | 是否成功 |
+| `results[].dir_name` | 安装后的相对路径（成功时） |
+| `results[].skipped` | 已存在则跳过（`ok=true, skipped=true`） |
+| `results[].error` | 失败原因（失败时） |
+
+**错误码**:
+
+| 状态码 | 说明 |
+|--------|------|
+| 400 | `skills` 或 `profiles` 为空或非数组 |
+| 503 | SkillHub 未配置 |
+
+**行为说明**:
+- 双层遍历：外层 skills × 内层 profiles，逐个安装
+- 市场技能（`is_custom=false`）：调用 `install_skill_to_profile()`，从上游下载
+- 自建技能（`is_custom=true`）：调用 `copy_custom_skill_to_profile()`，从源 profile 复制文件
+- 市场技能 category 缺省时自动从上游 `fetch_skill_detail()` 补齐（每个技能只查询一次）
+- 已存在的技能返回 `ok=true, skipped=true`，不影响其他安装操作
+- 单个安装失败不影响其他 skill × profile 组合
+
+---
+
+### 5. POST `/api/skillhub/batch-uninstall` — 批量从所有助理卸载多个技能
+
+遍历所有 profile，删除指定的多个技能。
+
+**Request Body**:
+
+```json
+{
+  "skills": [
+    { "name": "skill-a", "dir_name": "devops/skill-a" },
+    { "name": "my-custom-skill" }
+  ]
+}
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `skills` | object[] | 是 | 技能列表（非空） |
+| `skills[].name` | string | 是 | 技能逻辑名 |
+| `skills[].dir_name` | string | 否 | 精确目录路径（可选，用于消除歧义） |
+
+**成功响应** (200):
+
+```json
+{
+  "ok": true,
+  "results": [
+    {
+      "name": "skill-a",
+      "results": [
+        { "profile": "default", "ok": true },
+        { "profile": "researcher", "ok": true },
+        { "profile": "writer", "ok": true, "skipped": true }
+      ]
+    },
+    {
+      "name": "my-custom-skill",
+      "results": [
+        { "profile": "default", "ok": true },
+        { "profile": "researcher", "ok": true }
+      ]
+    }
+  ]
+}
+```
+
+| 字段 | 说明 |
+|------|------|
+| `results[].name` | 技能名称 |
+| `results[].results` | 该技能在各 profile 的卸载结果 |
+| `results[].results[].profile` | profile 名称 |
+| `results[].results[].ok` | 是否成功（未找到也算成功，`skipped=true`） |
+| `results[].results[].skipped` | 该 profile 不存在此技能，跳过 |
+| `results[].results[].error` | 失败原因 |
+| `results[].error` | 整个技能卸载过程的错误（异常时） |
+
+**错误码**:
+
+| 状态码 | 说明 |
+|--------|------|
+| 400 | `skills` 为空或非数组 |
+| 403 | 系统技能不可删除 |
+| 502 | 内部错误 |
+
+**行为说明**:
+- 遍历 skills 列表，每个技能调用 `delete_skill_from_all_profiles()`
+- `delete_skill_from_all_profiles` 内部遍历所有 profile 并逐个删除
+- 不存在该技能的 profile 自动跳过（`ok=true, skipped=true`）
+- 系统技能（`.system` 标记）会被拒绝删除
+- 单个技能的失败不影响其他技能的卸载
+
+---
+
+## 批量接口前端调用流程
+
+### 批量安装流程
+
+```
+用户点击 "Batch" 按钮进入批量模式
+  → 技能列表每项左侧显示 checkbox
+  → 用户勾选多个技能
+  → 点击底部操作栏 "Batch Install"
+  → 弹出 _showInstallProfileDialog（跳过已安装过滤，标题显示技能数量）
+  → 用户勾选目标助理，点击"安装"
+  → POST /api/skillhub/batch-install（携带 skills 数组 + profiles 数组）
+  → 显示 toast 成功/失败/部分失败提示
+  → 退出批量模式，刷新技能列表
+```
+
+### 批量卸载流程
+
+```
+用户点击 "Batch" 按钮进入批量模式
+  → 技能列表每项左侧显示 checkbox
+  → 用户勾选多个技能
+  → 点击底部操作栏 "Batch Uninstall"
+  → showConfirmDialog 确认弹窗（显示技能数量）
+  → POST /api/skillhub/batch-uninstall（携带 skills 数组）
+  → 显示 toast 成功/失败提示
+  → 退出批量模式，刷新技能列表
+```
+
+**批量模式 UI 行为**:
+- "Batch" 按钮位于搜索栏右侧，点击切换批量模式开关
+- 批量模式下列表项左侧出现 checkbox，默认未选中
+- 列表底部显示操作栏：选中计数 + 批量安装 + 批量卸载 + 取消
+- 切换 scope 或 category 时自动退出批量模式并清空选择
+- "取消"按钮退出批量模式
+
+---
+
+## 完整接口对照表
+
+| 接口 | 作用域 | 技能数 | Profile 数 | 说明 |
+|------|--------|--------|------------|------|
+| `POST /api/skillhub/install` | 默认 profile | 1 | 1 | 原有，仅安装到 shared_skills_dir |
+| `POST /api/skillhub/install-to-profiles` | 指定 profiles | 1 | N | 安装单个技能到多个 profile |
+| `POST /api/skillhub/delete` | 默认 profile | 1 | 1 | 原有，仅从默认 profile 删除 |
+| `POST /api/skillhub/delete-from-all-profiles` | 所有 profile | 1 | 全部 | 单个技能从所有 profile 删除 |
+| `POST /api/skillhub/sync-profiles` | 指定 profiles | 1 | N | 同步安装+卸载，用于管理助理 |
+| `POST /api/skillhub/batch-install` | 指定 profiles | N | M | **批量**安装多个技能到多个 profile |
+| `POST /api/skillhub/batch-uninstall` | 所有 profile | N | 全部 | **批量**从所有 profile 卸载多个技能 |

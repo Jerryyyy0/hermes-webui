@@ -34,6 +34,8 @@
   let _searchTimer = null;
   let _pendingUploadFile = null;
   let _pendingDetailJson = null;
+  let _batchMode = false;
+  let _selectedSkills = new Set();
 
   function showSkillHubNav() {
     ['skillhubRailBtn', 'skillhubSidebarBtn'].forEach(id => {
@@ -305,6 +307,21 @@
       const showCatalogOnly = _skillhubScope === 'hub' && !installed;
       const isDisabled = skill.disabled || false;
       el.className = 'skill-item' + (isDisabled ? ' disabled' : '') + (showCatalogOnly ? ' catalog-only' : '');
+      // Batch selection checkbox
+      const checkWrap = document.createElement('div');
+      checkWrap.className = 'skill-item-check';
+      checkWrap.style.display = _batchMode ? '' : 'none';
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = _selectedSkills.has(skill.name);
+      cb.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        if (cb.checked) _selectedSkills.add(skill.name);
+        else _selectedSkills.delete(skill.name);
+        _updateBatchBar();
+      });
+      checkWrap.appendChild(cb);
+      el.appendChild(checkWrap);
       // Toggle button for installed skills (hub-installed or custom)
       if (installed || isCustom) {
         const enableWrap = document.createElement('div');
@@ -911,7 +928,7 @@
     }
   }
 
-  function _showInstallProfileDialog(skillName, displayName) {
+  function _showInstallProfileDialog(skillName, displayName, batchCount) {
     return new Promise(async (resolve, reject) => {
       // Fetch profiles list
       let profiles = [];
@@ -922,12 +939,14 @@
         profiles = [];
       }
 
-      // Filter out profiles that already have this skill installed
+      // Filter out profiles that already have this skill installed (skip for batch)
       const installedProfiles = new Set();
-      for (const p of profiles) {
-        const skills = p.skills || [];
-        if (skills.some(s => s.name === skillName || s.dir_name === skillName)) {
-          installedProfiles.add(p.name);
+      if (!batchCount || batchCount <= 1) {
+        for (const p of profiles) {
+          const skills = p.skills || [];
+          if (skills.some(s => s.name === skillName || s.dir_name === skillName)) {
+            installedProfiles.add(p.name);
+          }
         }
       }
 
@@ -935,7 +954,9 @@
       overlay.className = 'app-dialog-overlay';
       overlay.style.display = 'flex';
 
-      const titleLabel = typeof t === 'function' ? t('install_select_profiles') : 'Select Assistants';
+      const titleLabel = batchCount > 1
+        ? (typeof t === 'function' ? t('batch_install_select_profiles') || `Install ${batchCount} skills to...` : `Install ${batchCount} skills to...`)
+        : (typeof t === 'function' ? t('install_select_profiles') : 'Select Assistants');
       const selectAllLabel = typeof t === 'function' ? t('install_select_all') : 'Select All';
       const deselectAllLabel = typeof t === 'function' ? t('install_deselect_all') : 'Deselect All';
       const installLabel = typeof t === 'function' ? t('install_btn') : 'Install';
@@ -1421,6 +1442,32 @@
     _showSkillCreateFormWithAiMeta(content, meta || {});
   }
 
+  async function _renderUploadProfileSelect() {
+    const container = $('aiMetaProfilesContainer');
+    if (!container) return;
+    try {
+      const resp = await api('/api/profiles');
+      const profiles = resp.profiles || [];
+      if (!profiles.length) { container.innerHTML = ''; return; }
+      const label = typeof t === 'function' ? t('install_select_profiles') || 'Install to Assistants' : 'Install to Assistants';
+      const hint = typeof t === 'function' ? t('install_default_hint') || 'Default is pre-selected. Uncheck to skip.' : 'Default is pre-selected. Uncheck to skip.';
+      let html = `<label style="font-size:12px;font-weight:500;color:var(--text);margin-bottom:4px;display:block">${esc(label)}</label>`;
+      html += `<div style="font-size:11px;color:var(--muted);margin-bottom:6px">${esc(hint)}</div>`;
+      html += '<div style="display:flex;flex-wrap:wrap;gap:6px">';
+      for (const p of profiles) {
+        const info = p.info || {};
+        const dn = info.display_name || p.name;
+        const checked = p.is_default ? 'checked' : '';
+        html += `<label style="display:inline-flex;align-items:center;gap:4px;padding:4px 10px;border:1px solid var(--border2);border-radius:6px;cursor:pointer;font-size:12px;color:var(--text);background:var(--bg)">
+          <input type="checkbox" value="${esc(p.name)}" ${checked} class="ai-meta-profile-cb" style="accent-color:var(--accent)">
+          ${esc(dn)}
+        </label>`;
+      }
+      html += '</div>';
+      container.innerHTML = html;
+    } catch (_) { container.innerHTML = ''; }
+  }
+
   function _showSkillCreateFormWithAiMeta(content, meta) {
     _pendingDetailJson = meta.detailJson || null;
 
@@ -1476,6 +1523,7 @@
             <label>${esc(categoryLabel)}</label>
             ${categoryHtml}
           </div>
+          <div class="detail-form-row" id="aiMetaProfilesContainer" style="margin-top:4px"></div>
           <div class="detail-form-row">
             <label>${esc(contentLabel)}</label>
             <textarea id="aiMetaContent" rows="18" readonly>${esc(content || '')}</textarea>
@@ -1495,6 +1543,7 @@
 
     body.querySelector('#aiMetaFormCancelBtn').addEventListener('click', () => cancelAiMetaForm());
     body.querySelector('#aiMetaFormSubmitBtn').addEventListener('click', () => submitAiMetaForm());
+    _renderUploadProfileSelect();
   }
 
   async function submitAiMetaForm() {
@@ -1613,6 +1662,41 @@
         }
       }
 
+      // Step 3: Install/uninstall to match selected profiles
+      // Upload always writes to shared_skills_dir (default profile).
+      // If default is unchecked, remove it from default after copying elsewhere.
+      try {
+        const selectedProfiles = [];
+        document.querySelectorAll('.ai-meta-profile-cb:checked').forEach(cb => {
+          selectedProfiles.push(cb.value);
+        });
+        // If user unchecked everything, default to "default"
+        if (selectedProfiles.length === 0) {
+          selectedProfiles.push('default');
+        }
+        const defaultSelected = selectedProfiles.includes('default');
+        const installProfiles = selectedProfiles.filter(p => p !== 'default');
+        const uninstallProfiles = defaultSelected ? [] : ['default'];
+        if (installProfiles.length > 0 || uninstallProfiles.length > 0) {
+          const skillName = uploadedName || detailName;
+          const displayN = ($('aiMetaSkillName') && $('aiMetaSkillName').value || '').trim();
+          const catVal = ($('aiMetaCategory') && $('aiMetaCategory').value || '').trim();
+          await api('/api/skillhub/sync-profiles', {
+            method: 'POST',
+            body: JSON.stringify({
+              name: skillName,
+              display_name: displayN,
+              category: catVal,
+              is_custom: true,
+              install: installProfiles,
+              uninstall: uninstallProfiles,
+            }),
+          });
+        }
+      } catch (profileErr) {
+        console.warn('[SkillHub] install to profiles failed:', profileErr);
+      }
+
       _pendingUploadFile = null;
       _pendingDetailJson = null;
       _skillhubData = null;
@@ -1697,6 +1781,9 @@
     _skillhubPage = 1;
     _skillhubData = null;
     _currentSkillhubItem = null;
+    _batchMode = false;
+    _selectedSkills.clear();
+    _updateBatchBar();
     persistScope();
     updateScopeTabs();
     clearDetail();
@@ -1710,6 +1797,9 @@
     _skillhubPage = 1;
     _skillhubData = null;
     _currentSkillhubItem = null;
+    _batchMode = false;
+    _selectedSkills.clear();
+    _updateBatchBar();
     persistCategory();
     renderCategoryChips();
     clearDetail();
@@ -1794,9 +1884,160 @@
       sortSelect.addEventListener('change', () => setSortFromValue(sortSelect.value));
     }
     updateCustomUploadVisibility();
+    // Batch mode buttons
+    const batchInstallBtn = $('btnBatchInstall');
+    const batchUninstallBtn = $('btnBatchUninstall');
+    const batchCancelBtn = $('btnBatchCancel');
+    if (batchInstallBtn) batchInstallBtn.addEventListener('click', batchInstallSelected);
+    if (batchUninstallBtn) batchUninstallBtn.addEventListener('click', batchUninstallSelected);
+    if (batchCancelBtn) batchCancelBtn.addEventListener('click', () => {
+      _batchMode = false;
+      _selectedSkills.clear();
+      _updateBatchBar();
+      renderSkillHubList(_skillhubData || []);
+    });
   }
 
   bindSkillHubControls();
+
+  // ── Batch mode ──────────────────────────────────────────────
+
+  function toggleBatchMode() {
+    _batchMode = !_batchMode;
+    if (!_batchMode) _selectedSkills.clear();
+    _updateBatchBar();
+    renderSkillHubList(_skillhubData || []);
+  }
+
+  function _updateBatchBar() {
+    const bar = $('skillhubBatchBar');
+    if (bar) bar.style.display = _batchMode ? '' : 'none';
+    const countEl = $('skillhubBatchCount');
+    if (countEl) {
+      const n = _selectedSkills.size;
+      countEl.textContent = (typeof t === 'function' ? t('skillhub_batch_selected') || '{0} selected' : '{0} selected').replace('{0}', n);
+    }
+    const installBtn = $('btnBatchInstall');
+    const uninstallBtn = $('btnBatchUninstall');
+    if (installBtn) installBtn.disabled = _selectedSkills.size === 0;
+    if (uninstallBtn) uninstallBtn.disabled = _selectedSkills.size === 0;
+    const toggleBtn = $('btnSkillhubBatch');
+    if (toggleBtn) toggleBtn.classList.toggle('active', _batchMode);
+  }
+
+  async function batchInstallSelected() {
+    if (_selectedSkills.size === 0) return;
+    const skills = [];
+    const data = _skillhubData || [];
+    for (const name of _selectedSkills) {
+      const skill = data.find(s => s.name === name);
+      if (!skill) continue;
+      const isCustom = _skillhubScope === 'custom' || skill.custom === true;
+      skills.push({
+        name: skill.name,
+        display_name: skill.display_name || skill.install_name || skill.name,
+        category: skill.category || '',
+        is_custom: isCustom,
+      });
+    }
+    if (skills.length === 0) return;
+
+    let profiles;
+    try {
+      const label = skills.map(s => s.display_name || s.name).join(', ');
+      profiles = await _showInstallProfileDialog(skills[0].name, label, skills.length);
+    } catch (_) { return; }
+    if (!profiles || profiles.length === 0) return;
+
+    try {
+      const resp = await api('/api/skillhub/batch-install', {
+        method: 'POST',
+        body: JSON.stringify({ skills, profiles }),
+      });
+      const results = resp.results || [];
+      const ok = results.filter(r => r.ok && !r.skipped).length;
+      const skipped = results.filter(r => r.skipped).length;
+      const fail = results.filter(r => !r.ok).length;
+
+      _skillhubData = null;
+      _selectedSkills.clear();
+      _batchMode = false;
+      _updateBatchBar();
+      if (typeof _invalidateSkillsDataCache === 'function') _invalidateSkillsDataCache();
+      await loadSkillHub(true);
+      if (typeof loadSkills === 'function') await loadSkills();
+      if (typeof showToast === 'function') {
+        if (fail === 0) {
+          const msg = typeof t === 'function' ? t('batch_install_success') || 'Installed {0} skills ({1} skipped)' : 'Installed {0} skills ({1} skipped)';
+          showToast(msg.replace('{0}', ok).replace('{1}', skipped));
+        } else {
+          const msg = typeof t === 'function' ? t('batch_install_partial') || '{0} installed, {1} failed' : '{0} installed, {1} failed';
+          showToast(msg.replace('{0}', ok).replace('{1}', fail), 5000, 'error');
+        }
+      }
+    } catch (e) {
+      if (typeof showToast === 'function') showToast(e.message, 5000, 'error');
+    }
+  }
+
+  async function batchUninstallSelected() {
+    if (_selectedSkills.size === 0) return;
+    const skills = [];
+    const data = _skillhubData || [];
+    for (const name of _selectedSkills) {
+      const skill = data.find(s => s.name === name);
+      if (!skill) continue;
+      skills.push({ name: skill.name, dir_name: skill.dir_name || '' });
+    }
+    if (skills.length === 0) return;
+
+    const count = skills.length;
+    const message = typeof t === 'function' && t('batch_delete_confirm')
+      ? t('batch_delete_confirm').replace('{0}', count)
+      : `Delete ${count} skill(s) from all assistants?`;
+    if (typeof showConfirmDialog === 'function') {
+      const ok = await showConfirmDialog({
+        title: typeof t === 'function' ? t('delete_title') : 'Delete',
+        message,
+        confirmLabel: typeof t === 'function' ? t('delete_title') : 'Delete',
+        danger: true,
+        focusCancel: true,
+      });
+      if (!ok) return;
+    }
+
+    try {
+      const resp = await api('/api/skillhub/batch-uninstall', {
+        method: 'POST',
+        body: JSON.stringify({ skills }),
+      });
+      let totalOk = 0, totalFail = 0;
+      for (const sr of (resp.results || [])) {
+        for (const pr of (sr.results || [])) {
+          if (pr.ok) totalOk++; else totalFail++;
+        }
+      }
+
+      _skillhubData = null;
+      _currentSkillhubItem = null;
+      _selectedSkills.clear();
+      _batchMode = false;
+      _updateBatchBar();
+      if (typeof _invalidateSkillsDataCache === 'function') _invalidateSkillsDataCache();
+      clearDetail();
+      await loadSkillHub(true);
+      if (typeof loadSkills === 'function') await loadSkills();
+      if (typeof showToast === 'function') {
+        if (totalFail === 0) {
+          showToast(typeof t === 'function' ? t('skill_deleted') || 'Removed' : `${count} skill(s) removed`);
+        } else {
+          showToast(`${totalOk} removed, ${totalFail} failed`, 5000, 'error');
+        }
+      }
+    } catch (e) {
+      if (typeof showToast === 'function') showToast(e.message, 5000, 'error');
+    }
+  }
 
   window.filterSkillHub = filterSkillHub;
 
@@ -1819,6 +2060,9 @@
     handleUploadFile,
     submitAiMetaForm,
     cancelAiMetaForm,
+    toggleBatchMode,
+    batchInstallSelected,
+    batchUninstallSelected,
   };
 
   // Sync skill lock state from Skills panel

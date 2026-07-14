@@ -346,9 +346,16 @@
       <div class="skillhub-list-controls">
         <div class="skills-search sidebar-search"><svg class="sidebar-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg><input id="skillhubSearch" placeholder="Search catalog..." data-i18n-placeholder="search_skillhub" oninput="filterSkillHub()"></div>
         <select id="skillhubSort" class="skillhub-sort" aria-label="Sort skills"></select>
+        <button id="btnSkillhubBatch" type="button" class="skillhub-batch-toggle" data-i18n="skillhub_batch" onclick="window.HermesSkillHub&&HermesSkillHub.toggleBatchMode()">Batch</button>
       </div>
       <div class="skillhub-list skills-list" id="skillhubList"><div style="padding:12px;color:var(--muted);font-size:12px" data-i18n="loading">Loading...</div></div>
       <div class="skillhub-pager" id="skillhubPager" hidden></div>
+      <div id="skillhubBatchBar" class="skillhub-batch-bar" style="display:none">
+        <span id="skillhubBatchCount" class="skillhub-batch-count">0 selected</span>
+        <button id="btnBatchInstall" type="button" class="btn primary" data-i18n="skillhub_batch_install">Batch Install</button>
+        <button id="btnBatchUninstall" type="button" class="btn" data-i18n="skillhub_batch_uninstall">Batch Uninstall</button>
+        <button id="btnBatchCancel" type="button" class="btn" data-i18n="cancel">Cancel</button>
+      </div>
     </div>
     <!-- Memory panel -->
     <div class="panel-view" id="panelMemory">
