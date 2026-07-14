@@ -124,7 +124,7 @@ Cron and Kanban profile pickers still show profile `name` only (by design).
 | GET | `/api/crons` | Active profile jobs; optional `?profile=` for a single named profile |
 | GET | `/api/crons?all_profiles=1` | Grouped jobs: `{ profiles: [{ profile, jobs }] }` |
 | GET | `/api/crons/recent?all_profiles=1&since=` | Cross-profile completions + session materialize |
-| GET | `/api/crons/history`, `/run`, `/output` | Optional `?profile=` (storage and execution profile) |
+| GET | `/api/crons/history`, `/run`, `/output` | Optional `?profile=` (storage and execution profile); history is `state.db` session-primary with optional output artifacts |
 | GET | `/api/integration/crons/unread` | Cron Hub unread run counts across profiles |
 | POST | `/api/integration/crons/create` | Create in the selected `profile` store and run under that same Profile (body: required `profile`, optional `skills`) |
 | POST | `/api/integration/crons/update\|delete\|run\|pause\|resume` | Same; all require `profile` + `job_id`; delete also clears that job's materialized sessions, state rows, and `cron/output/<job_id>/` history |
@@ -134,7 +134,9 @@ UI: **Cron Hub** rail/sidebar (`integrationCrons`) via `hermes_integration_crons
 
 When integration is enabled, one-shot schedules (`30m`, absolute datetimes, etc.) are kept in `jobs.json` after they finish (`enabled=false`, `state=completed`) instead of being auto-removed by Hermes Agent. Output history and Cron Hub listing remain available until you explicitly delete the job via `POST /api/integration/crons/delete` or upstream `POST /api/crons/delete`.
 
-Cron session materialization also persists stable Session Manifest artifact decisions. Hermes Agent's exact max-iteration summary request may be stored as a `role=user` message, but it continues the current cron invocation rather than opening a new Manifest turn. The materialization hook removes that internal boundary from its cron-only Manifest view, stamps only real cron requests with contiguous keys (`turn:1`, `turn:2`, ...), saves those keys before writing decisions, and the GET Manifest path reuses the same normalized view. Ordinary WebUI sessions and historical cron decisions are unchanged.
+Cron execution history is database-primary: `GET /api/crons/history` lists the matching `source=cron` sessions from the task execution Profile's `state.db`, including run timing, outcome, model, counters, and usage/cost aggregates when the schema provides them. Markdown files under `cron/output/<job_id>/` are attached as optional output artifacts; unmatched files remain visible as artifact-only rows. For legacy jobs whose stored `profile` is empty, the request's owner `profile` selects the execution database instead of falling back to default.
+
+Cron session materialization also persists stable Session Manifest artifact decisions. Hermes Agent's exact max-iteration summary request may be stored as a `role=user` message, but it continues the current cron invocation rather than opening a new Manifest turn. The materialization hook removes that internal boundary from its cron-only Manifest view, stamps only real cron requests with contiguous keys (`turn:1`, `turn:2`, ...), saves those keys before writing decisions, and the GET Manifest path reuses the same normalized view. A user who continues a materialized cron session through WebUI uses the normal streaming artifact path: the transcript is saved before that new turn's artifact or empty decision, and a persistence failure is recorded instead of silently treating the turn as complete. Ordinary WebUI sessions and historical cron decisions are unchanged.
 
 ### 会话状态与已读游标（`HERMES_INTEGRATION=1`）
 

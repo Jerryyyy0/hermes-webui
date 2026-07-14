@@ -69,12 +69,17 @@ def provider_error_payload_from_classification(raw_message: str, classification:
     )
 
 
-def append_persisted_provider_error_message(session, error_payload: dict, *, err_type: str) -> dict:
-    """Persist an assistant error turn and return the stored message dict."""
+def build_persisted_provider_error_message(
+    error_payload: dict,
+    *,
+    err_type: str,
+    timestamp: float | int | None = None,
+) -> dict:
+    """Build the durable assistant error turn shared by all transcript sources."""
     _error_message = {
         'role': 'assistant',
         'content': format_persisted_error_content(error_payload),
-        'timestamp': int(time.time()),
+        'timestamp': int(time.time()) if timestamp is None else timestamp,
         '_error': True,
         '_error_type': err_type,
     }
@@ -83,5 +88,11 @@ def append_persisted_provider_error_message(session, error_payload: dict, *, err
     _details_label = error_payload.get('details_label') or provider_details_label_for_type(err_type)
     if _details_label and error_payload.get('details'):
         _error_message['provider_details_label'] = _details_label
+    return _error_message
+
+
+def append_persisted_provider_error_message(session, error_payload: dict, *, err_type: str) -> dict:
+    """Persist an assistant error turn and return the stored message dict."""
+    _error_message = build_persisted_provider_error_message(error_payload, err_type=err_type)
     session.messages.append(_error_message)
     return _error_message

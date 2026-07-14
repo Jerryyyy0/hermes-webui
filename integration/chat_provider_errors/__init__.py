@@ -35,6 +35,7 @@ from integration.chat_provider_errors.messages import (
 from integration.chat_provider_errors.payload import (
     _redact_text,
     append_persisted_provider_error_message,
+    build_persisted_provider_error_message,
     format_persisted_error_content,
     provider_error_payload,
     provider_error_payload_from_classification,
@@ -52,6 +53,7 @@ __all__ = [
     '_redact_text',
     'append_persisted_provider_error_message',
     'build_interrupted_content_zh',
+    'build_persisted_provider_error_message',
     'build_user_error_content',
     'cancelled_turn_hint',
     'classify_connection_error_code',

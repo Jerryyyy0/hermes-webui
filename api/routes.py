@@ -815,11 +815,15 @@ def _event_profile_for_cron_job(job: dict) -> str | None:
     return raw
 
 
-def _execution_home_for_cron_session_lookup(job: dict):
+def _execution_home_for_cron_session_lookup(job: dict, owner_profile: str | None = None):
     """Resolve cron execution home for history/session lookup without TLS drift."""
     raw = str((job or {}).get("profile") or "").strip()
     if raw:
         return _profile_home_for_cron_job(job)
+    if str(owner_profile or "").strip():
+        from api.profiles import get_hermes_home_for_profile
+
+        return get_hermes_home_for_profile(str(owner_profile).strip())
     from api.profiles import _DEFAULT_HERMES_HOME
 
     return _DEFAULT_HERMES_HOME
@@ -11538,11 +11542,7 @@ def _handle_live_models(handler, parsed):
 
 
 def _handle_cron_history(handler, parsed):
-    """List cron run output files with metadata (no content).
-
-    Returns lightweight file listing so the frontend can render a run history
-    without fetching full output for every run.
-    """
+    """List cron executions from state.db, enriched with optional output artifacts."""
     from cron.jobs import OUTPUT_DIR as CRON_OUT
     import re as _re
 
@@ -11550,25 +11550,16 @@ def _handle_cron_history(handler, parsed):
     job_id = qs.get("job_id", [""])[0]
     if not job_id:
         return j(handler, {"error": "job_id required"}, status=400)
-    # Defense-in-depth: cron job_ids are 12-char hex from the agent's scheduler.
-    # Without validation, a job_id of "../<other>" would let an authenticated
-    # caller enumerate .md filenames in adjacent directories under CRON_OUT's
-    # parent. Mirror the rollback checkpoint id regex shape.
-    # (Opus pre-release advisor finding.)
     if not _re.fullmatch(r"[A-Za-z0-9_-][A-Za-z0-9_.-]{0,63}", job_id) or job_id in (".", ".."):
         return j(handler, {"error": "invalid job_id"}, status=400)
-    # Reject malformed offset/limit instead of letting int() raise ValueError
-    # and surface as a confusing 500. Clamp to safe ranges.
     try:
         offset = max(0, int(qs.get("offset", ["0"])[0]))
         limit = max(1, min(500, int(qs.get("limit", ["50"])[0])))
     except (ValueError, TypeError):
         return j(handler, {"error": "offset and limit must be integers"}, status=400)
-    out_dir = CRON_OUT / job_id
-    runs = []
-    total = 0
-    job = None
+
     profile = (qs.get("profile") or [""])[0].strip()
+    job = None
     try:
         from cron.jobs import get_job
         from api.profiles import get_active_profile_name
@@ -11576,63 +11567,107 @@ def _handle_cron_history(handler, parsed):
         job = get_job(job_id)
         profile = profile or get_active_profile_name() or "default"
     except Exception:
-        job = None
         profile = profile or "default"
+
+    artifacts = []
+    out_dir = CRON_OUT / job_id
     if out_dir.exists():
-        all_files = sorted(out_dir.glob("*.md"), key=lambda f: f.stat().st_mtime, reverse=True)
-        total = len(all_files)
-        page = all_files[offset:offset + limit]
-        materialize_inputs = []
-        for f in page:
+        try:
+            files = sorted(out_dir.glob("*.md"), key=lambda f: f.stat().st_mtime, reverse=True)
+        except OSError:
+            files = []
+        for path in files:
             try:
-                st = f.stat()
-                output_text = f.read_text(encoding="utf-8", errors="replace")
-                usage = _cron_output_usage_metadata(output_text)
-                if job:
-                    materialize_inputs.append({
-                        "filename": f.name,
-                        "run_mtime": st.st_mtime,
-                        "fallback_output": output_text,
-                    })
-                runs.append({
-                    "filename": f.name,
+                st = path.stat()
+                output_text = path.read_text(encoding="utf-8", errors="replace")
+                artifacts.append({
+                    "filename": path.name,
+                    "output_filename": path.name,
                     "size": st.st_size,
                     "modified": st.st_mtime,
-                    "usage": usage,
-                    "session_id": None,
+                    "output_modified": st.st_mtime,
+                    "usage": _cron_output_usage_metadata(output_text),
+                    "fallback_output": output_text,
                 })
             except OSError:
-                logger.debug("Failed to stat cron output file %s", f)
-        if job and materialize_inputs:
-            try:
-                from integration.crons.session_bridge import materialize_cron_sessions_for_runs
+                logger.debug("Failed to read cron output file %s", path)
 
-                session_ids = materialize_cron_sessions_for_runs(
+    database_runs = []
+    if job:
+        try:
+            from integration.crons.session_bridge import list_cron_job_runs_from_state_db
+
+            execution_home = _execution_home_for_cron_session_lookup(job, profile)
+            database_runs = list_cron_job_runs_from_state_db(execution_home, job_id)
+        except Exception:
+            logger.debug("Failed to query cron state history %s", job_id, exc_info=True)
+
+    unmatched_artifacts = list(artifacts)
+    for run in database_runs:
+        run.setdefault("filename", None)
+        run.setdefault("output_filename", None)
+        run.setdefault("output_modified", None)
+        run.setdefault("size", None)
+        run.setdefault("modified", run.get("ended_at") or run.get("started_at"))
+        run.setdefault("usage", {})
+        target = run.get("ended_at") or run.get("last_active") or run.get("started_at")
+        if target is None or not unmatched_artifacts:
+            continue
+        try:
+            artifact = min(
+                unmatched_artifacts,
+                key=lambda item: abs(float(item.get("modified") or 0) - float(target)),
+            )
+            delta = abs(float(artifact.get("modified") or 0) - float(target))
+        except (TypeError, ValueError):
+            continue
+        if delta > 600:
+            continue
+        unmatched_artifacts.remove(artifact)
+        run.update({key: value for key, value in artifact.items() if key != "fallback_output"})
+        run["_fallback_output"] = artifact.get("fallback_output")
+
+    merged_runs = list(database_runs)
+    for artifact in unmatched_artifacts:
+        merged_runs.append({
+            **{key: value for key, value in artifact.items() if key != "fallback_output"},
+            "session_id": None,
+            "started_at": None,
+            "ended_at": artifact.get("modified"),
+            "end_reason": None,
+            "preview": "",
+        })
+    merged_runs.sort(
+        key=lambda run: (
+            float(run.get("ended_at") or run.get("started_at") or run.get("modified") or 0),
+            str(run.get("session_id") or run.get("filename") or ""),
+        ),
+        reverse=True,
+    )
+    total = len(merged_runs)
+    runs = merged_runs[offset:offset + limit]
+
+    if job:
+        try:
+            from integration.crons.session_bridge import materialize_cron_session_run
+
+            for run in runs:
+                if not run.get("session_id"):
+                    continue
+                materialize_cron_session_run(
                     job,
                     owner_profile=profile,
-                    execution_home=_execution_home_for_cron_session_lookup(job),
-                    runs=materialize_inputs,
+                    run=run,
+                    fallback_output=run.pop("_fallback_output", None),
                 )
-                for run in runs:
-                    filename = run.get("filename")
-                    if filename in session_ids:
-                        run["session_id"] = session_ids[filename]
-            except Exception:
-                logger.debug("Failed to resolve cron sessions for history %s", job_id, exc_info=True)
-        if runs:
-            try:
-                from integration.crons.session_bridge import materialized_cron_session_ids_for_runs
-
-                existing_session_ids = materialized_cron_session_ids_for_runs(job_id, runs)
-                for run in runs:
-                    if run.get("session_id"):
-                        continue
-                    filename = run.get("filename")
-                    if filename in existing_session_ids:
-                        run["session_id"] = existing_session_ids[filename]
-            except Exception:
-                logger.debug("Failed to map existing cron sessions for history %s", job_id, exc_info=True)
-    return j(handler, {"job_id": job_id, "runs": runs, "total": total, "offset": offset})
+        except Exception:
+            logger.debug("Failed to materialize cron history %s", job_id, exc_info=True)
+    for run in runs:
+        run.pop("_fallback_output", None)
+    return j(
+        handler,
+        {"job_id": job_id, "profile": profile, "runs": runs, "total": total, "offset": offset},
+    )
 
 
 def _handle_cron_run_detail(handler, parsed):
@@ -11674,7 +11709,10 @@ def _handle_cron_run_detail(handler, parsed):
                 session_id = materialize_cron_session(
                     job,
                     owner_profile=profile or get_active_profile_name() or "default",
-                    execution_home=_execution_home_for_cron_session_lookup(job),
+                    execution_home=_execution_home_for_cron_session_lookup(
+                        job,
+                        profile or get_active_profile_name() or "default",
+                    ),
                     run_mtime=st.st_mtime,
                     fallback_output=content,
                     fallback_filename=filename,

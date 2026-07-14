@@ -151,7 +151,7 @@ integration 开启后，Profile 条目可能包含 `info` 扩展字段。`/api/p
 
 ### 4.3 GET `/api/crons/history`
 
-读取某个任务的运行历史元数据，不返回 Markdown 正文。
+读取某个任务的运行历史元数据，不返回 Markdown 正文。执行记录以任务执行 Profile 的 `state.db.sessions` 中 `source=cron` 且 session ID 属于该 `job_id` 的行作为主数据源；输出 Markdown 仅作为可选 artifact 附加。旧任务的 `profile` 字段为空时，以请求中的任务所属 `profile` 定位 `state.db`。没有数据库会话的 script/no-agent/旧输出仍以 `session_id: null` 的 artifact-only 记录返回。
 
 请求参数：
 
@@ -173,8 +173,18 @@ GET /api/crons/history?job_id=daily_report&profile=default&limit=50
 ```json
 {
   "job_id": "daily_report",
+  "profile": "default",
   "runs": [
     {
+      "session_id": "cron_daily_report_20260601_090000",
+      "started_at": 1780275590,
+      "ended_at": 1780275600,
+      "end_reason": "cron_complete",
+      "model": "gpt-5.5",
+      "message_count": 4,
+      "tool_call_count": 1,
+      "preview": "Summarize yesterday's work",
+      "output_filename": "2026-06-01_09-00-00.md",
       "filename": "2026-06-01_09-00-00.md",
       "size": 4096,
       "modified": 1780275600,
@@ -183,8 +193,7 @@ GET /api/crons/history?job_id=daily_report&profile=default&limit=50
         "input_tokens": 1000,
         "output_tokens": 500,
         "estimated_cost_usd": 0.02
-      },
-      "session_id": "20260601_090000_abcd1234"
+      }
     }
   ],
   "total": 1,
@@ -192,7 +201,7 @@ GET /api/crons/history?job_id=daily_report&profile=default&limit=50
 }
 ```
 
-`session_id` 存在时，Cron Hub 会显示查看会话步骤的按钮。
+`session_id` 存在时，Cron Hub 会显示查看会话步骤的按钮。`output_filename`/`filename` 存在时显示 Markdown 输出展开控件；database-only run 不显示输出控件，但仍显示执行时间、预览和会话步骤。`total` 是数据库执行记录与未匹配 artifact 合并去重后的总数，分页在合并排序后执行。
 
 ### 4.4 GET `/api/session`
 

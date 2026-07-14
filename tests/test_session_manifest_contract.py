@@ -112,6 +112,9 @@ def test_streaming_manifest_turn_key_fallback_uses_last_user_key_first():
     assert "_m.get('_turn_key', '')" in fallback_block
     persist_block = src.split('def _persist_turn_artifact_paths', 1)[1].split('\ndef ', 1)[0]
     assert 'upsert_manifest_records' in persist_block
+    assert "'status': 'persisted'" in persist_block
+    assert "'stage': 'extract'" in persist_block
+    assert "'stage': 'store'" in persist_block
     assert 'turn_artifacts' not in persist_block
 
 
@@ -119,9 +122,11 @@ def test_completed_transcript_is_saved_before_manifest_decision_and_journal():
     src = (REPO / 'api' / 'streaming.py').read_text(encoding='utf-8')
     block = src.split('Make the completed transcript durable before publishing', 1)[1]
     save_index = block.index('s.save()')
-    manifest_index = block.index('_persist_turn_artifact_paths(s, _manifest_turn_key)')
+    manifest_index = block.index('_artifact_decision = _persist_turn_artifact_paths(s, _manifest_turn_key)')
+    failure_index = block.index('"event": "artifact_persistence_failed"')
     completed_index = block.index('"event": "completed"')
-    assert save_index < manifest_index < completed_index
+    assert save_index < manifest_index < failure_index < completed_index
+    assert "_artifact_decision.get('status') == 'persisted'" in block
 
 
 def test_session_manifest_docs_separate_product_api_and_artifact_contracts():

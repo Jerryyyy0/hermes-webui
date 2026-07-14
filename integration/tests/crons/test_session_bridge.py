@@ -581,3 +581,84 @@ def test_ensure_cron_project_explicit_profile(tmp_path, monkeypatch):
     projects = json.loads(projects_file.read_text(encoding="utf-8"))
     row = next(p for p in projects if p["project_id"] == pid)
     assert row["profile"] == "alice"
+
+
+def _failed_cron_output(detail="Connection error."):
+    return f"# Cron Job: Nightly (FAILED)\n\n## Error\n\n```\n{detail}\n```\n"
+
+
+def test_existing_cron_sidecar_appends_provider_style_error_when_run_failed(cron_env, monkeypatch):
+    owner = "default"
+    job = {"id": "job1", "name": "Nightly", "profile": "", "prompt": "run nightly"}
+    sid = "cron_job1_1700000300"
+    with closing(sqlite3.connect(str(cron_env["db"]))) as conn:
+        conn.execute("ALTER TABLE sessions ADD COLUMN end_reason TEXT")
+        conn.execute(
+            "INSERT INTO sessions (id, title, source, started_at, end_reason) VALUES (?, ?, ?, ?, ?)",
+            (sid, "Cron failure", "cron", 1700000300.0, "cron_failed"),
+        )
+        conn.commit()
+
+    with patch("api.models.get_state_db_session_messages", return_value=[{"role": "user", "content": "real", "timestamp": 1.0}]):
+        with patch("api.profiles.list_profiles_api", return_value=[{"name": owner, "path": str(cron_env["home"])}]):
+            from integration.crons.session_bridge import materialize_cron_session
+
+            materialize_cron_session(
+                job,
+                owner_profile=owner,
+                execution_home=cron_env["home"],
+                fallback_output=_failed_cron_output(),
+                run_mtime=1700000305.0,
+            )
+
+    from api.models import Session
+
+    full = Session.load(sid)
+    error = full.messages[-1]
+    assert error["role"] == "assistant"
+    assert error["_error"] is True
+    assert error["_error_type"] == "connection_error"
+    assert error["provider_details"] == "```\nConnection error.\n```"
+    assert error["provider_details_label"] == "技术详情"
+    assert full.last_error_at == 1700000305.0
+
+
+def test_cron_provider_style_error_fallback_is_idempotent(cron_env, monkeypatch):
+    owner = "default"
+    job = {"id": "job1", "name": "Nightly", "profile": "", "prompt": "run nightly"}
+    sid = "cron_job1_1700000400"
+    with closing(sqlite3.connect(str(cron_env["db"]))) as conn:
+        conn.execute("INSERT INTO sessions VALUES (?, ?, ?, ?)", (sid, "Cron failure", "cron", 1700000400.0))
+        conn.commit()
+    run = {"session_id": sid, "title": "Cron run", "started_at": 1700000400.0, "ended_at": 1700000405.0, "end_reason": "cron_failed"}
+    with patch("api.models.get_state_db_session_messages", return_value=[{"role": "user", "content": "real", "timestamp": 1.0}]):
+        with patch("api.profiles.list_profiles_api", return_value=[{"name": owner, "path": str(cron_env["home"])}]):
+            from integration.crons.session_bridge import materialize_cron_session_run
+
+            materialize_cron_session_run(job, owner_profile=owner, run=run, fallback_output=_failed_cron_output())
+            materialize_cron_session_run(job, owner_profile=owner, run=run, fallback_output=_failed_cron_output())
+
+    from api.models import Session
+
+    full = Session.load(sid)
+    assert len([message for message in full.messages if message.get("_error")]) == 1
+
+
+def test_successful_cron_run_does_not_append_error_fallback(cron_env, monkeypatch):
+    owner = "default"
+    job = {"id": "job1", "name": "Nightly", "profile": "", "prompt": "run nightly"}
+    sid = "cron_job1_1700000500"
+    with closing(sqlite3.connect(str(cron_env["db"]))) as conn:
+        conn.execute("INSERT INTO sessions VALUES (?, ?, ?, ?)", (sid, "Cron success", "cron", 1700000500.0))
+        conn.commit()
+    run = {"session_id": sid, "title": "Cron run", "started_at": 1700000500.0, "ended_at": 1700000505.0, "end_reason": "cron_complete"}
+    with patch("api.models.get_state_db_session_messages", return_value=[{"role": "user", "content": "real", "timestamp": 1.0}]):
+        with patch("api.profiles.list_profiles_api", return_value=[{"name": owner, "path": str(cron_env["home"])}]):
+            from integration.crons.session_bridge import materialize_cron_session_run
+
+            materialize_cron_session_run(job, owner_profile=owner, run=run, fallback_output="## Response\n\ncompleted")
+
+    from api.models import Session
+
+    full = Session.load(sid)
+    assert not any(message.get("_error") for message in full.messages)

@@ -748,13 +748,13 @@
     "/api/crons/history": {
       "get": {
         "tags": ["Crons"],
-        "summary": "获取定时任务运行历史（元数据）",
-        "description": "列出输出目录下 `.md` 文件的 filename、size、modified、usage，不含正文。",
+        "summary": "获取定时任务执行历史（数据库优先）",
+        "description": "以任务执行 Profile 的 `state.db.sessions` cron 会话为主记录，返回执行时间、状态、模型、计数和 token/cost 聚合字段；若存在 `cron/output/{job_id}` Markdown，则附加 filename、size、modified、usage。仅有输出文件的旧运行仍作为 artifact-only 记录返回。",
         "parameters": [
           { "name": "job_id", "in": "query", "required": true, "schema": { "type": "string" } },
           { "name": "offset", "in": "query", "required": false, "schema": { "type": "integer", "default": 0, "minimum": 0 } },
           { "name": "limit", "in": "query", "required": false, "schema": { "type": "integer", "default": 50, "minimum": 1, "maximum": 500 } },
-          { "name": "profile", "in": "query", "required": false, "schema": { "type": "string" }, "description": "任务所属 Profile（读取其 cron/output）" }
+          { "name": "profile", "in": "query", "required": false, "schema": { "type": "string" }, "description": "任务所属 Profile；旧任务未保存执行 profile 时，也用于定位其 state.db 和 cron/output" }
         ],
         "responses": {
           "200": {
@@ -5392,18 +5392,38 @@
       "CronHistoryRunItem": {
         "type": "object",
         "properties": {
-          "filename": { "type": "string" },
-          "size":     { "type": "integer" },
-          "modified": { "type": "number", "description": "Unix 时间戳（秒）" },
-          "usage":    { "$ref": "#/components/schemas/CronOutputUsage" },
-          "session_id": { "type": "string", "nullable": true, "description": "已 materialize 的 cron 会话 ID；可用于打开完整执行步骤" }
+          "session_id": { "type": "string", "nullable": true, "description": "state.db cron 会话 ID；可用于打开完整执行步骤。artifact-only 记录为 null" },
+          "title": { "type": "string", "nullable": true },
+          "started_at": { "type": "number", "nullable": true, "description": "执行开始 Unix 时间戳（秒）" },
+          "ended_at": { "type": "number", "nullable": true, "description": "执行结束 Unix 时间戳（秒）" },
+          "end_reason": { "type": "string", "nullable": true },
+          "model": { "type": "string", "nullable": true },
+          "preview": { "type": "string", "description": "首条用户消息预览" },
+          "last_active": { "type": "number", "nullable": true },
+          "message_count": { "type": "integer", "nullable": true },
+          "tool_call_count": { "type": "integer", "nullable": true },
+          "api_call_count": { "type": "integer", "nullable": true },
+          "input_tokens": { "type": "integer", "nullable": true },
+          "output_tokens": { "type": "integer", "nullable": true },
+          "cache_read_tokens": { "type": "integer", "nullable": true },
+          "cache_write_tokens": { "type": "integer", "nullable": true },
+          "reasoning_tokens": { "type": "integer", "nullable": true },
+          "estimated_cost_usd": { "type": "number", "nullable": true },
+          "actual_cost_usd": { "type": "number", "nullable": true },
+          "filename": { "type": "string", "nullable": true, "description": "兼容字段；有输出 artifact 时等于 output_filename" },
+          "output_filename": { "type": "string", "nullable": true },
+          "size": { "type": "integer", "nullable": true },
+          "modified": { "type": "number", "nullable": true, "description": "输出 artifact 修改时间；无 artifact 时回退执行时间" },
+          "output_modified": { "type": "number", "nullable": true },
+          "usage": { "$ref": "#/components/schemas/CronOutputUsage" }
         },
-        "required": ["filename", "size", "modified"]
+        "required": ["session_id"]
       },
       "CronHistoryResponse": {
         "type": "object",
         "properties": {
           "job_id": { "type": "string" },
+          "profile": { "type": "string", "description": "任务所属 Profile" },
           "runs":   { "type": "array", "items": { "$ref": "#/components/schemas/CronHistoryRunItem" } },
           "total":  { "type": "integer" },
           "offset": { "type": "integer" }

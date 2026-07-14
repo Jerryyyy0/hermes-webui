@@ -76,8 +76,20 @@
     return `hermes-webui-integration-cron-${suffix}-${encodeURIComponent(ownerProfile)}-${encodeURIComponent(jobId)}`;
   }
 
-  function runExpandKey(ownerProfile, jobId, filename) {
-    return `${panelExpandKey(ownerProfile, jobId, 'run')}-${encodeURIComponent(filename || '')}`;
+  function runExpandKey(ownerProfile, jobId, runKey) {
+    return `${panelExpandKey(ownerProfile, jobId, 'run')}-${encodeURIComponent(runKey || '')}`;
+  }
+
+  function cronRunKey(run) {
+    return run?.session_id || run?.output_filename || run?.filename || '';
+  }
+
+  function cronRunTimestamp(run) {
+    const value = run?.started_at || run?.ended_at || run?.modified;
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return new Date(value * 1000).toLocaleString();
+    }
+    return String(run?.filename || '').replace('.md', '').replace(/_/g, ' ');
   }
 
   function expansionGet(key) {
@@ -416,8 +428,8 @@
     if (_selected && _mode === 'read') renderDetailView(_selected);
   }
 
-  function toggleRunExpanded(ownerProfile, jobId, filename, runId) {
-    const key = runExpandKey(ownerProfile, jobId, filename);
+  function toggleRunExpanded(ownerProfile, jobId, runKey, runId) {
+    const key = runExpandKey(ownerProfile, jobId, runKey);
     const expanded = !expansionGet(key);
     expansionSet(key, expanded);
     const item = document.getElementById(runId);
@@ -543,27 +555,37 @@
       const formatUsage = shared().formatRunUsageStrip || (() => '');
       const rows = data.runs
         .map((run, i) => {
-          const ts = String(run.filename || '').replace('.md', '').replace(/_/g, ' ');
-          const sizeStr = run.size > 1024 ? (run.size / 1024).toFixed(1) + ' KB' : run.size + ' B';
+          const ts = cronRunTimestamp(run);
+          const hasOutput = Boolean(run.output_filename || run.filename);
+          const sizeStr = hasOutput && Number.isFinite(Number(run.size))
+            ? Number(run.size) > 1024
+              ? (Number(run.size) / 1024).toFixed(1) + ' KB'
+              : Number(run.size) + ' B'
+            : '';
           const rid = `integration-cron-run-${encodeURIComponent(ownerProfile)}-${jobId}-${i}`;
           const usageStrip = formatUsage(run.usage);
-          const runExpanded = expansionGet(runExpandKey(ownerProfile, jobId, run.filename));
+          const runKey = cronRunKey(run);
+          const runExpanded = hasOutput && expansionGet(runExpandKey(ownerProfile, jobId, runKey));
           const runToggleLabel = runExpanded
             ? T('cron_collapse_output') || 'Collapse output'
             : T('cron_expand_output') || 'Expand output';
           const sessionAction = run.session_id
             ? `<button type="button" class="detail-expand-toggle" data-action="embed-session" data-session-id="${esc(run.session_id)}" data-run-id="${esc(rid)}" title="${esc(T('cron_view_session_steps') || 'View session steps')}" aria-label="${esc(T('cron_view_session_steps') || 'View session steps')}">☰</button>`
             : '';
+          const outputAction = hasOutput
+            ? `<button type="button" class="detail-expand-toggle" data-action="toggle-run" data-run-key="${esc(runKey)}" data-filename="${esc(run.output_filename || run.filename)}" data-run-id="${esc(rid)}" title="${esc(runToggleLabel)}" aria-label="${esc(runToggleLabel)}">${esc(runExpanded ? '▴' : '▾')}</button>`
+            : '';
+          const preview = !hasOutput && run.preview ? `<div class="detail-run-body">${esc(run.preview)}</div>` : '';
           return `<div class="detail-run-item" id="${rid}">
-        <div class="detail-run-head" data-action="load-run" data-filename="${esc(run.filename)}" data-run-id="${esc(rid)}">
-          <span><span style="opacity:.7">${esc(ts)}</span> <span style="opacity:.4;font-size:11px">${esc(sizeStr)}</span>${usageStrip ? ` <span class="cron-run-usage-strip">${esc(usageStrip)}</span>` : ''}</span>
+        <div class="detail-run-head"${hasOutput ? ` data-action="load-run" data-run-key="${esc(runKey)}" data-filename="${esc(run.output_filename || run.filename)}" data-run-id="${esc(rid)}"` : ''}>
+          <span><span style="opacity:.7">${esc(ts)}</span>${sizeStr ? ` <span style="opacity:.4;font-size:11px">${esc(sizeStr)}</span>` : ''}${usageStrip ? ` <span class="cron-run-usage-strip">${esc(usageStrip)}</span>` : ''}</span>
           <span class="detail-run-actions">
             ${sessionAction}
-            <button type="button" class="detail-expand-toggle" data-action="toggle-run" data-filename="${esc(run.filename)}" data-run-id="${esc(rid)}" title="${esc(runToggleLabel)}" aria-label="${esc(runToggleLabel)}">${esc(runExpanded ? '▴' : '▾')}</button>
-            <span style="opacity:.6">▸</span>
+            ${outputAction}
+            ${hasOutput ? '<span style="opacity:.6">▸</span>' : ''}
           </span>
         </div>
-        <div class="detail-run-body ${runExpanded ? 'expanded' : ''}" style="color:var(--muted);font-size:12px">${esc(T('loading'))}</div>
+        ${hasOutput ? `<div class="detail-run-body ${runExpanded ? 'expanded' : ''}" style="color:var(--muted);font-size:12px">${esc(T('loading'))}</div>` : preview}
         <div class="integration-cron-session-detail" data-session-host="${esc(rid)}" hidden></div>
       </div>`;
         })
@@ -572,7 +594,12 @@
       card.innerHTML = `<div class="detail-card-title">${esc(T('cron_last_output'))}${countLabel}</div>${rows}`;
       card.querySelectorAll('[data-action="load-run"]').forEach(el => {
         el.addEventListener('click', () => {
-          loadRunContent(row, el.getAttribute('data-filename'), el.getAttribute('data-run-id'));
+          loadRunContent(
+            row,
+            el.getAttribute('data-filename'),
+            el.getAttribute('data-run-id'),
+            el.getAttribute('data-run-key')
+          );
         });
       });
       card.querySelectorAll('[data-action="toggle-run"]').forEach(btn => {
@@ -581,7 +608,7 @@
           toggleRunExpanded(
             ownerProfile,
             jobId,
-            btn.getAttribute('data-filename'),
+            btn.getAttribute('data-run-key'),
             btn.getAttribute('data-run-id')
           );
         });
@@ -595,8 +622,10 @@
       for (const run of data.runs) {
         const idx = data.runs.indexOf(run);
         const rid = `integration-cron-run-${encodeURIComponent(ownerProfile)}-${jobId}-${idx}`;
-        if (expansionGet(runExpandKey(ownerProfile, jobId, run.filename))) {
-          loadRunContent(row, run.filename, rid);
+        const filename = run.output_filename || run.filename;
+        const runKey = cronRunKey(run);
+        if (filename && expansionGet(runExpandKey(ownerProfile, jobId, runKey))) {
+          loadRunContent(row, filename, rid, runKey);
         }
       }
     } catch (_) {
@@ -604,12 +633,13 @@
     }
   }
 
-  async function loadRunContent(row, filename, runId) {
+  async function loadRunContent(row, filename, runId, runKey = filename) {
+    if (!filename) return;
     const body = document.querySelector(`#${CSS.escape(runId)} .detail-run-body`);
     if (!body) return;
     const item = document.getElementById(runId);
     if (item && !item.classList.contains('open')) item.classList.add('open');
-    body.classList.toggle('expanded', expansionGet(runExpandKey(row.ownerProfile, row.job.id, filename)));
+    body.classList.toggle('expanded', expansionGet(runExpandKey(row.ownerProfile, row.job.id, runKey)));
     body.innerHTML = `<span style="opacity:.5">${esc(T('loading'))}</span>`;
     try {
       const data = await api(
@@ -619,7 +649,7 @@
         body.textContent = data.error;
         return;
       }
-      const expanded = expansionGet(runExpandKey(row.ownerProfile, row.job.id, filename));
+      const expanded = expansionGet(runExpandKey(row.ownerProfile, row.job.id, runKey));
       const output = expanded ? data.content || data.snippet || '' : data.snippet || data.content || '';
       body.classList.toggle('expanded', expanded);
       if (typeof renderMd === 'function') body.innerHTML = renderMd(output);
@@ -650,7 +680,7 @@
           'margin-top:8px;padding:4px 12px;border-radius:var(--radius-btn);border:1px solid var(--border-subtle);background:var(--surface-subtle);color:var(--text-secondary);cursor:pointer;font-size:12px';
         btn.textContent = T('cron_view_full_output') || 'View full output';
         btn.onclick = () => {
-          expansionSet(runExpandKey(row.ownerProfile, row.job.id, filename), true);
+          expansionSet(runExpandKey(row.ownerProfile, row.job.id, runKey), true);
           body.classList.add('expanded');
           body.innerHTML = typeof renderMd === 'function' ? renderMd(data.content) : data.content;
           btn.remove();

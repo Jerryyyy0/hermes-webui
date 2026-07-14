@@ -211,7 +211,7 @@ final assistant 已进入 s.messages
 → completed journal event
 ```
 
-先保存 transcript，确保 artifact/empty decision 不会先于其证据 durable。无成果时写 empty decision。
+先保存 transcript，确保 artifact/empty decision 不会先于其证据 durable。无成果时写 empty decision；提取或 store 写入失败会作为可观测的持久化失败处理，不能被伪装为 empty decision 或已完成 turn。
 
 Store row 最小字段：
 

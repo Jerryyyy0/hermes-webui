@@ -22,6 +22,7 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Changed
 
+- **Cron execution history is database-primary** — `GET /api/crons/history` now lists each job's `source=cron` sessions from its execution Profile `state.db`, so completed runs remain visible even without a Markdown output artifact. Existing `cron/output/<job_id>/*.md` files are attached as optional output metadata, while unmatched files remain artifact-only rows. Legacy non-default-Profile jobs with an empty stored `profile` now use the requested owner Profile for database lookup instead of incorrectly reading default.
 - **Profile list response minimization** — `GET /api/profiles` no longer returns `skills`, `skill_count`, `enabled_skills`, `total_skills`, or `memory_snapshot`. Profile UI keeps runtime and `info.json` metadata only; Cron Hub now loads a selected Profile's skills on demand through `GET /api/skills?profile=<name>`.
 
 - **Session manifest artifact authority** — `/api/session` no longer exposes `turn_artifacts`; `/api/session/manifest` is the single turn artifact display source and returns minimal `manifest_source`. New turn artifacts write only to `session_manifest.db`; legacy session JSON `turn_artifacts` is read only when the DB has no existing decision for that session/lineage, then backfilled into the DB.
@@ -35,6 +36,10 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 - **Chat apperror `content_filtered` type** — Provider 内容审核拦截（如 `data_inspection_failed`、`content_filter`、`content_policy_violation`、`moderation`）不再落到通用 `error` 兜底文案，新增 `content_filtered` 分类，中文文案「内容被审核拦截 / 输入内容被模型服务的内容审核策略拦截」，`details_label` 为「审核详情」。分类与文案集中在 `integration/chat_provider_errors/`（`classify.py`、`messages.py`），`api/streaming.py` 接缝不动。分类顺序：`content_filtered` / `compression_exhausted` 等 provider 专有 code 优先于 `404`/`401`/`429` 弱状态码匹配，避免 chatcmpl ID 子串误判（见下条 Fixed）。
 
 ### Fixed
+
+- **Cron 会话手动续聊 Artifact** — 在已 materialize 的定时任务会话中通过 WebUI 继续对话时，成功 `write_file` 的 Artifact decision 现在会被明确验证后再标记 turn 完成；提取或 SQLite store 写入失败会记录可诊断事件，不再被静默误判为无成果或完成。
+
+- **Cron 异常消息可见性** — 定时任务的失败 output 现在会在 materialized session 中补充与普通会话相同结构的 assistant 错误消息（含中文错误文案、技术详情和 `last_error_at`），因此打开 `/api/session` 可以直接看到异常；重复读取 history 不会重复写入，正常 run 不受影响。
 
 - **Cron Manifest turn 序号与 artifact 归属** — Hermes Agent 达到工具迭代上限时写入的内部总结请求不再被 materialized cron 会话识别为新的 user turn，避免出现 `turn:47`、`turn:224` 等按消息索引生成的伪 turn。新 cron 会话只为真实请求保存连续稳定 key；sidecar 先于 artifact decision 持久化，GET Manifest 复用同一 cron-only 规范化视图，使顶层与 per-turn artifacts 对齐。普通 WebUI 会话和历史 cron decisions 不变。
 - **聊天定时任务 Profile 归属** — 命名 Profile 的 WebUI 会话通过 `cronjob` 工具创建任务时，现在仅在单次工具调用边界绑定该会话的 Hermes home，任务会写入对应 Profile 的 `cron/jobs.json`，不再误落到 `default`；调用结束后立即恢复 cron 路径缓存，避免并发 Profile 串写。

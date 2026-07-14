@@ -953,10 +953,12 @@ def _finalize_cancelled_turn(session, *, ephemeral: bool = False, message: str =
         logger.debug("Failed to persist cancelled turn", exc_info=True)
 
 
-def _persist_turn_artifact_paths(s, turn_key: str = '') -> None:
-    """Persist current-turn artifact decisions to the manifest store."""
+def _persist_turn_artifact_paths(s, turn_key: str = '') -> dict[str, object]:
+    """Persist one completed turn's artifact or empty decision and report its outcome."""
+    session_id = str(getattr(s, 'session_id', '') or '').strip()
     if not getattr(s, 'messages', None):
-        return
+        logger.warning("Manifest artifact decision skipped: session=%s reason=no_messages", session_id)
+        return {'status': 'failed', 'stage': 'validate', 'turn_key': '', 'artifact_count': 0}
     _turn_key = str(turn_key or '').strip()
     if not _turn_key:
         for _m in reversed(s.messages):
@@ -965,26 +967,61 @@ def _persist_turn_artifact_paths(s, turn_key: str = '') -> None:
                 if _turn_key:
                     break
     if not _turn_key:
-        return
+        logger.warning("Manifest artifact decision skipped: session=%s reason=no_turn_key", session_id)
+        return {'status': 'failed', 'stage': 'validate', 'turn_key': '', 'artifact_count': 0}
     try:
         from api.session_manifest import extract_turn_artifact_entries_for_manifest
-        from api.session_manifest_store import upsert_manifest_records
 
         _entries = extract_turn_artifact_entries_for_manifest(s, _turn_key)
-        _store_entries = [
-            {
-                'path': entry.get('path'),
-                'source_tool': entry.get('source_tool') or 'assistant_prose',
-                'preview': entry.get('preview') or 'file',
-            }
-            for entry in _entries
-            if isinstance(entry, dict)
-        ]
-        if not _store_entries:
-            _store_entries = [{'path': '', 'source_tool': 'assistant_prose', 'preview': 'file'}]
-        upsert_manifest_records(s, _turn_key, _store_entries)
     except Exception:
-        logger.debug("Failed to persist turn artifacts to manifest store", exc_info=True)
+        logger.warning(
+            "Manifest artifact extraction failed: session=%s turn=%s",
+            session_id,
+            _turn_key,
+            exc_info=True,
+        )
+        return {'status': 'failed', 'stage': 'extract', 'turn_key': _turn_key, 'artifact_count': 0}
+
+    _store_entries = [
+        {
+            'path': entry.get('path'),
+            'source_tool': entry.get('source_tool') or 'assistant_prose',
+            'preview': entry.get('preview') or 'file',
+        }
+        for entry in _entries
+        if isinstance(entry, dict)
+    ]
+    artifact_count = len(_store_entries)
+    if not _store_entries:
+        _store_entries = [{'path': '', 'source_tool': 'assistant_prose', 'preview': 'file'}]
+    try:
+        from api.session_manifest_store import upsert_manifest_records
+
+        persisted = upsert_manifest_records(s, _turn_key, _store_entries)
+    except Exception:
+        logger.warning(
+            "Manifest artifact store write failed: session=%s turn=%s entries=%d",
+            session_id,
+            _turn_key,
+            artifact_count,
+            exc_info=True,
+        )
+        return {'status': 'failed', 'stage': 'store', 'turn_key': _turn_key, 'artifact_count': artifact_count}
+    if len(persisted) != len(_store_entries):
+        logger.warning(
+            "Manifest artifact store write incomplete: session=%s turn=%s entries=%d persisted=%d",
+            session_id,
+            _turn_key,
+            artifact_count,
+            len(persisted),
+        )
+        return {'status': 'failed', 'stage': 'store', 'turn_key': _turn_key, 'artifact_count': artifact_count}
+    return {
+        'status': 'persisted',
+        'decision': 'artifacts' if artifact_count else 'empty',
+        'turn_key': _turn_key,
+        'artifact_count': artifact_count,
+    }
 
 
 def _aiagent_import_error_detail() -> str:
@@ -7061,7 +7098,21 @@ def _run_agent_streaming(
                 # Make the completed transcript durable before publishing the
                 # manifest decision derived from its final assistant message.
                 s.save()
-                _persist_turn_artifact_paths(s, _manifest_turn_key)
+                _artifact_decision = _persist_turn_artifact_paths(s, _manifest_turn_key)
+                if _artifact_decision.get('status') != 'persisted':
+                    try:
+                        append_turn_journal_event_for_stream(
+                            s.session_id,
+                            stream_id,
+                            {
+                                "event": "artifact_persistence_failed",
+                                "created_at": time.time(),
+                                "turn_key": _artifact_decision.get('turn_key') or _manifest_turn_key,
+                                "stage": _artifact_decision.get('stage') or 'unknown',
+                            },
+                        )
+                    except Exception:
+                        logger.debug("Failed to append artifact persistence failure journal event", exc_info=True)
                 if cancel_event.is_set():
                     _finalize_cancelled_turn(s, ephemeral=False)
                     try:
@@ -7078,7 +7129,7 @@ def _run_agent_streaming(
                         logger.debug("Failed to append cancelled turn journal event", exc_info=True)
                     put('cancel', {'message': 'Cancelled by user'})
                     return
-                if not ephemeral:
+                if not ephemeral and _artifact_decision.get('status') == 'persisted':
                     try:
                         append_turn_journal_event_for_stream(
                             s.session_id,
