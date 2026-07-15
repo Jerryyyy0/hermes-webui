@@ -583,6 +583,117 @@ def test_ensure_cron_project_explicit_profile(tmp_path, monkeypatch):
     assert row["profile"] == "alice"
 
 
+def test_reconcile_cron_transcript_preserves_existing_followup_messages(cron_env, monkeypatch):
+    from api.models import Session
+    from integration.crons.session_bridge import reconcile_cron_session_transcript
+
+    sid = "cron_job1_1700000600"
+    session = Session(
+        session_id=sid,
+        profile="default",
+        source_tag="cron",
+        cron_execution_profile=str(cron_env["home"]),
+        cron_execution_ended_at=250.0,
+        messages=[
+            {"role": "user", "content": "cron prompt", "timestamp": 100.0},
+            {"role": "user", "content": "follow up", "timestamp": 300.0},
+            {"role": "assistant", "content": "follow-up answer", "timestamp": 301.0},
+        ],
+    )
+    monkeypatch.setattr("api.models._get_profile_home", lambda _profile: cron_env["home"])
+    with closing(sqlite3.connect(str(cron_env["db"]))) as conn:
+        conn.execute(
+            "INSERT INTO sessions VALUES (?, ?, ?, ?)",
+            (sid, "Cron run", "cron", 100.0),
+        )
+        conn.execute(
+            "INSERT INTO messages VALUES (?, ?, ?, ?, ?)",
+            ("m-cron-answer", sid, "assistant", "cron answer", 200.0),
+        )
+        conn.commit()
+
+    assert reconcile_cron_session_transcript(session) is True
+    assert [message["content"] for message in session.messages] == [
+        "cron prompt",
+        "cron answer",
+        "follow up",
+        "follow-up answer",
+    ]
+
+
+def test_reconcile_cron_transcript_does_not_duplicate_followup_replay(cron_env, monkeypatch):
+    from api.models import Session
+    from integration.crons.session_bridge import reconcile_cron_session_transcript
+
+    sid = "cron_job1_1700000650"
+    followup = [
+        {"role": "user", "content": "给我一个word", "timestamp": 300.0},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "call-skill", "function": {"name": "skill_view"}}],
+            "timestamp": 301.0,
+        },
+        {"role": "tool", "tool_call_id": "call-skill", "content": "skill ok", "timestamp": 302.0},
+        {"role": "assistant", "content": "Word 文档已生成", "timestamp": 303.0},
+    ]
+    session = Session(
+        session_id=sid,
+        profile="default",
+        source_tag="cron",
+        cron_execution_profile=str(cron_env["home"]),
+        cron_execution_ended_at=250.0,
+        messages=[
+            {"role": "user", "content": "cron prompt", "timestamp": 100.0},
+            *followup,
+        ],
+    )
+    monkeypatch.setattr("api.models._get_profile_home", lambda _profile: cron_env["home"])
+    with closing(sqlite3.connect(str(cron_env["db"]))) as conn:
+        conn.execute(
+            "INSERT INTO sessions VALUES (?, ?, ?, ?)",
+            (sid, "Cron run", "cron", 100.0),
+        )
+        rows = [
+            ("m-cron-answer", sid, "assistant", "cron answer", 200.0),
+            ("m-follow-user", sid, "user", "给我一个word", 300.5),
+            ("m-follow-assistant-tool", sid, "assistant", "", 301.5),
+            ("m-follow-tool", sid, "tool", "skill ok", 302.5),
+            ("m-follow-answer", sid, "assistant", "Word 文档已生成", 303.5),
+        ]
+        conn.executemany("INSERT INTO messages VALUES (?, ?, ?, ?, ?)", rows)
+        conn.commit()
+
+    assert reconcile_cron_session_transcript(session) is True
+    assert [message["content"] for message in session.messages] == [
+        "cron prompt",
+        "cron answer",
+        "给我一个word",
+        "",
+        "skill ok",
+        "Word 文档已生成",
+    ]
+
+
+def test_reconcile_cron_transcript_uses_output_when_database_reply_missing(cron_env, monkeypatch):
+    from api.models import Session
+    from integration.crons.session_bridge import reconcile_cron_session_transcript
+
+    session = Session(
+        session_id="cron_job1_1700000700",
+        profile="default",
+        source_tag="cron",
+        cron_execution_profile=str(cron_env["home"]),
+        messages=[{"role": "user", "content": "cron prompt", "timestamp": 100.0}],
+    )
+    monkeypatch.setattr("api.models.get_state_db_session_messages", lambda *_args, **_kwargs: [])
+    output = "# Cron Job: Nightly\n\n## Response\n\ncron answer"
+
+    assert reconcile_cron_session_transcript(session, fallback_output=output, run_mtime=200.0) is True
+    assert reconcile_cron_session_transcript(session, fallback_output=output, run_mtime=200.0) is False
+    assert [message["content"] for message in session.messages] == ["cron prompt", "cron answer"]
+
+
 def _failed_cron_output(detail="Connection error."):
     return f"# Cron Job: Nightly (FAILED)\n\n## Error\n\n```\n{detail}\n```\n"
 

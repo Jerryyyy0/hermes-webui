@@ -8,15 +8,17 @@ from integration.crons.hooks import (
     _MAX_ITERATION_SUMMARY_REQUEST,
     _persist_cron_turn_artifacts,
     normalize_cron_manifest_messages,
+    prepare_cron_session_for_reply,
 )
 
 
 def _tool_trace(*, user_content: str = "build report") -> list[dict]:
     return [
-        {"role": "user", "content": user_content},
+        {"role": "user", "content": user_content, "timestamp": 10.0},
         {
             "role": "assistant",
             "content": "",
+            "timestamp": 20.0,
             "tool_calls": [
                 {
                     "id": "call-1",
@@ -27,9 +29,9 @@ def _tool_trace(*, user_content: str = "build report") -> list[dict]:
                 }
             ],
         },
-        {"role": "tool", "tool_call_id": "call-1", "content": "ok"},
-        {"role": "user", "content": _MAX_ITERATION_SUMMARY_REQUEST},
-        {"role": "assistant", "content": "Created `report.html`."},
+        {"role": "tool", "tool_call_id": "call-1", "content": "ok", "timestamp": 30.0},
+        {"role": "user", "content": _MAX_ITERATION_SUMMARY_REQUEST, "timestamp": 40.0},
+        {"role": "assistant", "content": "Created `report.html`.", "timestamp": 50.0},
     ]
 
 
@@ -186,6 +188,44 @@ def test_cron_manifest_store_artifact_aligns_with_real_turn(tmp_path, monkeypatc
     assert manifest["artifacts"][0]["path"] == "report.html"
 
 
+def test_prepare_cron_session_for_reply_stamps_prefix_before_followup(monkeypatch):
+    import api.session_manifest_store as manifest_store
+    import api.streaming as streaming
+
+    persisted: list[str] = []
+    session = SimpleNamespace(
+        session_id="cron_job_20260713_120099",
+        source_tag="cron",
+        profile="default",
+        cron_execution_ended_at=100.0,
+        messages=[
+            *_tool_trace(),
+            {"role": "user", "content": "follow up", "timestamp": 150.0, "_turn_key": "turn:2"},
+            {"role": "assistant", "content": "follow-up answer", "timestamp": 160.0},
+        ],
+        save=lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(manifest_store, "load_manifest_decided_turn_keys", lambda _session: set())
+    monkeypatch.setattr(
+        streaming,
+        "_persist_turn_artifact_paths",
+        lambda _session, turn_key: persisted.append(turn_key) or {
+            "status": "persisted", "turn_key": turn_key,
+        },
+    )
+
+    prepared = prepare_cron_session_for_reply(session)
+
+    assert prepared.ready is True
+    assert prepared.next_turn_key == "turn:3"
+    assert persisted == ["turn:1"]
+    assert [
+        message.get("_turn_key")
+        for message in session.messages
+        if message.get("role") == "user"
+    ] == ["turn:1", "turn:2"]
+
+
 def test_persist_cron_turn_artifacts_stamps_one_real_turn_before_decision(monkeypatch):
     import api.models as models
     import api.streaming as streaming
@@ -194,6 +234,7 @@ def test_persist_cron_turn_artifacts_stamps_one_real_turn_before_decision(monkey
     session = SimpleNamespace(
         session_id="cron_job_20260713_120000",
         messages=_tool_trace(),
+        cron_execution_ended_at=100.0,
         save=lambda: events.append(("save",)),
     )
     monkeypatch.setattr(models.Session, "load", lambda sid: session)
@@ -220,16 +261,18 @@ def test_persist_cron_turn_artifacts_stamps_one_real_turn_before_decision(monkey
 def test_persist_cron_turn_artifacts_keeps_real_turns_contiguous(monkeypatch):
     import api.models as models
     import api.streaming as streaming
+    import api.session_manifest_store as manifest_store
 
+    monkeypatch.setattr(manifest_store, "load_manifest_decided_turn_keys", lambda _session: set())
     messages = _tool_trace()
     messages.extend(
         [
-            {"role": "user", "content": "second real request"},
-            {"role": "assistant", "content": "second answer"},
+            {"role": "user", "content": "second real request", "timestamp": 60.0},
+            {"role": "assistant", "content": "second answer", "timestamp": 70.0},
         ]
     )
     persisted: list[str] = []
-    session = SimpleNamespace(messages=messages, save=lambda: None)
+    session = SimpleNamespace(messages=messages, cron_execution_ended_at=100.0, save=lambda: None)
     monkeypatch.setattr(models.Session, "load", lambda sid: session)
     monkeypatch.setattr(
         streaming,
@@ -247,6 +290,44 @@ def test_persist_cron_turn_artifacts_keeps_real_turns_contiguous(monkeypatch):
     ] == ["turn:1", "turn:2"]
 
 
+def test_persist_cron_turn_artifacts_ignores_followup_suffix(monkeypatch):
+    import api.models as models
+    import api.streaming as streaming
+
+    messages = _tool_trace()
+    messages.extend(
+        [
+            {"role": "user", "content": "follow up", "timestamp": 150.0, "_turn_key": "turn:2"},
+            {"role": "assistant", "content": "follow-up answer", "timestamp": 160.0},
+        ]
+    )
+    persisted: list[str] = []
+    session = SimpleNamespace(
+        messages=messages,
+        cron_execution_ended_at=100.0,
+        save=lambda: None,
+    )
+    monkeypatch.setattr(models.Session, "load", lambda sid: session)
+    monkeypatch.setattr(
+        streaming,
+        "_persist_turn_artifact_paths",
+        lambda current, turn_key: persisted.append(turn_key),
+    )
+
+    _persist_cron_turn_artifacts("cron_job_20260713_120003")
+
+    assert persisted == ["turn:1"]
+    assert [
+        message.get("_turn_key")
+        for message in session.messages
+        if isinstance(message, dict) and message.get("role") == "user"
+    ] == ["turn:1", "turn:2"]
+    assert [message["content"] for message in session.messages if message.get("role") == "user"] == [
+        "build report",
+        "follow up",
+    ]
+
+
 def test_persist_cron_turn_artifacts_does_not_write_decision_when_save_fails(monkeypatch):
     import api.models as models
     import api.streaming as streaming
@@ -254,7 +335,11 @@ def test_persist_cron_turn_artifacts_does_not_write_decision_when_save_fails(mon
     def fail_save():
         raise OSError("disk full")
 
-    session = SimpleNamespace(messages=_tool_trace(), save=fail_save)
+    session = SimpleNamespace(
+        messages=_tool_trace(),
+        cron_execution_ended_at=100.0,
+        save=fail_save,
+    )
     persisted: list[str] = []
     monkeypatch.setattr(models.Session, "load", lambda sid: session)
     monkeypatch.setattr(

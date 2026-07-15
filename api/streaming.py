@@ -953,6 +953,21 @@ def _finalize_cancelled_turn(session, *, ephemeral: bool = False, message: str =
         logger.debug("Failed to persist cancelled turn", exc_info=True)
 
 
+def _cron_followup_turn_key_matches(session, msg_text: str, turn_key: str) -> bool:
+    """Verify a cron follow-up user row owns the stream's stable key."""
+    if str(getattr(session, 'source_tag', '') or '') != 'cron':
+        return True
+    expected = str(turn_key or '').strip()
+    text = ' '.join(str(msg_text or '').split())
+    for message in reversed(getattr(session, 'messages', None) or []):
+        if not isinstance(message, dict) or message.get('role') != 'user':
+            continue
+        if ' '.join(str(message.get('content') or '').split()) != text:
+            continue
+        return str(message.get('_turn_key') or '').strip() == expected
+    return False
+
+
 def _persist_turn_artifact_paths(s, turn_key: str = '') -> dict[str, object]:
     """Persist one completed turn's artifact or empty decision and report its outcome."""
     session_id = str(getattr(s, 'session_id', '') or '').strip()
@@ -6179,7 +6194,15 @@ def _run_agent_streaming(
             # or has been zeroed out (e.g. via a buggy migration / manual file edit).
             # Truthy-check covers None, missing-attr, and 0 uniformly.
             _turn_started_at = _pending_started_at if _pending_started_at else time.time()
-            _external_state_messages = get_state_db_session_messages(getattr(s, 'session_id', None))
+            if str(getattr(s, 'source_tag', '') or '') == 'cron':
+                _external_state_messages = get_state_db_session_messages(
+                    getattr(s, 'session_id', None),
+                    profile=getattr(s, 'cron_execution_profile', None),
+                )
+            else:
+                _external_state_messages = get_state_db_session_messages(
+                    getattr(s, 'session_id', None),
+                )
             _previous_messages = list(
                 reconciled_state_db_messages_for_session(
                     s,
@@ -7098,7 +7121,15 @@ def _run_agent_streaming(
                 # Make the completed transcript durable before publishing the
                 # manifest decision derived from its final assistant message.
                 s.save()
-                _artifact_decision = _persist_turn_artifact_paths(s, _manifest_turn_key)
+                if _cron_followup_turn_key_matches(s, msg_text, _manifest_turn_key):
+                    _artifact_decision = _persist_turn_artifact_paths(s, _manifest_turn_key)
+                else:
+                    _artifact_decision = {
+                        'status': 'failed',
+                        'stage': 'turn_key',
+                        'turn_key': _manifest_turn_key,
+                        'artifact_count': 0,
+                    }
                 if _artifact_decision.get('status') != 'persisted':
                     try:
                         append_turn_journal_event_for_stream(

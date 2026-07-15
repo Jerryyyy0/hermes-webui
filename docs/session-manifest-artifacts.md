@@ -205,8 +205,9 @@ User 消息中的 `MEDIA:`、工具结果 JSON 的相似字段和普通 URL 都�
 
 ```text
 final assistant 已进入 s.messages
+→ 当前 user._turn_key 与 stream/SSE key 一致
 → s.save() 持久化 transcript
-→ _persist_turn_artifact_paths()
+→ _persist_turn_artifact_paths(stream_turn_key)
 → upsert_manifest_records()
 → completed journal event
 ```

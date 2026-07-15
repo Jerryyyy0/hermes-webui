@@ -133,7 +133,7 @@ Manifest 不返回文件或技能正文。非 expired 且 `preview` 为 `file`/`
 }
 ```
 
-`turn_key` 格式为 `turn:<user_msg_idx>`，与 SSE 和聊天 `data-turn-key` 一致。聊天区 per-turn chips 只消费 `turns[].artifacts`。
+`turn_key` 优先使用持久化的 `user._turn_key`；只有历史 transcript 缺少稳定 key 时才 fallback 为 `turn:<user_msg_idx>`。SSE 和聊天 `data-turn-key` 必须使用同一个 key。聊天区 per-turn chips 只消费 `turns[].artifacts`。
 
 ## 3. SSE `manifest_delta`
 

@@ -84,53 +84,15 @@ def list_cron_job_runs_from_state_db(
                 (prefix, prefix_hi),
             ).fetchall()
 
-            table_names = {
-                str(row[0])
-                for row in conn.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                ).fetchall()
-            }
-            message_columns = (
-                {str(row[1]) for row in conn.execute("PRAGMA table_info(messages)").fetchall()}
-                if "messages" in table_names
-                else set()
-            )
-            can_preview = {"session_id", "role", "content"}.issubset(message_columns)
-            can_last_active = {"session_id", "timestamp"}.issubset(message_columns)
-
             runs: list[dict[str, Any]] = []
             for row in rows:
                 run = dict(row)
                 run["session_id"] = run.pop("id")
-                sid = run["session_id"]
-                preview = ""
-                if can_preview:
-                    preview_row = conn.execute(
-                        """
-                        SELECT content FROM messages
-                        WHERE session_id = ? AND role = 'user' AND content IS NOT NULL
-                        ORDER BY timestamp, id LIMIT 1
-                        """
-                        if {"timestamp", "id"}.issubset(message_columns)
-                        else """
-                        SELECT content FROM messages
-                        WHERE session_id = ? AND role = 'user' AND content IS NOT NULL
-                        LIMIT 1
-                        """,
-                        (sid,),
-                    ).fetchone()
-                    raw = str(preview_row[0] or "").replace("\n", " ").replace("\r", " ").strip() if preview_row else ""
-                    preview = raw[:60] + ("..." if len(raw) > 60 else "")
-                run["preview"] = preview
-                last_active = run.get("started_at")
-                if can_last_active:
-                    active_row = conn.execute(
-                        "SELECT MAX(timestamp) FROM messages WHERE session_id = ?",
-                        (sid,),
-                    ).fetchone()
-                    if active_row and active_row[0] is not None:
-                        last_active = active_row[0]
-                run["last_active"] = last_active
+                # A cron run can later become a normal, growing conversation under
+                # the same ID. History must therefore expose only fields persisted
+                # on its original sessions row, never values derived from messages.
+                run["preview"] = ""
+                run["last_active"] = None
                 runs.append(run)
             return runs
     except (OSError, sqlite3.Error) as exc:
@@ -830,15 +792,26 @@ def _select_cron_session_for_run(
     return _select_cron_session_candidate(candidates, run_mtime=run_mtime)
 
 
-def _cron_session_end_reason(conn, sid: str) -> str | None:
+def _cron_session_completion(conn, sid: str) -> tuple[str | None, float | None]:
     try:
         columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(sessions)").fetchall()}
-        if "end_reason" not in columns:
-            return None
-        row = conn.execute("SELECT end_reason FROM sessions WHERE id = ?", (sid,)).fetchone()
+        selected = [field for field in ("end_reason", "ended_at") if field in columns]
+        if not selected:
+            return None, None
+        row = conn.execute(
+            f"SELECT {', '.join(selected)} FROM sessions WHERE id = ?",
+            (sid,),
+        ).fetchone()
     except sqlite3.Error:
-        return None
-    return str(row[0] or "").strip() if row else None
+        return None, None
+    if row is None:
+        return None, None
+    values = dict(zip(selected, row))
+    try:
+        ended_at = float(values.get("ended_at")) if values.get("ended_at") is not None else None
+    except (TypeError, ValueError):
+        ended_at = None
+    return str(values.get("end_reason") or "").strip() or None, ended_at
 
 
 def _cron_output_body(text: str) -> str:
@@ -949,6 +922,131 @@ def _append_missing_cron_error(
     return True
 
 
+def _append_missing_cron_response(
+    messages: list[dict],
+    output_content: str | None,
+    *,
+    timestamp: float | int | None,
+) -> bool:
+    """Restore a missing successful cron final reply without replacing later chat turns."""
+    body = _cron_output_body(str(output_content or ""))
+    if not body:
+        return False
+    normalized = " ".join(body.split())
+    for message in messages or []:
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        if " ".join(str(message.get("content") or "").split()) == normalized:
+            return False
+    messages.append(
+        {
+            "role": "assistant",
+            "content": body,
+            "timestamp": _cron_error_timestamp(timestamp),
+            "source": "cron_fallback",
+        }
+    )
+    messages.sort(key=lambda message: _cron_error_timestamp(message.get("timestamp")))
+    return True
+
+
+def cron_execution_prefix_and_suffix(session) -> tuple[list, list] | None:
+    """Split a growing cron sidecar without reordering later WebUI turns."""
+    try:
+        ended_at = float(getattr(session, "cron_execution_ended_at", None))
+    except (TypeError, ValueError):
+        return None
+
+    messages = list(getattr(session, "messages", None) or [])
+    split_at = len(messages)
+    for index, message in enumerate(messages):
+        if not isinstance(message, dict):
+            return None
+        try:
+            timestamp = float(message.get("timestamp"))
+        except (TypeError, ValueError):
+            return None
+        if timestamp > ended_at:
+            split_at = index
+            break
+    prefix = messages[:split_at]
+    suffix = messages[split_at:]
+    if any(
+        not isinstance(message, dict)
+        or _cron_error_timestamp(message.get("timestamp")) <= ended_at
+        for message in suffix
+    ):
+        return None
+    return prefix, suffix
+
+
+def reconcile_cron_session_transcript(
+    session,
+    *,
+    fallback_output: str | None = None,
+    run_mtime: float | int | None = None,
+) -> bool:
+    """Append only the completed cron prefix without touching WebUI follow-ups."""
+    if session is None or str(getattr(session, "source_tag", "") or "") != "cron":
+        return False
+    from api.models import (
+        _session_message_dedup_key,
+        get_state_db_session_messages,
+        merge_session_messages_append_only,
+    )
+
+    split = cron_execution_prefix_and_suffix(session)
+    if split is None:
+        # Legacy materialization may not yet know execution_ended_at. It has no
+        # reply suffix to preserve, so retain the historical whole-transcript
+        # fallback here. The reply-start prepare gate remains fail-closed.
+        sidecar_prefix = list(getattr(session, "messages", None) or [])
+        suffix = []
+    else:
+        sidecar_prefix, suffix = split
+    execution_profile = str(
+        getattr(session, "cron_execution_profile", None) or getattr(session, "profile", None) or ""
+    ).strip() or None
+    try:
+        execution_ended_at = float(getattr(session, "cron_execution_ended_at", None))
+    except (TypeError, ValueError):
+        execution_ended_at = None
+    all_db_messages = get_state_db_session_messages(session.session_id, profile=execution_profile)
+    db_messages = [
+        message
+        for message in all_db_messages
+        if isinstance(message, dict)
+        and (
+            execution_ended_at is None
+            or _cron_error_timestamp(message.get("timestamp")) <= execution_ended_at
+        )
+    ]
+    merged_prefix = merge_session_messages_append_only(
+        sidecar_prefix,
+        db_messages,
+        truncation_watermark=getattr(session, "truncation_watermark", None),
+    )
+    known = {_session_message_dedup_key(message) for message in merged_prefix if isinstance(message, dict)}
+    for message in db_messages:
+        key = _session_message_dedup_key(message)
+        if key not in known:
+            merged_prefix.append(message)
+            known.add(key)
+    changed = merged_prefix != sidecar_prefix
+    if fallback_output and not any(
+        isinstance(message, dict) and message.get("role") == "assistant"
+        for message in db_messages
+    ):
+        changed = _append_missing_cron_response(
+            merged_prefix,
+            fallback_output,
+            timestamp=run_mtime or getattr(session, "created_at", None),
+        ) or changed
+    if changed:
+        session.messages = [*merged_prefix, *suffix]
+    return changed
+
+
 def read_cron_output_for_run(
     job_id: str,
     *,
@@ -1010,6 +1108,7 @@ def _materialize_cron_session_found(
     fallback_output: str | None = None,
     run_mtime: float | None = None,
     end_reason: str | None = None,
+    execution_ended_at: float | None = None,
 ) -> str:
     sid, cli_title, started_at, model = found
     model = str(model or "").strip()
@@ -1028,10 +1127,12 @@ def _materialize_cron_session_found(
     if existing is not None:
         existing_profile = getattr(existing, "profile", None) or ""
         if _normalize_profile_name(existing_profile) == target_profile:
+            execution_source = execution_profile or target_profile
             needs_update = (
                 not getattr(existing, "project_id", None)
                 or getattr(existing, "is_cli_session", None) is not False
                 or getattr(existing, "source_tag", None) != "cron"
+                or getattr(existing, "cron_execution_profile", None) != execution_source
             )
             needs_model_update = bool(
                 model and (not getattr(existing, "model", None) or getattr(existing, "model", None) == "unknown")
@@ -1041,7 +1142,11 @@ def _materialize_cron_session_found(
                 getattr(existing, "messages", None),
                 cron_error_message,
             )
-            if not needs_update and not needs_model_update and not needs_error_update and (not fallback_output or (metadata_count or 0) > 0):
+            # A cron sidecar may have been materialized while its execution
+            # database still lacked the final reply. Always enter the full-load
+            # path so append-only reconciliation can repair that same-ID gap.
+            needs_transcript_reconcile = True
+            if not needs_update and not needs_model_update and not needs_error_update and not needs_transcript_reconcile and (not fallback_output or (metadata_count or 0) > 0):
                 return sid
 
             # load_metadata_only() returns messages=[] by design and Session.save()
@@ -1056,6 +1161,19 @@ def _materialize_cron_session_found(
                     full.project_id = ensure_cron_project(profile=target_profile)
                 full.is_cli_session = False
                 full.source_tag = "cron"
+                changed = True
+            execution_source = execution_profile or target_profile
+            if getattr(full, "cron_execution_profile", None) != execution_source:
+                full.cron_execution_profile = execution_source
+                changed = True
+            if execution_ended_at is not None and getattr(full, "cron_execution_ended_at", None) != execution_ended_at:
+                full.cron_execution_ended_at = execution_ended_at
+                changed = True
+            if reconcile_cron_session_transcript(
+                full,
+                fallback_output=fallback_output,
+                run_mtime=run_mtime,
+            ):
                 changed = True
             if not (full.messages or []) and fallback_output:
                 full.messages = build_cron_fallback_messages(
@@ -1100,6 +1218,8 @@ def _materialize_cron_session_found(
     s.project_id = ensure_cron_project(profile=target_profile)
     s.is_cli_session = False
     s.source_tag = "cron"
+    s.cron_execution_profile = execution_profile or target_profile
+    s.cron_execution_ended_at = execution_ended_at
     if cron_error_message:
         s.last_error_at = _cron_error_timestamp(error_timestamp)
     s.save()
@@ -1139,7 +1259,7 @@ def materialize_cron_session(
     try:
         with closing(sqlite3.connect(str(db_path))) as conn:
             found = _select_cron_session_for_run(conn, job_id, run_mtime=run_mtime)
-            end_reason = _cron_session_end_reason(conn, found[0]) if found else None
+            end_reason, ended_at = _cron_session_completion(conn, found[0]) if found else (None, None)
     except sqlite3.Error as exc:
         logger.debug("materialize_cron_session: state.db read failed: %s", exc)
         return None
@@ -1155,6 +1275,7 @@ def materialize_cron_session(
         fallback_output=fallback_output,
         run_mtime=run_mtime,
         end_reason=end_reason,
+        execution_ended_at=ended_at,
     )
 
 
@@ -1184,6 +1305,7 @@ def materialize_cron_session_run(
         fallback_output=fallback_output,
         run_mtime=(run or {}).get("ended_at") or (run or {}).get("started_at"),
         end_reason=(run or {}).get("end_reason"),
+        execution_ended_at=(run or {}).get("ended_at"),
     )
 
 
@@ -1214,8 +1336,8 @@ def materialize_cron_sessions_for_runs(
     try:
         with closing(sqlite3.connect(str(db_path))) as conn:
             candidates = _cron_session_candidates(conn, job_id)
-            end_reasons = {
-                sid: _cron_session_end_reason(conn, sid)
+            completions = {
+                sid: _cron_session_completion(conn, sid)
                 for sid, _, _, _ in candidates
             }
     except sqlite3.Error as exc:
@@ -1243,7 +1365,8 @@ def materialize_cron_sessions_for_runs(
             execution_profile=execution_profile,
             fallback_output=run.get("fallback_output"),
             run_mtime=run_mtime,
-            end_reason=end_reasons.get(found[0]),
+            end_reason=completions.get(found[0], (None, None))[0],
+            execution_ended_at=completions.get(found[0], (None, None))[1],
         )
         if filename:
             session_ids[filename] = sid

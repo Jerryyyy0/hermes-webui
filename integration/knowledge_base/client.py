@@ -27,7 +27,7 @@ from integration.knowledge_base.constants import (
 
 _TIMEOUT = 30.0
 _SHOW_PDF_TIMEOUT = 180.0
-_UPLOAD_TIMEOUT = 120.0
+_UPLOAD_TIMEOUT = 180.0
 
 
 class KnowledgeBaseUpstreamError(Exception):

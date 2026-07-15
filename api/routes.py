@@ -5777,6 +5777,11 @@ def handle_get(handler, parsed) -> bool:
         try:
             _t1 = _time.monotonic()
             s = get_session(sid, metadata_only=(not load_messages))
+            if load_messages and is_cron_session(sid, getattr(s, "source_tag", None)):
+                from integration.crons.session_bridge import reconcile_cron_session_transcript
+
+                if reconcile_cron_session_transcript(s):
+                    s.save(touch_updated_at=False)
             original_stream_id = getattr(s, "active_stream_id", None)
             _clear_stale_stream_state(s)
             cli_meta = _lookup_cli_session_metadata(sid) if _session_requires_cli_metadata_lookup(s) else {}
@@ -11610,7 +11615,7 @@ def _handle_cron_history(handler, parsed):
         run.setdefault("size", None)
         run.setdefault("modified", run.get("ended_at") or run.get("started_at"))
         run.setdefault("usage", {})
-        target = run.get("ended_at") or run.get("last_active") or run.get("started_at")
+        target = run.get("ended_at") or run.get("started_at")
         if target is None or not unmatched_artifacts:
             continue
         try:
@@ -12115,7 +12120,14 @@ def _handle_background(handler, body):
     return j(handler, {"task_id": task_id, "stream_id": stream_id, "session_id": bg.session_id})
 
 
-def _checkpoint_user_message_for_eager_session_save(s, msg: str, attachments, started_at: float | None) -> None:
+def _checkpoint_user_message_for_eager_session_save(
+    s,
+    msg: str,
+    attachments,
+    started_at: float | None,
+    *,
+    turn_key: str = "",
+) -> None:
     """Materialize the current user turn for eager first-turn persistence.
 
     The streaming thread still receives ``pending_user_message`` so existing
@@ -12138,7 +12150,7 @@ def _checkpoint_user_message_for_eager_session_save(s, msg: str, attachments, st
     if attachments:
         user_msg["attachments"] = list(attachments)
     from api.session_manifest import _next_turn_key
-    user_msg["_turn_key"] = _next_turn_key(existing)
+    user_msg["_turn_key"] = str(turn_key or "").strip() or _next_turn_key(existing)
     s.messages.append(user_msg)
 
 
@@ -12185,6 +12197,7 @@ def _prepare_chat_start_session_for_stream(
     model_provider,
     stream_id: str,
     started_at: float | None = None,
+    turn_key: str = "",
 ):
     """Persist chat-start state according to webui.session_save_mode.
 
@@ -12214,6 +12227,7 @@ def _prepare_chat_start_session_for_stream(
             msg,
             attachments,
             s.pending_started_at,
+            turn_key=turn_key,
         )
     s.save()
     try:
@@ -12380,6 +12394,24 @@ def _start_chat_stream_for_session(
                         "_status": 409,
                     }
                 needs_stale_cleanup = False
+                prepared_turn_key = ""
+                if str(getattr(s, "source_tag", "") or "") == "cron":
+                    from api.session_manifest import _next_turn_key
+                    from integration.crons.hooks import prepare_cron_session_for_reply
+
+                    preparation = prepare_cron_session_for_reply(s)
+                    if not preparation.ready:
+                        status = 409 if preparation.error_stage in {"execution_prefix", "turn_keys"} else 500
+                        return {
+                            "error": "定时任务会话准备失败，暂时无法继续对话",
+                            "_status": status,
+                        }
+                    prepared_turn_key = preparation.next_turn_key
+                    if _next_turn_key(s.messages) != prepared_turn_key:
+                        return {
+                            "error": "定时任务会话轮次校验失败，暂时无法继续对话",
+                            "_status": 409,
+                        }
                 stream_id = uuid.uuid4().hex
                 diag.stage("save_pending_state") if diag else None
                 was_hidden_empty_session = _is_hidden_empty_session(s)
@@ -12391,8 +12423,14 @@ def _start_chat_stream_for_session(
                     model=model,
                     model_provider=model_provider,
                     stream_id=stream_id,
+                    turn_key=prepared_turn_key,
                 )
                 stream_turn_key = _turn_key_for_pending_user_message(s, msg)
+                if prepared_turn_key and stream_turn_key != prepared_turn_key:
+                    return {
+                        "error": "定时任务会话轮次校验失败，暂时无法继续对话",
+                        "_status": 409,
+                    }
                 break
         if needs_stale_cleanup:
             diag.stage("stale_stream_cleanup") if diag else None

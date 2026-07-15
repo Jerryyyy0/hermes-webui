@@ -1071,6 +1071,11 @@ class Session:
         self.session_source = kwargs.get('session_source')
         self.source_label = kwargs.get('source_label')
         self.read_only = bool(kwargs.get('read_only', False))
+        self.cron_execution_profile = str(kwargs.get('cron_execution_profile') or '').strip() or None
+        try:
+            self.cron_execution_ended_at = float(kwargs.get('cron_execution_ended_at'))
+        except (TypeError, ValueError):
+            self.cron_execution_ended_at = None
         self.enabled_toolsets = enabled_toolsets  # List[str] or None — per-session toolset override
         self.composer_draft = composer_draft if isinstance(composer_draft, dict) else {}
         self.anchor_activity_scenes = anchor_activity_scenes if isinstance(anchor_activity_scenes, dict) else {}
@@ -1135,12 +1140,20 @@ class Session:
             'enabled_toolsets', 'composer_draft', 'anchor_activity_scenes',
         ]
         meta = {k: getattr(self, k, None) for k in METADATA_FIELDS}
+        if (
+            str(getattr(self, 'source_tag', '') or '').strip() == 'cron'
+            or getattr(self, 'cron_execution_profile', None)
+            or getattr(self, 'cron_execution_ended_at', None) is not None
+        ):
+            meta['cron_execution_profile'] = getattr(self, 'cron_execution_profile', None)
+            meta['cron_execution_ended_at'] = getattr(self, 'cron_execution_ended_at', None)
         meta['message_count'] = len(self.messages or [])
         meta['messages'] = self.messages
         meta['tool_calls'] = self.tool_calls
         # Fields not in METADATA_FIELDS (e.g. last_usage) go at the end
         extra = {k: v for k, v in self.__dict__.items()
-                 if k not in METADATA_FIELDS and k not in ('messages', 'tool_calls')
+                 if k not in METADATA_FIELDS
+                 and k not in ('messages', 'tool_calls', 'cron_execution_profile', 'cron_execution_ended_at')
                  and not k.startswith('_')}
         payload = json.dumps({**meta, **extra}, ensure_ascii=False, indent=2)
 

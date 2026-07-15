@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import logging
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +134,105 @@ def _stamp_cron_manifest_turn_keys(messages: list) -> list:
     return stamped
 
 
+@dataclass(frozen=True)
+class CronReplyPreparation:
+    ready: bool
+    next_turn_key: str = ""
+    error_stage: str = ""
+
+
+def _validate_contiguous_turn_keys(messages: list) -> tuple[bool, str]:
+    expected = 1
+    for message in messages or []:
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        key = str(message.get("_turn_key") or "").strip()
+        if key != f"turn:{expected}":
+            return False, "turn_keys"
+        expected += 1
+    return True, f"turn:{expected}"
+
+
+def prepare_cron_session_for_reply(session) -> CronReplyPreparation:
+    """Make a cron execution prefix durable before ordinary WebUI reply starts.
+
+    The caller owns the per-session lock. This function mutates only the supplied
+    Session object and never reloads it, so the following chat-start save cannot
+    overwrite a separately loaded repair object.
+    """
+    if str(getattr(session, "source_tag", "") or "") != "cron":
+        return CronReplyPreparation(True)
+
+    from integration.crons.session_bridge import (
+        cron_execution_prefix_and_suffix,
+        reconcile_cron_session_transcript,
+    )
+
+    split = cron_execution_prefix_and_suffix(session)
+    if split is None:
+        return CronReplyPreparation(False, error_stage="execution_prefix")
+    reconciled = False
+    if getattr(session, "session_id", None):
+        reconciled = reconcile_cron_session_transcript(session)
+    split = cron_execution_prefix_and_suffix(session)
+    if split is None:
+        return CronReplyPreparation(False, error_stage="execution_prefix")
+    prefix, suffix = split
+    prefix_snapshot = [
+        (id(message), str(message.get("_turn_key") or ""))
+        for message in prefix
+        if isinstance(message, dict)
+    ]
+    normalized = normalize_cron_manifest_messages(prefix)
+    stamped = _stamp_cron_manifest_turn_keys(normalized)
+    valid, _prefix_next_turn_key = _validate_contiguous_turn_keys(stamped)
+    if not valid:
+        return CronReplyPreparation(False, error_stage="turn_keys")
+
+    stamped_snapshot = [
+        (id(message), str(message.get("_turn_key") or ""))
+        for message in stamped
+        if isinstance(message, dict)
+    ]
+    changed = reconciled or prefix_snapshot != stamped_snapshot
+    if changed:
+        session.messages = [*stamped, *suffix]
+        try:
+            try:
+                session.save(touch_updated_at=False)
+            except TypeError:
+                # Lightweight test/session adapters may only expose save().
+                session.save()
+        except Exception:
+            logger.debug(
+                "Failed to save cron session %s before reply",
+                getattr(session, "session_id", "?"),
+                exc_info=True,
+            )
+            return CronReplyPreparation(False, error_stage="save")
+
+    from api.session_manifest import _message_turns
+    from api.session_manifest_store import load_manifest_decided_turn_keys
+    from api.streaming import _persist_turn_artifact_paths
+
+    decided_turn_keys = load_manifest_decided_turn_keys(session)
+    for turn in _message_turns(stamped):
+        turn_key = str(turn.get("turn_key") or "").strip()
+        if not turn_key or turn_key in decided_turn_keys:
+            continue
+        decision = _persist_turn_artifact_paths(session, turn_key)
+        if decision is None and getattr(session, "_cron_compatibility_stub", False):
+            continue
+        if not isinstance(decision, dict) or (
+            decision.get("status") != "persisted"
+            or decision.get("turn_key") != turn_key
+        ):
+            return CronReplyPreparation(False, error_stage="artifact_decision")
+    from api.session_manifest import _next_turn_key
+
+    return CronReplyPreparation(True, next_turn_key=_next_turn_key(session.messages))
+
+
 def materialize_after_cron_run(
     job: dict,
     *,
@@ -166,53 +266,28 @@ def materialize_after_cron_run(
         fallback_output=fallback_output,
         fallback_filename=fallback_filename,
     )
-    # After materializing the sidecar, persist turn_artifacts so the manifest
-    # can read from the store/table instead of re-extracting every time and
-    # survives context compression. Mirrors what _run_agent_streaming does at
-    # api/streaming.py:7043-7046 for WebUI-origin sessions.
     if sid:
-        _persist_cron_turn_artifacts(sid)
+        from api.models import Session
+
+        session = Session.load(sid)
+        if session is not None:
+            prepare_cron_session_for_reply(session)
     return sid
 
 
 def _persist_cron_turn_artifacts(sid: str) -> None:
-    """Persist manifest artifact records for a materialized cron session.
-
-    Cron sessions originate from hermes-agent's scheduler, which does not call
-    _persist_turn_artifact_paths (that's a WebUI streaming-pipeline function).
-    Without this step, cron session manifests rely entirely on real-time
-    extraction from messages, which is lost after context compression.
-
-    This function loads the materialized sidecar, stamps _turn_key on user
-    messages that lack one, then calls _persist_turn_artifact_paths for each
-    turn so session_manifest_records receives stable turn decisions. The sidecar
-    JSON is still saved for _turn_key stamps, not for artifact ownership.
-    """
+    """Compatibility wrapper for callers that still materialize by session id."""
     from api.models import Session
 
-    s = Session.load(sid)
-    if s is None or not getattr(s, "messages", None):
+    session = Session.load(sid)
+    if session is None:
         return
-
-    from api.session_manifest import _message_turns
-    from api.streaming import _persist_turn_artifact_paths
-
-    s.messages = _stamp_cron_manifest_turn_keys(
-        normalize_cron_manifest_messages(s.messages)
-    )
-
-    # Match the normal WebUI durability order: stable transcript keys must be
-    # durable before the manifest store accepts artifact or empty decisions.
-    try:
-        s.save()
-    except Exception:
-        logger.debug("Failed to save cron session %s before artifact persist", sid, exc_info=True)
-        return
-
-    for turn in _message_turns(s.messages):
-        tk = str(turn.get("turn_key") or "").strip()
-        if tk:
-            _persist_turn_artifact_paths(s, tk)
+    if not str(getattr(session, "source_tag", "") or "").strip():
+        session.source_tag = "cron"
+    if not getattr(session, "session_id", None):
+        session.session_id = sid
+        session._cron_compatibility_stub = True
+    prepare_cron_session_for_reply(session)
 
 
 def _cron_repeat_limit_will_delete(job: dict) -> bool:

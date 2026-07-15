@@ -89,6 +89,8 @@ def test_eager_chat_start_checkpoints_first_user_message_before_thread(_isolate_
     assert on_disk["messages"][0]["content"] == "hello eager"
     assert on_disk["messages"][0]["attachments"][0]["name"] == "note.txt"
     assert on_disk["pending_user_message"] == "hello eager"
+    assert "cron_execution_profile" not in on_disk
+    assert "cron_execution_ended_at" not in on_disk
 
 
 def test_eager_wal_repair_does_not_duplicate_checkpointed_user_message(_isolate_state, monkeypatch):

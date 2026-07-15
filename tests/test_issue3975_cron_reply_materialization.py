@@ -44,28 +44,20 @@ def test_chat_start_materializes_cron_session_before_reply(monkeypatch, tmp_path
     )
     captured = {}
 
-    def fail_get_session(_sid):
-        raise KeyError(_sid)
-
-    def materialize(_sid, **_kwargs):
-        captured["materialize_sid"] = _sid
-        return materialized
-
     def start_run(session, **kwargs):
         captured["session"] = session
         captured["kwargs"] = kwargs
         return {"stream_id": "stream-3975", "session_id": session.session_id}
 
-    monkeypatch.setattr(routes, "get_session", fail_get_session)
-    monkeypatch.setattr(routes, "_get_or_materialize_session", materialize)
+    monkeypatch.setattr(routes, "get_session", lambda _sid: materialized)
     monkeypatch.setattr(routes, "_resolve_chat_workspace_with_recovery", lambda _s, _w: str(tmp_path))
-    monkeypatch.setattr(routes, "_read_profile_model_config", lambda _s, _provider: (None, None, None))
+    monkeypatch.setattr(routes, "_read_profile_model_config", lambda _s, _provider: (None, None))
     monkeypatch.setattr(
         routes,
         "_resolve_compatible_session_model_state",
         lambda *_args, **_kwargs: ("gpt-5.4", None, "gpt-5.4"),
     )
-    monkeypatch.setattr(routes, "_start_run", start_run)
+    monkeypatch.setattr(routes, "_start_chat_stream_for_session", start_run)
 
     handler = _FakeHandler()
     routes._handle_chat_start(
@@ -80,6 +72,5 @@ def test_chat_start_materializes_cron_session_before_reply(monkeypatch, tmp_path
 
     assert handler.status == 200
     assert _json_body(handler)["stream_id"] == "stream-3975"
-    assert captured["materialize_sid"] == sid
     assert captured["session"] is materialized
-    assert captured["kwargs"]["route"] == "/api/chat/start"
+    assert captured["kwargs"]["msg"] == "follow up on the cron output"

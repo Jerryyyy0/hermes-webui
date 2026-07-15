@@ -929,6 +929,8 @@ def _run_gateway_chat_streaming(
             # role/content ordering instead of turn order.
             assistant_ts = now + 0.000001
             user_msg = {"role": "user", "content": str(msg_text or ""), "timestamp": now}
+            if str(getattr(s, "source_tag", "") or "") == "cron":
+                user_msg["_turn_key"] = manifest_turn_key
             pending_source = getattr(s, "pending_user_source", None) or "webui"
             if pending_source != "webui":
                 user_msg["_source"] = pending_source
@@ -985,6 +987,23 @@ def _run_gateway_chat_streaming(
             s.model = model
             s.model_provider = model_provider
             s.save()
+            from api.streaming import _cron_followup_turn_key_matches, _persist_turn_artifact_paths
+
+            if _cron_followup_turn_key_matches(s, msg_text, manifest_turn_key):
+                artifact_decision = _persist_turn_artifact_paths(s, manifest_turn_key)
+            else:
+                artifact_decision = {
+                    "status": "failed",
+                    "stage": "turn_key",
+                    "turn_key": manifest_turn_key,
+                }
+        if artifact_decision.get("status") != "persisted":
+            put_gateway_event("apperror", {
+                "label": "Artifact persistence failed",
+                "type": "artifact_persistence_failed",
+                "message": "本轮成果保存失败，请稍后重试。",
+                "turn_key": artifact_decision.get("turn_key") or manifest_turn_key,
+            })
         try:
             from api.goals import evaluate_goal_after_turn, has_active_goal
             from api.profiles import get_hermes_home_for_profile
