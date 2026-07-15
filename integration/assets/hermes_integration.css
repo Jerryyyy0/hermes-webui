@@ -467,3 +467,48 @@
   color: var(--muted);
   margin-bottom: 2px;
 }
+/* Batch selection */
+.skill-item-check {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  padding: 2px 0;
+}
+.skill-item-check input[type="checkbox"] {
+  accent-color: var(--accent);
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+}
+.skillhub-batch-toggle {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition: all .15s;
+}
+.skillhub-batch-toggle:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.skillhub-batch-toggle.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-text, #fff);
+}
+.skillhub-batch-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--border2);
+  background: var(--bg);
+}
+.skillhub-batch-count {
+  font-size: 12px;
+  color: var(--muted);
+  flex: 1;
+}

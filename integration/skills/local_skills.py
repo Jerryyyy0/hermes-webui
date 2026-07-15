@@ -22,7 +22,7 @@ from integration.skills.zip_import import discover_skill_roots
 _log = logging.getLogger(__name__)
 
 _SKILL_META_EXCLUDE = frozenset(
-    {".hub_installed", ".category", ".install_name", ".hub_catalog_name"}
+    {".hub_installed", ".category", ".install_name", ".hub_catalog_name", ".user_created", ".detail.json"}
 )
 _SKILL_ORIGIN_SIDECAR = ".skill-origin.json"
 _UPLOAD_COPY_EXCLUDE = _SKILL_META_EXCLUDE | {_SKILL_ORIGIN_SIDECAR}
@@ -63,7 +63,7 @@ def collect_skill_zip_files(
         except (ValueError, OSError):
             continue
         for name in names:
-            if name in _SKILL_META_EXCLUDE:
+            if name in _UPLOAD_COPY_EXCLUDE:
                 continue
             fp = root_path / name
             if fp.is_symlink():
@@ -111,8 +111,8 @@ def prepare_skill_download(name: str, dir_name: str = "") -> dict:
     leaf = normalize_dir_name(list_name)
     if validate_dir_name(leaf) is not None:
         leaf = skill_dir.name
-    dir_name = _skill_dir_rel_path(skill_dir, skills_dir)
-    stored_category = _stored_category_for_dir(skill_dir, skills_dir, "")
+    # dir_name = _skill_dir_rel_path(skill_dir, skills_dir)
+    # stored_category = _stored_category_for_dir(skill_dir, skills_dir, "")
     files, total_bytes, limit_hit = collect_skill_zip_files(
         skill_dir,
         max_bytes,
@@ -135,22 +135,22 @@ def prepare_skill_download(name: str, dir_name: str = "") -> dict:
         }
 
     zip_basename = f"{leaf}.zip"
-    sidecar_payload = {
-        "version": 1,
-        "dir_name": dir_name,
-        "category": stored_category,
-        "name": list_name,
-    }
-    sidecar_arcname = f"{leaf}/{_SKILL_ORIGIN_SIDECAR}"
-    sidecar_bytes = (json.dumps(sidecar_payload, ensure_ascii=False, indent=2) + "\n").encode(
-        "utf-8"
-    )
+    # sidecar_payload = {
+    #     "version": 1,
+    #     "dir_name": dir_name,
+    #     "category": stored_category,
+    #     "name": list_name,
+    # }
+    # sidecar_arcname = f"{leaf}/{_SKILL_ORIGIN_SIDECAR}"
+    # sidecar_bytes = (json.dumps(sidecar_payload, ensure_ascii=False, indent=2) + "\n").encode(
+    #     "utf-8"
+    # )
     return {
         "ok": True,
         "skill_dir": skill_dir,
         "zip_basename": zip_basename,
         "files": files,
-        "extra_zip_entries": [(sidecar_bytes, sidecar_arcname)],
+        "extra_zip_entries": [],
         "total_bytes": total_bytes,
     }
 
@@ -280,6 +280,7 @@ def _scan_custom_skill_dicts(
     category: str,
     hub_names: set[str] = frozenset(),  # kept for backward compat, no longer used
     q: str | None = None,
+    user_created_only: bool = False,
 ) -> list[dict]:
     from agent.skill_utils import iter_skill_index_files
     from tools.skills_tool import (
@@ -325,6 +326,9 @@ def _scan_custom_skill_dicts(
                 continue
             # Exclude hub-installed skills via marker file only
             if (skill_dir / ".hub_installed").is_file():
+                continue
+            # Filter for user-created skills only if requested
+            if user_created_only and not (skill_dir / ".user_created").is_file():
                 continue
             description = str(frontmatter.get("description", "") or "")
             if not description:
@@ -391,14 +395,31 @@ def _scan_custom_skill_dicts(
     return all_skills
 
 
-def scan_custom_skills_global(hub_names: set[str], q: str | None = None, profile: str = "default") -> list[dict]:
-    """Scan all custom skills under shared_skills_dir (no category filter).
-
-    ``hub_names`` and ``profile`` are accepted for call-site stability; custom
-    listing always reads ``{HERMES_HOME}/skills`` regardless of WebUI profile.
-    """
+def scan_custom_skills_global(hub_names: set[str], q: str | None = None, profile: str = "default", user_created_only: bool = False) -> list[dict]:
+    """Scan all custom skills across all profiles' skills directories."""
     _ = hub_names, profile
-    return _scan_custom_skill_dicts(shared_skills_dir(), "", q=q)
+    all_skills: list[dict] = []
+    seen: set[str] = set()
+    # Scan all profiles
+    try:
+        from api.profiles import list_profiles_api
+        profiles = list_profiles_api()
+    except Exception:
+        profiles = [{"name": "default"}]
+    for p in profiles:
+        profile_name = str(p.get("name") or "").strip()
+        if not profile_name:
+            continue
+        skills_dir = skills_dir_for_profile(profile_name)
+        if not skills_dir.exists():
+            continue
+        skills = _scan_custom_skill_dicts(skills_dir, "", q=q, user_created_only=user_created_only)
+        for s in skills:
+            skill_name = str(s.get("name") or "").strip()
+            if skill_name and skill_name not in seen:
+                seen.add(skill_name)
+                all_skills.append(s)
+    return all_skills
 
 
 def _filter_custom_skills_in_memory(
@@ -514,10 +535,34 @@ def _find_skill(name: str, skills_dir: Path) -> tuple[Path | None, Path | None]:
 
 
 def has_local_skill(name: str) -> bool:
-    """True when name resolves to SKILL.md under shared_skills_dir."""
+    """True when name resolves to SKILL.md under any profile's skills dir."""
+    skills_dir, _ = _find_skill_in_any_profile(name)
+    return skills_dir is not None
+
+
+def _find_skill_in_any_profile(name: str) -> tuple[Path | None, Path | None]:
+    """Find a skill in any profile's skills directory. Returns (skill_dir, skill_md)."""
+    # Try default profile first
     skills_dir = shared_skills_dir()
-    _, skill_md = _find_skill(name, skills_dir)
-    return skill_md is not None
+    skill_dir, skill_md = _find_skill(name, skills_dir)
+    if skill_md:
+        return skill_dir, skill_md
+    # Try other profiles
+    try:
+        from api.profiles import list_profiles_api
+        for p in list_profiles_api():
+            profile_name = str(p.get("name") or "").strip()
+            if not profile_name or profile_name == "default":
+                continue
+            profile_skills_dir = skills_dir_for_profile(profile_name)
+            if not profile_skills_dir.exists():
+                continue
+            skill_dir, skill_md = _find_skill(name, profile_skills_dir)
+            if skill_md:
+                return skill_dir, skill_md
+    except Exception:
+        pass
+    return None, None
 
 
 def _structure_file_entries(skill_dir: Path, subdir: str, extensions: list[str]) -> list[dict]:
@@ -533,8 +578,7 @@ def _structure_file_entries(skill_dir: Path, subdir: str, extensions: list[str])
 
 
 def get_custom_doc(name: str) -> dict:
-    skills_dir = shared_skills_dir()
-    skill_dir, skill_md = _find_skill(name, skills_dir)
+    skill_dir, skill_md = _find_skill_in_any_profile(name)
     if not skill_md:
         return {"error": "Skill not found", "status": 404}
     return {
@@ -545,8 +589,7 @@ def get_custom_doc(name: str) -> dict:
 
 
 def get_custom_structure(name: str) -> dict:
-    skills_dir = shared_skills_dir()
-    skill_dir, skill_md = _find_skill(name, skills_dir)
+    skill_dir, skill_md = _find_skill_in_any_profile(name)
     if not skill_dir or not skill_md:
         return {"error": "Skill not found", "status": 404}
     return {
@@ -561,8 +604,7 @@ def get_custom_structure(name: str) -> dict:
 
 
 def get_custom_file(name: str, file_path: str) -> dict:
-    skills_dir = shared_skills_dir()
-    skill_dir, skill_md = _find_skill(name, skills_dir)
+    skill_dir, skill_md = _find_skill_in_any_profile(name)
     if not skill_dir or not skill_md:
         return {"error": "Skill not found", "status": 404}
     target = (skill_dir / file_path).resolve()
@@ -1002,18 +1044,17 @@ def _write_category_marker(skill_dir: Path, cat_seg: str) -> None:
 
 
 def read_detail_json(skill_dir: Path) -> dict | None:
-    """Read detail metadata, preferring detail.meta.json over detail.json."""
+    """Read detail metadata from .detail.json (hidden file)."""
     import json as _json
 
-    for name in ("detail.meta.json", "detail.json"):
-        p = skill_dir / name
-        if p.is_file():
-            try:
-                data = _json.loads(p.read_text(encoding="utf-8"))
-                if isinstance(data, dict):
-                    return data
-            except Exception:
-                pass
+    p = skill_dir / ".detail.json"
+    if p.is_file():
+        try:
+            data = _json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
     return None
 
 
@@ -1028,7 +1069,7 @@ def _skill_upload_entry(
         "dir_name": _skill_dir_rel_path(skill_dir, skills_dir),
         "category": stored_category,
         "custom": True,
-        "has_detail": (skill_dir / "detail.json").is_file(),
+        "has_detail": (skill_dir / ".detail.json").is_file(),
     }
 
 
@@ -1112,6 +1153,9 @@ def _plan_zip_import(
             continue
         use_explicit = str(request_name or "").strip() != ""
         sidecar = read_skill_origin_sidecar(skill_root)
+        # When user provides request_name, ignore sidecar dir_name to avoid overriding user's choice
+        if use_explicit and sidecar:
+            sidecar = {k: v for k, v in sidecar.items() if k != "dir_name"}
         resolved = resolve_upload_target(
             skills_dir,
             category=category,
@@ -1159,6 +1203,17 @@ def _upload_zip_skills(
         if not roots:
             return {"error": "压缩包内需包含 SKILL.md", "status": 400}
 
+        # Rename skill root directories to use request_name as outermost dir name,
+        # avoiding conflicts from unpredictable zip directory names.
+        req_name = str(request_name or "").strip()
+        if req_name and len(roots) == 1:
+            root = roots[0]
+            if root != temp_dir:
+                new_root = temp_dir / normalize_dir_name(req_name)
+                if new_root != root and not new_root.exists():
+                    root.rename(new_root)
+                    roots = [new_root]
+
         planned, errors, err_status = _plan_zip_import(
             skills_dir,
             category,
@@ -1184,6 +1239,7 @@ def _upload_zip_skills(
                         skill_md.write_text(patched, encoding="utf-8")
             created.append(dest)
             _write_category_marker(dest, stored_category)
+            (dest / ".user_created").write_text("1", encoding="utf-8")
             entries.append(_skill_upload_entry(dest, skills_dir, list_name, stored_category))
 
         ok = True
@@ -1243,6 +1299,7 @@ def _upload_single_md(
         if fmt_err:
             return fmt_err
         _write_category_marker(target, stored_category)
+        (target / ".user_created").write_text("1", encoding="utf-8")
         list_name = _resolve_list_name(
             use_explicit=use_explicit, leaf=leaf, skill_md=skill_md,
         )
@@ -1451,7 +1508,7 @@ def delete_local_skill(name: str, dir_name: str = "") -> dict:
 
 
 def save_skill_detail(name: str, detail: dict, dir_name: str = "") -> dict:
-    """Write detail.json into the skill directory."""
+    """Write .detail.json into the skill directory."""
     skill_name = str(name or "").strip()
     if not skill_name:
         return {"error": "缺少 name", "status": 400}
@@ -1462,12 +1519,7 @@ def save_skill_detail(name: str, detail: dict, dir_name: str = "") -> dict:
     if not skill_dir or not skill_dir.is_dir():
         return {"error": "Skill not found", "status": 404}
     try:
-        # When detail.json already exists (e.g. from zip), save AI data separately
-        # to avoid overwriting the author's original metadata.
-        if (skill_dir / "detail.json").is_file():
-            dest = skill_dir / "detail.meta.json"
-        else:
-            dest = skill_dir / "detail.json"
+        dest = skill_dir / ".detail.json"
         with open(dest, "w", encoding="utf-8") as f:
             json.dump(detail, f, ensure_ascii=False, indent=2)
     except Exception as exc:
