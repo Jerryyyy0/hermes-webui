@@ -255,6 +255,16 @@ def try_handle_post(handler, parsed, body: dict | None) -> bool:
         return False
     if path == "/api/skillhub/install":
         return _post_skillhub_install(handler, parsed, body)
+    if path == "/api/skillhub/install-to-profiles":
+        return _post_install_to_profiles(handler, parsed, body)
+    if path == "/api/skillhub/delete-from-all-profiles":
+        return _post_delete_from_all_profiles(handler, parsed, body)
+    if path == "/api/skillhub/sync-profiles":
+        return _post_sync_profiles(handler, parsed, body)
+    if path == "/api/skillhub/batch-install":
+        return _post_batch_install(handler, parsed, body)
+    if path == "/api/skillhub/batch-uninstall":
+        return _post_batch_uninstall(handler, parsed, body)
     return False
 
 
@@ -459,6 +469,189 @@ def _post_skillhub_install(handler, parsed, body: dict) -> bool:
         return _respond_bad(handler, str(exc), 503, exc_info=(type(exc), exc, exc.__traceback__))
     except Exception as exc:
         return _respond_bad(handler, str(exc), 502, exc_info=(type(exc), exc, exc.__traceback__))
+
+
+def _post_install_to_profiles(handler, parsed, body: dict) -> bool:
+    name = str(body.get("name", "")).strip()
+    if not name:
+        return _respond_bad(handler, "name required", 400)
+    display_name = str(body.get("display_name", "") or "").strip()
+    category = str(body.get("category", "") or "").strip()
+    profiles = body.get("profiles") or []
+    if not isinstance(profiles, list):
+        return _respond_bad(handler, "profiles must be a list", 400)
+    if not category:
+        try:
+            detail = skillhub.fetch_skill_detail(name)
+            category = str(detail.get("category") or "").strip()
+        except Exception:
+            category = ""
+    results = []
+    for profile_name in profiles:
+        profile_name = str(profile_name).strip()
+        if not profile_name:
+            continue
+        try:
+            result = skillhub.install_skill_to_profile(
+                name, profile_name, display_name=display_name, category=category
+            )
+            if result.get("status") == 409:
+                results.append({"profile": profile_name, "ok": False, "error": result.get("error", "already installed")})
+            elif result.get("ok"):
+                results.append({"profile": profile_name, "ok": True, "dir_name": result.get("dir_name", "")})
+            else:
+                results.append({"profile": profile_name, "ok": False, "error": result.get("error", "unknown error")})
+        except RuntimeError as exc:
+            results.append({"profile": profile_name, "ok": False, "error": str(exc)})
+        except Exception as exc:
+            results.append({"profile": profile_name, "ok": False, "error": str(exc)})
+    return _respond(handler, {"ok": True, "results": results})
+
+
+def _post_delete_from_all_profiles(handler, parsed, body: dict) -> bool:
+    name = str(body.get("name", "")).strip()
+    if not name:
+        return _respond_bad(handler, "name required", 400)
+    dir_name = str(body.get("dir_name", "") or "").strip()
+    try:
+        result = skillhub.delete_skill_from_all_profiles(name, dir_name=dir_name)
+        return _respond(handler, result)
+    except Exception as exc:
+        return _respond_bad(handler, str(exc), 502)
+
+
+def _post_sync_profiles(handler, parsed, body: dict) -> bool:
+    name = str(body.get("name", "")).strip()
+    if not name:
+        return _respond_bad(handler, "name required", 400)
+    display_name = str(body.get("display_name", "") or "").strip()
+    category = str(body.get("category", "") or "").strip()
+    is_custom = bool(body.get("is_custom"))
+    to_install = body.get("install") or []
+    to_uninstall = body.get("uninstall") or []
+    if not isinstance(to_install, list):
+        return _respond_bad(handler, "install must be a list", 400)
+    if not isinstance(to_uninstall, list):
+        return _respond_bad(handler, "uninstall must be a list", 400)
+    if not category and not is_custom:
+        try:
+            detail = skillhub.fetch_skill_detail(name)
+            category = str(detail.get("category") or "").strip()
+        except Exception:
+            category = ""
+    results_installed = []
+    for profile_name in to_install:
+        profile_name = str(profile_name).strip()
+        if not profile_name:
+            continue
+        try:
+            if is_custom:
+                result = skillhub.copy_custom_skill_to_profile(
+                    name, profile_name, category=category
+                )
+            else:
+                result = skillhub.install_skill_to_profile(
+                    name, profile_name, display_name=display_name, category=category
+                )
+            if result.get("status") == 409:
+                results_installed.append({"profile": profile_name, "ok": True, "skipped": True})
+            elif result.get("ok"):
+                results_installed.append({"profile": profile_name, "ok": True})
+            else:
+                results_installed.append({"profile": profile_name, "ok": False, "error": result.get("error", "unknown")})
+        except Exception as exc:
+            results_installed.append({"profile": profile_name, "ok": False, "error": str(exc)})
+    results_uninstalled = []
+    for profile_name in to_uninstall:
+        profile_name = str(profile_name).strip()
+        if not profile_name:
+            continue
+        try:
+            result = skillhub.delete_skill_from_profile(name, profile_name)
+            if result.get("ok"):
+                results_uninstalled.append({"profile": profile_name, "ok": True})
+            elif result.get("status") == 404:
+                results_uninstalled.append({"profile": profile_name, "ok": True, "skipped": True})
+            else:
+                results_uninstalled.append({"profile": profile_name, "ok": False, "error": result.get("error", "unknown")})
+        except Exception as exc:
+            results_uninstalled.append({"profile": profile_name, "ok": False, "error": str(exc)})
+    return _respond(handler, {
+        "ok": True,
+        "installed": results_installed,
+        "uninstalled": results_uninstalled,
+    })
+
+
+def _post_batch_install(handler, parsed, body: dict) -> bool:
+    """POST /api/skillhub/batch-install — install multiple skills to selected profiles."""
+    skills = body.get("skills") or []
+    profiles = body.get("profiles") or []
+    if not isinstance(skills, list) or not skills:
+        return _respond_bad(handler, "skills required (non-empty list)", 400)
+    if not isinstance(profiles, list) or not profiles:
+        return _respond_bad(handler, "profiles required (non-empty list)", 400)
+    results = []
+    for skill_entry in skills:
+        if not isinstance(skill_entry, dict):
+            continue
+        name = str(skill_entry.get("name", "")).strip()
+        if not name:
+            continue
+        display_name = str(skill_entry.get("display_name", "") or "").strip()
+        category = str(skill_entry.get("category", "") or "").strip()
+        is_custom = bool(skill_entry.get("is_custom"))
+        if not category and not is_custom:
+            try:
+                detail = skillhub.fetch_skill_detail(name)
+                category = str(detail.get("category") or "").strip()
+            except Exception:
+                category = ""
+        for profile_name in profiles:
+            profile_name = str(profile_name).strip()
+            if not profile_name:
+                continue
+            try:
+                if is_custom:
+                    result = skillhub.copy_custom_skill_to_profile(
+                        name, profile_name, category=category
+                    )
+                else:
+                    result = skillhub.install_skill_to_profile(
+                        name, profile_name, display_name=display_name, category=category
+                    )
+                if result.get("status") == 409:
+                    results.append({"name": name, "profile": profile_name, "ok": True, "skipped": True})
+                elif result.get("ok"):
+                    results.append({"name": name, "profile": profile_name, "ok": True, "dir_name": result.get("dir_name", "")})
+                else:
+                    results.append({"name": name, "profile": profile_name, "ok": False, "error": result.get("error", "unknown error")})
+            except RuntimeError as exc:
+                results.append({"name": name, "profile": profile_name, "ok": False, "error": str(exc)})
+            except Exception as exc:
+                results.append({"name": name, "profile": profile_name, "ok": False, "error": str(exc)})
+    return _respond(handler, {"ok": True, "results": results})
+
+
+def _post_batch_uninstall(handler, parsed, body: dict) -> bool:
+    """POST /api/skillhub/batch-uninstall — uninstall multiple skills from all profiles."""
+    skills = body.get("skills") or []
+    if not isinstance(skills, list) or not skills:
+        return _respond_bad(handler, "skills required (non-empty list)", 400)
+    results = []
+    for skill_entry in skills:
+        if not isinstance(skill_entry, dict):
+            continue
+        name = str(skill_entry.get("name", "")).strip()
+        if not name:
+            continue
+        dir_name = str(skill_entry.get("dir_name", "") or "").strip()
+        try:
+            result = skillhub.delete_skill_from_all_profiles(name, dir_name=dir_name)
+            results.append({"name": name, "results": result.get("results", [])})
+        except Exception as exc:
+            results.append({"name": name, "results": [], "error": str(exc)})
+    return _respond(handler, {"ok": True, "results": results})
 
 
 def _post_skillhub_edit(handler, body: dict) -> bool:
