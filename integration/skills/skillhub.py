@@ -619,17 +619,17 @@ def install_skill(name: str, display_name: str = "", category: str = "") -> dict
     catalog_name = str(name or "").strip()
     if catalog_name:
         (target / _HUB_CATALOG_NAME_SIDECAR).write_text(catalog_name, encoding="utf-8")
-    # Save detail.json from upstream for structured detail display
+    # Save .detail.json from upstream for structured detail display
     try:
         import json as _json
         detail_data = fetch_skill_detail(name)
         if isinstance(detail_data, dict) and detail_data:
-            (target / "detail.json").write_text(
+            (target / ".detail.json").write_text(
                 _json.dumps(detail_data, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
     except Exception as exc:
-        _log.debug("Could not save detail.json for %s: %s", name, exc)
+        _log.debug("Could not save .detail.json for %s: %s", name, exc)
     try:
         from integration.skills.no_self_improve import add_names
 
@@ -695,12 +695,12 @@ def install_skill_to_profile(
         import json as _json
         detail_data = fetch_skill_detail(name)
         if isinstance(detail_data, dict) and detail_data:
-            (target / "detail.json").write_text(
+            (target / ".detail.json").write_text(
                 _json.dumps(detail_data, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
     except Exception as exc:
-        _log.debug("Could not save detail.json for %s: %s", name, exc)
+        _log.debug("Could not save .detail.json for %s: %s", name, exc)
     try:
         from integration.skills.no_self_improve import add_names
         add_names([name])
