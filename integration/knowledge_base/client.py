@@ -26,6 +26,7 @@ from integration.knowledge_base.constants import (
 )
 
 _TIMEOUT = 30.0
+_SHOW_PDF_TIMEOUT = 180.0
 _UPLOAD_TIMEOUT = 120.0
 
 
@@ -91,8 +92,9 @@ def _is_json_upstream_response(resp: httpx.Response) -> bool:
 
 def post_binary_or_json(route_key: str, body: dict[str, Any]) -> KnowledgeBaseShowPdfResult:
     url = _downstream_url(route_key)
+    timeout = _SHOW_PDF_TIMEOUT if route_key == "show_pdf" else _TIMEOUT
     try:
-        with _client() as client:
+        with _client(timeout=timeout) as client:
             resp = client.post(url, json=body)
     except httpx.HTTPError as exc:
         raise KnowledgeBaseUpstreamError(str(exc)) from exc

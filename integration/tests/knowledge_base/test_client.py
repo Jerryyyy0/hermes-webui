@@ -181,6 +181,7 @@ def test_post_show_pdf_json_error():
     assert result.kind == "json"
     assert result.status == 200
     assert result.payload == {"code": 404, "msg": "not found", "data": None}
+    mock_client_cls.assert_called_once_with(timeout=180.0, follow_redirects=True)
 
 
 def test_post_show_pdf_binary_pdf():

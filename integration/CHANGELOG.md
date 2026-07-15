@@ -134,6 +134,8 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Changed
 
+- **Knowledge base PDF preview timeout** — `POST /api/integration/knowledge_base/show_pdf` now allows 180 seconds for the downstream request; other knowledge-base proxy routes retain their existing timeout behavior.
+
 - **SkillHub list performance (Phase 1)** — `GET /api/skillhub/skills` deduplicates work within each request: one upstream hub catalog fetch, one custom local scan, and one install-index/config read for annotate. `scope=installed|custom` with `all=1` benefits most; response shape and stats semantics unchanged.
 
 - **SkillHub installed list description** — `GET /api/skillhub/skills` (`scope=installed` and other hub-catalog scopes) prefers each installed skill's `description` from local `SKILL.md` frontmatter under `shared_skills_dir`; when local description is absent, upstream catalog value is kept.

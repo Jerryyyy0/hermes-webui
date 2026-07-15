@@ -328,7 +328,7 @@ export KNOWLEDGE_BASE_URL=http://192.168.1.132:17861
 | POST | `/api/integration/knowledge_base/delete_readed_message` | `delete_readed_message` | 透传，无字段校验 |
 | POST | `/api/integration/knowledge_base/download_doc` | `download_doc` | 透传，无字段校验（二进制或 JSON） |
 
-成功时 HTTP 状态码与 JSON body **原样透传**下游响应（含 `code` / `msg` / `data` 包装）。`show_pdf` 在下游返回 PDF 时透传二进制。`download_doc` 在下游返回文件时透传二进制。文档列表筛选请使用 `/documents`（下游同为 `list_knowledge_bases_details`）。BFF 自身错误：请求校验失败 HTTP 400；下游不可达 HTTP 502。
+成功时 HTTP 状态码与 JSON body **原样透传**下游响应（含 `code` / `msg` / `data` 包装）。`show_pdf` 的下游请求超时为 180 秒，并在下游返回 PDF 时透传二进制。`download_doc` 在下游返回文件时透传二进制。文档列表筛选请使用 `/documents`（下游同为 `list_knowledge_bases_details`）。BFF 自身错误：请求校验失败 HTTP 400；下游不可达 HTTP 502。
 
 文档上传须两步串联：`upload_docs` 成功后再 `update_docs`。
 
