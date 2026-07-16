@@ -15333,6 +15333,7 @@ def _handle_skill_save(handler, body):
     skill_dir.mkdir(parents=True, exist_ok=True)
     skill_file = skill_dir / "SKILL.md"
     skill_file.write_text(body["content"], encoding="utf-8")
+    (skill_dir / ".user_created").write_text("1", encoding="utf-8")
     return j(handler, {"ok": True, "name": skill_name, "path": str(skill_file)})
 
 
