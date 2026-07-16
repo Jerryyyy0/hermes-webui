@@ -252,6 +252,25 @@ def test_local_all_custom_wins_on_name_conflict():
     assert result["total"] == 2
 
 
+def test_local_all_excludes_disabled_skills():
+    annotated = [
+        {"name": "hub-enabled", "installed": True, "hub_installed": True, "custom": False, "category": "", "disabled": False},
+        {"name": "hub-disabled", "installed": True, "hub_installed": True, "custom": False, "category": "", "disabled": True},
+    ]
+    custom = [
+        {"name": "custom-enabled", "installed": True, "hub_installed": False, "custom": True, "category": "", "disabled": False},
+        {"name": "custom-disabled", "installed": True, "hub_installed": False, "custom": True, "category": "", "disabled": True},
+    ]
+    ctx = _ctx_with_annotated(annotated)
+    with patch("integration.skills.listing.skillhub.build_hub_catalog_context", return_value=ctx):
+        with patch("integration.skills.listing.skillhub.compute_scope_stats_from", return_value=_STATS):
+            with patch("integration.skills.listing.local_skills.scan_custom_skills_global", return_value=custom):
+                result = listing.list_skillhub_skills(scope="local_all", all_records=True)
+    assert [skill["name"] for skill in result["skills"]] == ["custom-enabled", "hub-enabled"]
+    assert result["total"] == 2
+    assert result["page_size"] == 2
+
+
 def test_local_all_category_filter():
     annotated = [
         {"name": "hub-tools", "installed": True, "hub_installed": True, "custom": False, "category": "tools"},

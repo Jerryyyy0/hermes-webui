@@ -438,7 +438,7 @@ Query parameters:
 
 | Param | Default | Meaning |
 |-------|---------|---------|
-| `scope` | `hub` | `hub` (market), `installed`, `not_installed` (`shared_skills_dir`), `custom` (`shared_skills_dir`), `local_all` (聚合 installed hub + custom，自建优先按 `name` 去重) |
+| `scope` | `hub` | `hub` (market), `installed`, `not_installed` (`shared_skills_dir`), `custom` (`shared_skills_dir`), `local_all` (聚合 enabled 的 installed hub + custom；自建优先按 `name` 去重，并排除 `skills.disabled` 中的技能) |
 | `category` | `""` (all) | Hub category filter; empty/`all` = all categories |
 | `q` | — | Search (list only; tab stats ignore `q`) |
 | `all` | — | Only `all=1` returns the full filtered list (ignores `page`/`page_size`; response `page=1`, `page_size=total`) |
@@ -446,7 +446,7 @@ Query parameters:
 | `sort` | `name` | `name` or `mtime` |
 | `order` | `asc` | `asc` or `desc` |
 
-List items always include aligned string fields (empty string when unset) and `mtime` (`null` when unset). Hub upstream `updated_at` is normalized into `mtime`. `hub` / `installed` / `not_installed` fetch the full catalog locally, apply `q` as substring match, sort, then paginate. `local_all` merges `installed` (hub) with `custom` (local self-built) into one list, dedupes by `name` (custom wins), then applies the same filter/sort/paginate.
+List items always include aligned string fields (empty string when unset) and `mtime` (`null` when unset). Hub upstream `updated_at` is normalized into `mtime`. `hub` / `installed` / `not_installed` fetch the full catalog locally, apply `q` as substring match, sort, then paginate. `local_all` merges `installed` (hub) with `custom` (local self-built) into one list, dedupes by `name` (custom wins), excludes skills marked `disabled` by `skills.disabled`, then applies the same filter/sort/paginate.
 
 Response includes global `stats`: `{ hub, installed, not_installed, custom }` across **all** categories (unaffected by list `category` or `q`; only `skills`/`total` follow those filters).
 

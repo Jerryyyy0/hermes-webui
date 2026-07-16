@@ -933,6 +933,29 @@
         "responses": { "200": { "description": "running 或 already_running" }, "404": { "description": "任务不存在" } }
       }
     },
+    "/api/integration/crons/restore_archived": {
+      "post": {
+        "tags": ["IntegrationCrons"],
+        "summary": "将 output-only 归档执行记录恢复为已完成审计任务",
+        "description": "仅从指定 Profile 的 cron/output/<job_id>/ 存在的 Markdown 输出创建 disabled/completed 记录；不会执行任务或重新启用调度。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["profile", "job_id"],
+                "properties": {
+                  "profile": { "type": "string" },
+                  "job_id": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": { "200": { "description": "已恢复的 completed CronJob" }, "404": { "description": "未找到归档输出" }, "409": { "description": "任务已存在" } }
+      }
+    },
     "/api/integration/workspace/files": {
       "get": {
         "tags": ["IntegrationWorkspace"],
@@ -2137,9 +2160,9 @@
       "get": {
         "tags": ["SkillHub"],
         "summary": "获取 SkillHub 技能列表",
-        "description": "按 scope 返回技能市场目录、已安装/未安装筛选或本地自建技能。无效 scope 回落为 hub。stats 为全库全局计数（不受 category/q 影响）；skills/total 仍受 category 与 q 过滤。hub/installed/not_installed 在本地全量拉取后排序再分页；q 为本地子串匹配。已安装项的 description 优先取自本地 SKILL.md frontmatter（无则保留上游）。`all=1` 时返回当前筛选下的全量 skills，忽略 page/page_size，响应 page=1、page_size=total。`scope=local_all` 聚合本地已安装 hub 技能与本地自建技能为单一列表，自建优先按 name 去重（同名仅保留 custom 项）。",
+        "description": "按 scope 返回技能市场目录、已安装/未安装筛选或本地自建技能。无效 scope 回落为 hub。stats 为全库全局计数（不受 category/q 影响）；skills/total 仍受 category 与 q 过滤。hub/installed/not_installed 在本地全量拉取后排序再分页；q 为本地子串匹配。已安装项的 description 优先取自本地 SKILL.md frontmatter（无则保留上游）。`all=1` 时返回当前筛选下的全量 skills，忽略 page/page_size，响应 page=1、page_size=total。`scope=local_all` 聚合已启用的本地已安装 hub 技能与本地自建技能为单一列表，自建优先按 name 去重（同名仅保留 custom 项），并排除 `skills.disabled` 中的禁用技能。",
         "parameters": [
-          { "name": "scope", "in": "query", "schema": { "type": "string", "enum": ["hub", "installed", "not_installed", "custom", "local_all"], "default": "hub" }, "description": "hub=市场目录（附 installed 标注）；installed/not_installed=按当前 Cookie profile 的本地安装状态筛选；custom=读取 {HERMES_HOME}/skills 下本地自建（非市场同名），不按 profile 分子目录；local_all=聚合已安装 hub 技能与本地自建技能（自建优先，按 name 去重）" },
+          { "name": "scope", "in": "query", "schema": { "type": "string", "enum": ["hub", "installed", "not_installed", "custom", "local_all"], "default": "hub" }, "description": "hub=市场目录（附 installed 标注）；installed/not_installed=按当前 Cookie profile 的本地安装状态筛选；custom=读取 {HERMES_HOME}/skills 下本地自建（非市场同名），不按 profile 分子目录；local_all=聚合已启用的已安装 hub 技能与本地自建技能（自建优先，按 name 去重，并排除 skills.disabled 中的禁用技能）" },
           { "name": "category", "in": "query", "schema": { "type": "string" }, "description": "分类过滤；空字符串、all 或 * 表示全部分类" },
           { "name": "q", "in": "query", "schema": { "type": "string" }, "description": "关键词搜索（仅列表项，不影响 stats 计数）" },
           { "name": "all", "in": "query", "schema": { "type": "string", "enum": ["1"] }, "description": "仅 all=1 时返回全量列表（忽略 page/page_size）；缺省或其它值走分页" },
@@ -5260,8 +5283,8 @@
           "model":               { "type": "string", "nullable": true },
           "profile":             { "type": "string", "nullable": true, "description": "执行 Profile 名称；null 表示沿用服务器默认" },
           "toast_notifications": { "type": "boolean", "description": "WebUI 完成 Toast；缺省 true" },
-          "execution_bucket":     { "type": "string", "enum": ["running", "waiting", "error"], "description": "前端展示用执行大类：running=执行中，waiting=待执行/已完成/停用归并，error=异常" },
-          "execution_state":      { "type": "string", "enum": ["manual_running", "last_run_error", "schedule_error", "scheduled_waiting", "last_success_waiting", "last_unknown_waiting", "paused_waiting", "disabled_waiting", "not_yet_run_waiting"], "description": "执行小类；暂停任务不覆盖上次状态，只有无上次状态时才返回 paused_waiting" },
+          "execution_bucket":     { "type": "string", "enum": ["running", "waiting", "completed", "error"], "description": "前端展示用执行大类：running=执行中，waiting=待执行/停用，completed=一次性任务已完成且不会自动再次调度，error=异常或中断" },
+          "execution_state":      { "type": "string", "enum": ["manual_running", "scheduled_running", "once_completed", "once_interrupted", "last_run_error", "schedule_error", "scheduled_waiting", "last_success_waiting", "last_unknown_waiting", "paused_waiting", "disabled_waiting", "not_yet_run_waiting"], "description": "执行小类；once_completed 保留已完成的一次性任务，once_interrupted 表示执行 lease 过期后为避免重复副作用而未自动重试" },
           "state":               { "type": "string", "description": "如 paused" },
           "last_run_at":         { "description": "ISO8601 字符串或 Unix 时间戳" },
           "last_status":         { "type": "string", "description": "最近一次运行状态，如 success / error" },

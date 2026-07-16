@@ -100,6 +100,7 @@ def list_skillhub_skills(
             for s in installed_hub
             if str(s.get("name") or "").strip() not in custom_names
         ]
+        merged = [skill for skill in merged if not skill.get("disabled")]
         merged = _filter_skills_by_category(merged, category_key)
         merged = _filter_skills_by_q(merged, q)
         if sort == "mtime":
