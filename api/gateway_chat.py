@@ -580,6 +580,7 @@ def _run_gateway_chat_streaming(
         )
 
     manifest_delta_sequence = [0]
+    gateway_manifest_pending_tools: dict[str, dict] = {}
     manifest_turn_key = str(stream_turn_key or "").strip()
     gateway_session = None
     if not manifest_turn_key:
@@ -614,13 +615,30 @@ def _run_gateway_chat_streaming(
                 extract_manifest_delta_from_tool_event,
                 merge_manifest_delta,
             )
-            manifest_delta_sequence[0] += 1
+            tid = str(event_payload.get("tid") or "").strip()
+            args = event_payload.get("args") if isinstance(event_payload.get("args"), dict) else {}
             is_complete = event_name == "tool_complete"
+            if not is_complete:
+                if tid:
+                    gateway_manifest_pending_tools[tid] = {
+                        "name": str(event_payload.get("name") or ""),
+                        "args": dict(args),
+                    }
+            else:
+                pending = gateway_manifest_pending_tools.pop(tid, None) if tid else None
+                if pending:
+                    if not args:
+                        args = pending["args"]
+                    elif str(event_payload.get("name") or "") != pending["name"]:
+                        return
+                elif not args:
+                    return
+            manifest_delta_sequence[0] += 1
             tool_event = ToolEvent(
                 name=str(event_payload.get("name") or ""),
-                args=event_payload.get("args") if isinstance(event_payload.get("args"), dict) else {},
+                args=args,
                 result=str(event_payload.get("preview") or "") if is_complete else "",
-                tid=str(event_payload.get("tid") or ""),
+                tid=tid,
                 status="error" if event_payload.get("is_error") else ("completed" if is_complete else "in_progress"),
                 source="gateway",
             )

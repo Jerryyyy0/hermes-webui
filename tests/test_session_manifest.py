@@ -2684,6 +2684,7 @@ def test_extract_turn_artifact_paths_scopes_session_tool_calls(tmp_path):
             'args': {'path': str(report)},
             'assistant_msg_idx': 1,
             'tid': 'write-turn1',
+            'done': True,
         },
         {
             'name': 'web_search',
@@ -3602,12 +3603,14 @@ def test_persist_turn_artifact_paths_scopes_session_tool_calls(tmp_path, monkeyp
                 'args': {'path': 'report.md'},
                 'assistant_msg_idx': 1,
                 'tid': 'write-turn1',
+                'done': True,
             },
             {
                 'name': 'write_file',
                 'args': {'path': 'deliver.docx'},
                 'assistant_msg_idx': 3,
                 'tid': 'write-turn2',
+                'done': True,
             },
         ],
     )

@@ -4114,6 +4114,7 @@ def _extract_tool_calls_from_messages(messages, live_tool_calls=None):
                         'tid': tid,
                         'assistant_msg_idx': pending_asst_idx.get(tid, -1),
                         'args': _truncate_tool_args(pending_args.get(tid, {})),
+                        'done': True,
                     })
                     seq['resolved'] = True
             tool_msg_sequence.append(seq)
@@ -4132,6 +4133,8 @@ def _extract_tool_calls_from_messages(messages, live_tool_calls=None):
                 'tid': live_tc.get('tid', '') or '',
                 'assistant_msg_idx': _nearest_assistant_msg_idx(messages, seq.get('msg_idx', -1)),
                 'args': _truncate_tool_args(live_tc.get('args', {}), limit=4),
+                'done': bool(live_tc.get('done')),
+                'is_error': bool(live_tc.get('is_error')),
             })
 
     return tool_calls

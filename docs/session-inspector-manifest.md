@@ -17,9 +17,9 @@ Session Inspector Manifest 是从会话活动派生出的轻量索引，用于�
 
 ## Artifact 证据边界
 
-Artifacts 可来自成功写入工具的结构化参数/diff、成功 terminal 的受控输出操作数、显式 `MEDIA:`、成功 skill mutation，以及当前轮最后一条 assistant 中经严格验证的 workspace 文件。成功文件读取路径仅作为同 turn 的瞬态 read evidence，抑制同路径 `assistant_prose` 弱候选；不公开、不持久化，也不抑制强工具/MEDIA artifact。中间 assistant prose 不提取路径。
+Artifacts 可来自成功写入工具的结构化参数/diff、成功 terminal 的受控输出操作数、显式 `MEDIA:`、成功 skill mutation，以及当前轮最后一条 assistant 中经严格验证的 workspace 文件。工具调用 start 本身不构成证据；必须有同一工具调用的成功完成结果。成功文件读取路径仅作为同 turn 的瞬态 read evidence，抑制同路径 `assistant_prose` 弱候选；不公开、不持久化，也不抑制强工具/MEDIA artifact。中间 assistant prose 不提取路径。
 
-最终 assistant 候选必须位于 workspace、真实存在且可预览；不存在的文件不会因正文声称已交付而进入 Manifest。Terminal 不扫描 stdout、目录列表、heredoc 源码或整个 workspace。
+最终 assistant 候选必须位于 workspace、真实存在且可预览；不存在的文件不会因正文声称已交付而进入 Manifest。裸文件名按当前 turn 强证据、此前 turn 已确认成果、workspace 根目录的顺序做唯一 exact-basename 解析；同层歧义时跳过，不从自然语言目录上下文补全。因而后续纯问答 turn 的最后一条 assistant 若明确列出可唯一解析的既有文件，该文件可作为该 turn 的 `assistant_prose` artifact。Terminal 不扫描 stdout、目录列表、heredoc 源码或整个 workspace。
 
 具体工具白名单与算法只有 [session-manifest-artifacts.md](./session-manifest-artifacts.md) 是权威来源。
 
