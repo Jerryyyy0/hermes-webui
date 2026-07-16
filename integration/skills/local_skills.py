@@ -327,9 +327,9 @@ def _scan_custom_skill_dicts(
             # Exclude hub-installed skills via marker file only
             if (skill_dir / ".hub_installed").is_file():
                 continue
-            # Filter for user-created skills only if requested
-            if user_created_only and not (skill_dir / ".user_created").is_file():
-                continue
+            # user_created_only: show user-uploaded (.user_created) and
+            # unmarked skills (session-created, profile-bundled), but not
+            # hub-installed ones (already excluded above).
             description = str(frontmatter.get("description", "") or "")
             if not description:
                 for line in body.strip().split("\n"):
