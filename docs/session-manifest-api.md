@@ -191,6 +191,8 @@ Manifest 不返回文件或技能正文。非 expired 且 `preview` 为 `file`/`
 | `tool_complete` | 成功 `todo` 顶层 `todos[]` | 仅成功工具的参数、结果、diff 或 terminal 输出操作数 | 仅明确 `success: true` 的 `skill_view` |
 | `turn_complete` | 不发射 | 工具强证据、`MEDIA:` 与最后一条 assistant 的严格 workspace 文件提取 | 不发射 |
 
+`tool_start` 只可携带待配对的工具参数，永不产生 artifact/reference。`tool_complete` 仅在与同一 `stream_id + tid` 的 start 配对且成功时解析工具参数；complete 缺参数且没有对应 start、或配对身份不一致时不产生工具 artifact。`turn_complete` 中的最终 assistant 裸文件名按当前 turn 强证据、此前 turn 已确认 artifacts、workspace 根目录的唯一 exact-basename 顺序解析；因此后续纯问答 turn 明确列出可唯一解析的既有文件时，可产生该 turn 的 `assistant_prose` artifact。
+
 SSE 是乐观派生状态，不写入 transcript，不进入模型上下文，只更新 Inspector；不直接生成聊天区 per-turn chips。
 
 ## 4. 合并、去重与幂等

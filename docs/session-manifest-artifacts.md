@@ -63,7 +63,7 @@ turn_key = user._turn_key 或 turn:<user_msg_idx>
 
 每轮记录 `start_msg_idx` / `end_msg_idx`。`_tool_calls_for_turn()` 使用消息范围限制 `session.tool_calls`，避免 earlier turn 的写入路径污染当前轮。
 
-`_collect_tool_events()` 将以下来源规范化为 `ToolEvent`。Mutation/read/terminal/skill 等工具证据只有 `_tool_event_succeeded()` 确认 completed 且未报告失败后才生效；`skill_view` 还要求结果明确 `success: true`。
+`_collect_tool_events()` 将以下来源规范化为 `ToolEvent`。Mutation/read/terminal/skill/todo 等工具证据只有完成结果存在、`_tool_event_succeeded()` 确认 completed 且未报告失败后才解析其 args/result/diff；`skill_view` 还要求结果明确 `success: true`。调用 start、孤立 result、in-progress、取消、失败或非零 `exit_code` 均不产生 Manifest 证据。持久化 `session.tool_calls` 仅接受明确 `done: true` 且未标记失败的已结算 row，不能由前端展示层的 `done` 补值反推成功。
 
 来源：
 
@@ -133,6 +133,8 @@ User 消息中的 `MEDIA:`、工具结果 JSON 的相似字段和普通 URL 都�
 - `_BROAD_FILENAME_EXT_RE`：绝对路径、相对路径、裸文件名；
 - `_LAST_ASSISTANT_TILDE_PATH_RE`：`~/...` 路径候选。
 
+显式相对/绝对路径直接走路径安全与预览 gate。裸文件名不从正文中的目录描述补全，而按以下优先级选择首个唯一 exact-basename 匹配：当前 turn 的成功强工具/MEDIA 路径、当前构建中此前 turn 已确认 artifact 路径、workspace 根目录真实文件。任一优先级层出现多个不同路径时视为歧义并跳过，且不降级到下一层。后续纯问答 turn 若最后一条 assistant 明确列出一个能唯一解析的既有文件，仍可产生该 turn 的 `assistant_prose` artifact。
+
 不依赖“已保存”“文件路径”等交付关键词。候选必须：
 
 - 解析后位于 session workspace；
@@ -159,13 +161,16 @@ User 消息中的 `MEDIA:`、工具结果 JSON 的相似字段和普通 URL 都�
 
 ### 4.6 Terminal
 
-`terminal` 不是通用 mutation 工具。只有 `_execution_event_succeeded()` 确认成功后，`_terminal_output_paths()` 才解析：
+`terminal` 不是通用 mutation 工具。调用/start 事件只提供结构化 `args.command`；必须与同一 `tool_call_id` / `tool_use_id` 的完成结果配对，且 `_execution_event_succeeded()` 确认成功后，`_terminal_output_paths()` 才解析：
 
 ```text
 -o PATH
 --output PATH
 --output=PATH
+python .../md2word.py INPUT OUTPUT [options]
 ```
+
+最后一种位置参数规则只适用于脚本 basename 精确为 `md2word.py` 的 Python 调用；不会推广为未知 CLI 的通用“最后一个参数即输出”规则。
 
 支持受控 `cd DIR && ...` 的命令本地目录。拒绝：
 

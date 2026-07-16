@@ -31,6 +31,7 @@ def test_extract_tool_calls_from_openai_message_linkage():
     assert result[0]["name"] == "terminal"
     assert result[0]["assistant_msg_idx"] == 1
     assert result[0]["snippet"] == "file.txt"
+    assert result[0]["done"] is True
 
 
 def test_tool_result_snippet_allows_frontend_show_more_threshold_but_stays_bounded():
