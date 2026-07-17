@@ -208,6 +208,55 @@ def test_chat_start_body_profile_cannot_retag_visible_empty_session_without_acti
     assert captured["profile"] == "default"
 
 
+def test_attachment_upload_uses_profile_field_when_profile_cookie_is_absent(monkeypatch):
+    handler = _FakeHandler()
+    target = _SimpleSession("upload_coder", profile="coder")
+    monkeypatch.setattr(
+        upload,
+        "parse_multipart",
+        lambda *_args: ({"session_id": "upload_coder", "profile": "coder"}, {"file": ("note.txt", b"x")}),
+    )
+    monkeypatch.setattr(upload, "get_session", lambda sid: target)
+    monkeypatch.setattr(upload, "get_profile_cookie", lambda _handler: None)
+    monkeypatch.setattr(upload, "_get_active_profile_name", lambda: "default")
+    captured = {}
+
+    def _reject(_handler, session, profile_override=None):
+        captured["session"] = session
+        captured["profile_override"] = profile_override
+        return True
+
+    monkeypatch.setattr(upload, "_reject_invisible_session", _reject)
+
+    upload.handle_upload(handler)
+
+    assert captured == {"session": target, "profile_override": "coder"}
+
+
+def test_attachment_upload_prefers_profile_cookie_over_profile_field(monkeypatch):
+    handler = _FakeHandler()
+    target = _SimpleSession("upload_default", profile="default")
+    monkeypatch.setattr(
+        upload,
+        "parse_multipart",
+        lambda *_args: ({"session_id": "upload_default", "profile": "coder"}, {"file": ("note.txt", b"x")}),
+    )
+    monkeypatch.setattr(upload, "get_session", lambda sid: target)
+    monkeypatch.setattr(upload, "get_profile_cookie", lambda _handler: "default")
+    captured = {}
+
+    def _reject(_handler, session, profile_override=None):
+        captured["session"] = session
+        captured["profile_override"] = profile_override
+        return True
+
+    monkeypatch.setattr(upload, "_reject_invisible_session", _reject)
+
+    upload.handle_upload(handler)
+
+    assert captured == {"session": target, "profile_override": None}
+
+
 def test_attachment_upload_foreign_profile_session_returns_404_before_write(monkeypatch):
     handler = _FakeHandler()
     foreign = _SimpleSession("upload_foreign", profile="other")

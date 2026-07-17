@@ -647,7 +647,7 @@ FAIL: Multiple messages sent while one is in flight.
 ### T12.2: Upload Failure Shows Status
 SETUP: Active session.
 STEPS:
-  1. Try to attach a file larger than the configured upload limit (20MB by default; overridden by `HERMES_WEBUI_MAX_UPLOAD_MB` if set)
+  1. Try to attach a file larger than the configured upload limit (50 MiB by default; overridden by `HERMES_WEBUI_MAX_UPLOAD_MB` if set)
 EXPECT:
   - Status bar shows an error message about file size or the upload is rejected
   - The chat is not broken (can still send messages)

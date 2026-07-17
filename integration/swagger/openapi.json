@@ -474,14 +474,14 @@
       "post": {
         "tags": ["Workspace"],
         "summary": "上传会话附件",
-        "description": "将文件保存为指定会话的附件，不写入会话工作区。`session_id` 必须存在，且必须归属当前活跃 Profile；会话属于命名 Profile 时，请求需携带匹配的 `hermes_profile` Cookie。Profile 不匹配时，服务端为防止跨 Profile 枚举会话而返回 404 `Session not found`。文件大小受服务端 `MAX_UPLOAD_BYTES` 限制（默认 20 MiB）。",
+        "description": "将文件保存为指定会话的附件，不写入会话工作区。`session_id` 必须存在，且必须归属请求 Profile。优先使用有效的 `hermes_profile` Cookie；未携带该 Cookie 时，使用 multipart `profile` 字段校验。Profile 不匹配时，服务端为防止跨 Profile 枚举会话而返回 404 `Session not found`。文件大小受服务端 `MAX_UPLOAD_BYTES` 限制（默认 50 MiB，可由 `HERMES_WEBUI_MAX_UPLOAD_MB` 覆盖）。",
         "parameters": [
           {
             "name": "hermes_profile",
             "in": "cookie",
             "required": false,
             "schema": { "type": "string" },
-            "description": "当前活跃 Profile。目标会话属于命名 Profile 时必须与其一致；例如会话 Profile 为 `coder` 时传 `coder`。浏览器 WebUI 请求通常由 Cookie 自动携带。"
+            "description": "当前活跃 Profile。存在有效 Cookie 时优先于 multipart `profile`；浏览器 WebUI 请求通常自动携带。"
           }
         ],
         "requestBody": {
@@ -493,7 +493,11 @@
                 "properties": {
                   "session_id": {
                     "type": "string",
-                    "description": "目标会话 ID，必须属于当前活跃 Profile。"
+                    "description": "目标会话 ID，必须属于请求 Profile。"
+                  },
+                  "profile": {
+                    "type": "string",
+                    "description": "请求 Profile。仅在未携带有效 `hermes_profile` Cookie 时用于会话归属校验；例如 `coder`。"
                   },
                   "file": {
                     "type": "string",

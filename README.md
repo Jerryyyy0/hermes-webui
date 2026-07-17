@@ -264,7 +264,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Signed HMAC HTTP-only cookie with 24h TTL
 - Minimal dark-themed login page at `/login`
 - Security headers on all responses (X-Content-Type-Options, X-Frame-Options, Referrer-Policy)
-- 20MB POST body size limit
+- 20MB limit for non-upload POST request bodies; file uploads use a separate 50 MiB default limit configurable via `HERMES_WEBUI_MAX_UPLOAD_MB`
 - CDN resources pinned with SRI integrity hashes
 
 ### Themes
