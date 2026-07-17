@@ -428,11 +428,23 @@ def compute_scope_stats_from(ctx: _HubCatalogContext, *, custom_count: int) -> d
     }
 
 
+def _normalize_category_for_match(value: str) -> str:
+    """Normalize category for comparison: lowercase, spaces to hyphens."""
+    return str(value or "").strip().lower().replace(" ", "-")
+
+
 def _filter_skills_by_category(skills: list[dict], category: str) -> list[dict]:
     category_key = str(category or "").strip()
     if not category_key:
         return skills
-    return [skill for skill in skills if str(skill.get("category") or "") == category_key]
+    # Normalize both sides: lowercase + spaces→hyphens
+    # so "AI 与机器学习" matches "AI-与机器学习"
+    normalized = _normalize_category_for_match(category_key)
+    return [
+        skill
+        for skill in skills
+        if _normalize_category_for_match(skill.get("category")) == normalized
+    ]
 
 
 def list_hub_catalog_filtered_from(
@@ -845,6 +857,79 @@ def delete_skill_from_all_profiles(name: str, dir_name: str = "") -> dict:
         except Exception as exc:
             results.append({"profile": profile_name, "ok": False, "error": str(exc)})
     return {"ok": True, "results": results}
+
+
+def get_skill_installed_profiles(name: str) -> dict:
+    """Get all profiles that have a specific skill installed.
+
+    Returns a list of profiles with the skill's dir_name in each profile.
+    Checks both hub-installed skills and local custom skills.
+    """
+    from api.profiles import list_profiles_api
+    from agent.skill_utils import iter_skill_index_files
+    from tools.skills_tool import _EXCLUDED_SKILL_DIRS
+
+    profiles = list_profiles_api()
+    installed = []
+    seen_profiles: set[str] = set()
+
+    for p in profiles:
+        profile_name = str(p.get("name") or "").strip()
+        if not profile_name:
+            continue
+        skills_dir = skills_dir_for_profile(profile_name)
+        if not skills_dir.exists():
+            continue
+
+        # Check hub-installed skills first
+        try:
+            index = _hub_installed_index(skills_dir)
+            if name in index:
+                installed.append({
+                    "profile": profile_name,
+                    "dir_name": index[name],
+                })
+                seen_profiles.add(profile_name)
+                continue
+        except Exception:
+            pass
+
+        # Check local custom skills (SKILL.md files without .hub_installed)
+        try:
+            for skill_md in iter_skill_index_files(skills_dir, "SKILL.md"):
+                if any(part in _EXCLUDED_SKILL_DIRS for part in skill_md.parts):
+                    continue
+                skill_dir = skill_md.parent
+                if (skill_dir / ".hub_installed").is_file():
+                    continue  # Already checked hub-installed
+                dir_name = _skill_dir_rel_path(skill_dir, skills_dir)
+                # Match by directory name or SKILL.md frontmatter name
+                if dir_name == name or skill_dir.name == name:
+                    installed.append({
+                        "profile": profile_name,
+                        "dir_name": dir_name,
+                    })
+                    seen_profiles.add(profile_name)
+                    break
+                # Also check frontmatter name
+                try:
+                    content = skill_md.read_text(encoding="utf-8")[:4000]
+                    from tools.skills_tool import _parse_frontmatter
+                    frontmatter, _ = _parse_frontmatter(content)
+                    skill_name = str(frontmatter.get("name", "") or "").strip()
+                    if skill_name == name:
+                        installed.append({
+                            "profile": profile_name,
+                            "dir_name": dir_name,
+                        })
+                        seen_profiles.add(profile_name)
+                        break
+                except Exception:
+                    continue
+        except Exception:
+            continue
+
+    return {"ok": True, "name": name, "installed": installed}
 
 
 def _remove_skill_from_profile_config(profile_name: str, skill_name: str) -> None:

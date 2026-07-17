@@ -1158,21 +1158,25 @@
 
   function _showManageProfilesDialog(skillName, displayName) {
     return new Promise(async (resolve, reject) => {
-      // Fetch profiles list
+      // Fetch profiles list and installed profiles in parallel
       let profiles = [];
+      let installedProfiles = new Set();
       try {
-        const resp = await api('/api/profiles');
-        profiles = resp.profiles || [];
+        const [profilesResp, installedResp] = await Promise.all([
+          api('/api/profiles'),
+          api(`/api/skillhub/installed-profiles?name=${encodeURIComponent(skillName)}`, { timeoutToast: false }),
+        ]);
+        profiles = profilesResp.profiles || [];
+        const installed = installedResp.installed || [];
+        for (const item of installed) {
+          if (item.profile) installedProfiles.add(item.profile);
+        }
       } catch (_) {
-        profiles = [];
-      }
-
-      // Determine which profiles currently have this skill
-      const installedProfiles = new Set();
-      for (const p of profiles) {
-        const skills = p.skills || [];
-        if (skills.some(s => s.name === skillName || s.dir_name === skillName)) {
-          installedProfiles.add(p.name);
+        try {
+          const resp = await api('/api/profiles');
+          profiles = resp.profiles || [];
+        } catch (__) {
+          profiles = [];
         }
       }
 

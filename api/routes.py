@@ -6826,6 +6826,22 @@ def handle_get(handler, parsed) -> bool:
             },
         )
 
+    if parsed.path == "/api/profile/skills":
+        qs = parse_qs(parsed.query)
+        profile_name = str(qs.get("name", [""])[0] or "").strip()
+        if not profile_name:
+            return bad(handler, "name required", 400)
+        from api.profiles import get_hermes_home_for_profile
+
+        try:
+            profile_home = get_hermes_home_for_profile(profile_name)
+        except Exception:
+            return bad(handler, "Profile not found", 404)
+        skills_dir = profile_home / "skills"
+        config_path = profile_home / "config.yaml"
+        data = _skills_list_from_dir(skills_dir, config_path=config_path)
+        return j(handler, {"skills": data.get("skills", [])})
+
     # ── Gateway Status (GET) ──
     if parsed.path == "/api/gateway/status":
         import datetime

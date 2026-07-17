@@ -52,6 +52,8 @@ def try_handle_get(handler, parsed) -> bool:
         return _get_skillhub_structure(handler, parsed)
     if path == "/api/skillhub/file":
         return _get_skillhub_file(handler, parsed)
+    if path == "/api/skillhub/installed-profiles":
+        return _get_skillhub_installed_profiles(handler, parsed)
     return False
 
 
@@ -773,3 +775,16 @@ def _post_skillhub_detail(handler, body: dict) -> bool:
     if result.get("error"):
         return _respond_bad(handler, result["error"], status or 400)
     return _respond(handler, result)
+
+
+def _get_skillhub_installed_profiles(handler, parsed) -> bool:
+    """GET /api/skillhub/installed-profiles — get profiles that have a skill installed."""
+    qs = _qs(parsed)
+    name = (qs.get("name") or [""])[0]
+    if not name:
+        return _respond_bad(handler, "name required", 400)
+    try:
+        result = skillhub.get_skill_installed_profiles(name)
+        return _respond(handler, result)
+    except Exception as exc:
+        return _respond_bad(handler, str(exc), 502)
