@@ -102,6 +102,9 @@ let _slashPersonalityCache=null;
 let _slashPersonalityCachePromise=null;
 let _agentCommandCache=null;
 let _agentCommandCachePromise=null;
+let _skillCommandCache=[];
+let _skillCommandLoadPromise=null;
+let _skillCommandCacheReady=false;
 
 // Invalidate the /api/models slash-suggestion cache. Called by panels.js
 // after a provider is added or removed so the next /model autocomplete
@@ -1492,9 +1495,6 @@ async function forkFromMessage(msgIdx){
   }catch(e){showToast(t('branch_failed')+e.message);}
 }
 
-let _skillCommandCache=[];
-let _skillCommandLoadPromise=null;
-let _skillCommandCacheReady=false;
 function _skillCommandSlug(name){
   const raw=String(name||'').trim().toLowerCase();
   if(!raw)return'';

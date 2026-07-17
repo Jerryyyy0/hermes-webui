@@ -21,6 +21,11 @@ from integration.skills.zip_import import discover_skill_roots
 
 _log = logging.getLogger(__name__)
 
+def _normalize_category_for_match(value: str) -> str:
+    """Normalize category for comparison: lowercase, spaces to hyphens."""
+    return str(value or "").strip().lower().replace(" ", "-")
+
+
 _SKILL_META_EXCLUDE = frozenset(
     {".hub_installed", ".category", ".install_name", ".hub_catalog_name", ".user_created", ".detail.json"}
 )
@@ -314,7 +319,7 @@ def _scan_custom_skill_dicts(
             category_file = skill_dir / ".category"
             if category_file.is_file():
                 cat = category_file.read_text(encoding="utf-8").strip() or cat
-            if category and cat != category:
+            if category and _normalize_category_for_match(cat) != _normalize_category_for_match(category):
                 continue
             content = skill_md.read_text(encoding="utf-8")[:4000]
             frontmatter, body = _parse_frontmatter(content)
@@ -430,7 +435,8 @@ def _filter_custom_skills_in_memory(
     category_key = str(category or "").strip()
     filtered = skills
     if category_key:
-        filtered = [skill for skill in filtered if str(skill.get("category") or "") == category_key]
+        normalized_key = _normalize_category_for_match(category_key)
+        filtered = [skill for skill in filtered if _normalize_category_for_match(skill.get("category")) == normalized_key]
     query = str(q or "").strip().lower()
     if not query:
         return filtered
@@ -999,7 +1005,8 @@ def _normalize_category_segment(category: str) -> tuple[str | None, dict | None]
     raw = str(category or "").strip()
     if not raw:
         return "", None
-    seg = normalize_dir_name(raw)
+    # Preserve original case for categories (unlike skill dir names)
+    seg = raw.replace(" ", "-")[:64]
     if not seg:
         return None, {"error": "无效的分类", "status": 400}
     err = validate_dir_name(seg)
