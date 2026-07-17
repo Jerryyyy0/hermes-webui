@@ -473,11 +473,63 @@
     "/api/upload": {
       "post": {
         "tags": ["Workspace"],
-        "summary": "上传文件",
+        "summary": "上传会话附件",
+        "description": "将文件保存为指定会话的附件，不写入会话工作区。`session_id` 必须存在，且必须归属当前活跃 Profile；会话属于命名 Profile 时，请求需携带匹配的 `hermes_profile` Cookie。Profile 不匹配时，服务端为防止跨 Profile 枚举会话而返回 404 `Session not found`。文件大小受服务端 `MAX_UPLOAD_BYTES` 限制（默认 20 MiB）。",
+        "parameters": [
+          {
+            "name": "hermes_profile",
+            "in": "cookie",
+            "required": false,
+            "schema": { "type": "string" },
+            "description": "当前活跃 Profile。目标会话属于命名 Profile 时必须与其一致；例如会话 Profile 为 `coder` 时传 `coder`。浏览器 WebUI 请求通常由 Cookie 自动携带。"
+          }
+        ],
         "requestBody": {
-          "content": { "multipart/form-data": { "schema": { "type": "object", "properties": { "file": { "type": "string", "format": "binary" } } } } }
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "session_id": {
+                    "type": "string",
+                    "description": "目标会话 ID，必须属于当前活跃 Profile。"
+                  },
+                  "file": {
+                    "type": "string",
+                    "format": "binary",
+                    "description": "待上传的二进制文件。"
+                  }
+                },
+                "required": ["session_id", "file"]
+              }
+            }
+          }
         },
-        "responses": { "200": { "description": "上传结果" } }
+        "responses": {
+          "200": {
+            "description": "上传成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["filename", "path", "size", "mime", "is_image"],
+                  "properties": {
+                    "filename": { "type": "string", "description": "服务端保存后的文件名；同名文件自动追加序号。" },
+                    "path": { "type": "string", "description": "服务器上的附件绝对路径。" },
+                    "size": { "type": "integer", "format": "int64", "description": "文件大小（字节）。" },
+                    "mime": { "type": "string", "description": "根据文件名推断的 MIME 类型。" },
+                    "is_image": { "type": "boolean", "description": "是否为图片文件。" }
+                  }
+                }
+              }
+            }
+          },
+          "400": { "description": "请求格式无效、缺少文件、文件名无效或其他上传参数错误" },
+          "404": { "description": "会话不存在，或会话不属于当前 Profile（返回 `Session not found`）" },
+          "413": { "description": "文件大小超过服务端上限" },
+          "500": { "description": "服务器保存附件失败" }
+        }
       }
     },
     "/api/git/status": {
