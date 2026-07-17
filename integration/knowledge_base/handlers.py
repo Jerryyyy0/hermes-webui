@@ -281,7 +281,6 @@ def _handle_upload_artifacts(handler, body: dict[str, Any]) -> bool:
     from api.workspace import resolve_trusted_workspace, safe_resolve_ws
     from integration.knowledge_base.constants import (
         MAX_ARTIFACT_FILE_BYTES,
-        MAX_ARTIFACT_TOTAL_BYTES,
         MAX_ARTIFACT_COUNT,
     )
 
@@ -297,7 +296,6 @@ def _handle_upload_artifacts(handler, body: dict[str, Any]) -> bool:
 
     workspace = resolve_trusted_workspace(None)
     httpx_files: list[tuple[str, tuple[str, bytes, str | None]]] = []
-    total = 0
     for rel in paths:
         rel = str(rel or "").strip()
         if not rel:
@@ -311,9 +309,6 @@ def _handle_upload_artifacts(handler, body: dict[str, Any]) -> bool:
         size = resolved.stat().st_size
         if size > MAX_ARTIFACT_FILE_BYTES:
             return _respond_bad(handler, "文件过大", 400)
-        total += size
-        if total > MAX_ARTIFACT_TOTAL_BYTES:
-            return _respond_bad(handler, "请求体过大", 413)
         file_bytes = resolved.read_bytes()
         basename = resolved.name
         httpx_files.append(("files", (basename, file_bytes, "application/octet-stream")))

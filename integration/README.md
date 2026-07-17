@@ -313,7 +313,7 @@ export KNOWLEDGE_BASE_URL=http://192.168.1.132:17861
 | POST | `/api/integration/knowledge_base/members` | `get_user_inshkb` | `uuid`, `kbName`, `page`, `size` |
 | POST | `/api/integration/knowledge_base/documents` | `list_knowledge_bases_details` | `kbName`, `page`, `size` |
 | POST | `/api/integration/knowledge_base/upload_docs` | `upload_docs` | multipart 透传，无字段校验 |
-| POST | `/api/integration/knowledge_base/upload_artifacts` | `upload_docs`（编排） | `uuid`, `kbName`, `fileProperties`, `paths` |
+| POST | `/api/integration/knowledge_base/upload_artifacts` | `upload_docs`（编排；单文件最大 50 MiB、最多 20 个文件，不限制单次同步总大小） | `uuid`, `kbName`, `fileProperties`, `paths` |
 | POST | `/api/integration/knowledge_base/update_docs` | `update_docs` | `kbName`, `fileNames`, `fileProperties` |
 | POST | `/api/integration/knowledge_base/delete_docs` | `delete_docs` | `kbName`, `fileNames` |
 | POST | `/api/integration/knowledge_base/show_pdf` | `show_pdf` | `kbName`, `fileName`（可选 `flag`） |

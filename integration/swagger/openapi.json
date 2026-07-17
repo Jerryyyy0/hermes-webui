@@ -1246,12 +1246,11 @@
       "post": {
         "tags": ["IntegrationKnowledgeBase"],
         "summary": "上传 workspace 成果文件到知识库（编排）",
-        "description": "WebUI 原生编排端点：调用方传 `paths`（workspace 相对路径数组），WebUI 读取成果文件字节后复用下游 `upload_docs` 透传。`fileProperties` 与 `upload_docs` 一致（原样透传，`fileClass` 即直属库类型），`paths` 与 `fileProperties` 一一对应、等长。仅执行 `upload_docs`，不串联 `update_docs`。",
+        "description": "WebUI 原生编排端点：调用方传 `paths`（workspace 相对路径数组），WebUI 读取成果文件字节后复用下游 `upload_docs` 透传。`fileProperties` 与 `upload_docs` 一致（原样透传，`fileClass` 即直属库类型），`paths` 与 `fileProperties` 一一对应、等长。单文件最大 50 MiB，最多 20 个文件；不限制单次同步的文件总大小。仅执行 `upload_docs`，不串联 `update_docs`。",
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUploadArtifactsRequest" } } } },
         "responses": {
           "200": { "description": "下游 upload_docs 原始 JSON 响应" },
           "400": { "description": "缺参、路径校验失败或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
-          "413": { "description": "请求体总量超限", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
           "502": { "description": "下游不可达", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
         }
       }
