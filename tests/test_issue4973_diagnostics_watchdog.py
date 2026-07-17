@@ -56,35 +56,29 @@ def test_many_concurrent_diags_do_not_spawn_a_thread_each():
     assert remaining == 0
 
 
-def test_watchdog_fires_on_timeout_for_a_slow_request(caplog):
+def test_watchdog_fires_on_timeout_for_a_slow_request(capsys):
     """A request that never finishes before its deadline still gets logged by
     the process-global watchdog (behavioral, not just structural)."""
-    logger = logging.getLogger("test.issue4973.fires")
     # Tiny timeout so the watchdog (1s tick) fires quickly.
-    diag = RequestDiagnostics(
-        "GET", "/api/sessions", logger=logger, timeout_seconds=0.05
-    )
+    diag = RequestDiagnostics("GET", "/api/sessions", timeout_seconds=0.05)
     diag.stage("slow_stage")
-    with caplog.at_level(logging.WARNING, logger=logger.name):
-        deadline = time.monotonic() + 4.0
-        while time.monotonic() < deadline:
-            if any("still running" in (r.getMessage() or "") for r in caplog.records):
-                break
-            time.sleep(0.1)
-    assert any("still running" in (r.getMessage() or "") for r in caplog.records), \
+    output = ""
+    deadline = time.monotonic() + 4.0
+    while time.monotonic() < deadline:
+        output += capsys.readouterr().err
+        if "[webui][slow_request][running]" in output:
+            break
+        time.sleep(0.1)
+    output += capsys.readouterr().err
+    assert "[webui][slow_request][running]" in output, \
         "watchdog did not log the slow request within the window"
     diag.finish()
 
 
-def test_finish_before_deadline_prevents_watchdog_log(caplog):
+def test_finish_before_deadline_prevents_watchdog_log(capsys):
     """A request that finishes fast must NOT be logged by the watchdog."""
-    logger = logging.getLogger("test.issue4973.fast")
-    diag = RequestDiagnostics(
-        "GET", "/api/sessions", logger=logger, timeout_seconds=0.05
-    )
+    diag = RequestDiagnostics("GET", "/api/sessions", timeout_seconds=0.05)
     diag.finish()  # completes immediately, well under the deadline
-    with caplog.at_level(logging.WARNING, logger=logger.name):
-        time.sleep(1.5)  # give the watchdog a couple of ticks
-    assert not any(
-        "still running" in (r.getMessage() or "") for r in caplog.records
-    ), "watchdog logged a request that already finished"
+    time.sleep(1.5)  # give the watchdog a couple of ticks
+    assert "[webui][slow_request][running]" not in capsys.readouterr().err, \
+        "watchdog logged a request that already finished"

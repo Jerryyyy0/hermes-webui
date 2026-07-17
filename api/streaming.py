@@ -53,6 +53,14 @@ from api.models import (
     reconciled_state_db_messages_for_session,
 )
 from api.session_ops import mark_session_title_generated, session_has_manual_title
+from api.stream_diagnostics import (
+    StreamDiag,
+    debug_enabled as _stream_diag_debug_enabled,
+    elapsed_ms as _stream_diag_elapsed_ms,
+    get_stream_summary as _get_stream_diag_summary,
+    monotonic_ms as _stream_diag_monotonic_ms,
+    update_stream_summary as _update_stream_diag_summary,
+)
 from integration.chat_provider_errors import (
     append_persisted_provider_error_message as _append_persisted_provider_error_message,
     build_user_error_content as _build_user_error_content,
@@ -4627,6 +4635,18 @@ def _run_agent_streaming(
     q = STREAMS.get(stream_id)
     if q is None:
         return
+    stream_diag = StreamDiag(
+        stream_id=stream_id,
+        session_id=session_id,
+        model=model,
+        provider=model_provider or "",
+        workspace=workspace,
+    )
+    stream_diag.event(
+        "webui.worker.start",
+        "后台 Agent 执行开始，已绑定本次聊天流和会话上下文。",
+        ephemeral=bool(ephemeral),
+    )
     register_active_run(
         stream_id,
         session_id=session_id,
@@ -4637,10 +4657,12 @@ def _run_agent_streaming(
         provider=model_provider,
         ephemeral=bool(ephemeral),
     )
+    _pre_agent_setup_started = _stream_diag_monotonic_ms()
     try:
         run_journal = RunJournalWriter(session_id, stream_id)
     except Exception:
         run_journal = None
+        stream_diag.journal_failures += 1
         logger.debug("Failed to initialize run journal for stream %s", stream_id, exc_info=True)
     if not ephemeral:
         try:
@@ -4888,6 +4910,7 @@ def _run_agent_streaming(
         if cancel_event.is_set() and event not in ('cancel', 'error'):
             return
         event_id = None
+        stream_diag.note_queued_event(event)
         if run_journal is not None:
             try:
                 journaled = run_journal.append_sse_event(event, data)
@@ -4900,6 +4923,7 @@ def _run_agent_streaming(
                 if event_id:
                     STREAM_LAST_EVENT_ID[stream_id] = event_id
             except Exception:
+                stream_diag.journal_failures += 1
                 logger.debug("Failed to append run journal event %s for stream %s", event, stream_id, exc_info=True)
         if event_id and hasattr(q, "note_last_event_id"):
             try:
@@ -4910,6 +4934,7 @@ def _run_agent_streaming(
             queue_item = (event, data, event_id) if event_id and hasattr(q, "subscribe_with_snapshot") else (event, data)
             q.put_nowait(queue_item)
         except Exception:
+            stream_diag.queue_failures += 1
             logger.debug("Failed to put event to queue")
 
     def _agent_status_callback(kind, message):
@@ -5181,6 +5206,15 @@ def _run_agent_streaming(
             _metering_last_emit = [time.monotonic() - 1]  # fire immediately on first token
             _metering_output_deltas = [0]
             _metering_reasoning_deltas = [0]
+
+            stream_diag.event(
+                "webui.worker.pre_agent_setup",
+                "Agent 创建前的 WebUI 准备完成，包括运行状态、环境、MCP 和回调注册。",
+                elapsed_ms=_stream_diag_elapsed_ms(_pre_agent_setup_started),
+                mcp_discovery_ms=None,
+                skill_prewarm_ms=None,
+                env_lock_wait_ms=None,
+            )
 
             def _emit_metering():
                 now = time.monotonic()
@@ -5830,6 +5864,18 @@ def _run_agent_streaming(
             # argument 'credential_pool' — issue #772)
             import inspect as _inspect
             _agent_params = set(_inspect.signature(_AIAgent.__init__).parameters)
+            try:
+                _agent_source_file = _inspect.getsourcefile(_AIAgent) or _inspect.getfile(_AIAgent)
+            except Exception:
+                _agent_source_file = ""
+            stream_diag.event(
+                "webui.worker.agent_import",
+                "Agent 类加载自检完成，可用于确认 WebUI 实际加载的 hermes-agent 版本和回调能力。",
+                agent_class_module=getattr(_AIAgent, "__module__", ""),
+                agent_source_file=_agent_source_file,
+                event_callback_supported="event_callback" in _agent_params,
+                event_callback_will_be_passed="event_callback" in _agent_params,
+            )
 
             # CLI-parity max-iteration budget: read config.yaml's
             # agent.max_turns and pass it to AIAgent when supported. Without
@@ -5946,12 +5992,66 @@ def _run_agent_streaming(
             # re-instantiated fresh each turn (#855).
             if 'gateway_session_key' in _agent_params:
                 _agent_kwargs['gateway_session_key'] = session_id
+            _agent_init_timings = []
+            _agent_init_total_ms = [0.0]
 
+            def _agent_event_callback(event_name, payload):
+                if event_name != "agent.init_timing":
+                    return
+                if not isinstance(payload, dict):
+                    payload = {}
+                stage_name = str(payload.get("stage") or payload.get("name") or "agent_init.unknown")
+                fields = dict(payload)
+                fields.pop("stage", None)
+                fields.pop("name", None)
+                fields.setdefault("elapsed_ms", fields.get("duration_ms"))
+                fields.setdefault("message_zh", "Agent 初始化阶段完成。")
+                event_payload = stream_diag.event(stage_name, str(fields.pop("message_zh")), **fields)
+                _agent_init_timings.append(event_payload)
+                try:
+                    _agent_init_total_ms[0] += float(event_payload.get("elapsed_ms") or 0)
+                except Exception:
+                    pass
+                _update_stream_diag_summary(
+                    stream_id,
+                    agent_init_total_ms=round(_agent_init_total_ms[0], 1),
+                    agent_init_breakdown={item.get("event"): item.get("elapsed_ms") for item in _agent_init_timings},
+                )
+
+            if 'event_callback' in _agent_params:
+                _agent_kwargs['event_callback'] = _agent_event_callback
+
+            stream_diag.event(
+                "webui.worker.agent_kwargs_ready",
+                "Agent 构造参数已准备完成，即将进入缓存检查或 Agent 构造。",
+                event_callback_supported="event_callback" in _agent_params,
+                event_callback_passed="event_callback" in _agent_kwargs,
+                fallback_count=len(_fallback_resolved or []),
+                toolset_count=len(_toolsets or []),
+            )
+            _agent_cache_started = _stream_diag_monotonic_ms()
+            _agent_cache_hit = False
+            _agent_cache_evicted_count = 0
+            _agent_construct_started = None
+            _agent_constructor_total_ms = None
             # ── Agent cache: reuse across messages in the same session ──
             # Mirrors gateway _agent_cache.  Keeps _user_turn_count alive so
             # injectionFrequency: "first-turn" actually suppresses after turn 1.
             if ephemeral:
+                _agent_construct_started = _stream_diag_monotonic_ms()
+                stream_diag.event(
+                    "webui.worker.agent_construct_start",
+                    "开始构造临时 Agent。",
+                    ephemeral=True,
+                )
                 agent = _AIAgent(**_agent_kwargs)
+                _agent_constructor_total_ms = _stream_diag_elapsed_ms(_agent_construct_started)
+                stream_diag.event(
+                    "webui.worker.agent_construct_done",
+                    "临时 Agent 构造完成。",
+                    elapsed_ms=_agent_constructor_total_ms,
+                    ephemeral=True,
+                )
                 logger.debug('[webui] Created ephemeral agent for session %s', session_id)
             else:
                 import hashlib as _hashlib
@@ -5985,12 +6085,17 @@ def _run_agent_streaming(
 
                 agent = None
                 _identity_mismatch_entry = None
+                stream_diag.event(
+                    "webui.worker.agent_cache_lookup_start",
+                    "开始检查 WebUI Agent 缓存。",
+                )
                 with SESSION_AGENT_CACHE_LOCK:
                     _cached = SESSION_AGENT_CACHE.get(session_id)
                     if _cached and _cached[1] == _agent_sig:
                         _cached_agent = _cached[0]
                         if _cached_agent_matches_session(_cached_agent, session_id):
                             agent = _cached_agent
+                            _agent_cache_hit = True
                             SESSION_AGENT_CACHE.move_to_end(session_id)  # LRU: mark as recently used
                             logger.debug('[webui] Reusing cached agent for session %s', session_id)
                         else:
@@ -6008,6 +6113,12 @@ def _run_agent_streaming(
                             register_agent(session_id, agent)
                         except Exception:
                             logger.debug("Lifecycle register_agent failed for cached session %s", session_id, exc_info=True)
+
+                stream_diag.event(
+                    "webui.worker.agent_cache_lookup_done",
+                    "WebUI Agent 缓存检查完成。",
+                    cache_hit=bool(agent is not None),
+                )
 
                 if _identity_mismatch_entry is not None:
                     try:
@@ -6044,6 +6155,8 @@ def _run_agent_streaming(
                         agent.tool_complete_callback = _agent_kwargs.get('tool_complete_callback')
                     if hasattr(agent, 'status_callback'):
                         agent.status_callback = _agent_kwargs.get('status_callback')
+                    if hasattr(agent, 'event_callback'):
+                        agent.event_callback = _agent_kwargs.get('event_callback')
                     if hasattr(agent, 'interim_assistant_callback'):
                         agent.interim_assistant_callback = _agent_kwargs.get('interim_assistant_callback')
                     if hasattr(agent, 'reasoning_callback'):
@@ -6072,7 +6185,20 @@ def _run_agent_streaming(
                     if hasattr(agent, '_interrupt_message'):
                         agent._interrupt_message = None
                 else:
+                    _agent_construct_started = _stream_diag_monotonic_ms()
+                    stream_diag.event(
+                        "webui.worker.agent_construct_start",
+                        "开始构造新 Agent。",
+                        ephemeral=False,
+                    )
                     agent = _AIAgent(**_agent_kwargs)
+                    _agent_constructor_total_ms = _stream_diag_elapsed_ms(_agent_construct_started)
+                    stream_diag.event(
+                        "webui.worker.agent_construct_done",
+                        "新 Agent 构造完成。",
+                        elapsed_ms=_agent_constructor_total_ms,
+                        ephemeral=False,
+                    )
                     # Register the new agent with the memory lifecycle so
                     # its commit_memory_session() can be found later.
                     try:
@@ -6119,6 +6245,7 @@ def _run_agent_streaming(
                                 break  # all over-cap entries are active; defer
                             evicted_entry = SESSION_AGENT_CACHE.pop(_evictable_sid)
                             _evicted_items.append((_evictable_sid, evicted_entry))
+                    _agent_cache_evicted_count = len(_evicted_items)
                     # Commit and close evicted agents outside the cache lock so
                     # concurrent cache users are not blocked by provider I/O.
                     for _evicted_sid, _evicted_entry in _evicted_items:
@@ -6130,6 +6257,31 @@ def _run_agent_streaming(
                         logger.debug('[webui] Evicted LRU agent from cache: %s', _evicted_sid)
                     logger.debug('[webui] Created new agent for session %s', session_id)
 
+            stream_diag.event(
+                "webui.worker.agent_ready",
+                "Agent 已准备就绪，已汇总缓存复用、构造耗时和内部初始化分段。",
+                cache_hit=bool(_agent_cache_hit),
+                cache_elapsed_ms=_stream_diag_elapsed_ms(_agent_cache_started),
+                evicted_count=_agent_cache_evicted_count,
+                constructor_total_ms=_agent_constructor_total_ms,
+                event_callback_supported="event_callback" in _agent_params,
+                event_callback_passed="event_callback" in _agent_kwargs,
+                agent_init_breakdown_available=bool(_agent_init_timings),
+                agent_init_missing_reason=(
+                    "cache_hit_reused_existing_agent"
+                    if _agent_cache_hit else (
+                        "event_callback_not_supported_by_loaded_agent"
+                        if "event_callback" not in _agent_params else "agent_did_not_emit_init_timing"
+                    )
+                ) if not _agent_init_timings else None,
+                agent_init_total_ms=round(_agent_init_total_ms[0], 1) if _agent_init_timings else None,
+            )
+            _update_stream_diag_summary(
+                stream_id,
+                constructor_total_ms=_agent_constructor_total_ms,
+                agent_init_total_ms=round(_agent_init_total_ms[0], 1) if _agent_init_timings else None,
+            )
+            _context_prepare_started = _stream_diag_monotonic_ms()
             # Store agent instance for cancel/interrupt propagation
             with STREAMS_LOCK:
                 AGENT_INSTANCES[stream_id] = agent
@@ -6274,6 +6426,19 @@ def _run_agent_streaming(
                 _agent_msg_text = "\n\n".join([*_process_notifications, msg_text]).strip()
             user_message = _build_native_multimodal_message(workspace_ctx, _agent_msg_text, attachments, workspace, cfg=_cfg)
             conversation_history = _sanitize_messages_for_api(_previous_context_messages, cfg=_cfg)
+            stream_diag.event(
+                "webui.worker.context_prepared",
+                "模型调用前上下文准备完成，包括历史消息读取、去重、附件处理和 API 输入整理。",
+                elapsed_ms=_stream_diag_elapsed_ms(_context_prepare_started),
+                state_db_load_ms=None,
+                message_count=len(_previous_messages),
+                context_message_count=len(conversation_history),
+                attachments_count=len(attachments or []),
+                display_reconcile_ms=None if not _stream_diag_debug_enabled() else None,
+                context_reconcile_ms=None if not _stream_diag_debug_enabled() else None,
+                dedupe_ms=None if not _stream_diag_debug_enabled() else None,
+                sanitize_ms=None if not _stream_diag_debug_enabled() else None,
+            )
             logger.info(
                 "[agent_prompt_input] session_id=%s stream_id=%s model=%s provider=%s system_message=%r ephemeral_system_prompt=%r conversation_history=%r user_message=%r",
                 session_id,
@@ -6286,6 +6451,7 @@ def _run_agent_streaming(
                 user_message,
             )
             _persistent_state_before = _persistent_state_snapshot(_profile_home)
+            _run_conversation_started = _stream_diag_monotonic_ms()
             result = agent.run_conversation(
                 user_message=user_message,
                 system_message=workspace_system_msg,
@@ -6293,6 +6459,19 @@ def _run_agent_streaming(
                 task_id=session_id,
                 persist_user_message=msg_text,
             )
+            _run_conversation_ms = _stream_diag_elapsed_ms(_run_conversation_started)
+            stream_diag.event(
+                "webui.worker.run_conversation",
+                "Agent 主执行完成，已汇总模型响应、首 token 和工具调用耗时。",
+                elapsed_ms=_run_conversation_ms,
+                first_token_ms=stream_diag.first_token_ms,
+                first_reasoning_ms=stream_diag.first_reasoning_ms,
+                first_tool_ms=stream_diag.first_tool_ms,
+                tool_call_count=stream_diag.event_counts.get("tool", 0) + stream_diag.event_counts.get("tool_start", 0) + stream_diag.event_counts.get("tool_complete", 0),
+                tool_error_count=stream_diag.event_counts.get("tool_error", 0),
+            )
+            _update_stream_diag_summary(stream_id, run_conversation_ms=_run_conversation_ms, first_token_ms=stream_diag.first_token_ms)
+            _finalize_started = _stream_diag_monotonic_ms()
             if cancel_event.is_set():
                 if _checkpoint_stop is not None:
                     _checkpoint_stop.set()
@@ -7123,7 +7302,9 @@ def _run_agent_streaming(
                     return
                 # Make the completed transcript durable before publishing the
                 # manifest decision derived from its final assistant message.
+                _final_save_started = _stream_diag_monotonic_ms()
                 s.save()
+                _final_save_ms = _stream_diag_elapsed_ms(_final_save_started)
                 if _cron_followup_turn_key_matches(s, msg_text, _manifest_turn_key):
                     _artifact_decision = _persist_turn_artifact_paths(s, _manifest_turn_key)
                 else:
@@ -7218,6 +7399,8 @@ def _run_agent_streaming(
                 except Exception:
                     logger.debug("Persistent state change detection failed for session %s", s.session_id, exc_info=True)
             # Sync to state.db for /insights (opt-in setting)
+            _usage_sync_started = _stream_diag_monotonic_ms()
+            _usage_sync_ms = None
             try:
                 from api.config import load_settings as _load_settings
                 if _load_settings().get('sync_to_insights'):
@@ -7239,6 +7422,8 @@ def _run_agent_streaming(
                     )
             except Exception:
                 logger.debug("Failed to sync session to insights")
+            finally:
+                _usage_sync_ms = _stream_diag_elapsed_ms(_usage_sync_started)
             usage = {
                 'input_tokens': input_tokens,
                 'output_tokens': output_tokens,
@@ -7443,6 +7628,21 @@ def _run_agent_streaming(
                         })
             except Exception as _goal_exc:
                 logger.debug("Goal continuation hook failed for session %s: %s", session_id, _goal_exc)
+            stream_diag.event(
+                "webui.worker.finalize",
+                "Agent 输出已完成收尾处理，包括结果合并、用量统计和会话保存。",
+                elapsed_ms=_stream_diag_elapsed_ms(_finalize_started),
+                final_save_ms=locals().get('_final_save_ms'),
+                usage_sync_ms=_usage_sync_ms,
+                output_tokens=output_tokens,
+                estimated_cost=estimated_cost,
+            )
+            _update_stream_diag_summary(
+                stream_id,
+                final_save_ms=locals().get('_final_save_ms'),
+                output_tokens=output_tokens,
+                estimated_cost=estimated_cost,
+            )
             raw_session = s.compact() | {'messages': s.messages, 'tool_calls': tool_calls}
             _emit_turn_complete_reconcile_delta()
             put('done', {'session': redact_session_data(raw_session), 'usage': usage})
@@ -7500,6 +7700,12 @@ def _run_agent_streaming(
                 else: os.environ['HERMES_HOME'] = old_hermes_home
 
     except Exception as e:
+        stream_diag.event(
+            "webui.worker.error",
+            "后台执行发生异常，已进入错误处理流程。",
+            error_type=type(e).__name__,
+            error=str(e),
+        )
         print('[webui] stream error:\n' + traceback.format_exc(), flush=True)
         err_str = str(e)
         # Sanitize HTML from provider error responses — some providers return
@@ -7690,8 +7896,33 @@ def _run_agent_streaming(
             update_active_run(stream_id, phase="finalizing")
             _last_resort_sync_from_core(s, stream_id, _agent_lock)
         _clear_thread_env()  # TD1: always clear thread-local context
+        _cleanup_started = _stream_diag_monotonic_ms()
         if _streaming_cron_profile_home_token is not None:
             _STREAMING_CRON_PROFILE_HOME.reset(_streaming_cron_profile_home_token)
+        _status = "cancelled" if cancel_event.is_set() else "ok"
+        if s is not None:
+            try:
+                _last_error = getattr(agent, '_last_error', None) if agent is not None else None
+                if _last_error:
+                    _status = "error"
+            except Exception:
+                pass
+        _summary_fields = stream_diag.summary_fields()
+        _summary_fields.update(
+            status=_status,
+            cleanup_ms=_stream_diag_elapsed_ms(_cleanup_started),
+            agent_init_total_ms=(_get_stream_diag_summary(stream_id) or {}).get("agent_init_total_ms"),
+            run_conversation_ms=(_get_stream_diag_summary(stream_id) or {}).get("run_conversation_ms"),
+            final_save_ms=(_get_stream_diag_summary(stream_id) or {}).get("final_save_ms"),
+        )
+        stream_diag.event(
+            "webui.worker.cleanup_summary",
+            "后台执行已结束并完成资源清理，已生成本轮执行汇总。",
+            **_summary_fields,
+        )
+        _summary_for_store = dict(_summary_fields)
+        _summary_for_store.pop("stream_id", None)
+        _update_stream_diag_summary(stream_id, **_summary_for_store)
         with STREAMS_LOCK:
             STREAMS.pop(stream_id, None)
             CANCEL_FLAGS.pop(stream_id, None)

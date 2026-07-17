@@ -1,9 +1,12 @@
 import json
+import re
 from unittest.mock import MagicMock, patch
 from urllib.parse import urlparse
 
 from integration.identity.handlers import try_handle_get
 from integration.identity.session_store import clear_session, get_cached_identity
+
+_TS_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3} ")
 
 
 def _json_payload(handler: MagicMock) -> dict:
@@ -151,7 +154,7 @@ def test_upstream_403_passthrough():
     assert isinstance(payload.get("timestamp"), int)
 
 
-def test_lookup_unreachable_returns_502():
+def test_lookup_unreachable_returns_502(capsys):
     handler = MagicMock()
     handler.headers = {"Authorization": "Bearer tok"}
     parsed = urlparse("/api/integration/webui_login")
@@ -168,6 +171,11 @@ def test_lookup_unreachable_returns_502():
     assert payload["error"] == "identity_lookup_failed"
     assert "connection refused" in payload["message"]
     assert isinstance(payload.get("timestamp"), int)
+    log_line = capsys.readouterr().err.strip()
+    assert _TS_RE.match(log_line)
+    assert "[webui][integration_login][exit]" in log_line
+    assert "status=502" in log_line
+    assert "[webui] {" not in log_line
 
 
 def test_expired_cache_returns_session_expired():

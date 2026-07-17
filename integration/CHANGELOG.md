@@ -20,6 +20,8 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 - **Structured API error logging** — `j()` / `bad()` responses with `status >= 400` emit `[webui]` JSON `event=api_error` lines (method, path without query, status, error/message, optional traceback for 5xx). Unhandled exceptions in `server.py` use the same format (`source=unhandled`). Access logs may include `error_summary` when an API error was recorded. Module: `integration/request_logging/`. Env: `HERMES_WEBUI_API_ERROR_LOG` (default on), `HERMES_WEBUI_API_ERROR_LOG_MIN_STATUS` (default `400`). Errors are written only via `[webui]` stderr JSON (no duplicate `logging` mirror line).
 
+- **Stream diagnostics logging** — 新增 `HERMES_WEBUI_STREAM_DIAG` 控制的流式执行诊断日志，记录 agent 初始化、上下文准备、运行耗时、最终保存和 worker cleanup summary，便于排查慢流、失败流和资源清理问题。
+
 ### Changed
 
 - **成果库同步知识库取消总量限制** — `POST /api/integration/knowledge_base/upload_artifacts` 不再限制单次同步的全部文件总大小；单文件 50 MiB 和最多 20 个文件的限制保持不变。

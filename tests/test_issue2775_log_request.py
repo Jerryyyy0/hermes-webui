@@ -1,6 +1,13 @@
-import json
+import re
 
 from server import Handler
+
+_TS_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3} ")
+
+
+def _without_ts(line: str) -> str:
+    assert _TS_RE.match(line)
+    return _TS_RE.sub("", line, count=1)
 
 
 def test_log_request_handles_malformed_request_without_path(capsys):
@@ -10,13 +17,9 @@ def test_log_request_handles_malformed_request_without_path(capsys):
 
     Handler.log_request(handler, "400")
 
-    line = capsys.readouterr().out.strip()
-    assert line.startswith("[webui] ")
-    record = json.loads(line.removeprefix("[webui] "))
-    assert record["method"] == "-"
-    assert record["path"] == "-"
-    assert record["status"] == 400
-    assert record["remote"] == "-"
+    line = _without_ts(capsys.readouterr().err.strip())
+    assert line.startswith("[webui][request] - - -> 400")
+    assert "remote" not in line
 
 
 def test_log_request_includes_remote_address(capsys):
@@ -28,10 +31,10 @@ def test_log_request_includes_remote_address(capsys):
 
     Handler.log_request(handler, "401")
 
-    line = capsys.readouterr().out.strip()
-    record = json.loads(line.removeprefix("[webui] "))
-    assert record["remote"] == "192.0.2.10"
-    assert "forwarded_for" not in record
+    line = _without_ts(capsys.readouterr().err.strip())
+    assert line.startswith("[webui][request] POST /api/auth/login -> 401")
+    assert "remote=192.0.2.10" in line
+    assert "forwarded_for" not in line
 
 
 def test_log_request_includes_first_forwarded_for_address(capsys):
@@ -48,7 +51,7 @@ def test_log_request_includes_first_forwarded_for_address(capsys):
 
     Handler.log_request(handler, "401")
 
-    line = capsys.readouterr().out.strip()
-    record = json.loads(line.removeprefix("[webui] "))
-    assert record["remote"] == "192.0.2.10"
-    assert record["forwarded_for"] == "203.0.113.7"
+    line = _without_ts(capsys.readouterr().err.strip())
+    assert line.startswith("[webui][request] POST /api/auth/login -> 401")
+    assert "remote=192.0.2.10" in line
+    assert "forwarded_for=203.0.113.7" in line

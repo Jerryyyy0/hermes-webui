@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-import json
 import time
 
 from api.helpers import _sanitize_error, j
 
 from integration.config import identity_lookup_enabled
+from integration.request_logging.formatting import format_kv, one_line, with_timestamp
+from integration.request_logging.logger import console_error, console_info, console_warning
 from integration.identity.client import IdentityLookupError, lookup_current_identity
 from integration.identity.session_store import (
     clear_session,
@@ -41,18 +42,27 @@ def _response_payload(payload: dict) -> dict:
 
 
 def _log_integration_login(handler, *, phase: str, **fields) -> None:
-    """Structured trace for /api/integration/webui_login (docker logs / [webui] prefix)."""
+    """Human-readable trace for /api/integration/webui_login."""
     record = {
         "event": "integration_login",
         "phase": phase,
-        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "ts": time.time(),
         "remote": _request_remote(handler),
         **fields,
     }
     forwarded_for = str(handler.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
     if forwarded_for:
         record["forwarded_for"] = forwarded_for
-    print(f"[webui] {json.dumps(record, ensure_ascii=False)}", flush=True)
+    extras = format_kv({key: value for key, value in record.items() if key not in {"event", "phase", "ts"}})
+    suffix = f" {extras}" if extras else ""
+    line = with_timestamp(f"[webui][integration_login][{one_line(phase)}]{suffix}", record)
+    status = record.get("status")
+    if isinstance(status, int) and status >= 500:
+        console_error(line)
+    elif isinstance(status, int) and status >= 400:
+        console_warning(line)
+    else:
+        console_info(line)
 
 
 def try_handle_get(handler, parsed) -> bool:
