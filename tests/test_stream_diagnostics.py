@@ -51,6 +51,25 @@ def test_stream_diag_logs_pretty_sanitized_line(monkeypatch, capsys):
     assert "x" * 241 not in output
 
 
+def test_stream_diag_timing_fields_are_not_redacted(monkeypatch, capsys):
+    monkeypatch.setenv("HERMES_WEBUI_STREAM_DIAG", "1")
+
+    payload = sd.log_event(
+        "agent.model_first_delta",
+        "模型返回首个有效增量。",
+        stream_id="s1",
+        first_token_ms=123.4,
+        first_visible_token_ms=456.7,
+    )
+
+    output = capsys.readouterr().err
+    assert payload["first_token_ms"] == 123.4
+    assert payload["first_visible_token_ms"] == 456.7
+    assert "first_token=123.4ms" in output
+    assert "first_visible_token=456.7ms" in output
+    assert "[redacted]" not in output
+
+
 def test_stream_diag_non_slow_events_are_emitted(monkeypatch, capsys):
     monkeypatch.setenv("HERMES_WEBUI_STREAM_DIAG", "1")
 
@@ -89,6 +108,7 @@ def test_stream_diag_summary_and_event_counters(monkeypatch):
     sd.clear_stream_summary("stream-test")
     diag = sd.StreamDiag(stream_id="stream-test", session_id="session-test", workspace="/tmp/workspace")
 
+    diag.note_model_first_delta()
     diag.note_queued_event("token")
     diag.note_queued_event("token")
     diag.note_queued_event("tool")
@@ -101,5 +121,6 @@ def test_stream_diag_summary_and_event_counters(monkeypatch):
     assert summary["events_enqueued"] == 3
     assert summary["event_counts"] == {"token": 2, "tool": 1}
     assert summary["first_token_ms"] is not None
+    assert summary["first_visible_token_ms"] is not None
     assert stored["events_enqueued"] == 3
     assert stored["workspace_hash"]

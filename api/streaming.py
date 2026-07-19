@@ -4911,6 +4911,11 @@ def _run_agent_streaming(
             return
         event_id = None
         stream_diag.note_queued_event(event)
+        if event == 'token' and stream_diag.first_visible_token_ms is not None:
+            _update_stream_diag_summary(
+                stream_id,
+                first_visible_token_ms=stream_diag.first_visible_token_ms,
+            )
         if run_journal is not None:
             try:
                 journaled = run_journal.append_sse_event(event, data)
@@ -5996,6 +6001,18 @@ def _run_agent_streaming(
             _agent_init_total_ms = [0.0]
 
             def _agent_event_callback(event_name, payload):
+                if event_name == "agent.model_first_delta":
+                    if stream_diag.first_token_ms is not None:
+                        return
+                    first_token_ms = stream_diag.note_model_first_delta()
+                    _update_stream_diag_summary(stream_id, first_token_ms=first_token_ms)
+                    stream_diag.event(
+                        "agent.model_first_delta",
+                        "模型返回首个有效token，包括文本、推理或工具调用token。",
+                        elapsed_ms=first_token_ms,
+                        api_call_count=(payload or {}).get("api_call_count") if isinstance(payload, dict) else None,
+                    )
+                    return
                 if event_name != "agent.init_timing":
                     return
                 if not isinstance(payload, dict):

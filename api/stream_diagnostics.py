@@ -42,6 +42,7 @@ _CORE_CONSOLE_FIELDS = (
     "agent_init_total_ms",
     "run_conversation_ms",
     "first_token_ms",
+    "first_visible_token_ms",
     "final_save_ms",
     "error_type",
     "error",
@@ -70,6 +71,7 @@ _FIELD_ALIASES = {
     "agent_init_total_ms": "agent_init",
     "run_conversation_ms": "run",
     "first_token_ms": "first_token",
+    "first_visible_token_ms": "first_visible_token",
     "final_save_ms": "save",
     "cache_elapsed_ms": "cache",
     "event_callback_supported": "callback_supported",
@@ -89,6 +91,7 @@ _MS_FIELDS = {
     "agent_init_total_ms",
     "run_conversation_ms",
     "first_token_ms",
+    "first_visible_token_ms",
     "final_save_ms",
     "cache_elapsed_ms",
 }
@@ -181,7 +184,7 @@ def _base_payload(event: str, message_zh: str, fields: dict[str, Any]) -> dict[s
         if v is None:
             continue
         key_l = str(k).lower()
-        if any(token in key_l for token in ("key", "token", "secret", "password", "cookie", "authorization")):
+        if k not in _MS_FIELDS and any(token in key_l for token in ("key", "token", "secret", "password", "cookie", "authorization")):
             payload[k] = "[redacted]"
         else:
             payload[k] = _clean_value(v)
@@ -307,6 +310,7 @@ class StreamDiag:
         self.events_enqueued = 0
         self.first_event_ms: float | None = None
         self.first_token_ms: float | None = None
+        self.first_visible_token_ms: float | None = None
         self.first_reasoning_ms: float | None = None
         self.first_tool_ms: float | None = None
         self.last_event_type = ""
@@ -342,6 +346,11 @@ class StreamDiag:
             merged.setdefault("elapsed_ms", elapsed_ms(started))
             self.event(event, message_zh, **merged)
 
+    def note_model_first_delta(self) -> float:
+        if self.first_token_ms is None:
+            self.first_token_ms = elapsed_ms(self.start_ms)
+        return self.first_token_ms
+
     def note_queued_event(self, event_type: str) -> None:
         self.events_enqueued += 1
         self.event_counts[str(event_type or "unknown")] += 1
@@ -349,8 +358,8 @@ class StreamDiag:
         now_elapsed = elapsed_ms(self.start_ms)
         if self.first_event_ms is None:
             self.first_event_ms = now_elapsed
-        if event_type == "token" and self.first_token_ms is None:
-            self.first_token_ms = now_elapsed
+        if event_type == "token" and self.first_visible_token_ms is None:
+            self.first_visible_token_ms = now_elapsed
         elif event_type == "reasoning" and self.first_reasoning_ms is None:
             self.first_reasoning_ms = now_elapsed
         elif str(event_type or "").startswith("tool") and self.first_tool_ms is None:
@@ -363,6 +372,7 @@ class StreamDiag:
             event_counts=dict(self.event_counts),
             first_event_ms=self.first_event_ms,
             first_token_ms=self.first_token_ms,
+            first_visible_token_ms=self.first_visible_token_ms,
             first_reasoning_ms=self.first_reasoning_ms,
             first_tool_ms=self.first_tool_ms,
             last_event_type=self.last_event_type,

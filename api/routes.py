@@ -9741,7 +9741,7 @@ def _handle_sse_stream(handler, parsed):
     last_event_type = ""
     disconnect_reason = "unknown"
     first_event_logged = False
-    first_token_logged = False
+    first_visible_token_logged = False
     replay_requested = bool(
         qs.get("replay", [""])[0]
         or qs.get("after_seq", [None])[0] not in (None, "")
@@ -9904,16 +9904,17 @@ def _handle_sse_stream(handler, parsed):
                     event_type=event,
                     wait_ms=_stream_diag_elapsed_ms(opened_ms),
                 )
-            if event == "token" and not first_token_logged:
-                first_token_logged = True
+            if event == "token" and not first_visible_token_logged:
+                first_visible_token_logged = True
                 worker_summary = _get_stream_diag_summary(stream_id)
                 _stream_diag_log_event(
-                    "webui.stream.first_token",
-                    "聊天流收到首个模型文本片段，可用于定位首 token 延迟。",
+                    "webui.stream.first_visible_token",
+                    "聊天流收到首个可见文本片段，用于区分模型首增量与最终文本输出延迟。",
                     stream_id=stream_id,
                     request_id=request_id,
                     wait_ms=_stream_diag_elapsed_ms(opened_ms),
-                    worker_first_token_ms=worker_summary.get("first_token_ms"),
+                    first_token_ms=worker_summary.get("first_token_ms"),
+                    first_visible_token_ms=worker_summary.get("first_visible_token_ms"),
                 )
             if event_id:
                 _sse_with_id(handler, event, data, event_id)
