@@ -1577,14 +1577,14 @@ def delete_local_skill(name: str, dir_name: str = "") -> dict:
     }
 
 
-def save_skill_detail(name: str, detail: dict, dir_name: str = "") -> dict:
+def save_skill_detail(name: str, detail: dict, dir_name: str = "", profile: str = "default") -> dict:
     """Write .detail.json into the skill directory."""
     skill_name = str(name or "").strip()
     if not skill_name:
         return {"error": "缺少 name", "status": 400}
     if not isinstance(detail, dict):
         return {"error": "detail must be a dict", "status": 400}
-    skills_dir = shared_skills_dir()
+    skills_dir = skills_dir_for_profile(profile) if profile else shared_skills_dir()
     skill_dir = _resolve_skill_dir(skills_dir, skill_name, dir_name)
     if not skill_dir or not skill_dir.is_dir():
         return {"error": "Skill not found", "status": 404}
@@ -1595,7 +1595,7 @@ def save_skill_detail(name: str, detail: dict, dir_name: str = "") -> dict:
     except Exception as exc:
         _log.warning("save_skill_detail: failed to write %s: %s", dest, exc)
         return {"error": str(exc), "status": 500}
-    return {"ok": True, "name": skill_name}
+    return {"ok": True, "name": skill_name, "profile": profile}
 
 
 def extract_zip_skill_content(zip_bytes: bytes) -> dict:

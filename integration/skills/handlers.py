@@ -776,11 +776,38 @@ def _post_skillhub_detail(handler, body: dict) -> bool:
     if not isinstance(detail, dict):
         return _respond_bad(handler, "detail must be an object", 400)
     dir_name = str(body.get("dir_name", "") or "").strip()
-    result = local_skills.save_skill_detail(name, detail, dir_name)
-    status = int(result.get("status") or 0)
-    if result.get("error"):
-        return _respond_bad(handler, result["error"], status or 400)
-    return _respond(handler, result)
+
+    # Get all profiles that have this skill installed
+    try:
+        profiles_result = skillhub.get_skill_installed_profiles(name)
+        profiles = profiles_result.get("installed", [])
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).warning("Failed to get installed profiles for %s: %s", name, exc)
+        profiles = []
+
+    # Save to default profile first
+    results = []
+    default_result = local_skills.save_skill_detail(name, detail, dir_name, profile="default")
+    results.append({"profile": "default", **default_result})
+
+    # Save to other profiles
+    seen_profiles = {"default"}
+    for p in profiles:
+        profile_name = str(p.get("profile") or "").strip()
+        if not profile_name or profile_name in seen_profiles:
+            continue
+        seen_profiles.add(profile_name)
+        profile_dir_name = str(p.get("dir_name") or dir_name).strip()
+        result = local_skills.save_skill_detail(name, detail, profile_dir_name, profile=profile_name)
+        results.append({"profile": profile_name, **result})
+
+    # Check if any profile failed
+    failed = [r for r in results if r.get("error")]
+    if failed and len(failed) == len(results):
+        return _respond_bad(handler, failed[0]["error"], int(failed[0].get("status") or 500))
+
+    return _respond(handler, {"ok": True, "name": name, "results": results})
 
 
 def _get_skillhub_installed_profiles(handler, parsed) -> bool:
