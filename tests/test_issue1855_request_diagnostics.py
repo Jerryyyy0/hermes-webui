@@ -1,10 +1,17 @@
 import json
-import logging
+import re
 from pathlib import Path
 
 import api.models as models
 from api.models import Session
 from api.request_diagnostics import RequestDiagnostics
+
+_TS_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3} ")
+
+
+def _without_ts(line: str) -> str:
+    assert _TS_RE.match(line)
+    return _TS_RE.sub("", line, count=1)
 
 
 class _StageRecorder:
@@ -15,47 +22,40 @@ class _StageRecorder:
         self.stages.append(name)
 
 
-def test_request_diagnostics_timeout_record_includes_stage_without_thread_stacks_by_default(caplog):
-    logger = logging.getLogger("test.issue1855.timeout")
+def test_request_diagnostics_timeout_record_includes_stage_without_thread_stacks_by_default(capsys):
     diag = RequestDiagnostics(
         "GET",
         "/api/sessions?all_profiles=1",
-        logger=logger,
         timeout_seconds=5,
         auto_start=False,
     )
     diag.stage("all_sessions.read_index")
 
-    with caplog.at_level(logging.WARNING, logger=logger.name):
-        diag._on_timeout()
+    diag._on_timeout()
 
-    assert len(caplog.records) == 1
-    record = json.loads(caplog.records[0].args[0])
-    assert record["method"] == "GET"
-    assert record["path"] == "/api/sessions"
-    assert record["current_stage"] == "all_sessions.read_index"
-    assert record["elapsed_ms"] >= 0
-    assert any(stage["name"] == "all_sessions.read_index" for stage in record["stages"])
-    assert "thread_stacks" not in record
+    line = _without_ts(capsys.readouterr().err.strip())
+    assert line.startswith("[webui][slow_request][running] GET /api/sessions")
+    assert "current_stage=all_sessions.read_index" in line
+    assert "stages=start:" in line
+    assert "all_sessions.read_index:" in line
+    assert "elapsed=" in line
+    assert "thread_stacks=yes" not in line
 
 
-def test_request_diagnostics_timeout_record_includes_thread_stacks_when_enabled(caplog, monkeypatch):
+def test_request_diagnostics_timeout_record_includes_thread_stacks_when_enabled(capsys, monkeypatch):
     monkeypatch.setenv("HERMES_WEBUI_SLOW_REQUEST_STACKS", "1")
-    logger = logging.getLogger("test.issue1855.timeout.stacks")
     diag = RequestDiagnostics(
         "GET",
         "/api/sessions?all_profiles=1",
-        logger=logger,
         timeout_seconds=5,
         auto_start=False,
     )
     diag.stage("all_sessions.read_index")
 
-    with caplog.at_level(logging.WARNING, logger=logger.name):
-        diag._on_timeout()
+    diag._on_timeout()
 
-    record = json.loads(caplog.records[0].args[0])
-    assert record["thread_stacks"]
+    line = _without_ts(capsys.readouterr().err.strip())
+    assert "thread_stacks=yes" in line
 
 
 def test_request_diagnostics_maybe_start_is_limited_to_issue1855_paths():

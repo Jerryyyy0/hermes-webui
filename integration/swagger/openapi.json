@@ -473,11 +473,67 @@
     "/api/upload": {
       "post": {
         "tags": ["Workspace"],
-        "summary": "上传文件",
+        "summary": "上传会话附件",
+        "description": "将文件保存为指定会话的附件，不写入会话工作区。`session_id` 必须存在，且必须归属请求 Profile。优先使用有效的 `hermes_profile` Cookie；未携带该 Cookie 时，使用 multipart `profile` 字段校验。Profile 不匹配时，服务端为防止跨 Profile 枚举会话而返回 404 `Session not found`。文件大小受服务端 `MAX_UPLOAD_BYTES` 限制（默认 50 MiB，可由 `HERMES_WEBUI_MAX_UPLOAD_MB` 覆盖）。",
+        "parameters": [
+          {
+            "name": "hermes_profile",
+            "in": "cookie",
+            "required": false,
+            "schema": { "type": "string" },
+            "description": "当前活跃 Profile。存在有效 Cookie 时优先于 multipart `profile`；浏览器 WebUI 请求通常自动携带。"
+          }
+        ],
         "requestBody": {
-          "content": { "multipart/form-data": { "schema": { "type": "object", "properties": { "file": { "type": "string", "format": "binary" } } } } }
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "session_id": {
+                    "type": "string",
+                    "description": "目标会话 ID，必须属于请求 Profile。"
+                  },
+                  "profile": {
+                    "type": "string",
+                    "description": "请求 Profile。仅在未携带有效 `hermes_profile` Cookie 时用于会话归属校验；例如 `coder`。"
+                  },
+                  "file": {
+                    "type": "string",
+                    "format": "binary",
+                    "description": "待上传的二进制文件。"
+                  }
+                },
+                "required": ["session_id", "file"]
+              }
+            }
+          }
         },
-        "responses": { "200": { "description": "上传结果" } }
+        "responses": {
+          "200": {
+            "description": "上传成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["filename", "path", "size", "mime", "is_image"],
+                  "properties": {
+                    "filename": { "type": "string", "description": "服务端保存后的文件名；同名文件自动追加序号。" },
+                    "path": { "type": "string", "description": "服务器上的附件绝对路径。" },
+                    "size": { "type": "integer", "format": "int64", "description": "文件大小（字节）。" },
+                    "mime": { "type": "string", "description": "根据文件名推断的 MIME 类型。" },
+                    "is_image": { "type": "boolean", "description": "是否为图片文件。" }
+                  }
+                }
+              }
+            }
+          },
+          "400": { "description": "请求格式无效、缺少文件、文件名无效或其他上传参数错误" },
+          "404": { "description": "会话不存在，或会话不属于当前 Profile（返回 `Session not found`）" },
+          "413": { "description": "文件大小超过服务端上限" },
+          "500": { "description": "服务器保存附件失败" }
+        }
       }
     },
     "/api/git/status": {
@@ -933,6 +989,29 @@
         "responses": { "200": { "description": "running 或 already_running" }, "404": { "description": "任务不存在" } }
       }
     },
+    "/api/integration/crons/restore_archived": {
+      "post": {
+        "tags": ["IntegrationCrons"],
+        "summary": "将 output-only 归档执行记录恢复为已完成审计任务",
+        "description": "仅从指定 Profile 的 cron/output/<job_id>/ 存在的 Markdown 输出创建 disabled/completed 记录；不会执行任务或重新启用调度。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["profile", "job_id"],
+                "properties": {
+                  "profile": { "type": "string" },
+                  "job_id": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": { "200": { "description": "已恢复的 completed CronJob" }, "404": { "description": "未找到归档输出" }, "409": { "description": "任务已存在" } }
+      }
+    },
     "/api/integration/workspace/files": {
       "get": {
         "tags": ["IntegrationWorkspace"],
@@ -1223,12 +1302,11 @@
       "post": {
         "tags": ["IntegrationKnowledgeBase"],
         "summary": "上传 workspace 成果文件到知识库（编排）",
-        "description": "WebUI 原生编排端点：调用方传 `paths`（workspace 相对路径数组），WebUI 读取成果文件字节后复用下游 `upload_docs` 透传。`fileProperties` 与 `upload_docs` 一致（原样透传，`fileClass` 即直属库类型），`paths` 与 `fileProperties` 一一对应、等长。仅执行 `upload_docs`，不串联 `update_docs`。",
+        "description": "WebUI 原生编排端点：调用方传 `paths`（workspace 相对路径数组），WebUI 读取成果文件字节后复用下游 `upload_docs` 透传。`fileProperties` 与 `upload_docs` 一致（原样透传，`fileClass` 即直属库类型），`paths` 与 `fileProperties` 一一对应、等长。单文件最大 50 MiB，最多 20 个文件；不限制单次同步的文件总大小。仅执行 `upload_docs`，不串联 `update_docs`。",
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUploadArtifactsRequest" } } } },
         "responses": {
           "200": { "description": "下游 upload_docs 原始 JSON 响应" },
           "400": { "description": "缺参、路径校验失败或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
-          "413": { "description": "请求体总量超限", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
           "502": { "description": "下游不可达", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
         }
       }
@@ -2137,9 +2215,9 @@
       "get": {
         "tags": ["SkillHub"],
         "summary": "获取 SkillHub 技能列表",
-        "description": "按 scope 返回技能市场目录、已安装/未安装筛选或本地自建技能。无效 scope 回落为 hub。stats 为全库全局计数（不受 category/q 影响）；skills/total 仍受 category 与 q 过滤。hub/installed/not_installed 在本地全量拉取后排序再分页；q 为本地子串匹配。已安装项的 description 优先取自本地 SKILL.md frontmatter（无则保留上游）。`all=1` 时返回当前筛选下的全量 skills，忽略 page/page_size，响应 page=1、page_size=total。`scope=local_all` 聚合本地已安装 hub 技能与本地自建技能为单一列表，自建优先按 name 去重（同名仅保留 custom 项）。",
+        "description": "按 scope 返回技能市场目录、已安装/未安装筛选或本地自建技能。无效 scope 回落为 hub。stats 为全库全局计数（不受 category/q 影响）；skills/total 仍受 category 与 q 过滤。hub/installed/not_installed 在本地全量拉取后排序再分页；q 为本地子串匹配。已安装项的 description 优先取自本地 SKILL.md frontmatter（无则保留上游）。`all=1` 时返回当前筛选下的全量 skills，忽略 page/page_size，响应 page=1、page_size=total。`scope=local_all` 聚合已启用的本地已安装 hub 技能与本地自建技能为单一列表，自建优先按 name 去重（同名仅保留 custom 项），并排除 `skills.disabled` 中的禁用技能。",
         "parameters": [
-          { "name": "scope", "in": "query", "schema": { "type": "string", "enum": ["hub", "installed", "not_installed", "custom", "local_all"], "default": "hub" }, "description": "hub=市场目录（附 installed 标注）；installed/not_installed=按当前 Cookie profile 的本地安装状态筛选；custom=读取 {HERMES_HOME}/skills 下本地自建（非市场同名），不按 profile 分子目录；local_all=聚合已安装 hub 技能与本地自建技能（自建优先，按 name 去重）" },
+          { "name": "scope", "in": "query", "schema": { "type": "string", "enum": ["hub", "installed", "not_installed", "custom", "local_all"], "default": "hub" }, "description": "hub=市场目录（附 installed 标注）；installed/not_installed=按当前 Cookie profile 的本地安装状态筛选；custom=读取 {HERMES_HOME}/skills 下本地自建（非市场同名），不按 profile 分子目录；local_all=聚合已启用的已安装 hub 技能与本地自建技能（自建优先，按 name 去重，并排除 skills.disabled 中的禁用技能）" },
           { "name": "category", "in": "query", "schema": { "type": "string" }, "description": "分类过滤；空字符串、all 或 * 表示全部分类" },
           { "name": "q", "in": "query", "schema": { "type": "string" }, "description": "关键词搜索（仅列表项，不影响 stats 计数）" },
           { "name": "all", "in": "query", "schema": { "type": "string", "enum": ["1"] }, "description": "仅 all=1 时返回全量列表（忽略 page/page_size）；缺省或其它值走分页" },
@@ -5260,8 +5338,8 @@
           "model":               { "type": "string", "nullable": true },
           "profile":             { "type": "string", "nullable": true, "description": "执行 Profile 名称；null 表示沿用服务器默认" },
           "toast_notifications": { "type": "boolean", "description": "WebUI 完成 Toast；缺省 true" },
-          "execution_bucket":     { "type": "string", "enum": ["running", "waiting", "error"], "description": "前端展示用执行大类：running=执行中，waiting=待执行/已完成/停用归并，error=异常" },
-          "execution_state":      { "type": "string", "enum": ["manual_running", "last_run_error", "schedule_error", "scheduled_waiting", "last_success_waiting", "last_unknown_waiting", "paused_waiting", "disabled_waiting", "not_yet_run_waiting"], "description": "执行小类；暂停任务不覆盖上次状态，只有无上次状态时才返回 paused_waiting" },
+          "execution_bucket":     { "type": "string", "enum": ["running", "waiting", "completed", "error"], "description": "前端展示用执行大类：running=执行中，waiting=待执行/停用，completed=一次性任务已完成且不会自动再次调度，error=异常或中断" },
+          "execution_state":      { "type": "string", "enum": ["manual_running", "scheduled_running", "once_completed", "once_interrupted", "last_run_error", "schedule_error", "scheduled_waiting", "last_success_waiting", "last_unknown_waiting", "paused_waiting", "disabled_waiting", "not_yet_run_waiting"], "description": "执行小类；once_completed 保留已完成的一次性任务，once_interrupted 表示执行 lease 过期后为避免重复副作用而未自动重试" },
           "state":               { "type": "string", "description": "如 paused" },
           "last_run_at":         { "description": "ISO8601 字符串或 Unix 时间戳" },
           "last_status":         { "type": "string", "description": "最近一次运行状态，如 success / error" },

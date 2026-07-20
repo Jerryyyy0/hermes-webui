@@ -9,7 +9,7 @@ import tempfile
 from pathlib import Path
 
 from api.config import MAX_UPLOAD_BYTES, STATE_DIR
-from api.helpers import j, bad
+from api.helpers import get_profile_cookie, j, bad
 from api.models import get_session
 from api.profiles import _profiles_match, get_active_profile_name as _get_active_profile_name
 from api.workspace import (
@@ -175,16 +175,28 @@ def _session_attachment_dir(session_id: str, *, root: Path | None = None) -> Pat
     return dest_dir
 
 
-def _session_visible_to_active_profile(session) -> bool:
-    """Return whether an upload target session belongs to the active profile."""
+def _upload_profile_from_fields(fields: dict) -> str | None:
+    """Return a valid multipart profile override, if the caller supplied one."""
+    raw_profile = fields.get('profile')
+    if not isinstance(raw_profile, str):
+        return None
+    profile = raw_profile.strip()
+    if not profile:
+        return None
+    from api.profiles import _PROFILE_ID_RE
+    return profile if profile == 'default' or _PROFILE_ID_RE.fullmatch(profile) else None
+
+
+def _session_visible_to_active_profile(session, profile_override: str | None = None) -> bool:
+    """Return whether an upload target session belongs to the request profile."""
     session_profile = getattr(session, 'profile', None)
     if not isinstance(session_profile, str):
         session_profile = None
-    return _profiles_match(session_profile, _get_active_profile_name())
+    return _profiles_match(session_profile, profile_override or _get_active_profile_name())
 
 
-def _reject_invisible_session(handler, session) -> bool:
-    if _session_visible_to_active_profile(session):
+def _reject_invisible_session(handler, session, profile_override: str | None = None) -> bool:
+    if _session_visible_to_active_profile(session, profile_override):
         return False
     j(handler, {'error': 'Session not found'}, status=404)
     return True
@@ -199,6 +211,8 @@ def handle_upload(handler):
             return j(handler, {'error': _upload_too_large_error()}, status=413)
         fields, files = parse_multipart(handler.rfile, content_type, content_length)
         session_id = fields.get('session_id', '')
+        cookie_profile = get_profile_cookie(handler)
+        profile_override = None if cookie_profile else _upload_profile_from_fields(fields)
         if 'file' not in files:
             return j(handler, {'error': '缺少上传文件'}, status=400)
         filename, file_bytes = files['file']
@@ -208,7 +222,7 @@ def handle_upload(handler):
             s = get_session(session_id)
         except KeyError:
             return j(handler, {'error': '会话不存在'}, status=404)
-        if _reject_invisible_session(handler, s):
+        if _reject_invisible_session(handler, s, profile_override):
             return True
         safe_name = _sanitize_upload_name(filename)
         dest = _upload_destination(session_id, safe_name)

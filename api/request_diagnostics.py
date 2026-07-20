@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import sys
@@ -11,6 +10,9 @@ import time
 import traceback
 import uuid
 from typing import Any
+
+from integration.request_logging.formatting import format_slow_request_line
+from integration.request_logging.logger import console_warning
 
 
 DEFAULT_SLOW_REQUEST_SECONDS = 5.0
@@ -182,10 +184,7 @@ class RequestDiagnostics:
         # bounded by the number of in-flight requests).
         _watchdog_unregister(self.request_id)
         if record and self.timeout_seconds > 0 and record["elapsed_ms"] >= self.timeout_seconds * 1000:
-            self.logger.warning(
-                "Slow WebUI request completed: %s",
-                json.dumps(record, sort_keys=True),
-            )
+            console_warning(format_slow_request_line(record, "completed"))
 
     def _on_timeout(self) -> None:
         with self._lock:
@@ -193,10 +192,7 @@ class RequestDiagnostics:
                 return
             self._watchdog_logged = True
             record = self._build_record_locked(include_stacks=_slow_request_include_stacks())
-        self.logger.warning(
-            "Slow WebUI request still running: %s",
-            json.dumps(record, sort_keys=True),
-        )
+        console_warning(format_slow_request_line(record, "running"))
 
     def _build_record_locked(self, *, include_stacks: bool) -> dict[str, Any]:
         now = time.monotonic()

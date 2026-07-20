@@ -1,4 +1,4 @@
-import json
+import re
 import sys
 import types
 
@@ -28,14 +28,16 @@ def _handler(**kwargs):
     return types.SimpleNamespace(**defaults)
 
 
-def _parse_webui_lines(output: str) -> list[dict]:
-    records = []
-    for line in output.splitlines():
-        line = line.strip()
-        if not line.startswith("[webui] "):
-            continue
-        records.append(json.loads(line.removeprefix("[webui] ")))
-    return records
+_TS_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3} ")
+
+
+def _webui_lines(output: str) -> list[str]:
+    return [line.strip() for line in output.splitlines() if "[webui]" in line]
+
+
+def _without_ts(line: str) -> str:
+    assert _TS_RE.match(line)
+    return _TS_RE.sub("", line, count=1)
 
 
 def test_error_fields_from_payload_bad_shape():
@@ -63,14 +65,14 @@ def test_bad_logs_structured_api_error(capsys, monkeypatch):
 
     bad(handler, "missing field", 400)
 
-    records = _parse_webui_lines(capsys.readouterr().err)
-    assert len(records) == 1
-    record = records[0]
-    assert record["event"] == "api_error"
-    assert record["status"] == 400
-    assert record["path"] == "/api/example"
-    assert "token=secret" not in record["path"]
-    assert record["message"] == "missing field"
+    lines = _webui_lines(capsys.readouterr().err)
+    assert len(lines) == 1
+    line = _without_ts(lines[0])
+    assert line.startswith("[webui][api_error] POST /api/example -> 400")
+    assert "source=j" in line
+    assert "remote=127.0.0.1" in line
+    assert "message=\"missing field\"" in line
+    assert "token=secret" not in line
     assert sent == [400]
 
 
@@ -93,11 +95,13 @@ def test_j_logs_502_with_traceback(capsys, monkeypatch):
             exc_info=(type(exc), exc, exc.__traceback__),
         )
 
-    record = _parse_webui_lines(capsys.readouterr().err)[0]
-    assert record["status"] == 502
-    assert record["error"] == "upstream_failed"
-    assert "traceback" in record
-    assert "RuntimeError" in record["traceback"]
+    output = capsys.readouterr().err
+    line = _without_ts(_webui_lines(output)[0])
+    assert line.startswith("[webui][api_error] POST /api/example -> 502")
+    assert "error=upstream_failed" in line
+    assert "message=\"upstream down\"" in line
+    assert "traceback=yes" in line
+    assert "RuntimeError" in output
 
 
 def test_log_error_false_skips_logging(capsys, monkeypatch):
@@ -111,7 +115,7 @@ def test_log_error_false_skips_logging(capsys, monkeypatch):
 
     bad(handler, "hidden", 500, log_error=False)
 
-    assert _parse_webui_lines(capsys.readouterr().err) == []
+    assert _webui_lines(capsys.readouterr().err) == []
 
 
 def test_api_error_logging_disabled_by_env(capsys, monkeypatch):
@@ -120,7 +124,7 @@ def test_api_error_logging_disabled_by_env(capsys, monkeypatch):
     handler = _handler()
     emit_api_error(handler, status=500, message="should not log")
 
-    assert _parse_webui_lines(capsys.readouterr().err) == []
+    assert _webui_lines(capsys.readouterr().err) == []
 
 
 def test_api_error_min_status_env(capsys, monkeypatch):
@@ -130,7 +134,7 @@ def test_api_error_min_status_env(capsys, monkeypatch):
     handler = _handler()
     maybe_log_api_response(handler, 404, {"error": "not found"})
 
-    assert _parse_webui_lines(capsys.readouterr().err) == []
+    assert _webui_lines(capsys.readouterr().err) == []
 
 
 def test_emit_sets_handler_error_summary():
@@ -152,9 +156,9 @@ def test_server_log_request_includes_error_summary(capsys):
 
     Handler.log_request(handler, "502")
 
-    record = _parse_webui_lines(capsys.readouterr().out)[0]
-    assert record["status"] == 502
-    assert record["error_summary"] == "502 | upstream_failed | down"
+    line = _without_ts(_webui_lines(capsys.readouterr().err)[0])
+    assert line.startswith("[webui][request] POST /api/example -> 502")
+    assert "error=\"502 | upstream_failed | down\"" in line
 
 
 def test_server_unhandled_exception_logs_structured_error(capsys, monkeypatch):
@@ -181,11 +185,12 @@ def test_server_unhandled_exception_logs_structured_error(capsys, monkeypatch):
     except ValueError:
         server.Handler._log_unhandled_exception(handler)
 
-    record = _parse_webui_lines(capsys.readouterr().err)[0]
-    assert record["event"] == "api_error"
-    assert record["source"] == "unhandled"
-    assert record["status"] == 500
-    assert "traceback" in record
+    output = capsys.readouterr().err
+    line = _without_ts(_webui_lines(output)[0])
+    assert line.startswith("[webui][api_error] GET /api/boom -> 500")
+    assert "source=unhandled" in line
+    assert "traceback=yes" in line
+    assert "ValueError" in output
 
 
 def test_policy_helpers_defaults(monkeypatch):

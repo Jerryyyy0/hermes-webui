@@ -100,6 +100,7 @@ def list_skillhub_skills(
             for s in installed_hub
             if str(s.get("name") or "").strip() not in custom_names
         ]
+        merged = [skill for skill in merged if not skill.get("disabled")]
         all_categories = None
         if _is_uncategorized_match(category_key):
             try:

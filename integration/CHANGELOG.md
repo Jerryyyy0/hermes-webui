@@ -20,7 +20,11 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 - **Structured API error logging** — `j()` / `bad()` responses with `status >= 400` emit `[webui]` JSON `event=api_error` lines (method, path without query, status, error/message, optional traceback for 5xx). Unhandled exceptions in `server.py` use the same format (`source=unhandled`). Access logs may include `error_summary` when an API error was recorded. Module: `integration/request_logging/`. Env: `HERMES_WEBUI_API_ERROR_LOG` (default on), `HERMES_WEBUI_API_ERROR_LOG_MIN_STATUS` (default `400`). Errors are written only via `[webui]` stderr JSON (no duplicate `logging` mirror line).
 
+- **Stream diagnostics logging** — 新增 `HERMES_WEBUI_STREAM_DIAG` 控制的流式执行诊断日志，记录 agent 初始化、上下文准备、运行耗时、最终保存和 worker cleanup summary，便于排查慢流、失败流和资源清理问题。
+
 ### Changed
+
+- **成果库同步知识库取消总量限制** — `POST /api/integration/knowledge_base/upload_artifacts` 不再限制单次同步的全部文件总大小；单文件 50 MiB 和最多 20 个文件的限制保持不变。
 
 - **Cron execution history is database-primary** — `GET /api/crons/history` now lists each job's `source=cron` sessions from its execution Profile `state.db`, so completed runs remain visible even without a Markdown output artifact. Existing `cron/output/<job_id>/*.md` files are attached as optional output metadata, while unmatched files remain artifact-only rows. Legacy non-default-Profile jobs with an empty stored `profile` now use the requested owner Profile for database lookup instead of incorrectly reading default.
 - **Profile list response minimization** — `GET /api/profiles` no longer returns `skills`, `skill_count`, `enabled_skills`, `total_skills`, or `memory_snapshot`. Profile UI keeps runtime and `info.json` metadata only; Cron Hub now loads a selected Profile's skills on demand through `GET /api/skills?profile=<name>`.
@@ -104,7 +108,7 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 - **Notification response Content-Length** — 通知 handlers 手动写响应未设置 `Content-Length`，HTTP/1.1 keep-alive 下 curl/浏览器会挂起约 30s 直到超时。改为统一使用 `api.helpers.j()` 写 JSON 响应。
 - **Notification KB field mapping** — 下游 `get_user_messages` 必填 `readType`；消息字段为 `massage`/`createTime`/`showName`/`state`，非此前假设的 `messages`/`createdAt`/`kbName`。列表请求补 `readType: all`，归一化层按下游实际字段映射。
 
-- **Knowledge base upload_artifacts** — `POST /api/integration/knowledge_base/upload_artifacts` orchestrates workspace artifact upload to the knowledge base. Parameters align with `upload_docs`: `uuid`, `kbName`, `fileProperties` (passthrough, `fileClass` = 直属库类型), `chunkSize`, `chunkOverlap`, plus new `paths` array (workspace-relative paths, parallel to `fileProperties`). WebUI reads workspace file bytes, forwards multipart to downstream `upload_docs` without constructing or mutating `fileProperties`. Per-file 50MB / total 200MB / 20 file caps. Path traversal blocked by `safe_resolve_ws`. Only performs `upload_docs`; `update_docs` remains a separate caller responsibility.
+- **Knowledge base upload_artifacts** — `POST /api/integration/knowledge_base/upload_artifacts` orchestrates workspace artifact upload to the knowledge base. Parameters align with `upload_docs`: `uuid`, `kbName`, `fileProperties` (passthrough, `fileClass` = 直属库类型), `chunkSize`, `chunkOverlap`, plus new `paths` array (workspace-relative paths, parallel to `fileProperties`). WebUI reads workspace file bytes, forwards multipart to downstream `upload_docs` without constructing or mutating `fileProperties`. 单文件 50 MiB / 最多 20 个文件，不限制单次同步文件总大小。Path traversal blocked by `safe_resolve_ws`. Only performs `upload_docs`; `update_docs` remains a separate caller responsibility.
 
 - **Knowledge base passthrough routes** — `POST /api/integration/knowledge_base/creater_handle_application` and `POST /api/integration/knowledge_base/get_user_messages` proxy downstream `creater_handle_application` (approve/reject/ignore join requests) and `get_user_messages` (user notification list). Request and response bodies are forwarded verbatim with no field validation or payload building. New `PASSTHROUGH_ROUTES` set in `integration/knowledge_base/constants.py` marks routes that skip the `_ROUTE_BUILDERS`/`_REQUIRED_FIELDS` machinery in `handlers.py`.
 

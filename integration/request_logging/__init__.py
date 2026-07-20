@@ -1,4 +1,4 @@
-"""Structured API error logging for Hermes WebUI integration layer."""
+"""Human-readable API error logging for Hermes WebUI integration layer."""
 
 from integration.request_logging.emit import emit_api_error
 from integration.request_logging.extract import error_fields_from_payload
