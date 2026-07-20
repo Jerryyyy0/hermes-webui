@@ -124,8 +124,7 @@ def prepare_skill_download(name: str, dir_name: str = "") -> dict:
     if is_system_skill(skill_name):
         return {"error": "Cannot download system skill", "status": 403}
 
-    skills_dir = shared_skills_dir()
-    skill_dir = _resolve_skill_dir(skills_dir, skill_name, dir_name)
+    skill_dir, _skills_root = _resolve_skill_dir_in_any_profile(skill_name, dir_name)
     if not skill_dir or not skill_dir.is_dir():
         return {"error": "Skill not found", "status": 404}
 
@@ -519,7 +518,19 @@ def _filter_custom_skills_in_memory(
 
 
 def count_custom_skills(category: str, hub_names: set[str]) -> int:
-    return len(_scan_custom_skill_dicts(shared_skills_dir(), category, hub_names))
+    total = len(_scan_custom_skill_dicts(shared_skills_dir(), category, hub_names))
+    try:
+        from api.profiles import list_profiles_api
+        for p in list_profiles_api():
+            profile_name = str(p.get("name") or "").strip()
+            if not profile_name or profile_name == "default":
+                continue
+            profile_dir = skills_dir_for_profile(profile_name)
+            if profile_dir.exists():
+                total += len(_scan_custom_skill_dicts(profile_dir, category, hub_names))
+    except Exception:
+        pass
+    return total
 
 
 def list_custom_skills(
@@ -629,6 +640,35 @@ def _find_skill_in_any_profile(name: str) -> tuple[Path | None, Path | None]:
             skill_dir, skill_md = _find_skill(name, profile_skills_dir)
             if skill_md:
                 return skill_dir, skill_md
+    except Exception:
+        pass
+    return None, None
+
+
+def _resolve_skill_dir_in_any_profile(name: str, dir_name: str = "") -> tuple[Path | None, Path | None]:
+    """Resolve a skill directory across all profiles, supporting dir_name.
+
+    Returns (skill_dir, skills_dir) where skills_dir is the profile's skills root
+    that contained the skill, or (None, None) if not found.
+    """
+    # Try default profile first
+    skills_dir = shared_skills_dir()
+    skill_dir = _resolve_skill_dir(skills_dir, name, dir_name)
+    if skill_dir and skill_dir.is_dir():
+        return skill_dir, skills_dir
+    # Try other profiles
+    try:
+        from api.profiles import list_profiles_api
+        for p in list_profiles_api():
+            profile_name = str(p.get("name") or "").strip()
+            if not profile_name or profile_name == "default":
+                continue
+            profile_skills_dir = skills_dir_for_profile(profile_name)
+            if not profile_skills_dir.exists():
+                continue
+            skill_dir = _resolve_skill_dir(profile_skills_dir, name, dir_name)
+            if skill_dir and skill_dir.is_dir():
+                return skill_dir, profile_skills_dir
     except Exception:
         pass
     return None, None
@@ -1470,9 +1510,8 @@ def edit_custom_skill(*, name: str, content: str, dir_name: str = "") -> dict:
     if is_system_skill(skill_name):
         return {"error": "Cannot edit system skill", "status": 403}
 
-    skills_dir = shared_skills_dir()
-    skill_dir = _resolve_skill_dir(skills_dir, skill_name, dir_name)
-    if not skill_dir:
+    skill_dir, skills_dir = _resolve_skill_dir_in_any_profile(skill_name, dir_name)
+    if not skill_dir or not skills_dir:
         return {"error": "Skill not found", "status": 404}
     if (skill_dir / ".hub_installed").is_file():
         return {"error": "市场安装的技能不可编辑", "status": 403}
@@ -1548,12 +1587,11 @@ def _remove_skill_from_config_yaml(skill_name: str) -> None:
 
 
 def delete_local_skill(name: str, dir_name: str = "") -> dict:
-    """Remove a hub install or custom skill from shared_skills_dir."""
+    """Remove a hub install or custom skill from any profile."""
     if is_system_skill(name):
         return {"error": "Cannot delete system skill", "status": 403}
-    skills_dir = shared_skills_dir()
-    skill_dir = _resolve_skill_dir(skills_dir, name, dir_name)
-    if not skill_dir:
+    skill_dir, skills_dir = _resolve_skill_dir_in_any_profile(name, dir_name)
+    if not skill_dir or not skills_dir:
         return {"error": "Skill not found", "status": 404}
     hub_installed = (skill_dir / ".hub_installed").is_file()
     skill_md = find_skill_main_file(skill_dir)
@@ -1645,7 +1683,7 @@ def check_duplicate_skill(
     display_name: str = "",
     exclude_dir_name: str = "",
 ) -> dict:
-    """Check if a skill with the same name or display_name already exists.
+    """Check if a skill with the same name or display_name already exists in any profile.
 
     Returns {"ok": True} if no duplicate, or {"error": str, "status": 409} if duplicate.
     """
@@ -1654,36 +1692,54 @@ def check_duplicate_skill(
     if not check_name and not check_display:
         return {"ok": True}
 
-    skills_dir = shared_skills_dir()
-    if not skills_dir.exists():
-        return {"ok": True}
-
     from agent.skill_utils import iter_skill_index_files
     from tools.skills_tool import _EXCLUDED_SKILL_DIRS, _parse_frontmatter
 
     exclude = str(exclude_dir_name or "").strip().lower()
-    for skill_md in iter_skill_index_files(skills_dir, "SKILL.md"):
-        if any(part in _EXCLUDED_SKILL_DIRS for part in skill_md.parts):
-            continue
-        skill_dir = skill_md.parent
-        dir_name_lower = skill_dir.name.lower()
-        if exclude and dir_name_lower == exclude:
-            continue
-        try:
-            rel = skill_md.relative_to(skills_dir)
-            parts = rel.parts
-            if len(parts) >= 3:
+
+    def _scan_dir(skills_dir: Path) -> dict | None:
+        if not skills_dir.exists():
+            return None
+        for skill_md in iter_skill_index_files(skills_dir, "SKILL.md"):
+            if any(part in _EXCLUDED_SKILL_DIRS for part in skill_md.parts):
                 continue
-            content = skill_md.read_text(encoding="utf-8", errors="replace")
-            fm, _ = _parse_frontmatter(content)
-            if not fm:
+            skill_dir = skill_md.parent
+            dir_name_lower = skill_dir.name.lower()
+            if exclude and dir_name_lower == exclude:
                 continue
-            existing_name = str(fm.get("name") or "").strip().lower()
-            existing_display = str(fm.get("display_name") or "").strip().lower()
-            if check_name and existing_name and check_name == existing_name:
-                return {"error": f"已存在同名技能: {fm.get('name')}", "status": 409}
-            if check_display and existing_display and check_display == existing_display:
-                return {"error": f"已存在同显示名称的技能: {fm.get('display_name')}", "status": 409}
-        except Exception:
-            continue
+            try:
+                rel = skill_md.relative_to(skills_dir)
+                parts = rel.parts
+                if len(parts) >= 3:
+                    continue
+                content = skill_md.read_text(encoding="utf-8", errors="replace")
+                fm, _ = _parse_frontmatter(content)
+                if not fm:
+                    continue
+                existing_name = str(fm.get("name") or "").strip().lower()
+                existing_display = str(fm.get("display_name") or "").strip().lower()
+                if check_name and existing_name and check_name == existing_name:
+                    return {"error": f"已存在同名技能: {fm.get('name')}", "status": 409}
+                if check_display and existing_display and check_display == existing_display:
+                    return {"error": f"已存在同显示名称的技能: {fm.get('display_name')}", "status": 409}
+            except Exception:
+                continue
+        return None
+
+    # Check default profile first
+    result = _scan_dir(shared_skills_dir())
+    if result:
+        return result
+    # Check other profiles
+    try:
+        from api.profiles import list_profiles_api
+        for p in list_profiles_api():
+            profile_name = str(p.get("name") or "").strip()
+            if not profile_name or profile_name == "default":
+                continue
+            result = _scan_dir(skills_dir_for_profile(profile_name))
+            if result:
+                return result
+    except Exception:
+        pass
     return {"ok": True}

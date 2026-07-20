@@ -25,6 +25,51 @@ def _config_path() -> Path:
     return _active_profile_config_path()
 
 
+def _config_path_for_profile(profile_name: str) -> Path:
+    from api.profiles import get_hermes_home_for_profile
+
+    return Path(get_hermes_home_for_profile(profile_name)) / "config.yaml"
+
+
+def get_no_self_improve_names_for_profile(profile_name: str) -> set[str]:
+    config_path = _config_path_for_profile(profile_name)
+    if not config_path.exists():
+        return set()
+    try:
+        cfg = _load_yaml_config_file(config_path)
+    except Exception:
+        return set()
+    skills_cfg = cfg.get("skills")
+    if not isinstance(skills_cfg, dict):
+        return set()
+    return set(normalize_names(skills_cfg.get(_CONFIG_KEY)))
+
+
+def _save_no_self_improve_for_profile(profile_name: str, names: list[str]) -> None:
+    config_path = _config_path_for_profile(profile_name)
+    with _cfg_lock:
+        cfg = _load_yaml_config_file(config_path)
+        if "skills" not in cfg or not isinstance(cfg["skills"], dict):
+            cfg["skills"] = {}
+        cfg["skills"][_CONFIG_KEY] = names
+        _save_yaml_config_file(config_path, cfg)
+
+
+def add_names_to_profile(profile_name: str, names: Iterable[str]) -> set[str]:
+    current = get_no_self_improve_names_for_profile(profile_name)
+    updated = current | set(normalize_names(list(names)))
+    _save_no_self_improve_for_profile(profile_name, sorted(updated))
+    return updated
+
+
+def remove_names_from_profile(profile_name: str, names: Iterable[str]) -> set[str]:
+    drop = set(normalize_names(list(names)))
+    current = get_no_self_improve_names_for_profile(profile_name)
+    updated = current - drop
+    _save_no_self_improve_for_profile(profile_name, sorted(updated))
+    return updated
+
+
 def normalize_names(names: object) -> list[str]:
     if names is None:
         return []
@@ -90,6 +135,108 @@ def remove_names(names: Iterable[str], *, reload: bool = True) -> set[str]:
     return updated
 
 
+def propagate_lock_to_all_profiles(skill_name: str, locked: bool) -> list[str]:
+    """Add or remove skill_name from no_self_improve in every profile that has it installed.
+
+    Returns list of profile names that were updated.
+    """
+    from integration.skills.skillhub import get_skill_installed_profiles
+
+    result = get_skill_installed_profiles(skill_name)
+    profiles = result.get("installed") or []
+    updated: list[str] = []
+    for entry in profiles:
+        profile_name = str(entry.get("profile") or "").strip()
+        if not profile_name:
+            continue
+        try:
+            if locked:
+                add_names_to_profile(profile_name, [skill_name])
+            else:
+                remove_names_from_profile(profile_name, [skill_name])
+            updated.append(profile_name)
+        except Exception as exc:
+            _log.debug("Failed to update no_self_improve for %s/%s: %s", profile_name, skill_name, exc)
+    # Also update the active profile
+    try:
+        if locked:
+            add_names([skill_name])
+        else:
+            remove_names([skill_name])
+    except Exception as exc:
+        _log.debug("Failed to update active profile no_self_improve for %s: %s", skill_name, exc)
+    # Reload config for the active profile
+    try:
+        reload_config()
+    except Exception:
+        pass
+    return updated
+
+
+# ── Per-profile disabled list (skills.disabled) ──────────────────────────
+
+_DISABLED_KEY = "disabled"
+
+
+def get_disabled_names_for_profile(profile_name: str) -> set[str]:
+    config_path = _config_path_for_profile(profile_name)
+    if not config_path.exists():
+        return set()
+    try:
+        cfg = _load_yaml_config_file(config_path)
+    except Exception:
+        return set()
+    skills_cfg = cfg.get("skills")
+    if not isinstance(skills_cfg, dict):
+        return set()
+    raw = skills_cfg.get(_DISABLED_KEY)
+    if not isinstance(raw, list):
+        return set()
+    return set(normalize_names(raw))
+
+
+def _save_disabled_names_for_profile(profile_name: str, names: list[str]) -> None:
+    config_path = _config_path_for_profile(profile_name)
+    with _cfg_lock:
+        cfg = _load_yaml_config_file(config_path)
+        if "skills" not in cfg or not isinstance(cfg["skills"], dict):
+            cfg["skills"] = {}
+        cfg["skills"][_DISABLED_KEY] = names
+        _save_yaml_config_file(config_path, cfg)
+
+
+def _toggle_disabled_in_profile(profile_name: str, skill_name: str, enabled: bool) -> None:
+    """Toggle a skill's disabled state in a specific profile's config."""
+    current = get_disabled_names_for_profile(profile_name)
+    if enabled:
+        current.discard(skill_name)
+    else:
+        current.add(skill_name)
+    _save_disabled_names_for_profile(profile_name, sorted(current))
+
+
+def propagate_skill_toggle(skill_name: str, enabled: bool) -> list[str]:
+    """Toggle enabled/disabled state across every profile that has the skill installed.
+
+    Returns list of profile names that were updated.
+    """
+    from integration.skills.skillhub import get_skill_installed_profiles
+
+    result = get_skill_installed_profiles(skill_name)
+    profiles = result.get("installed") or []
+    updated: list[str] = []
+    for entry in profiles:
+        profile_name = str(entry.get("profile") or "").strip()
+        if not profile_name:
+            continue
+        try:
+            _toggle_disabled_in_profile(profile_name, skill_name, enabled)
+            updated.append(profile_name)
+        except Exception as exc:
+            _log.debug("Failed to toggle disabled for %s/%s: %s", profile_name, skill_name, exc)
+    return updated
+
+
 def is_name_locked(name: str, *, hub_installed: bool = False) -> bool:
     if hub_installed:
         return True
@@ -101,28 +248,19 @@ def is_name_locked(name: str, *, hub_installed: bool = False) -> bool:
 
 def _iter_skill_entries() -> Iterable[tuple[str, bool]]:
     from agent.skill_utils import iter_skill_index_files
-    from integration.skills.paths import shared_skills_dir
+    from integration.skills.paths import shared_skills_dir, skills_dir_for_profile
     from tools.skills_tool import (
         _EXCLUDED_SKILL_DIRS,
         _parse_frontmatter,
         skill_matches_platform,
     )
 
-    skills_dir = shared_skills_dir()
-    if not skills_dir.exists():
-        return
     seen: set[str] = set()
-    search_dirs = [skills_dir]
-    try:
-        from agent.skill_utils import get_external_skills_dirs
 
-        search_dirs.extend(Path(p) for p in get_external_skills_dirs())
-    except Exception:
-        pass
-    for scan_dir in search_dirs:
-        if not scan_dir.exists():
-            continue
-        for skill_md in iter_skill_index_files(scan_dir, "SKILL.md"):
+    def _scan(skills_dir: Path) -> Iterable[tuple[str, bool]]:
+        if not skills_dir.exists():
+            return
+        for skill_md in iter_skill_index_files(skills_dir, "SKILL.md"):
             if any(part in _EXCLUDED_SKILL_DIRS for part in skill_md.parts):
                 continue
             skill_dir = skill_md.parent
@@ -139,6 +277,26 @@ def _iter_skill_entries() -> Iterable[tuple[str, bool]]:
                 yield skill_name, hub
             except Exception as exc:
                 _log.debug("skip skill %s: %s", skill_md, exc)
+
+    # Default profile + external dirs
+    search_dirs = [shared_skills_dir()]
+    try:
+        from agent.skill_utils import get_external_skills_dirs
+        search_dirs.extend(Path(p) for p in get_external_skills_dirs())
+    except Exception:
+        pass
+    for scan_dir in search_dirs:
+        yield from _scan(scan_dir)
+    # Other profiles
+    try:
+        from api.profiles import list_profiles_api
+        for p in list_profiles_api():
+            profile_name = str(p.get("name") or "").strip()
+            if not profile_name or profile_name == "default":
+                continue
+            yield from _scan(skills_dir_for_profile(profile_name))
+    except Exception:
+        pass
 
 
 def list_installed_skill_names() -> set[str]:

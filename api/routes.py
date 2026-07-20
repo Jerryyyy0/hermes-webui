@@ -15716,11 +15716,10 @@ def _handle_skill_delete(handler, body):
     skill_name = str(body["name"]).strip().lower().replace(" ", "-")
     if not skill_name or "/" in skill_name or ".." in skill_name:
         return bad(handler, "Invalid skill name")
-    skills_dir = _active_skills_dir()
-    matches = [p for p in skills_dir.rglob("SKILL.md") if p.parent.name == skill_name]
-    if not matches:
+    from integration.skills.local_skills import _resolve_skill_dir_in_any_profile
+    skill_dir, _skills_root = _resolve_skill_dir_in_any_profile(skill_name)
+    if not skill_dir or not skill_dir.is_dir():
         return bad(handler, "Skill not found", 404)
-    skill_dir = matches[0].parent
     shutil.rmtree(str(skill_dir))
     return j(handler, {"ok": True, "name": body["name"]})
 
@@ -15747,7 +15746,7 @@ def _toggle_name_in_list(names, name: str, enabled: bool) -> list[str]:
 
 
 def _handle_skill_toggle(handler, body):
-    """Toggle a skill's enabled/disabled state in the active profile's config.yaml.
+    """Toggle a skill's enabled/disabled state across all profiles that have it installed.
 
     Writes through to ``skills.platform_disabled.webui`` when that key exists
     so the toggle takes effect for WebUI sessions (the agent's
@@ -15762,30 +15761,29 @@ def _handle_skill_toggle(handler, body):
     name = body["name"].strip()
     enabled = bool(body["enabled"])
 
-    # Validate the skill exists in the filesystem
-    skills_dir = _active_skills_dir()
-    search_dirs = _active_skill_search_dirs(skills_dir)
-    skill_dir, skill_md = _find_skill_in_dirs(name, search_dirs)
-    if not skill_md:
+    # Validate the skill exists in the filesystem (search across all profiles)
+    from integration.skills.local_skills import _resolve_skill_dir_in_any_profile
+    skill_dir, _skills_root = _resolve_skill_dir_in_any_profile(name)
+    if not skill_dir or not skill_dir.is_dir():
         return bad(handler, f"Skill '{name}' not found", 404)
 
+    # Propagate toggle to all profiles that have this skill installed
+    from integration.skills.no_self_improve import propagate_skill_toggle
+    updated_profiles = propagate_skill_toggle(name, enabled)
+
+    # Also update the active profile with platform_disabled write-through
     config_path = _active_profile_config_path()
     with _cfg_lock:
         cfg = _load_yaml_config_file(config_path)
 
-        # Ensure skills section exists as a dict
         if "skills" not in cfg or not isinstance(cfg["skills"], dict):
             cfg["skills"] = {}
         skills_cfg = cfg["skills"]
 
-        # Always update the global disabled list
         skills_cfg["disabled"] = _toggle_name_in_list(
             skills_cfg.get("disabled"), name, enabled
         )
 
-        # Write-through to platform_disabled.webui if it exists so that the
-        # toggle takes effect for WebUI sessions (the agent checks the
-        # platform-specific list first when HERMES_SESSION_PLATFORM=webui).
         platform_disabled = skills_cfg.get("platform_disabled")
         if isinstance(platform_disabled, dict) and "webui" in platform_disabled:
             platform_disabled["webui"] = _toggle_name_in_list(
@@ -15795,9 +15793,9 @@ def _handle_skill_toggle(handler, body):
         cfg["skills"] = skills_cfg
         _save_yaml_config_file(config_path, cfg)
 
-    reload_config()  # outside with block — reload_config() acquires the lock itself
+    reload_config()
 
-    return j(handler, {"ok": True, "name": name, "enabled": enabled})
+    return j(handler, {"ok": True, "name": name, "enabled": enabled, "profiles": updated_profiles})
 
 
 def _handle_memory_write(handler, body):

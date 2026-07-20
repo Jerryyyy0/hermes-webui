@@ -710,20 +710,14 @@ def _post_no_self_improve_toggle(handler, body: dict) -> bool:
     locked = bool(body["locked"])
     dir_name = str(body.get("dir_name", "") or "").strip()
 
-    from integration.skills.paths import shared_skills_dir
-
-    skills_dir = shared_skills_dir()
-    skill_dir = local_skills._resolve_skill_dir(skills_dir, name, dir_name)
+    skill_dir, _skills_root = local_skills._resolve_skill_dir_in_any_profile(name, dir_name)
     if not skill_dir or not skill_dir.is_dir():
         return _respond_bad(handler, f"Skill '{name}' not found", 404)
     if (skill_dir / ".hub_installed").is_file():
         return _respond_bad(handler, "Hub skills are permanently locked", 403)
 
-    if locked:
-        no_self_improve.add_names([name])
-    else:
-        no_self_improve.remove_names([name])
-    return _respond(handler, {"ok": True, "name": name, "locked": locked})
+    updated_profiles = no_self_improve.propagate_lock_to_all_profiles(name, locked)
+    return _respond(handler, {"ok": True, "name": name, "locked": locked, "profiles": updated_profiles})
 
 
 def _put_no_self_improve(handler, body: dict) -> bool:
