@@ -28,6 +28,10 @@ _SUMMARIES_LOCK = threading.Lock()
 _TRUTHY = {"1", "true", "yes", "on", "debug"}
 _CORE_CONSOLE_FIELDS = (
     "event",
+    "phase",
+    "step",
+    "phase_name",
+    "outcome",
     "stream_id",
     "session_id",
     "model",
@@ -36,6 +40,7 @@ _CORE_CONSOLE_FIELDS = (
     "elapsed_ms",
     "duration_ms",
     "wait_ms",
+    "hold_ms",
     "total_ms",
     "cache_hit",
     "constructor_total_ms",
@@ -74,6 +79,11 @@ _FIELD_ALIASES = {
     "first_visible_token_ms": "first_visible_token",
     "final_save_ms": "save",
     "cache_elapsed_ms": "cache",
+    "phase": "phase",
+    "step": "step",
+    "phase_name": "phase_name",
+    "outcome": "outcome",
+    "hold_ms": "hold",
     "event_callback_supported": "callback_supported",
     "event_callback_passed": "callback_passed",
     "event_callback_will_be_passed": "callback_will_pass",
@@ -86,6 +96,7 @@ _MS_FIELDS = {
     "elapsed_ms",
     "duration_ms",
     "wait_ms",
+    "hold_ms",
     "total_ms",
     "constructor_total_ms",
     "agent_init_total_ms",
@@ -95,6 +106,47 @@ _MS_FIELDS = {
     "final_save_ms",
     "cache_elapsed_ms",
 }
+
+# Stable diagnostic hierarchy. New steps may be appended but existing identifiers
+# must not be repurposed: operators use them to compare latency across releases.
+_EVENT_PHASES = {
+    "webui.chat_start.accepted": ("P0", "S0.1", "chat-start validation"),
+    "webui.chat_start.stream_created": ("P0", "S0.2", "stream creation"),
+    "webui.chat_start.worker_dispatched": ("P0", "S0.3", "worker dispatch"),
+    "webui.worker.start": ("P2", "BEGIN", "worker pre-agent setup"),
+    "webui.worker.pre_agent_journal": ("P2", "S2.1", "journal and live-stream state"),
+    "webui.worker.profile_context": ("P2", "S2.2", "session and profile resolution"),
+    "webui.worker.profile_runtime": ("P2", "S2.3", "profile runtime and skill prewarm"),
+    "webui.worker.process_env": ("P2", "S2.4", "process environment lock"),
+    "webui.worker.mcp_discovery": ("P2", "S2.5", "MCP discovery"),
+    "webui.worker.callbacks_registered": ("P2", "S2.6", "approval and clarify callbacks"),
+    "webui.worker.pre_agent_setup": ("P2", "SUMMARY", "worker pre-agent setup total"),
+    "webui.worker.agent_import": ("P3", "S3.0.1", "agent class load and capability check"),
+    "webui.worker.agent_kwargs_ready": ("P3", "S3.0.2", "agent construction arguments"),
+    "webui.worker.agent_cache_lookup_start": ("P3", "S3.1", "agent cache lookup"),
+    "webui.worker.agent_cache_lookup_done": ("P3", "S3.1", "agent cache lookup"),
+    "webui.worker.agent_construct_start": ("P3", "S3.2", "agent construction"),
+    "webui.worker.agent_construct_done": ("P3", "S3.2", "agent construction"),
+    "agent_init.basic": ("P3", "S3.2.1", "agent basic initialization"),
+    "agent_init.provider_client": ("P3", "S3.2.2", "provider client initialization"),
+    "agent_init.tools_registry": ("P3", "S3.2.3", "tool registry initialization"),
+    "agent_init.memory_provider": ("P3", "S3.2.4", "memory provider initialization"),
+    "agent_init.config_model_metadata": ("P3", "S3.2.5", "model metadata initialization"),
+    "agent_init.context_engine": ("P3", "S3.2.6", "context engine initialization"),
+    "webui.worker.agent_ready": ("P3", "SUMMARY", "agent preparation total"),
+    "webui.worker.context_prepared": ("P4", "S4.1", "context preparation"),
+    "agent.model_first_delta": ("P4", "S4.2", "model request to first delta"),
+    "webui.stream.first_visible_token": ("P4", "S4.3", "first delta to visible token"),
+    "webui.worker.run_conversation": ("P4", "SUMMARY", "model execution total"),
+    "webui.worker.finalize": ("P5", "S5.1", "finalize and persist"),
+    "webui.worker.cleanup_summary": ("P5", "SUMMARY", "worker total"),
+    "webui.stream.open": ("P1", "S1.1", "SSE connection"),
+    "webui.stream.resolve": ("P1", "S1.2", "SSE source resolution"),
+    "webui.stream.first_event": ("P1", "S1.3", "first SSE event"),
+    "webui.stream.summary": ("P6", "SUMMARY", "SSE lifecycle total"),
+}
+
+_AGENT_INIT_PHASE = ("P3", "S3.2", "agent initialization")
 
 
 def mode() -> str:
@@ -173,7 +225,20 @@ def _event_side(event: str) -> str:
     return "unknown"
 
 
+def _phase_fields(event: str, fields: dict[str, Any]) -> dict[str, Any]:
+    resolved = dict(fields)
+    phase = _EVENT_PHASES.get(event)
+    if phase is None and str(event).startswith("agent_init."):
+        phase = _AGENT_INIT_PHASE
+    if phase is None:
+        return resolved
+    for key, value in zip(("phase", "step", "phase_name"), phase):
+        resolved.setdefault(key, value)
+    return resolved
+
+
 def _base_payload(event: str, message_zh: str, fields: dict[str, Any]) -> dict[str, Any]:
+    fields = _phase_fields(event, fields)
     payload = {
         "event": event,
         "side": _event_side(event),
@@ -188,14 +253,14 @@ def _base_payload(event: str, message_zh: str, fields: dict[str, Any]) -> dict[s
             payload[k] = "[redacted]"
         else:
             payload[k] = _clean_value(v)
-    elapsed = payload.get("elapsed_ms", payload.get("duration_ms", payload.get("wait_ms", payload.get("total_ms"))))
+    elapsed = payload.get("duration_ms", payload.get("elapsed_ms", payload.get("wait_ms", payload.get("total_ms"))))
     if isinstance(elapsed, (int, float)):
         payload["slow"] = float(elapsed) >= STREAM_DIAG_SLOW_MS
     return payload
 
 
 def _elapsed_for_status(payload: dict[str, Any]) -> float | None:
-    for key in ("elapsed_ms", "duration_ms", "wait_ms", "total_ms"):
+    for key in ("duration_ms", "elapsed_ms", "wait_ms", "total_ms"):
         value = payload.get(key)
         if isinstance(value, (int, float)):
             return float(value)
@@ -229,8 +294,6 @@ def _format_console_line(payload: dict[str, Any]) -> str:
     if debug_enabled():
         fields.extend(_DEBUG_CONSOLE_FIELDS)
     for key in fields:
-        if key in {"elapsed_ms", "duration_ms", "wait_ms", "total_ms"}:
-            continue
         if key not in payload:
             continue
         value = payload.get(key)
@@ -240,7 +303,13 @@ def _format_console_line(payload: dict[str, Any]) -> str:
         details.append(f"{label}={_format_value(key, value)}")
     detail_text = " ".join(details)
     suffix = f" | {detail_text}" if detail_text else ""
-    line = f"{_STREAM_DIAG_PREFIX}[{side}][{status}] {payload.get('message_zh') or payload.get('event')}{suffix}"
+    phase_marker = " ".join(
+        str(payload[key])
+        for key in ("phase", "step")
+        if payload.get(key)
+    )
+    phase_prefix = f"[{phase_marker}]" if phase_marker else ""
+    line = f"{_STREAM_DIAG_PREFIX}[{side}]{phase_prefix}[{status}] {payload.get('message_zh') or payload.get('event')}{suffix}"
     return with_timestamp(line, payload)
 
 
@@ -331,7 +400,24 @@ class StreamDiag:
     def event(self, event: str, message_zh: str, **fields: Any) -> dict[str, Any]:
         payload = log_event(event, message_zh, **self.fields(**fields))
         if self.stream_id:
-            update_stream_summary(self.stream_id, **{event.replace(".", "_") + "_ms": payload.get("elapsed_ms")})
+            event_key = event.replace(".", "_") + "_ms"
+            summary_fields = {event_key: payload.get("duration_ms", payload.get("elapsed_ms"))}
+            step = str(payload.get("step") or "")
+            phase = str(payload.get("phase") or "")
+            if step:
+                existing = get_stream_summary(self.stream_id).get("stage_timings") or {}
+                stage_timings = dict(existing) if isinstance(existing, dict) else {}
+                stage_key = f"{phase}.{step}" if phase else step
+                stage_timings[stage_key] = {
+                    "phase": phase,
+                    "name": payload.get("phase_name"),
+                    "duration_ms": payload.get("duration_ms"),
+                    "elapsed_ms": payload.get("elapsed_ms"),
+                    "outcome": payload.get("outcome", "ok"),
+                }
+                summary_fields["stage_timings"] = stage_timings
+                summary_fields["last_stage"] = stage_key
+            update_stream_summary(self.stream_id, **summary_fields)
         return payload
 
     @contextmanager
@@ -340,10 +426,16 @@ class StreamDiag:
         details: dict[str, Any] = {}
         try:
             yield details
+        except Exception as exc:
+            details.setdefault("outcome", "error")
+            details.setdefault("error_type", type(exc).__name__)
+            raise
         finally:
             merged = dict(fields)
             merged.update(details)
-            merged.setdefault("elapsed_ms", elapsed_ms(started))
+            merged.setdefault("duration_ms", elapsed_ms(started))
+            merged.setdefault("elapsed_ms", elapsed_ms(self.start_ms))
+            merged.setdefault("outcome", "ok")
             self.event(event, message_zh, **merged)
 
     def note_model_first_delta(self) -> float:
