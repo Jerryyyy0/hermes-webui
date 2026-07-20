@@ -17,6 +17,7 @@ export SKILLHUB_URL=http://127.0.0.1:8000   # optional; SkillHub market only (se
 - **Egress policy (iptables)** — gated API to apply iptables open/whitelist policies (see below). **Off by default**; requires `HERMES_EGRESS_POLICY_ENABLED=1`.
 - **Knowledge base BFF** — `POST /api/integration/knowledge_base/*` routes are active only when `KNOWLEDGE_BASE_URL` is also set.
 - **Notifications** — `/api/integration/notifications/*` for local notification storage (`notifications.db`) and knowledge base notification aggregation (from downstream `get_user_messages`).
+- **Fixed Chinese session titles** — WebUI automatic and manual title generation always instruct the title model to return Simplified Chinese. This Fork policy does not read `auxiliary.title_generation.language`; model/provider/timeout routing remains unchanged. If the title model fails, WebUI keeps its existing topic-first local fallback behavior.
 
 If you use a local HTTP proxy (`HTTP_PROXY`, e.g. Clash), add the SkillHub host to `NO_PROXY` (or rely on `ensure_skillhub_no_proxy()` at server startup, which appends the hostname from `SKILLHUB_URL`). Without this, `/api/skillhub/*` may return 502 while `curl` to the same upstream works.
 

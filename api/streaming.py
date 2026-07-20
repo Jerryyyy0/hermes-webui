@@ -70,6 +70,10 @@ from integration.chat_provider_errors import (
     provider_error_payload as _provider_error_payload,
     provider_error_payload_from_classification as _provider_error_payload_from_classification,
 )
+from integration.session_titles.policy import (
+    should_validate_source_language_match as _should_validate_title_source_language_match,
+    title_language_rule as _title_language_rule,
+)
 
 # Global lock for os.environ writes. Per-session locks (_agent_lock) prevent
 # concurrent runs of the SAME session, but two DIFFERENT sessions can still
@@ -2051,7 +2055,7 @@ def _dominant_script(text: str) -> str:
 
 
 def _title_prompt_language_rule(user_text: str) -> str:
-    return "Match the language of the user question.\n"
+    return _title_language_rule(user_text)
 
 
 def _title_language_mismatch(user_text: str, title: str) -> bool:
@@ -2488,7 +2492,7 @@ def _generate_llm_session_title_for_agent(agent, user_text: str, assistant_text:
         return None, status, ''
     title = _sanitize_generated_title(raw)
     if title:
-        if _title_language_mismatch(user_text, title):
+        if _should_validate_title_source_language_match() and _title_language_mismatch(user_text, title):
             return None, 'llm_language_mismatch', str(raw)[:120]
         return title, status, ''
     return None, 'llm_invalid', str(raw)[:120]
@@ -2522,7 +2526,7 @@ def _generate_llm_session_title_via_aux(user_text: str, assistant_text: str, age
         return None, status, ''
     title = _sanitize_generated_title(raw)
     if title:
-        if _title_language_mismatch(user_text, title):
+        if _should_validate_title_source_language_match() and _title_language_mismatch(user_text, title):
             return None, 'llm_language_mismatch_aux', str(raw)[:120]
         return title, status, ''
     return None, 'llm_invalid_aux', str(raw)[:120]

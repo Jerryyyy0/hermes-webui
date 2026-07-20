@@ -234,8 +234,8 @@ class TestGenerateTitleRawViaAuxTimeout(unittest.TestCase):
         self.assertEqual(captured.get('base_url'), 'http://openrouter:4000/v1')
         self.assertEqual(captured.get('api_key'), 'test-title-api-key')
 
-    def test_title_prompt_requires_matching_user_language(self):
-        """Conversation starts should get a language-neutral match-language instruction."""
+    def test_title_prompt_requires_simplified_chinese(self):
+        """The Fork pins every WebUI-generated title to Simplified Chinese."""
         from api.streaming import generate_title_raw_via_aux
 
         mock_resp = types.SimpleNamespace(
@@ -262,14 +262,13 @@ class TestGenerateTitleRawViaAuxTimeout(unittest.TestCase):
         self.assertEqual(result, 'Alte Session Bilder')
         self.assertEqual(status, 'llm_aux')
         messages = captured.get('messages') or []
-        self.assertIn('Match the language of the user question', messages[0]['content'])
-        self.assertNotIn('If the user writes German', messages[0]['content'])
-        self.assertNotIn('German good:', messages[0]['content'])
+        self.assertIn('Write the title in Simplified Chinese', messages[0]['content'])
+        self.assertNotIn('Match the language of the user question', messages[0]['content'])
 
-    def test_title_prompt_language_rule_is_same_for_supported_locales(self):
+    def test_title_prompt_language_rule_is_fixed_to_simplified_chinese(self):
         from api.streaming import _title_prompt_language_rule
 
-        expected = "Match the language of the user question.\n"
+        expected = "Write the title in Simplified Chinese.\n"
         examples = [
             'Warum werden hier die Bilder nicht angezeigt?',
             'Pourquoi les images ne sont-elles pas affichées ?',
@@ -303,8 +302,8 @@ class TestGenerateTitleRawViaAuxTimeout(unittest.TestCase):
             'de',
         )
 
-    def test_german_source_rejects_english_aux_title(self):
-        """Regression: an English aux title must not overwrite a German conversation."""
+    def test_aux_title_keeps_model_output_when_language_differs(self):
+        """The fork requests Chinese but does not discard an unexpected model response."""
         from api.streaming import _generate_llm_session_title_via_aux
 
         mock_resp = types.SimpleNamespace(
@@ -323,9 +322,9 @@ class TestGenerateTitleRawViaAuxTimeout(unittest.TestCase):
                     'Ich prüfe die Attachment-Pfade im WebUI.',
                 )
 
-        self.assertIsNone(title)
-        self.assertEqual(status, 'llm_language_mismatch_aux')
-        self.assertEqual(raw_preview, 'Old Session Image Display Issue')
+        self.assertEqual(title, 'Old Session Image Display Issue')
+        self.assertEqual(status, 'llm_aux')
+        self.assertEqual(raw_preview, '')
 
     def test_german_fallback_uses_generic_topic_extraction_without_literal_override(self):
         from api.streaming import _fallback_title_from_exchange
@@ -348,7 +347,7 @@ class TestGenerateTitleRawViaAuxTimeout(unittest.TestCase):
         code_only = "print('hello')\nfor i in range(3):\n    print(i)"
 
         self.assertEqual(_detect_title_language(code_only), '')
-        self.assertEqual(_title_prompt_language_rule(code_only), 'Match the language of the user question.\n')
+        self.assertEqual(_title_prompt_language_rule(code_only), 'Write the title in Simplified Chinese.\n')
         self.assertFalse(_title_language_mismatch(code_only, 'Python Hello Loop'))
 
     def test_configured_api_key_is_not_sent_to_caller_supplied_route(self):
