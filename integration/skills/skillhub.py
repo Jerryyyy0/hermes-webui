@@ -428,15 +428,42 @@ def compute_scope_stats_from(ctx: _HubCatalogContext, *, custom_count: int) -> d
     }
 
 
+_UNCATEGORIZED_KEY = "未分类"
+
+
 def _normalize_category_for_match(value: str) -> str:
     """Normalize category for comparison: lowercase, spaces to hyphens."""
     return str(value or "").strip().lower().replace(" ", "-")
 
 
-def _filter_skills_by_category(skills: list[dict], category: str) -> list[dict]:
+def _is_uncategorized_match(category_key: str) -> bool:
+    """Check if the category key represents 'uncategorized'."""
+    return _normalize_category_for_match(category_key) == _normalize_category_for_match(_UNCATEGORIZED_KEY)
+
+
+def _filter_skills_by_category(
+    skills: list[dict],
+    category: str,
+    all_categories: list[str] | None = None,
+) -> list[dict]:
     category_key = str(category or "").strip()
     if not category_key:
         return skills
+
+    # Special handling for "未分类": include skills with empty category,
+    # explicitly "未分类", or category not in the known categories list
+    if _is_uncategorized_match(category_key):
+        known = set()
+        if all_categories:
+            for cat in all_categories:
+                if cat and not _is_uncategorized_match(cat):
+                    known.add(_normalize_category_for_match(cat))
+        return [
+            skill
+            for skill in skills
+            if _is_uncategorized_skill(skill, known)
+        ]
+
     # Normalize both sides: lowercase + spaces→hyphens
     # so "AI 与机器学习" matches "AI-与机器学习"
     normalized = _normalize_category_for_match(category_key)
@@ -445,6 +472,18 @@ def _filter_skills_by_category(skills: list[dict], category: str) -> list[dict]:
         for skill in skills
         if _normalize_category_for_match(skill.get("category")) == normalized
     ]
+
+
+def _is_uncategorized_skill(skill: dict, known_categories: set[str]) -> bool:
+    """Check if a skill should be included in '未分类' filter."""
+    cat = str(skill.get("category") or "").strip()
+    if not cat:
+        return True
+    if _normalize_category_for_match(cat) == _normalize_category_for_match(_UNCATEGORIZED_KEY):
+        return True
+    if known_categories and _normalize_category_for_match(cat) not in known_categories:
+        return True
+    return False
 
 
 def list_hub_catalog_filtered_from(
@@ -456,7 +495,13 @@ def list_hub_catalog_filtered_from(
     order: str = "asc",
 ) -> tuple[list[dict], int]:
     """List hub catalog items from a prebuilt context (no extra upstream fetch)."""
-    skills = _filter_skills_by_category(ctx.annotated_all, category)
+    all_categories = None
+    if _is_uncategorized_match(category):
+        try:
+            all_categories = fetch_categories()
+        except Exception:
+            all_categories = []
+    skills = _filter_skills_by_category(ctx.annotated_all, category, all_categories)
     if scope == "installed":
         skills = [skill for skill in skills if skill.get("installed")]
     elif scope == "not_installed":

@@ -381,9 +381,15 @@ def _get_skillhub_skills(handler, parsed) -> bool:
         return _respond_bad(handler, str(exc), 502, exc_info=(type(exc), exc, exc.__traceback__))
 
 
+_UNCATEGORIZED_LABEL = "未分类"
+
+
 def _get_skillhub_categories(handler, parsed) -> bool:
     try:
-        return _respond(handler, skillhub.fetch_categories())
+        categories = skillhub.fetch_categories()
+        if _UNCATEGORIZED_LABEL not in categories:
+            categories.append(_UNCATEGORIZED_LABEL)
+        return _respond(handler, categories)
     except Exception as exc:
         return _respond_bad(handler, str(exc), 502, exc_info=(type(exc), exc, exc.__traceback__))
 

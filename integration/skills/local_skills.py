@@ -26,6 +26,26 @@ def _normalize_category_for_match(value: str) -> str:
     return str(value or "").strip().lower().replace(" ", "-")
 
 
+_UNCATEGORIZED_KEY = "未分类"
+
+
+def _is_uncategorized_match(category_key: str) -> bool:
+    """Check if the category key represents 'uncategorized'."""
+    return _normalize_category_for_match(category_key) == _normalize_category_for_match(_UNCATEGORIZED_KEY)
+
+
+def _is_uncategorized_skill(skill: dict, known_categories: set[str]) -> bool:
+    """Check if a skill should be included in '未分类' filter."""
+    cat = str(skill.get("category") or "").strip()
+    if not cat:
+        return True
+    if _normalize_category_for_match(cat) == _normalize_category_for_match(_UNCATEGORIZED_KEY):
+        return True
+    if known_categories and _normalize_category_for_match(cat) not in known_categories:
+        return True
+    return False
+
+
 _SKILL_META_EXCLUDE = frozenset(
     {".hub_installed", ".category", ".install_name", ".hub_catalog_name", ".user_created", ".detail.json"}
 )
@@ -260,7 +280,19 @@ def list_installed(
             _log.debug("skip skill %s: %s", skill_md, exc)
 
     if category:
-        all_skills = [s for s in all_skills if s.get("category") == category]
+        if _is_uncategorized_match(category):
+            from integration.skills.skillhub import fetch_categories
+            try:
+                all_categories = fetch_categories()
+            except Exception:
+                all_categories = []
+            known = set()
+            for c in all_categories:
+                if c and not _is_uncategorized_match(c):
+                    known.add(_normalize_category_for_match(c))
+            all_skills = [s for s in all_skills if _is_uncategorized_skill(s, known)]
+        else:
+            all_skills = [s for s in all_skills if _normalize_category_for_match(s.get("category")) == _normalize_category_for_match(category)]
     all_skills = _sort_skills(all_skills)
     try:
         from integration.skills.no_self_improve import apply_lock_fields_batch
@@ -272,6 +304,8 @@ def list_installed(
             skill.setdefault("no_self_improve", hub)
             skill.setdefault("can_lock", not hub)
     categories = sorted({s.get("category") for s in all_skills if s.get("category")})
+    if _UNCATEGORIZED_KEY not in categories:
+        categories.append(_UNCATEGORIZED_KEY)
     return {
         "skills": all_skills,
         "skillhub_enabled": False,
@@ -319,8 +353,23 @@ def _scan_custom_skill_dicts(
             category_file = skill_dir / ".category"
             if category_file.is_file():
                 cat = category_file.read_text(encoding="utf-8").strip() or cat
-            if category and _normalize_category_for_match(cat) != _normalize_category_for_match(category):
-                continue
+            if category:
+                if _is_uncategorized_match(category):
+                    # For "未分类", include skills with empty category, explicitly "未分类",
+                    # or category not in known categories
+                    from integration.skills.skillhub import fetch_categories
+                    try:
+                        all_categories = fetch_categories()
+                    except Exception:
+                        all_categories = []
+                    known = set()
+                    for c in all_categories:
+                        if c and not _is_uncategorized_match(c):
+                            known.add(_normalize_category_for_match(c))
+                    if not _is_uncategorized_skill({"category": cat}, known):
+                        continue
+                elif _normalize_category_for_match(cat) != _normalize_category_for_match(category):
+                    continue
             content = skill_md.read_text(encoding="utf-8")[:4000]
             frontmatter, body = _parse_frontmatter(content)
             if not skill_matches_platform(frontmatter):
@@ -435,8 +484,22 @@ def _filter_custom_skills_in_memory(
     category_key = str(category or "").strip()
     filtered = skills
     if category_key:
-        normalized_key = _normalize_category_for_match(category_key)
-        filtered = [skill for skill in filtered if _normalize_category_for_match(skill.get("category")) == normalized_key]
+        if _is_uncategorized_match(category_key):
+            # For "未分类", include skills with empty category, explicitly "未分类",
+            # or category not in known categories
+            from integration.skills.skillhub import fetch_categories
+            try:
+                all_categories = fetch_categories()
+            except Exception:
+                all_categories = []
+            known = set()
+            for cat in all_categories:
+                if cat and not _is_uncategorized_match(cat):
+                    known.add(_normalize_category_for_match(cat))
+            filtered = [skill for skill in filtered if _is_uncategorized_skill(skill, known)]
+        else:
+            normalized_key = _normalize_category_for_match(category_key)
+            filtered = [skill for skill in filtered if _normalize_category_for_match(skill.get("category")) == normalized_key]
     query = str(q or "").strip().lower()
     if not query:
         return filtered
