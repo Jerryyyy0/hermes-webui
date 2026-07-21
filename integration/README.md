@@ -12,6 +12,7 @@ export SKILLHUB_URL=http://127.0.0.1:8000   # optional; SkillHub market only (se
 `HERMES_INTEGRATION=1` enables:
 
 - **Profile enrich** — `GET /api/profiles` adds nested `info` from `info.json`. UI via `hermes_profiles.js` (logo picker, edit, create).
+- **Profile assistant bubbles** — `GET /api/integration/assistant_bubbles?profile=<name>` returns fixed-order short assistant avatar bubbles from independent `<profile.path>/assistant_bubbles.json`; scheduled-task copy is computed live.
 - **Cross-profile cron** — Cron Hub and grouped cron APIs across profiles.
 - **SkillHub** — UI and `/api/skillhub/*` routes are active only when `SKILLHUB_URL` is also set.
 - **Egress policy (iptables)** — gated API to apply iptables open/whitelist policies (see below). **Off by default**; requires `HERMES_EGRESS_POLICY_ENABLED=1`.
@@ -117,6 +118,26 @@ Optional pin fields (usually set via `POST /api/profile/pin`, not hand-edited): 
 Regenerate built-in logo PNGs (network required): `python3 integration/scripts/fetch_profile_logos.py` (writes `assets/profile-logos/` from DiceBear + Noto Emoji; see `assets/profile-logos/LICENSES.md`).
 
 Cron and Kanban profile pickers still show profile `name` only (by design).
+
+### Profile assistant bubbles (`HERMES_INTEGRATION=1`)
+
+`GET /api/integration/assistant_bubbles?profile=<name>` returns 8 short avatar bubble items in this fixed order: `assistant_intro → emotion → scheduled_task → emotion → memory → emotion → skill → emotion`. `profile` is required; the handler resolves the Profile only through `list_profiles_api()` and returns Chinese errors for missing or unknown values.
+
+Bubble cache is stored only in `{profile.path}/assistant_bubbles.json`; it does not read or extend `info.json`. The file stores model-generated text and generation metadata (`fingerprint`, `generated_at`, `last_attempt_at`, `retry_after`) for `assistant_intro`, `memory`, `skill`, and `emotion`. Invalid, missing, or old-schema files are treated as cache misses: the API returns deterministic fallback copy immediately and queues self-healing generation.
+
+Generation is process-global and serial (`integration/assistant_bubbles/generation.py`). First fills for missing categories run continuously in priority order without a 5-minute gap; later fingerprint-driven regenerations are rate-limited to at least 5 minutes after the last attempt, while failures retry after 30 seconds. `emotion` also refreshes every 5 minutes even when its input fingerprint is unchanged. `scheduled_task` never calls a model and is never written back: each GET reads the target Profile cron state and replaces the dynamic slot in the response.
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/api/integration/assistant_bubbles?profile=<name>` | Return fixed-order assistant bubbles for one Profile; `profile` is required |
+
+Example:
+
+```bash
+curl -sS 'http://127.0.0.1:8787/api/integration/assistant_bubbles?profile=default'
+```
+
+Implementation: [`integration/assistant_bubbles/`](assistant_bubbles/). Route seam: `api/routes.py` only imports and delegates the GET handler.
 
 ### Cross-profile cron (`HERMES_INTEGRATION=1`)
 

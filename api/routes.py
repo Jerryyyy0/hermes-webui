@@ -6637,6 +6637,14 @@ def handle_get(handler, parsed) -> bool:
         pass
 
     try:
+        from integration.assistant_bubbles.handlers import try_handle_get as _assistant_bubbles_try_get
+
+        if _assistant_bubbles_try_get(handler, parsed) is True:
+            return True
+    except ImportError:
+        pass
+
+    try:
         from integration.crons.handlers import try_handle_get as _crons_try_get
 
         if _crons_try_get(handler, parsed) is True:

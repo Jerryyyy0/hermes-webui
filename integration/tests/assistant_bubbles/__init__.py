@@ -1,0 +1,1 @@
+"""Assistant bubble integration tests."""

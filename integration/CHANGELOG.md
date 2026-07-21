@@ -8,6 +8,8 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Added
 
+- **Profile assistant bubbles API** — 新增 `GET /api/integration/assistant_bubbles?profile=<name>`，按固定顺序返回 Profile 助理头像气泡。模型文案独立持久化到 `{profile.path}/assistant_bubbles.json`，不再读写 `info.json`；缺失或损坏时立即返回确定性降级文案并异步自愈。定时任务槽位每次 GET 从目标 Profile cron 状态实时统计，不写回缓存。生成队列全局串行，首次缺失批量填充不插入 5 分钟间隔，后续变更 5 分钟冷却，失败 30 秒冷却。
+
 - **Fixed Chinese session titles** — WebUI automatic and manual title generation now always asks the title model for a Simplified Chinese title, without reading `auxiliary.title_generation.language`. The existing title model/provider/timeout route and topic-first local fallback remain unchanged. The fixed-language policy lives in `integration/session_titles/`; `api/streaming.py` keeps only the prompt and validation seam.
 
 - **Session status and unread cursors** — `GET /api/sessions` 在 integration 开启时为每行返回 `status`（`error` / `in_progress` / `has_new_messages` / `ready`）与独立 `is_unread`；`POST /api/integration/sessions/mark_read` 由服务端推进当前 Profile 会话的已读游标。游标集中存于 `{HERMES_WEBUI_STATE_DIR}/session_status.db`，以 `(profile, session_id)` 隔离；运行与异常事实仍由 Session sidecar 维护，不持久化派生 status。

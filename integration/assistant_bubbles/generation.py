@@ -1,0 +1,455 @@
+"""Global serial generation queue for assistant bubbles."""
+
+from __future__ import annotations
+
+import importlib
+import json
+import logging
+import re
+import threading
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from integration.assistant_bubbles import collectors, copy, store
+
+logger = logging.getLogger(__name__)
+
+SYSTEM_PROMPT = """你是 Profile 助理气泡文案生成器。
+你的任务是根据用户提供的 Profile 上下文，生成一条会显示在助理头像旁边的短气泡文案。
+必须遵守：
+1. 只输出简体中文。
+2. 只输出一条短句，最多 50 个 中文字符。
+3. 只基于输入上下文生成，不得编造上下文没有的信息。
+4. 不得承诺已经完成、正在执行或将自动执行任何动作。
+5. 不得输出 JSON、Markdown、代码块、标题、编号、候选列表、解释、引号或前后缀。
+6. 返回内容必须能直接展示给用户。"""
+
+PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
+GENERATION_ORDER = ("assistant_intro", "memory", "skill", "emotion")
+SUCCESS_REGEN_COOLDOWN_SECONDS = 300
+FAILURE_RETRY_SECONDS = 30
+EMOTION_REFRESH_SECONDS = 5 * 60
+
+@dataclass(frozen=True)
+class BubbleTask:
+    profile: str
+    profile_path: str
+    category: str
+    fingerprint: str
+    provider: str | None = None
+    model: str | None = None
+    base_url: str | None = None
+
+
+_lock = threading.Lock()
+_cv = threading.Condition(_lock)
+_pending: dict[tuple[str, str], BubbleTask] = {}
+_worker_started = False
+_disabled = False
+
+
+def disable_worker_for_tests(value: bool = True) -> None:
+    global _disabled
+    with _lock:
+        _disabled = value
+
+
+def _ensure_worker() -> None:
+    global _worker_started
+    with _lock:
+        if _worker_started or _disabled:
+            return
+        _worker_started = True
+        threading.Thread(target=_worker_loop, name="assistant-bubbles-generator", daemon=True).start()
+
+
+def enqueue(profile: str, profile_path: Path, category: str, fingerprint: str) -> None:
+    if category not in GENERATION_ORDER:
+        return
+    route = collectors.model_route(profile_path)
+    task = BubbleTask(
+        profile=profile,
+        profile_path=str(profile_path),
+        category=category,
+        fingerprint=fingerprint,
+        provider=route.get("provider"),
+        model=route.get("model"),
+        base_url=route.get("base_url"),
+    )
+    _ensure_worker()
+    with _cv:
+        _pending[(profile, category)] = task
+        _cv.notify()
+
+
+def enqueue_missing_or_stale(profile: str, profile_path: Path, cache: dict[str, Any] | None = None) -> None:
+    cache = cache if cache is not None else store.read_store(profile_path)
+    for category in GENERATION_ORDER:
+        context = collectors.collect_context(profile, profile_path, category)
+        fp = collectors.fingerprint_for(category, context)
+        if should_generate(category, fp, cache, now=time.time()):
+            enqueue(profile, profile_path, category, fp)
+
+
+def start_pregeneration() -> None:
+    def _scan() -> None:
+        try:
+            from api.profiles import list_profiles_api
+
+            for row in list_profiles_api():
+                profile = str(row.get("name") or "").strip()
+                path = row.get("path")
+                if profile and path:
+                    enqueue_missing_or_stale(profile, Path(path))
+        except Exception:
+            logger.debug("assistant_bubbles pregeneration scan failed", exc_info=True)
+
+    _ensure_worker()
+    threading.Thread(target=_scan, name="assistant-bubbles-pregeneration", daemon=True).start()
+
+
+def should_generate(category: str, fingerprint: str, cache: dict[str, Any] | None, now: float | None = None) -> bool:
+    now = time.time() if now is None else now
+    if category == "memory":
+        # Empty memory contexts use deterministic copy and do not need model calls.
+        pass
+    if not cache:
+        return True
+    generation = cache.get("generation") if isinstance(cache, dict) else {}
+    entry = generation.get(category) if isinstance(generation, dict) else None
+    if not isinstance(entry, dict):
+        return True
+    retry_after = entry.get("retry_after")
+    if isinstance(retry_after, (int, float)) and retry_after > now:
+        return False
+    generated_at = entry.get("generated_at")
+    last_attempt_at = entry.get("last_attempt_at")
+    if generated_at is None:
+        return True
+    if entry.get("fingerprint") != fingerprint:
+        if generated_at is None:
+            return True
+        if isinstance(last_attempt_at, (int, float)) and now - last_attempt_at < SUCCESS_REGEN_COOLDOWN_SECONDS:
+            return False
+        return True
+    if category == "emotion" and isinstance(generated_at, (int, float)):
+        if now - generated_at >= EMOTION_REFRESH_SECONDS:
+            if isinstance(last_attempt_at, (int, float)) and now - last_attempt_at < SUCCESS_REGEN_COOLDOWN_SECONDS:
+                return False
+            return True
+    return False
+
+
+def _worker_loop() -> None:
+    while True:
+        with _cv:
+            while not _pending:
+                _cv.wait()
+            key = next(iter(_pending))
+            task = _pending.pop(key)
+        try:
+            _run_task(task)
+        except Exception:
+            logger.debug("assistant_bubbles task failed", exc_info=True)
+
+
+def _run_task(task: BubbleTask) -> None:
+    profile_path = Path(task.profile_path)
+    cache = store.read_store(profile_path)
+    context = collectors.collect_context(task.profile, profile_path, task.category)
+    current_fp = collectors.fingerprint_for(task.category, context)
+    if current_fp != task.fingerprint:
+        enqueue(task.profile, profile_path, task.category, current_fp)
+        return
+    if not should_generate(task.category, current_fp, cache, now=time.time()):
+        return
+    if task.category == "memory" and not context.get("latest_memory"):
+        _write_success(
+            profile_path,
+            task.category,
+            copy.fallback_text(task.category, context),
+            current_fp,
+            task=task,
+            reason="empty_memory_fallback",
+        )
+        return
+    if task.category == "skill" and not context.get("skills_count"):
+        _write_success(
+            profile_path,
+            task.category,
+            copy.fallback_text(task.category, context),
+            current_fp,
+            task=task,
+            reason="empty_skill_fallback",
+        )
+        return
+    if not task.model:
+        _write_success(
+            profile_path,
+            task.category,
+            _fallback_for_category(task.category, context),
+            current_fp,
+            task=task,
+            reason="missing_profile_default_model_fallback",
+        )
+        return
+    text_or_texts, failure_reason = _generate_with_model(task, profile_path, context)
+    if text_or_texts is None:
+        _write_failure(profile_path, task.category, current_fp, reason=failure_reason, task=task, context=context)
+        return
+    latest_context = collectors.collect_context(task.profile, profile_path, task.category)
+    latest_fp = collectors.fingerprint_for(task.category, latest_context)
+    if latest_fp != current_fp:
+        enqueue(task.profile, profile_path, task.category, latest_fp)
+        return
+    _write_success(profile_path, task.category, text_or_texts, current_fp, task=task, reason="model_generated")
+
+
+def _fallback_for_category(category: str, context: dict[str, Any]) -> str | list[str]:
+    if category == "emotion":
+        return copy.fallback_emotions(context)
+    return copy.fallback_text(category, context)
+
+
+def _generation_entry(fingerprint: str, *, success: bool) -> dict[str, Any]:
+    now = time.time()
+    return {
+        "fingerprint": fingerprint,
+        "generated_at": now if success else None,
+        "last_attempt_at": now,
+        "retry_after": None if success else now + FAILURE_RETRY_SECONDS,
+    }
+
+
+def _preview_text(text_or_texts: str | list[str]) -> str:
+    if isinstance(text_or_texts, list):
+        return " | ".join(str(item) for item in text_or_texts)[:160]
+    return str(text_or_texts or "")[:160]
+
+
+def _write_success(
+    profile_path: Path,
+    category: str,
+    text_or_texts: str | list[str],
+    fingerprint: str,
+    *,
+    task: BubbleTask | None = None,
+    reason: str = "model_generated",
+) -> None:
+    entry = _generation_entry(fingerprint, success=True)
+    logger.info(
+        "assistant_bubbles generation succeeded: profile=%s category=%s fingerprint=%s reason=%s provider=%s model=%s generated_at=%s preview=%r",
+        task.profile if task else "",
+        category,
+        fingerprint[:12],
+        reason,
+        task.provider if task else None,
+        task.model if task else None,
+        entry.get("generated_at"),
+        _preview_text(text_or_texts),
+    )
+    store.update_category(profile_path, category, text_or_texts, entry)
+
+
+def _category_has_cached_text(cache: dict[str, Any], category: str) -> bool:
+    items = cache.get("items") if isinstance(cache, dict) else []
+    if not isinstance(items, list):
+        return False
+    expected = 4 if category == "emotion" else 1
+    found = 0
+    for item in items:
+        if not isinstance(item, dict) or item.get("type") != category:
+            continue
+        text = item.get("text")
+        if isinstance(text, str) and text:
+            found += 1
+    return found >= expected
+
+
+def _write_failure(
+    profile_path: Path,
+    category: str,
+    fingerprint: str,
+    *,
+    reason: str = "unknown",
+    task: BubbleTask | None = None,
+    context: dict[str, Any] | None = None,
+) -> None:
+    cache = store.read_store(profile_path) or store.empty_store()
+    previous = (cache.get("generation") or {}).get(category) or {}
+    entry = _generation_entry(fingerprint, success=False)
+    if previous.get("generated_at") is not None:
+        entry["generated_at"] = previous.get("generated_at")
+    logger.warning(
+        "assistant_bubbles generation failed: profile=%s category=%s fingerprint=%s reason=%s provider=%s model=%s retry_after=%s",
+        task.profile if task else "",
+        category,
+        fingerprint[:12],
+        reason,
+        task.provider if task else None,
+        task.model if task else None,
+        entry.get("retry_after"),
+    )
+    if not _category_has_cached_text(cache, category):
+        fallback = _fallback_for_category(category, context or {})
+        store.update_category(profile_path, category, fallback, entry)
+        return
+    store.update_generation_only(profile_path, category, entry)
+
+
+def _load_user_prompt(category: str, context: dict[str, Any]) -> str:
+    template = (PROMPTS_DIR / f"{category}.txt").read_text(encoding="utf-8")
+    raw_skills_block = collectors.skills_block(context.get("skills") or [])
+    skills_block = raw_skills_block if category == "skill" else collectors.sanitize_for_prompt(raw_skills_block, 1500)
+    variables = {
+        "display_name": collectors.sanitize_for_prompt(context.get("display_name"), 200),
+        "description": collectors.sanitize_for_prompt(context.get("description"), 500),
+        "soul": collectors.sanitize_for_prompt(context.get("soul"), 1500),
+        "latest_memory": collectors.sanitize_for_prompt(context.get("latest_memory"), 500),
+        "skills_count": str(context.get("skills_count") or 0),
+        "skills_block": skills_block,
+    }
+    return template.format(**variables)
+
+
+def _generate_with_model(
+    task: BubbleTask,
+    profile_path: Path,
+    context: dict[str, Any],
+) -> tuple[str | list[str] | None, str]:
+    category = task.category
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": _load_user_prompt(category, context)},
+    ]
+    try:
+        auxiliary_client = importlib.import_module("agent.auxiliary_client")
+        call_llm = getattr(auxiliary_client, "call_llm")
+        from api.profiles import profile_env_for_background_worker
+
+        with profile_env_for_background_worker(task.profile, purpose="assistant bubble generation"):
+            resp = call_llm(
+                task="assistant_bubbles",
+                provider=task.provider,
+                model=task.model,
+                base_url=task.base_url,
+                messages=messages,
+                temperature=0.2,
+                max_tokens=180 if category == "emotion" else 80,
+                timeout=45,
+            )
+        content = resp.choices[0].message.content
+    except Exception as exc:
+        logger.warning(
+            "assistant_bubbles model call failed: profile=%s category=%s provider=%s model=%s error=%s",
+            task.profile,
+            category,
+            task.provider,
+            task.model,
+            exc,
+        )
+        return None, "model_call_failed"
+    result, reason = validate_model_output(category, content, context)
+    if result is None:
+        logger.warning(
+            "assistant_bubbles model output rejected: profile=%s category=%s provider=%s model=%s reason=%s preview=%r",
+            task.profile,
+            category,
+            task.provider,
+            task.model,
+            reason,
+            str(content or "")[:160],
+        )
+    return result, reason
+
+
+def _strip_wrapping_quotes(text: str) -> str:
+    text = text.strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {'"', "'", "“", "”", "‘", "’"}:
+        return text[1:-1].strip()
+    return text
+
+
+def _has_cjk(text: str) -> bool:
+    return bool(re.search(r"[\u4e00-\u9fff]", text or ""))
+
+
+def _contains_real_chinese_skill(value: str, context: dict[str, Any] | None) -> bool:
+    skills = (context or {}).get("skills") or []
+    for skill in skills:
+        label = str(skill.get("label") or "").strip()
+        if label and label in value:
+            return True
+        desc = str(skill.get("description") or "").strip()
+        if not _has_cjk(desc):
+            continue
+        for phrase in re.findall(r"[\u4e00-\u9fffA-Za-z0-9]{2,12}", desc):
+            if _has_cjk(phrase) and phrase in value:
+                return True
+    return False
+
+
+def _skill_mentions_ascii_slug(value: str, context: dict[str, Any] | None) -> bool:
+    skills = (context or {}).get("skills") or []
+    for skill in skills:
+        name = str(skill.get("name") or "").strip()
+        if not name or _has_cjk(name):
+            continue
+        if name in value:
+            return True
+    return False
+
+
+def validate_one_text(category: str, text: Any, context: dict[str, Any] | None = None) -> tuple[str | None, str]:
+    if not isinstance(text, str):
+        return None, "not_string"
+    value = _strip_wrapping_quotes(text)
+    if not value:
+        return None, "empty"
+    if len(value) > 50:
+        return None, "over_50_chars"
+    if "```" in value or re.search(r"(^|\n)\s*(?:[-*+]\s+|\d+[.)]\s+|#{1,6}\s+)", value):
+        return None, "markdown_or_list_marker"
+    if "\n" in value or "\r" in value:
+        return None, "multiline"
+    if category == "skill":
+        if not _has_cjk(value):
+            return None, "skill_not_chinese"
+        if _skill_mentions_ascii_slug(value, context):
+            return None, "skill_ascii_slug"
+        if (context or {}).get("skills") and not _contains_real_chinese_skill(value, context):
+            return None, "skill_real_chinese_missing"
+    return value, "ok"
+
+
+def validate_model_output(
+    category: str,
+    content: Any,
+    context: dict[str, Any] | None = None,
+) -> tuple[str | list[str] | None, str]:
+    if category == "emotion":
+        if not isinstance(content, str):
+            return None, "not_string"
+        raw = content.strip()
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return None, "invalid_json"
+        if not isinstance(parsed, list):
+            return None, "not_json_array"
+        if len(parsed) != 4:
+            return None, "emotion_count_not_4"
+        out: list[str] = []
+        seen: set[str] = set()
+        for item in parsed:
+            text, reason = validate_one_text(category, item, context)
+            if not text:
+                return None, f"emotion_item_{reason}"
+            if text in seen:
+                return None, "emotion_duplicate"
+            out.append(text)
+            seen.add(text)
+        return out, "ok"
+    return validate_one_text(category, content, context)

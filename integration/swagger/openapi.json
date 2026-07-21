@@ -30,7 +30,8 @@
     { "name": "IntegrationKnowledgeBase", "description": "知识库下游 BFF 代理（需 HERMES_INTEGRATION=1 且 KNOWLEDGE_BASE_URL）。`account`/`uuid` 由调用方在请求体传入；成功时返回下游 `data` 字段内容。" },
     { "name": "IntegrationRecordScripts", "description": "录制脚本与关联 CSV（需 HERMES_INTEGRATION=1）。`relate_name` 由前端生成，一个 relate_name 对应一份脚本 JSON 字符串和一份 CSV，存储于 {HERMES_WEBUI_STATE_DIR}/attachments/record_scripts/<relate_name>/。" },
     { "name": "IntegrationNotifications", "description": "通知系统（需 HERMES_INTEGRATION=1 且 KNOWLEDGE_BASE_URL）。知识库通知从下游 get_user_messages 实时聚合；notifications.db 表结构预留，HTTP 层当前不读写本地存储。" },
-    { "name": "IntegrationMemory",   "description": "记忆统计（需 HERMES_INTEGRATION=1）。聚合展示会话天数、定时任务和记忆文件。" }
+    { "name": "IntegrationMemory",   "description": "记忆统计（需 HERMES_INTEGRATION=1）。聚合展示会话天数、定时任务和记忆文件。" },
+    { "name": "IntegrationAssistantBubbles", "description": "Profile 助理气泡（需 HERMES_INTEGRATION=1）。读取 `<profile.path>/assistant_bubbles.json` 独立缓存；定时任务槽位实时统计，不写回。" }
   ],
   "paths": {
 
@@ -1843,6 +1844,34 @@
               }
             }
           }
+        }
+      }
+    },
+    "/api/integration/assistant_bubbles": {
+      "get": {
+        "tags": ["IntegrationAssistantBubbles"],
+        "summary": "获取 Profile 助理气泡",
+        "description": "需 `HERMES_INTEGRATION=1`。`profile` 为必填 query；仅读取可信 `list_profiles_api()` 返回的 Profile 路径。模型文案缓存独立存于 `<profile.path>/assistant_bubbles.json`；`scheduled_task` 槽位每次 GET 实时统计并替换，不写回缓存。",
+        "parameters": [
+          {
+            "name": "profile",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string" },
+            "description": "Profile 名称，例如 default 或 alice"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "固定顺序气泡列表",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/AssistantBubblesResponse" }
+              }
+            }
+          },
+          "400": { "description": "缺少 profile" },
+          "404": { "description": "Profile 不存在" }
         }
       }
     },
@@ -6248,6 +6277,30 @@
         "properties": {
           "total": { "type": "integer" },
           "documents": { "type": "array", "items": { "type": "object" } }
+        }
+      },
+      "AssistantBubbleItem": {
+        "type": "object",
+        "required": ["type", "text"],
+        "properties": {
+          "type": { "type": "string", "enum": ["assistant_intro", "emotion", "scheduled_task", "memory", "skill"] },
+          "text": { "type": "string", "maxLength": 50 },
+          "dynamic": { "type": "boolean", "description": "仅 scheduled_task 槽位返回 true" }
+        }
+      },
+      "AssistantBubblesResponse": {
+        "type": "object",
+        "required": ["profile", "items"],
+        "properties": {
+          "profile": { "type": "string" },
+          "cache_status": { "type": "string", "enum": ["hit", "fallback"] },
+          "items": {
+            "type": "array",
+            "minItems": 8,
+            "maxItems": 8,
+            "items": { "$ref": "#/components/schemas/AssistantBubbleItem" },
+            "description": "固定顺序：assistant_intro → emotion → scheduled_task → emotion → memory → emotion → skill → emotion"
+          }
         }
       },
       "IntegrationWorkspaceFileEntry": {
