@@ -108,6 +108,8 @@ def test_cancel_nonexistent_stream(cleanup_test_sessions):
     assert status == 200
     assert data["ok"] is True
     assert data["cancelled"] is False
+    assert data["settled"] is True
+    assert data["settle_timeout_ms"] == 10000
 
 def test_send_button_in_html(cleanup_test_sessions):
     src, _ = get_text("/")

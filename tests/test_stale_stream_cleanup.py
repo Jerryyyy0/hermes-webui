@@ -12,6 +12,61 @@ SESSIONS_SRC = (REPO / "static" / "sessions.js").read_text(encoding="utf-8")
 SW_SRC = (REPO / "static" / "sw.js").read_text(encoding="utf-8")
 
 
+def test_wait_for_stream_worker_settled_returns_immediately_for_empty_stream():
+    assert routes._wait_for_stream_worker_settled(None, timeout_seconds=0) is True
+    assert routes._wait_for_stream_worker_settled("", timeout_seconds=0) is True
+
+
+def test_wait_for_stream_worker_settled_observes_active_run_unregister(monkeypatch):
+    config.ACTIVE_RUNS.clear()
+    stream_id = "settles-before-deadline"
+    config.register_active_run(stream_id, session_id="settle-session", phase="cancelling")
+    sleeps = []
+
+    def fake_sleep(seconds):
+        sleeps.append(seconds)
+        config.unregister_active_run(stream_id)
+
+    monkeypatch.setattr(routes.time, "sleep", fake_sleep)
+
+    assert routes._wait_for_stream_worker_settled(
+        stream_id,
+        timeout_seconds=1.0,
+        poll_seconds=0.05,
+    ) is True
+    assert sleeps, "helper should poll while the worker remains registered"
+
+
+def test_wait_for_stream_worker_settled_times_out_without_real_delay(monkeypatch):
+    config.ACTIVE_RUNS.clear()
+    stream_id = "still-running-at-deadline"
+    config.register_active_run(stream_id, session_id="settle-timeout-session", phase="cancelling")
+    ticks = iter([0.0, 0.0, 0.2, 0.2])
+    sleeps = []
+
+    def fake_monotonic():
+        try:
+            return next(ticks)
+        except StopIteration:
+            return 0.2
+
+    def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(routes.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(routes.time, "sleep", fake_sleep)
+
+    try:
+        assert routes._wait_for_stream_worker_settled(
+            stream_id,
+            timeout_seconds=0.1,
+            poll_seconds=0.05,
+        ) is False
+        assert sleeps == [0.05]
+    finally:
+        config.unregister_active_run(stream_id)
+
+
 class _GateLock:
     def __init__(self):
         self._lock = threading.Lock()

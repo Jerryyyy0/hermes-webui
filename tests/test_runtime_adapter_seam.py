@@ -1,6 +1,7 @@
 import importlib
 import io
 import queue
+from urllib.parse import urlparse
 
 from tests.conftest import requires_agent_modules
 
@@ -254,6 +255,90 @@ def test_legacy_journal_adapter_queue_and_goal_return_bounded_statuses():
     assert goal.payload["error"] == "agent_running"
 
 
+class _RouteCaptureHandler:
+    command = "GET"
+    path = "/"
+    client_address = ("127.0.0.1", 12345)
+
+
+def _capture_route_json(monkeypatch, routes):
+    captured = {}
+
+    def fake_j(_handler, payload, *_, **kwargs):
+        captured["payload"] = payload
+        captured["status"] = kwargs.get("status", 200)
+        return True
+
+    monkeypatch.setattr(routes, "j", fake_j)
+    return captured
+
+
+def test_chat_cancel_route_reports_settled_for_direct_cancel(monkeypatch):
+    routes = importlib.import_module("api.routes")
+    runtime = importlib.import_module("api.runtime_adapter")
+    calls = {"cancel": [], "wait": []}
+
+    monkeypatch.setattr(runtime, "runtime_adapter_enabled", lambda: False)
+    monkeypatch.setattr(routes, "cancel_stream", lambda stream_id: calls["cancel"].append(stream_id) or True)
+    monkeypatch.setattr(routes, "_wait_for_stream_worker_settled", lambda stream_id: calls["wait"].append(stream_id) or True)
+    captured = _capture_route_json(monkeypatch, routes)
+
+    routes.handle_get(_RouteCaptureHandler(), urlparse("/api/chat/cancel?stream_id=stream-direct"))
+
+    assert calls == {"cancel": ["stream-direct"], "wait": ["stream-direct"]}
+    assert captured["payload"] == {
+        "ok": True,
+        "cancelled": True,
+        "settled": True,
+        "stream_id": "stream-direct",
+        "settle_timeout_ms": 10000,
+    }
+
+
+def test_chat_cancel_route_reports_unsettled_for_adapter_cancel(monkeypatch):
+    routes = importlib.import_module("api.routes")
+    runtime = importlib.import_module("api.runtime_adapter")
+    calls = {"cancel": [], "wait": []}
+
+    monkeypatch.setattr(runtime, "runtime_adapter_enabled", lambda: True)
+    monkeypatch.setattr(routes, "cancel_stream", lambda stream_id: calls["cancel"].append(stream_id) or True)
+    monkeypatch.setattr(routes, "_wait_for_stream_worker_settled", lambda stream_id: calls["wait"].append(stream_id) or False)
+    captured = _capture_route_json(monkeypatch, routes)
+
+    routes.handle_get(_RouteCaptureHandler(), urlparse("/api/chat/cancel?stream_id=stream-adapter"))
+
+    assert calls == {"cancel": ["stream-adapter"], "wait": ["stream-adapter"]}
+    assert captured["payload"] == {
+        "ok": True,
+        "cancelled": True,
+        "settled": False,
+        "stream_id": "stream-adapter",
+        "settle_timeout_ms": 10000,
+    }
+
+
+def test_chat_cancel_route_skips_settle_wait_for_missing_stream(monkeypatch):
+    routes = importlib.import_module("api.routes")
+    runtime = importlib.import_module("api.runtime_adapter")
+    calls = {"cancel": [], "wait": []}
+
+    monkeypatch.setattr(runtime, "runtime_adapter_enabled", lambda: False)
+    monkeypatch.setattr(routes, "cancel_stream", lambda stream_id: calls["cancel"].append(stream_id) or False)
+    monkeypatch.setattr(routes, "_wait_for_stream_worker_settled", lambda stream_id: calls["wait"].append(stream_id) or True)
+    captured = _capture_route_json(monkeypatch, routes)
+
+    routes.handle_get(_RouteCaptureHandler(), urlparse("/api/chat/cancel?stream_id=stream-missing"))
+
+    assert calls == {"cancel": ["stream-missing"], "wait": []}
+    assert captured["payload"] == {
+        "ok": True,
+        "cancelled": False,
+        "settled": True,
+        "stream_id": "stream-missing",
+        "settle_timeout_ms": 10000,
+    }
+
+
 def test_chat_cancel_route_uses_adapter_only_when_flag_enabled():
     routes = importlib.import_module("api.routes")
     src = (routes.Path(__file__).parent.parent / "api" / "routes.py").read_text(encoding="utf-8")
@@ -264,6 +349,9 @@ def test_chat_cancel_route_uses_adapter_only_when_flag_enabled():
     assert "LegacyJournalRuntimeAdapter(cancel_delegate=cancel_stream)" in cancel_body
     assert "adapter.cancel_run(stream_id).accepted" in cancel_body
     assert "else:\n            cancelled = cancel_stream(stream_id)" in cancel_body
+    assert "_wait_for_stream_worker_settled(stream_id)" in cancel_body
+    assert '"settled": settled' in cancel_body
+    assert '"settle_timeout_ms": int(CANCEL_SETTLE_TIMEOUT_SECONDS * 1000)' in cancel_body
     assert "HERMES_WEBUI_RUNTIME_ADAPTER" not in cancel_body, "route should use runtime_adapter_enabled(), not inline env checks"
 
 

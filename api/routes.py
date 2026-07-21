@@ -1131,6 +1131,8 @@ from api.config import (
     LOCK,
     STREAMS,
     STREAMS_LOCK,
+    ACTIVE_RUNS,
+    ACTIVE_RUNS_LOCK,
     CANCEL_FLAGS,
     STREAM_LIVE_MANIFEST,
     STREAM_LAST_EVENT_ID,
@@ -6463,6 +6465,23 @@ def handle_get(handler, parsed) -> bool:
         stream_id = parse_qs(parsed.query).get("stream_id", [""])[0]
         if not stream_id:
             return bad(handler, "stream_id required")
+
+        with ACTIVE_RUNS_LOCK:
+            run = dict((ACTIVE_RUNS or {}).get(stream_id) or {})
+        session_id = str(run.get("session_id") or "").strip()
+        if session_id:
+            try:
+                stream_session = get_session(session_id, metadata_only=True)
+                from api.profiles import get_active_profile_name
+
+                if not _profiles_match(
+                    getattr(stream_session, "profile", None),
+                    get_active_profile_name(),
+                ):
+                    return bad(handler, "Session not found", 404)
+            except KeyError:
+                return bad(handler, "Session not found", 404)
+
         from api.runtime_adapter import LegacyJournalRuntimeAdapter, runtime_adapter_enabled
 
         if runtime_adapter_enabled():
@@ -6470,7 +6489,16 @@ def handle_get(handler, parsed) -> bool:
             cancelled = adapter.cancel_run(stream_id).accepted
         else:
             cancelled = cancel_stream(stream_id)
-        return j(handler, {"ok": True, "cancelled": cancelled, "stream_id": stream_id})
+        settled = True
+        if cancelled:
+            settled = _wait_for_stream_worker_settled(stream_id)
+        return j(handler, {
+            "ok": True,
+            "cancelled": cancelled,
+            "settled": settled,
+            "stream_id": stream_id,
+            "settle_timeout_ms": int(CANCEL_SETTLE_TIMEOUT_SECONDS * 1000),
+        })
 
     if parsed.path == "/api/chat/stream":
         return _handle_sse_stream(handler, parsed)
@@ -12422,6 +12450,49 @@ def _is_hidden_empty_session(s) -> bool:
     )
 
 
+CANCEL_SETTLE_TIMEOUT_SECONDS = 10.0
+_CANCEL_SETTLE_POLL_SECONDS = 0.05
+
+
+def _stream_worker_active(stream_id: str | None) -> bool:
+    sid = str(stream_id or "").strip()
+    if not sid:
+        return False
+    try:
+        with ACTIVE_RUNS_LOCK:
+            return sid in (ACTIVE_RUNS or {})
+    except Exception:
+        logger.debug("Failed to inspect ACTIVE_RUNS for stream %s", sid, exc_info=True)
+        return False
+
+
+def _wait_for_stream_worker_settled(
+    stream_id: str | None,
+    *,
+    timeout_seconds: float = CANCEL_SETTLE_TIMEOUT_SECONDS,
+    poll_seconds: float = _CANCEL_SETTLE_POLL_SECONDS,
+) -> bool:
+    sid = str(stream_id or "").strip()
+    if not sid:
+        return True
+    try:
+        timeout = max(0.0, float(timeout_seconds))
+    except (TypeError, ValueError):
+        timeout = CANCEL_SETTLE_TIMEOUT_SECONDS
+    try:
+        poll = max(0.01, float(poll_seconds))
+    except (TypeError, ValueError):
+        poll = _CANCEL_SETTLE_POLL_SECONDS
+    deadline = time.monotonic() + timeout
+    while True:
+        if not _stream_worker_active(sid):
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(poll, remaining))
+
+
 def _active_stream_blocks_chat_start(session, stream_id: str | None) -> bool:
     """Return whether an active_stream_id still owns this session's next turn.
 
@@ -12494,8 +12565,12 @@ def _active_run_stream_for_session(session_id: str | None) -> str | None:
                 except (TypeError, ValueError):
                     started_at = 0.0
                 # Ignore a stale/wedged entry past the unwind ceiling so it can't
-                # block the session permanently.
+                # block the session permanently, and reconcile the zombie registry
+                # immediately so health/recovery polling stops advertising it.
                 if started_at and (now - started_at) > ceiling:
+                    # ACTIVE_RUNS_LOCK is not reentrant, so do not call
+                    # unregister_active_run() while holding it.
+                    (_live_config.ACTIVE_RUNS or {}).pop(stream_id, None)
                     continue
                 return stream_id
     except Exception:
