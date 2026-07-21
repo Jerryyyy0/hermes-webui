@@ -76,6 +76,22 @@ def test_collect_skills_prefers_real_chinese_display_metadata(tmp_path):
     assert collectors.skills_block(skills) == "- 创意构思：生成创意点子"
 
 
+def test_collect_skills_keeps_skills_without_chinese_display_text(tmp_path):
+    skill = tmp_path / "skills" / "plain-english"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        "---\nname: plain-english\ndescription: Generate concise English summaries.\n---\n",
+        encoding="utf-8",
+    )
+
+    skills = collectors.collect_skills(tmp_path)
+
+    assert skills == [
+        {"name": "plain-english", "label": "plain-english", "description": "Generate concise English summaries."},
+    ]
+    assert collectors.skills_block(skills) == "- plain-english：Generate concise English summaries."
+
+
 def test_skill_prompt_uses_full_skill_count_and_block():
     skills = [
         {"name": f"skill-{idx}", "label": f"技能{idx}", "description": f"描述{idx}"}
@@ -99,6 +115,15 @@ def test_validate_emotion_requires_four_unique_short_texts():
     result, reason = generation.validate_model_output("emotion", duplicate)
     assert result is None
     assert reason == "emotion_duplicate"
+
+
+def test_validate_model_output_allows_text_over_50_chars():
+    content = "这是一段超过五十字但格式合法的气泡文案，用于确认本地代码不再强制校验长度，只依赖提示词约束模型尽量控制长度。"
+
+    result, reason = generation.validate_model_output("assistant_intro", content)
+
+    assert result == content
+    assert reason == "ok"
 
 
 def test_validate_skill_requires_real_chinese_skill_content():
@@ -227,7 +252,7 @@ def test_run_task_logs_generation_success(tmp_path, caplog):
     with patch("integration.assistant_bubbles.generation._generate_with_model", return_value=("成功文案。", "ok")):
         generation._run_task(task)
 
-    assert "assistant_bubbles generation succeeded" in caplog.text
+    assert "[webui][assistant_bubbles][generation_succeeded]" in caplog.text
     assert "profile=alice" in caplog.text
     assert "category=assistant_intro" in caplog.text
     assert "reason=model_generated" in caplog.text
@@ -315,7 +340,7 @@ def test_run_task_logs_generation_failure(tmp_path, caplog):
     with patch("integration.assistant_bubbles.generation._generate_with_model", return_value=(None, "model_output_rejected")):
         generation._run_task(task)
 
-    assert "assistant_bubbles generation failed" in caplog.text
+    assert "[webui][assistant_bubbles][generation_failed]" in caplog.text
     assert "profile=alice" in caplog.text
     assert "category=assistant_intro" in caplog.text
     assert "reason=model_output_rejected" in caplog.text

@@ -20,7 +20,7 @@ def _fallback_items(profile: str, profile_path: Path) -> list[dict]:
     return [
         {"type": "assistant_intro", "text": copy.fallback_text("assistant_intro", intro_context)},
         {"type": "emotion", "text": emotions[0]},
-        {"type": "scheduled_task", "text": copy.scheduled_task_text(stats), "dynamic": True},
+        {"type": "scheduled_task", "text": copy.scheduled_task_text(stats)},
         {"type": "emotion", "text": emotions[1]},
         {"type": "memory", "text": copy.fallback_text("memory", memory_context)},
         {"type": "emotion", "text": emotions[2]},
@@ -39,7 +39,7 @@ def _items_for_response(profile: str, profile_path: Path, cache: dict | None) ->
     for idx, item in enumerate(cache.get("items") or []):
         item_type = item.get("type")
         if item_type == "scheduled_task":
-            out.append({"type": "scheduled_task", "text": copy.scheduled_task_text(stats), "dynamic": True})
+            out.append({"type": "scheduled_task", "text": copy.scheduled_task_text(stats)})
             continue
         text = item.get("text")
         if not isinstance(text, str) or not text:

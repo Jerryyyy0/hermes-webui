@@ -24,7 +24,7 @@ def test_handler_requires_profile(monkeypatch):
     assert calls == [("profile 为必填参数", 400)]
 
 
-def test_handler_resolves_profile_from_list_and_returns_dynamic_task(tmp_path, monkeypatch):
+def test_handler_resolves_profile_from_list_and_returns_scheduled_task(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_INTEGRATION", "1")
     generation.disable_worker_for_tests(True)
     profile = tmp_path / "profile"
@@ -53,7 +53,7 @@ def test_handler_resolves_profile_from_list_and_returns_dynamic_task(tmp_path, m
     assert payload["profile"] == "alice"
     assert payload["cache_status"] == "hit"
     assert [item["type"] for item in payload["items"]] == store.ITEM_ORDER
-    assert payload["items"][2]["dynamic"] is True
+    assert "dynamic" not in payload["items"][2]
     assert "2个定时任务" in payload["items"][2]["text"]
 
 

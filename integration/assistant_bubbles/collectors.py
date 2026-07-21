@@ -11,10 +11,10 @@ from typing import Any
 import yaml
 
 PROMPT_VERSIONS = {
-    "assistant_intro": "assistant_intro.v1",
-    "memory": "memory.v1",
-    "skill": "skill.v3",
-    "emotion": "emotion.v3",
+    "assistant_intro": "assistant_intro.v2",
+    "memory": "memory.v2",
+    "skill": "skill.v4",
+    "emotion": "emotion.v4",
 }
 
 
@@ -133,12 +133,7 @@ def collect_skills(profile_path: Path) -> list[dict[str, str]]:
                 if line and not line.startswith("#"):
                     desc = line
                     break
-        label = display_name if _has_cjk(display_name) else ""
-        if not label and _has_cjk(name):
-            label = name
-        if not label and not _has_cjk(desc):
-            seen.add(name)
-            continue
+        label = display_name or name
         seen.add(name)
         out.append({"name": name, "label": label, "description": desc})
     return out
@@ -237,10 +232,10 @@ def skills_block(skills: list[dict[str, str]]) -> str:
     for skill in skills:
         label = str(skill.get("label") or "").strip()
         desc = str(skill.get("description") or "").strip()
-        if not label and not _has_cjk(desc):
-            continue
-        if label:
-            lines.append(f"- {label}：{desc}" if desc else f"- {label}")
+        name = str(skill.get("name") or "").strip()
+        display = label or name
+        if display:
+            lines.append(f"- {display}：{desc}" if desc else f"- {display}")
         elif desc:
             lines.append(f"- {desc}")
     return "\n".join(lines)

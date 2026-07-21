@@ -6284,8 +6284,7 @@
         "required": ["type", "text"],
         "properties": {
           "type": { "type": "string", "enum": ["assistant_intro", "emotion", "scheduled_task", "memory", "skill"] },
-          "text": { "type": "string", "maxLength": 50 },
-          "dynamic": { "type": "boolean", "description": "仅 scheduled_task 槽位返回 true" }
+          "text": { "type": "string" }
         }
       },
       "AssistantBubblesResponse": {

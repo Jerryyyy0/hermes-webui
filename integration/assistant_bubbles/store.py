@@ -39,7 +39,7 @@ def empty_store() -> dict[str, Any]:
 
 
 def _valid_text(value: Any) -> bool:
-    return value is None or (isinstance(value, str) and 0 < len(value) <= 50)
+    return value is None or (isinstance(value, str) and len(value) > 0)
 
 
 def _validate_generation(generation: Any) -> dict[str, dict[str, Any]]:

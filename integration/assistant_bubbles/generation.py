@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from integration.assistant_bubbles import collectors, copy, store
+from integration.request_logging.formatting import format_kv, with_timestamp
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +32,12 @@ GENERATION_ORDER = ("assistant_intro", "memory", "skill", "emotion")
 SUCCESS_REGEN_COOLDOWN_SECONDS = 300
 FAILURE_RETRY_SECONDS = 30
 EMOTION_REFRESH_SECONDS = 5 * 60
+
+
+def _log_line(event: str, fields: dict[str, Any] | None = None) -> str:
+    suffix = format_kv(fields or {})
+    return with_timestamp(f"[webui][assistant_bubbles][{event}]" + (f" {suffix}" if suffix else ""))
+
 
 @dataclass(frozen=True)
 class BubbleTask:
@@ -104,7 +111,7 @@ def start_pregeneration() -> None:
                 if profile and path:
                     enqueue_missing_or_stale(profile, Path(path))
         except Exception:
-            logger.debug("assistant_bubbles pregeneration scan failed", exc_info=True)
+            logger.debug(_log_line("pregeneration_scan_failed"), exc_info=True)
 
     _ensure_worker()
     threading.Thread(target=_scan, name="assistant-bubbles-pregeneration", daemon=True).start()
@@ -152,7 +159,17 @@ def _worker_loop() -> None:
         try:
             _run_task(task)
         except Exception:
-            logger.debug("assistant_bubbles task failed", exc_info=True)
+            logger.debug(
+                _log_line(
+                    "task_failed",
+                    {
+                        "profile": task.profile,
+                        "category": task.category,
+                        "fingerprint": task.fingerprint[:12],
+                    },
+                ),
+                exc_info=True,
+            )
 
 
 def _run_task(task: BubbleTask) -> None:
@@ -240,15 +257,19 @@ def _write_success(
 ) -> None:
     entry = _generation_entry(fingerprint, success=True)
     logger.info(
-        "assistant_bubbles generation succeeded: profile=%s category=%s fingerprint=%s reason=%s provider=%s model=%s generated_at=%s preview=%r",
-        task.profile if task else "",
-        category,
-        fingerprint[:12],
-        reason,
-        task.provider if task else None,
-        task.model if task else None,
-        entry.get("generated_at"),
-        _preview_text(text_or_texts),
+        _log_line(
+            "generation_succeeded",
+            {
+                "profile": task.profile if task else "",
+                "category": category,
+                "fingerprint": fingerprint[:12],
+                "reason": reason,
+                "provider": task.provider if task else None,
+                "model": task.model if task else None,
+                "generated_at": entry.get("generated_at"),
+                "preview": _preview_text(text_or_texts),
+            },
+        )
     )
     store.update_category(profile_path, category, text_or_texts, entry)
 
@@ -283,14 +304,18 @@ def _write_failure(
     if previous.get("generated_at") is not None:
         entry["generated_at"] = previous.get("generated_at")
     logger.warning(
-        "assistant_bubbles generation failed: profile=%s category=%s fingerprint=%s reason=%s provider=%s model=%s retry_after=%s",
-        task.profile if task else "",
-        category,
-        fingerprint[:12],
-        reason,
-        task.provider if task else None,
-        task.model if task else None,
-        entry.get("retry_after"),
+        _log_line(
+            "generation_failed",
+            {
+                "profile": task.profile if task else "",
+                "category": category,
+                "fingerprint": fingerprint[:12],
+                "reason": reason,
+                "provider": task.provider if task else None,
+                "model": task.model if task else None,
+                "retry_after": entry.get("retry_after"),
+            },
+        )
     )
     if not _category_has_cached_text(cache, category):
         fallback = _fallback_for_category(category, context or {})
@@ -343,24 +368,32 @@ def _generate_with_model(
         content = resp.choices[0].message.content
     except Exception as exc:
         logger.warning(
-            "assistant_bubbles model call failed: profile=%s category=%s provider=%s model=%s error=%s",
-            task.profile,
-            category,
-            task.provider,
-            task.model,
-            exc,
+            _log_line(
+                "model_call_failed",
+                {
+                    "profile": task.profile,
+                    "category": category,
+                    "provider": task.provider,
+                    "model": task.model,
+                    "error": exc,
+                },
+            )
         )
         return None, "model_call_failed"
     result, reason = validate_model_output(category, content, context)
     if result is None:
         logger.warning(
-            "assistant_bubbles model output rejected: profile=%s category=%s provider=%s model=%s reason=%s preview=%r",
-            task.profile,
-            category,
-            task.provider,
-            task.model,
-            reason,
-            str(content or "")[:160],
+            _log_line(
+                "model_output_rejected",
+                {
+                    "profile": task.profile,
+                    "category": category,
+                    "provider": task.provider,
+                    "model": task.model,
+                    "reason": reason,
+                    "preview": str(content or "")[:160],
+                },
+            )
         )
     return result, reason
 
@@ -408,8 +441,6 @@ def validate_one_text(category: str, text: Any, context: dict[str, Any] | None =
     value = _strip_wrapping_quotes(text)
     if not value:
         return None, "empty"
-    if len(value) > 50:
-        return None, "over_50_chars"
     if "```" in value or re.search(r"(^|\n)\s*(?:[-*+]\s+|\d+[.)]\s+|#{1,6}\s+)", value):
         return None, "markdown_or_list_marker"
     if "\n" in value or "\r" in value:

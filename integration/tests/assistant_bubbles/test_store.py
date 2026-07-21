@@ -1,7 +1,5 @@
 import json
 
-import pytest
-
 from integration.assistant_bubbles import store
 
 
@@ -39,9 +37,10 @@ def test_invalid_schema_is_cache_miss(tmp_path):
     assert store.read_store(profile) is None
 
 
-def test_rejects_overlong_text(tmp_path):
+def test_accepts_text_over_50_chars(tmp_path):
     data = store.empty_store()
-    data["items"][0]["text"] = "x" * 51
+    data["items"][0]["text"] = "x" * 80
 
-    with pytest.raises(ValueError):
-        store.write_store(tmp_path, data)
+    store.write_store(tmp_path, data)
+
+    assert store.read_store(tmp_path)["items"][0]["text"] == "x" * 80
