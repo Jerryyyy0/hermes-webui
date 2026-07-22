@@ -126,7 +126,7 @@ def test_validate_model_output_allows_text_over_50_chars():
     assert reason == "ok"
 
 
-def test_validate_skill_requires_real_chinese_skill_content():
+def test_validate_skill_allows_real_chinese_skill_content():
     context = {
         "skills": [
             {"name": "ppt-deck-builder", "label": "PPT 生成", "description": "根据主题生成 PPT"},
@@ -144,7 +144,7 @@ def test_validate_skill_requires_real_chinese_skill_content():
     assert reason == "ok"
 
 
-def test_validate_skill_rejects_ascii_slugs_and_fake_chinese_capabilities():
+def test_validate_skill_rejects_ascii_slugs_but_allows_chinese_summaries():
     context = {
         "skills": [
             {"name": "ideation", "label": "创意构思", "description": "生成创意点子"},
@@ -165,8 +165,8 @@ def test_validate_skill_rejects_ascii_slugs_and_fake_chinese_capabilities():
         "我具备PPT、邮件、知识库等50项技能，擅长文档与通信。",
         context,
     )
-    assert result is None
-    assert reason == "skill_real_chinese_missing"
+    assert result == "我具备PPT、邮件、知识库等50项技能，擅长文档与通信。"
+    assert reason == "ok"
 
 
 def test_scheduled_task_stats_counts_completed_non_failed_jobs_as_pending(tmp_path):

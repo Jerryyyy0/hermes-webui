@@ -8,7 +8,7 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Added
 
-- **Profile assistant bubbles API** — 新增 `GET /api/integration/assistant_bubbles?profile=<name>`，按固定顺序返回 Profile 助理头像气泡。模型文案独立持久化到 `{profile.path}/assistant_bubbles.json`，不再读写 `info.json`；缺失或损坏时立即返回确定性降级文案并异步自愈。定时任务槽位每次 GET 从目标 Profile cron 状态实时统计，不写回缓存。生成队列全局串行，首次缺失批量填充不插入 5 分钟间隔，后续变更 5 分钟冷却，失败 30 秒冷却。
+- **Profile assistant bubbles API** — 新增 `GET /api/integration/assistant_bubbles?profile=<name>`，按固定顺序返回 Profile 助理头像气泡。模型文案独立持久化到 `{profile.path}/assistant_bubbles.json`，不再读写 `info.json`；缺失或损坏时立即返回确定性降级文案并异步自愈。定时任务槽位每次 GET 从目标 Profile cron 状态实时统计，不写回缓存。生成队列全局串行，首次缺失批量填充不插入 5 分钟间隔，后续变更 5 分钟冷却，失败 3 秒冷却。
 
 - **Fixed Chinese session titles** — WebUI automatic and manual title generation now always asks the title model for a Simplified Chinese title, without reading `auxiliary.title_generation.language`. The existing title model/provider/timeout route and topic-first local fallback remain unchanged. The fixed-language policy lives in `integration/session_titles/`; `api/streaming.py` keeps only the prompt and validation seam.
 
@@ -27,6 +27,8 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 - **Stream diagnostics logging** — 新增 `HERMES_WEBUI_STREAM_DIAG` 控制的流式执行诊断日志，记录 agent 初始化、上下文准备、运行耗时、最终保存和 worker cleanup summary，便于排查慢流、失败流和资源清理问题。
 
 ### Changed
+
+- **Profile assistant bubbles skill validation relaxed** — `skill` 气泡生成不再校验模型输出是否字面匹配技能 `label` 或中文 `description` 片段；仍要求简体中文、单行格式，并继续拒绝直接输出英文 skill slug。模型概括与技能元数据不完全重合时不再触发 `skill_real_chinese_missing` 失败重试。
 
 - **成果库同步知识库取消总量限制** — `POST /api/integration/knowledge_base/upload_artifacts` 不再限制单次同步的全部文件总大小；单文件 50 MiB 和最多 20 个文件的限制保持不变。
 

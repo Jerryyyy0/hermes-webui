@@ -30,7 +30,7 @@ SYSTEM_PROMPT = """你是 Profile 助理气泡文案生成器。
 PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 GENERATION_ORDER = ("assistant_intro", "memory", "skill", "emotion")
 SUCCESS_REGEN_COOLDOWN_SECONDS = 300
-FAILURE_RETRY_SECONDS = 30
+FAILURE_RETRY_SECONDS = 3
 EMOTION_REFRESH_SECONDS = 5 * 60
 
 
@@ -409,21 +409,6 @@ def _has_cjk(text: str) -> bool:
     return bool(re.search(r"[\u4e00-\u9fff]", text or ""))
 
 
-def _contains_real_chinese_skill(value: str, context: dict[str, Any] | None) -> bool:
-    skills = (context or {}).get("skills") or []
-    for skill in skills:
-        label = str(skill.get("label") or "").strip()
-        if label and label in value:
-            return True
-        desc = str(skill.get("description") or "").strip()
-        if not _has_cjk(desc):
-            continue
-        for phrase in re.findall(r"[\u4e00-\u9fffA-Za-z0-9]{2,12}", desc):
-            if _has_cjk(phrase) and phrase in value:
-                return True
-    return False
-
-
 def _skill_mentions_ascii_slug(value: str, context: dict[str, Any] | None) -> bool:
     skills = (context or {}).get("skills") or []
     for skill in skills:
@@ -450,8 +435,6 @@ def validate_one_text(category: str, text: Any, context: dict[str, Any] | None =
             return None, "skill_not_chinese"
         if _skill_mentions_ascii_slug(value, context):
             return None, "skill_ascii_slug"
-        if (context or {}).get("skills") and not _contains_real_chinese_skill(value, context):
-            return None, "skill_real_chinese_missing"
     return value, "ok"
 
 
