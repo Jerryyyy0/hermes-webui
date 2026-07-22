@@ -1,5 +1,6 @@
 {
   "display_name": "My Profile",
   "description": "Optional short description shown in the Profiles panel.",
+  "welcome": "哈喽，我是 My Profile，随时帮你处理日常工作。",
   "logo": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
 }

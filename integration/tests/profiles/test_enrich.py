@@ -25,7 +25,13 @@ def test_enrich_nested_info(tmp_path):
     profile_dir = tmp_path / "p1"
     profile_dir.mkdir()
     (profile_dir / "info.json").write_text(
-        json.dumps({"display_name": "Demo", "description": "A profile"}),
+        json.dumps(
+            {
+                "display_name": "Demo",
+                "description": "A profile",
+                "welcome": "欢迎回来，我是 Demo。",
+            }
+        ),
         encoding="utf-8",
     )
     payload = {"profiles": [{"name": "p1", "path": str(profile_dir)}], "active": "p1"}
@@ -33,11 +39,24 @@ def test_enrich_nested_info(tmp_path):
     entry = out["profiles"][0]
     assert entry["info"]["display_name"] == "Demo"
     assert entry["info"]["description"] == "A profile"
+    assert entry["info"]["welcome"] == "欢迎回来，我是 Demo。"
     assert "logo" not in entry["info"]
     assert "skills" not in entry
     assert "memory_snapshot" not in entry
     assert "logo_base64" not in entry
     assert "display_name" not in entry
+
+
+def test_enrich_welcome_defaults_to_empty_string(tmp_path):
+    profile_dir = tmp_path / "p1"
+    profile_dir.mkdir()
+    (profile_dir / "info.json").write_text(
+        json.dumps({"display_name": "Demo"}),
+        encoding="utf-8",
+    )
+    payload = {"profiles": [{"name": "p1", "path": str(profile_dir)}], "active": "p1"}
+    out = _enrich(payload)
+    assert out["profiles"][0]["info"]["welcome"] == ""
 
 
 def test_enrich_logo_in_info(tmp_path):
@@ -76,7 +95,7 @@ def test_enrich_missing_info_json(tmp_path):
     payload = {"profiles": [{"name": "p1", "path": str(profile_dir)}], "active": "p1"}
     out = _enrich(payload)
     entry = out["profiles"][0]
-    assert entry["info"] == {}
+    assert entry["info"] == {"welcome": ""}
     assert "skills" not in entry
     assert "memory_snapshot" not in entry
 

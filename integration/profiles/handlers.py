@@ -34,7 +34,7 @@ def try_handle_post(handler, parsed, body: dict | None) -> bool:
             bad(handler, "name is required")
             return True
         fields = {}
-        for key in ("display_name", "description", "logo_preset", "logo_base64", "remove_logo"):
+        for key in ("display_name", "description", "welcome", "logo_preset", "logo_base64", "remove_logo"):
             if key in body:
                 fields[key] = body[key]
         try:

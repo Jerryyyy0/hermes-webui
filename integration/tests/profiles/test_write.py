@@ -36,7 +36,12 @@ def test_save_profile_info_display_and_preset(tmp_path):
     ):
         out = save_profile_info(
             "work",
-            {"display_name": "Work", "description": "Dev profile", "logo_preset": preset_id},
+            {
+                "display_name": "Work",
+                "description": "Dev profile",
+                "welcome": "哈喽，我是 Work。",
+                "logo_preset": preset_id,
+            },
         )
 
     assert out["ok"] is True
@@ -44,8 +49,31 @@ def test_save_profile_info_display_and_preset(tmp_path):
     assert info_path.is_file()
     data = json.loads(info_path.read_text(encoding="utf-8"))
     assert data["display_name"] == "Work"
+    assert data["welcome"] == "哈喽，我是 Work。"
     assert data["logo"].startswith("data:image/png;base64,")
     assert out["profile"]["info"]["display_name"] == "Work"
+    assert out["profile"]["info"]["welcome"] == "哈喽，我是 Work。"
+
+
+def test_save_profile_info_clears_welcome(tmp_path):
+    profile_dir = tmp_path / "work"
+    profile_dir.mkdir()
+    (profile_dir / "info.json").write_text(
+        json.dumps({"display_name": "Work", "welcome": "旧欢迎语"}),
+        encoding="utf-8",
+    )
+
+    def fake_list():
+        return [{"name": "work", "path": str(profile_dir)}]
+
+    with patch("api.profiles.list_profiles_api", fake_list), patch(
+        "api.profiles.get_active_profile_name", return_value="work"
+    ):
+        out = save_profile_info("work", {"welcome": ""})
+
+    data = json.loads((profile_dir / "info.json").read_text(encoding="utf-8"))
+    assert data["welcome"] == ""
+    assert out["profile"]["info"]["welcome"] == ""
 
 
 def test_save_profile_info_mutually_exclusive(tmp_path):

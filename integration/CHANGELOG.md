@@ -8,6 +8,8 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Added
 
+- **Profile info welcome field** — `info.json` 新增可选 `welcome`（Profile 欢迎语）。`GET /api/profiles` 在 `info.welcome` 返回；`POST /api/profile/info` 可写入/清空；Profiles 面板编辑与新建表单支持配置。建议约 50 字，服务端不校验长度；不驱动 assistant bubbles 或聊天空状态。
+
 - **Profile assistant bubbles API** — 新增 `GET /api/integration/assistant_bubbles?profile=<name>`，按固定顺序返回 Profile 助理头像气泡。模型文案独立持久化到 `{profile.path}/assistant_bubbles.json`，不再读写 `info.json`；缺失或损坏时立即返回确定性降级文案并异步自愈。定时任务槽位每次 GET 从目标 Profile cron 状态实时统计，不写回缓存。生成队列全局串行，首次缺失批量填充不插入 5 分钟间隔，后续变更 5 分钟冷却，失败 3 秒冷却。
 
 - **Fixed Chinese session titles** — WebUI automatic and manual title generation now always asks the title model for a Simplified Chinese title, without reading `auxiliary.title_generation.language`. The existing title model/provider/timeout route and topic-first local fallback remain unchanged. The fixed-language policy lives in `integration/session_titles/`; `api/streaming.py` keeps only the prompt and validation seam.

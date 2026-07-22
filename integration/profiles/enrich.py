@@ -115,12 +115,12 @@ def sort_profiles_by_pin(profiles: list) -> list:
 
 def _load_info_for_response(profile_path: str) -> dict:
     info = _read_info_json(profile_path)
-    if not info:
-        return {}
 
     out: dict = {}
     for key, val in info.items():
         if key == "logo":
+            continue
+        if key == "welcome":
             continue
         if key == "pinned":
             if val is True:
@@ -138,6 +138,7 @@ def _load_info_for_response(profile_path: str) -> dict:
         if normalized:
             out["logo"] = normalized
 
+    out["welcome"] = str(info.get("welcome") or "")
     return out
 
 

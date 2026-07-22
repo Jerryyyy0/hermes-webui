@@ -89,6 +89,7 @@ When integration is enabled, `GET /api/profiles` enriches each entry with profil
 | Response field | Source |
 |----------------|--------|
 | `info` | `{profile.path}/info.json` (missing file → `{}`) |
+| `info.welcome` | `info.json` → Profile 欢迎语；缺省或缺失时返回 `""` |
 | `info.logo` | Data URI base64 in info.json; PNG/JPEG/GIF/WebP/SVG, invalid/over 10MB omitted from response |
 | `info.pinned` | `info.json` → `pinned: true`（仅置顶时返回） |
 | `info.pin_order` | `info.json` → 置顶组内排序（越小越靠前；仅置顶时返回） |
@@ -100,7 +101,7 @@ Write / update via UI or API:
 | Method | Path | Purpose |
 |--------|------|---------|
 | GET | `/api/profile/logo-presets` | Built-in logo library (`?category=` optional) |
-| POST | `/api/profile/info` | Update `info.json` (`display_name`, `description`, `logo_preset`, `logo_base64`, `remove_logo`) |
+| POST | `/api/profile/info` | Update `info.json` (`display_name`, `description`, `welcome`, `logo_preset`, `logo_base64`, `remove_logo`) |
 | POST | `/api/profile/pin` | Pin/unpin profile (`name`, `pinned`); writes `pinned` + `pin_order` to `info.json` (max 5, includes `default`) |
 
 Example `info.json` — copy [`profiles/info.json.example`](profiles/info.json.example):
@@ -109,6 +110,7 @@ Example `info.json` — copy [`profiles/info.json.example`](profiles/info.json.e
 {
   "display_name": "My Profile",
   "description": "Optional short description",
+  "welcome": "哈喽，我是 My Profile，随时帮你处理日常工作。",
   "logo": "data:image/png;base64,..."
 }
 ```
