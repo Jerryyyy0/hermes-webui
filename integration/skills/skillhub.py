@@ -230,6 +230,27 @@ def _disabled_skill_names() -> set[str]:
         return set()
 
 
+def _disabled_skill_names_for_profile(profile_name: str) -> set[str]:
+    """Read ``skills.disabled`` from the given profile's config.yaml."""
+    try:
+        from api.profiles import get_hermes_home_for_profile
+        import yaml
+
+        home = Path(get_hermes_home_for_profile(profile_name))
+        config_path = home / "config.yaml"
+        if not config_path.is_file():
+            return set()
+        with open(config_path, encoding="utf-8") as f:
+            cfg = yaml.safe_load(f) or {}
+        disabled = (cfg.get("skills") or {}).get("disabled") or []
+        if not isinstance(disabled, list):
+            return set()
+        return {str(name).strip() for name in disabled if str(name).strip()}
+    except Exception as exc:
+        _log.debug("disabled names for profile %s failed: %s", profile_name, exc)
+        return set()
+
+
 def _hub_installed_index(skills_dir: Path) -> dict[str, str]:
     """Map catalog skill name to relative path under skills_dir for hub installs."""
     index: dict[str, str] = {}
@@ -278,16 +299,22 @@ def annotate_installed(
     skills: list[dict],
     *,
     installed_index: dict[str, str] | None = None,
+    index_profile: str = "default",
     locked_names: set[str] | None = None,
+    disabled_names: set[str] | None = None,
 ) -> list[dict]:
-    """Mark hub catalog items with local install state across all profiles."""
+    """Mark hub catalog items with local install state across all profiles.
+
+    When ``installed_index`` is provided, treat it as installs under
+    ``index_profile`` (default ``default``). Pass ``disabled_names`` to
+    override the active-process disabled set (e.g. target profile config).
+    """
     # Use all-profiles index by default
     profile_index: dict[str, tuple[str, str]] = {}
     if installed_index is not None:
-        # Backward compat: caller provided a flat index (default profile only)
-        default_profile = "default"
+        profile_label = str(index_profile or "default").strip() or "default"
         for k, v in installed_index.items():
-            profile_index[k] = (default_profile, v)
+            profile_index[k] = (profile_label, v)
     else:
         try:
             profile_index = _hub_installed_index_all_profiles()
@@ -295,7 +322,7 @@ def annotate_installed(
             _log.debug("annotate_installed all-profiles failed: %s", exc)
             profile_index = {}
 
-    disabled = _disabled_skill_names()
+    disabled = disabled_names if disabled_names is not None else _disabled_skill_names()
     lock_fields_ok = True
     if locked_names is None:
         try:

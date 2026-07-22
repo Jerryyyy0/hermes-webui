@@ -28,6 +28,8 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Changed
 
+- **SkillHub `local_all` profile filter** — `GET /api/skillhub/skills?scope=local_all` 支持 `profile`（默认 `default`）：只聚合该 Profile skills 目录下的已安装 hub + 本地 custom，并用该 Profile `config.yaml` 的 `skills.disabled` 过滤。其它 scope 仍忽略 `profile`；`stats` 仍为全局计数。
+
 - **Profile assistant bubbles skill validation relaxed** — `skill` 气泡生成不再校验模型输出是否字面匹配技能 `label` 或中文 `description` 片段；仍要求简体中文、单行格式，并继续拒绝直接输出英文 skill slug。模型概括与技能元数据不完全重合时不再触发 `skill_real_chinese_missing` 失败重试。
 
 - **成果库同步知识库取消总量限制** — `POST /api/integration/knowledge_base/upload_artifacts` 不再限制单次同步的全部文件总大小；单文件 50 MiB 和最多 20 个文件的限制保持不变。

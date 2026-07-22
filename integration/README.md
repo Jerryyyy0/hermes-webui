@@ -439,7 +439,7 @@ curl -sS -X POST 'http://127.0.0.1:8787/api/integration/notifications/read' \
 
 | WebUI | Upstream |
 |-------|----------|
-| `GET /api/skillhub/skills` | `GET /api/skills` (`scope`, `q`, `category`, `page`, `page_size` — no `profile` upstream；`scope=local_all` 不请求上游，聚合本地 installed hub + custom) |
+| `GET /api/skillhub/skills` | `GET /api/skills` (`scope`, `q`, `category`, `page`, `page_size` — no `profile` upstream；`scope=local_all` 用上游目录 + 本地安装状态聚合，并支持 `profile` 按该 Profile 的 skills 目录过滤) |
 | `GET /api/skillhub/categories` | `GET /api/skills/categories` |
 | `GET /api/skillhub/detail?name=` | `GET /api/skills/{name}` |
 | `GET /api/skillhub/content?name=` | 默认 `scope=auto`：仅本地 `{HERMES_HOME}/skills`（无则 404）；`scope=hub` 本地优先否则 `GET /api/skills/{name}/doc` |
@@ -454,13 +454,14 @@ curl -sS -X POST 'http://127.0.0.1:8787/api/integration/notifications/read' \
 | `POST /api/skillhub/skills/no_self_improve/toggle` | Custom 技能加锁/解锁 `{ name, locked, dir_name? }`；Hub 技能返回 403（仅需 `HERMES_INTEGRATION=1`） |
 | `PUT /api/skillhub/skills/no_self_improve` | 全量替换 `skills.no_self_improve`（`{ names: string[] }`；Hub 名会在启动/install sync 补回） |
 
-`GET /api/skillhub/skills` annotates `installed` from `shared_skills_dir`. SkillHub routes do not use WebUI profile cookies or `profile` query/body parameters.
+`GET /api/skillhub/skills` annotates `installed` from local skills dirs (hub/installed/not_installed still scan across profiles for stats/tab counts). Only `scope=local_all` honors the `profile` query (default `default`); other scopes ignore it. SkillHub routes do not use WebUI profile cookies for this list.
 
 Query parameters:
 
 | Param | Default | Meaning |
 |-------|---------|---------|
-| `scope` | `hub` | `hub` (market), `installed`, `not_installed` (`shared_skills_dir`), `custom` (`shared_skills_dir`), `local_all` (聚合 enabled 的 installed hub + custom；自建优先按 `name` 去重，并排除 `skills.disabled` 中的技能) |
+| `scope` | `hub` | `hub` (market), `installed`, `not_installed` (`shared_skills_dir` / all-profiles annotate), `custom` (all-profiles custom scan), `local_all` (聚合指定 `profile` 下已启用的 installed hub + custom；自建优先按 `name` 去重，并排除该 profile `skills.disabled`) |
+| `profile` | `default` | **仅 `scope=local_all` 生效**：只扫描该 Profile 的 skills 目录与其 `config.yaml` 的 `skills.disabled` |
 | `category` | `""` (all) | Hub category filter; empty/`all` = all categories |
 | `q` | — | Search (list only; tab stats ignore `q`) |
 | `all` | — | Only `all=1` returns the full filtered list (ignores `page`/`page_size`; response `page=1`, `page_size=total`) |
@@ -468,7 +469,7 @@ Query parameters:
 | `sort` | `name` | `name` or `mtime` |
 | `order` | `asc` | `asc` or `desc` |
 
-List items always include aligned string fields (empty string when unset) and `mtime` (`null` when unset). Hub upstream `updated_at` is normalized into `mtime`. `hub` / `installed` / `not_installed` fetch the full catalog locally, apply `q` as substring match, sort, then paginate. `local_all` merges `installed` (hub) with `custom` (local self-built) into one list, dedupes by `name` (custom wins), excludes skills marked `disabled` by `skills.disabled`, then applies the same filter/sort/paginate.
+List items always include aligned string fields (empty string when unset) and `mtime` (`null` when unset). Hub upstream `updated_at` is normalized into `mtime`. `hub` / `installed` / `not_installed` fetch the full catalog locally, apply `q` as substring match, sort, then paginate. `local_all` merges installed hub with custom under the requested `profile`, dedupes by `name` (custom wins), excludes that profile's `skills.disabled`, then applies the same filter/sort/paginate.
 
 Response includes global `stats`: `{ hub, installed, not_installed, custom }` across **all** categories (unaffected by list `category` or `q`; only `skills`/`total` follow those filters).
 

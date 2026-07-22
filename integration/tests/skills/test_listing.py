@@ -107,7 +107,9 @@ def test_list_skillhub_skills_custom_scope():
                         sort="mtime",
                         order="desc",
                     )
-                    scan.assert_called_once_with({"hub-skill"}, profile="default")
+                    scan.assert_called_once_with(
+                        {"hub-skill"}, profile="default", user_created_only=True
+                    )
                     custom.assert_called_once_with(
                         category="tools",
                         profile="default",
@@ -210,20 +212,30 @@ def _ctx_with_annotated(annotated: list[dict]) -> skillhub._HubCatalogContext:
     )
 
 
+def _patch_local_all(installed_hub: list[dict], custom: list[dict]):
+    """Stub profile-scoped local_all sources; stats scan stays mocked separately."""
+    return patch(
+        "integration.skills.listing._local_all_skills_for_profile",
+        return_value=(installed_hub, custom),
+    )
+
+
 def test_local_all_merges_installed_hub_and_custom():
     annotated = [
         {"name": "hub-a", "installed": True, "hub_installed": True, "custom": False, "category": "tools"},
         {"name": "hub-b", "installed": True, "hub_installed": True, "custom": False, "category": "tools"},
         {"name": "hub-c", "installed": False, "hub_installed": False, "custom": False, "category": "tools"},
     ]
+    installed_hub = [s for s in annotated if s.get("installed")]
     custom = [
         {"name": "custom-1", "installed": True, "hub_installed": False, "custom": True, "category": "tools"},
     ]
     ctx = _ctx_with_annotated(annotated)
     with patch("integration.skills.listing.skillhub.build_hub_catalog_context", return_value=ctx):
         with patch("integration.skills.listing.skillhub.compute_scope_stats_from", return_value=_STATS):
-            with patch("integration.skills.listing.local_skills.scan_custom_skills_global", return_value=custom):
-                result = listing.list_skillhub_skills(scope="local_all", sort="name", order="asc")
+            with patch("integration.skills.listing.local_skills.scan_custom_skills_global", return_value=[]):
+                with _patch_local_all(installed_hub, custom):
+                    result = listing.list_skillhub_skills(scope="local_all", sort="name", order="asc")
     names = [s["name"] for s in result["skills"]]
     assert names == ["custom-1", "hub-a", "hub-b"]
     assert result["total"] == 3
@@ -236,14 +248,16 @@ def test_local_all_custom_wins_on_name_conflict():
         {"name": "shared", "installed": True, "hub_installed": True, "custom": False, "category": ""},
         {"name": "hub-only", "installed": True, "hub_installed": True, "custom": False, "category": ""},
     ]
+    installed_hub = [s for s in annotated if s.get("installed")]
     custom = [
         {"name": "shared", "installed": True, "hub_installed": False, "custom": True, "category": ""},
     ]
     ctx = _ctx_with_annotated(annotated)
     with patch("integration.skills.listing.skillhub.build_hub_catalog_context", return_value=ctx):
         with patch("integration.skills.listing.skillhub.compute_scope_stats_from", return_value=_STATS):
-            with patch("integration.skills.listing.local_skills.scan_custom_skills_global", return_value=custom):
-                result = listing.list_skillhub_skills(scope="local_all")
+            with patch("integration.skills.listing.local_skills.scan_custom_skills_global", return_value=[]):
+                with _patch_local_all(installed_hub, custom):
+                    result = listing.list_skillhub_skills(scope="local_all")
     names = [s["name"] for s in result["skills"]]
     assert names == ["hub-only", "shared"]
     shared_item = next(s for s in result["skills"] if s["name"] == "shared")
@@ -257,6 +271,7 @@ def test_local_all_excludes_disabled_skills():
         {"name": "hub-enabled", "installed": True, "hub_installed": True, "custom": False, "category": "", "disabled": False},
         {"name": "hub-disabled", "installed": True, "hub_installed": True, "custom": False, "category": "", "disabled": True},
     ]
+    installed_hub = [s for s in annotated if s.get("installed")]
     custom = [
         {"name": "custom-enabled", "installed": True, "hub_installed": False, "custom": True, "category": "", "disabled": False},
         {"name": "custom-disabled", "installed": True, "hub_installed": False, "custom": True, "category": "", "disabled": True},
@@ -264,8 +279,9 @@ def test_local_all_excludes_disabled_skills():
     ctx = _ctx_with_annotated(annotated)
     with patch("integration.skills.listing.skillhub.build_hub_catalog_context", return_value=ctx):
         with patch("integration.skills.listing.skillhub.compute_scope_stats_from", return_value=_STATS):
-            with patch("integration.skills.listing.local_skills.scan_custom_skills_global", return_value=custom):
-                result = listing.list_skillhub_skills(scope="local_all", all_records=True)
+            with patch("integration.skills.listing.local_skills.scan_custom_skills_global", return_value=[]):
+                with _patch_local_all(installed_hub, custom):
+                    result = listing.list_skillhub_skills(scope="local_all", all_records=True)
     assert [skill["name"] for skill in result["skills"]] == ["custom-enabled", "hub-enabled"]
     assert result["total"] == 2
     assert result["page_size"] == 2
@@ -276,6 +292,7 @@ def test_local_all_category_filter():
         {"name": "hub-tools", "installed": True, "hub_installed": True, "custom": False, "category": "tools"},
         {"name": "hub-data", "installed": True, "hub_installed": True, "custom": False, "category": "data"},
     ]
+    installed_hub = [s for s in annotated if s.get("installed")]
     custom = [
         {"name": "custom-tools", "installed": True, "hub_installed": False, "custom": True, "category": "tools"},
         {"name": "custom-data", "installed": True, "hub_installed": False, "custom": True, "category": "data"},
@@ -283,8 +300,9 @@ def test_local_all_category_filter():
     ctx = _ctx_with_annotated(annotated)
     with patch("integration.skills.listing.skillhub.build_hub_catalog_context", return_value=ctx):
         with patch("integration.skills.listing.skillhub.compute_scope_stats_from", return_value=_STATS):
-            with patch("integration.skills.listing.local_skills.scan_custom_skills_global", return_value=custom):
-                result = listing.list_skillhub_skills(scope="local_all", category="tools")
+            with patch("integration.skills.listing.local_skills.scan_custom_skills_global", return_value=[]):
+                with _patch_local_all(installed_hub, custom):
+                    result = listing.list_skillhub_skills(scope="local_all", category="tools")
     names = sorted(s["name"] for s in result["skills"])
     assert names == ["custom-tools", "hub-tools"]
     assert result["total"] == 2
@@ -296,14 +314,16 @@ def test_local_all_q_filter():
         {"name": "alpha", "installed": True, "hub_installed": True, "custom": False, "category": "", "description": "remote tool"},
         {"name": "beta", "installed": True, "hub_installed": True, "custom": False, "category": "", "description": "other"},
     ]
+    installed_hub = [s for s in annotated if s.get("installed")]
     custom = [
         {"name": "gamma", "installed": True, "hub_installed": False, "custom": True, "category": "", "description": "local tool"},
     ]
     ctx = _ctx_with_annotated(annotated)
     with patch("integration.skills.listing.skillhub.build_hub_catalog_context", return_value=ctx):
         with patch("integration.skills.listing.skillhub.compute_scope_stats_from", return_value=_STATS):
-            with patch("integration.skills.listing.local_skills.scan_custom_skills_global", return_value=custom):
-                result = listing.list_skillhub_skills(scope="local_all", q="tool")
+            with patch("integration.skills.listing.local_skills.scan_custom_skills_global", return_value=[]):
+                with _patch_local_all(installed_hub, custom):
+                    result = listing.list_skillhub_skills(scope="local_all", q="tool")
     names = sorted(s["name"] for s in result["skills"])
     assert names == ["alpha", "gamma"]
     assert result["total"] == 2
@@ -314,6 +334,7 @@ def test_local_all_pagination_and_all_records():
         {"name": f"hub-{i}", "installed": True, "hub_installed": True, "custom": False, "category": ""}
         for i in range(5)
     ]
+    installed_hub = list(annotated)
     custom = [
         {"name": f"custom-{i}", "installed": True, "hub_installed": False, "custom": True, "category": ""}
         for i in range(3)
@@ -321,21 +342,140 @@ def test_local_all_pagination_and_all_records():
     ctx = _ctx_with_annotated(annotated)
     with patch("integration.skills.listing.skillhub.build_hub_catalog_context", return_value=ctx):
         with patch("integration.skills.listing.skillhub.compute_scope_stats_from", return_value=_STATS):
-            with patch("integration.skills.listing.local_skills.scan_custom_skills_global", return_value=custom):
-                paged = listing.list_skillhub_skills(
-                    scope="local_all", page=1, page_size=4, sort="name", order="asc"
-                )
+            with patch("integration.skills.listing.local_skills.scan_custom_skills_global", return_value=[]):
+                with _patch_local_all(installed_hub, custom):
+                    paged = listing.list_skillhub_skills(
+                        scope="local_all", page=1, page_size=4, sort="name", order="asc"
+                    )
     assert paged["total"] == 8
     assert len(paged["skills"]) == 4
     assert paged["page"] == 1
     assert paged["page_size"] == 4
     with patch("integration.skills.listing.skillhub.build_hub_catalog_context", return_value=ctx):
         with patch("integration.skills.listing.skillhub.compute_scope_stats_from", return_value=_STATS):
-            with patch("integration.skills.listing.local_skills.scan_custom_skills_global", return_value=custom):
-                full = listing.list_skillhub_skills(
-                    scope="local_all", all_records=True, sort="name", order="asc"
-                )
+            with patch("integration.skills.listing.local_skills.scan_custom_skills_global", return_value=[]):
+                with _patch_local_all(installed_hub, custom):
+                    full = listing.list_skillhub_skills(
+                        scope="local_all", all_records=True, sort="name", order="asc"
+                    )
     assert full["total"] == 8
     assert len(full["skills"]) == 8
     assert full["page"] == 1
     assert full["page_size"] == 8
+
+
+def test_local_all_passes_profile_to_sources():
+    ctx = _ctx_with_annotated([])
+    with patch("integration.skills.listing.skillhub.build_hub_catalog_context", return_value=ctx):
+        with patch("integration.skills.listing.skillhub.compute_scope_stats_from", return_value=_STATS):
+            with patch("integration.skills.listing.local_skills.scan_custom_skills_global", return_value=[]):
+                with patch(
+                    "integration.skills.listing._local_all_skills_for_profile",
+                    return_value=([], []),
+                ) as sources:
+                    listing.list_skillhub_skills(scope="local_all", profile="team-a", all_records=True)
+    sources.assert_called_once_with(ctx, "team-a")
+
+
+def test_local_all_skills_for_profile_uses_profile_dir(tmp_path):
+    raw = [
+        {"name": "hub-in-a", "category": "tools"},
+        {"name": "hub-in-b", "category": "tools"},
+        {"name": "hub-nowhere", "category": "tools"},
+    ]
+    ctx = _ctx_with_annotated(raw)
+    skills_a = tmp_path / "profile-a" / "skills"
+    skills_b = tmp_path / "profile-b" / "skills"
+    custom = [
+        {
+            "name": "custom-a",
+            "installed": True,
+            "hub_installed": False,
+            "custom": True,
+            "category": "tools",
+            "disabled": False,
+        }
+    ]
+
+    def fake_skills_dir(profile_name: str):
+        if profile_name == "profile-a":
+            return skills_a
+        if profile_name == "profile-b":
+            return skills_b
+        return tmp_path / profile_name / "skills"
+
+    with patch("integration.skills.listing.skills_dir_for_profile", side_effect=fake_skills_dir):
+        with patch(
+            "integration.skills.listing.skillhub._hub_installed_index",
+            side_effect=lambda d: (
+                {"hub-in-a": "hub-in-a"} if d == skills_a else {"hub-in-b": "hub-in-b"} if d == skills_b else {}
+            ),
+        ):
+            with patch(
+                "integration.skills.listing.skillhub._disabled_skill_names_for_profile",
+                return_value=set(),
+            ):
+                with patch(
+                    "integration.skills.listing.local_skills._scan_custom_skill_dicts",
+                    side_effect=lambda d, *a, **k: custom if d == skills_a else [],
+                ):
+                    hub_a, custom_a = listing._local_all_skills_for_profile(ctx, "profile-a")
+                    hub_b, custom_b = listing._local_all_skills_for_profile(ctx, "profile-b")
+
+    assert sorted(s["name"] for s in hub_a if s.get("installed")) == ["hub-in-a"]
+    assert [s["name"] for s in custom_a] == ["custom-a"]
+    assert sorted(s["name"] for s in hub_b if s.get("installed")) == ["hub-in-b"]
+    assert custom_b == []
+
+
+def test_local_all_skills_for_profile_applies_profile_disabled(tmp_path):
+    raw = [{"name": "hub-x", "category": ""}]
+    ctx = _ctx_with_annotated(raw)
+    skills_dir = tmp_path / "skills"
+    skills_dir.mkdir()
+    with patch("integration.skills.listing.skills_dir_for_profile", return_value=skills_dir):
+        with patch(
+            "integration.skills.listing.skillhub._hub_installed_index",
+            return_value={"hub-x": "hub-x"},
+        ):
+            with patch(
+                "integration.skills.listing.skillhub._disabled_skill_names_for_profile",
+                return_value={"hub-x", "custom-x"},
+            ):
+                with patch(
+                    "integration.skills.listing.local_skills._scan_custom_skill_dicts",
+                    return_value=[
+                        {
+                            "name": "custom-x",
+                            "installed": True,
+                            "hub_installed": False,
+                            "custom": True,
+                            "category": "",
+                        }
+                    ],
+                ):
+                    installed_hub, custom_skills = listing._local_all_skills_for_profile(ctx, "p1")
+    assert installed_hub[0]["disabled"] is True
+    assert custom_skills[0]["disabled"] is True
+
+
+def test_annotate_installed_index_profile_and_disabled_override(tmp_path):
+    skills_dir = tmp_path / "skills"
+    skill_dir = skills_dir / "demo"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("---\nname: demo\ndescription: local\n---\n", encoding="utf-8")
+    skills = [{"name": "demo"}, {"name": "other"}]
+    with patch("integration.skills.skillhub.skills_dir_for_profile", return_value=skills_dir):
+        result = skillhub.annotate_installed(
+            skills,
+            installed_index={"demo": "demo"},
+            index_profile="team-x",
+            disabled_names={"other"},
+            locked_names=set(),
+        )
+    by_name = {s["name"]: s for s in result}
+    assert by_name["demo"]["installed"] is True
+    assert by_name["demo"]["disabled"] is False
+    assert by_name["demo"]["description"] == "local"
+    assert by_name["other"]["installed"] is False
+    assert by_name["other"]["disabled"] is True
