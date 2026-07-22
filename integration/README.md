@@ -12,11 +12,13 @@ export SKILLHUB_URL=http://127.0.0.1:8000   # optional; SkillHub market only (se
 `HERMES_INTEGRATION=1` enables:
 
 - **Profile enrich** — `GET /api/profiles` adds nested `info` from `info.json`. UI via `hermes_profiles.js` (logo picker, edit, create).
+- **Profile assistant bubbles** — `GET /api/integration/assistant_bubbles?profile=<name>` returns fixed-order short assistant avatar bubbles from independent `<profile.path>/assistant_bubbles.json`; scheduled-task copy is computed live.
 - **Cross-profile cron** — Cron Hub and grouped cron APIs across profiles.
 - **SkillHub** — UI and `/api/skillhub/*` routes are active only when `SKILLHUB_URL` is also set.
 - **Egress policy (iptables)** — gated API to apply iptables open/whitelist policies (see below). **Off by default**; requires `HERMES_EGRESS_POLICY_ENABLED=1`.
 - **Knowledge base BFF** — `POST /api/integration/knowledge_base/*` routes are active only when `KNOWLEDGE_BASE_URL` is also set.
 - **Notifications** — `/api/integration/notifications/*` for local notification storage (`notifications.db`) and knowledge base notification aggregation (from downstream `get_user_messages`).
+- **Fixed Chinese session titles** — WebUI automatic and manual title generation always instruct the title model to return Simplified Chinese. This Fork policy does not read `auxiliary.title_generation.language`; model/provider/timeout routing remains unchanged. If the title model fails, WebUI keeps its existing topic-first local fallback behavior.
 
 If you use a local HTTP proxy (`HTTP_PROXY`, e.g. Clash), add the SkillHub host to `NO_PROXY` (or rely on `ensure_skillhub_no_proxy()` at server startup, which appends the hostname from `SKILLHUB_URL`). Without this, `/api/skillhub/*` may return 502 while `curl` to the same upstream works.
 
@@ -116,6 +118,26 @@ Optional pin fields (usually set via `POST /api/profile/pin`, not hand-edited): 
 Regenerate built-in logo PNGs (network required): `python3 integration/scripts/fetch_profile_logos.py` (writes `assets/profile-logos/` from DiceBear + Noto Emoji; see `assets/profile-logos/LICENSES.md`).
 
 Cron and Kanban profile pickers still show profile `name` only (by design).
+
+### Profile assistant bubbles (`HERMES_INTEGRATION=1`)
+
+`GET /api/integration/assistant_bubbles?profile=<name>` returns 8 short avatar bubble items in this fixed order: `assistant_intro → emotion → scheduled_task → emotion → memory → emotion → skill → emotion`. `profile` is required; the handler resolves the Profile only through `list_profiles_api()` and returns Chinese errors for missing or unknown values.
+
+Bubble cache is stored only in `{profile.path}/assistant_bubbles.json`; it does not read or extend `info.json`. The file stores model-generated text and generation metadata (`fingerprint`, `generated_at`, `last_attempt_at`, `retry_after`) for `assistant_intro`, `memory`, `skill`, and `emotion`. Invalid, missing, or old-schema files are treated as cache misses: the API returns deterministic fallback copy immediately and queues self-healing generation.
+
+Generation is process-global and serial (`integration/assistant_bubbles/generation.py`). First fills for missing categories run continuously in priority order without a 5-minute gap; later fingerprint-driven regenerations are rate-limited to at least 5 minutes after the last attempt, while failures retry after 30 seconds. `emotion` also refreshes every 5 minutes even when its input fingerprint is unchanged. `scheduled_task` never calls a model and is never written back: each GET reads the target Profile cron state and replaces the dynamic slot in the response.
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/api/integration/assistant_bubbles?profile=<name>` | Return fixed-order assistant bubbles for one Profile; `profile` is required |
+
+Example:
+
+```bash
+curl -sS 'http://127.0.0.1:8787/api/integration/assistant_bubbles?profile=default'
+```
+
+Implementation: [`integration/assistant_bubbles/`](assistant_bubbles/). Route seam: `api/routes.py` only imports and delegates the GET handler.
 
 ### Cross-profile cron (`HERMES_INTEGRATION=1`)
 
@@ -417,7 +439,7 @@ curl -sS -X POST 'http://127.0.0.1:8787/api/integration/notifications/read' \
 
 | WebUI | Upstream |
 |-------|----------|
-| `GET /api/skillhub/skills` | `GET /api/skills` (`scope`, `q`, `category`, `page`, `page_size` — no `profile` upstream；`scope=local_all` 不请求上游，聚合本地 installed hub + custom) |
+| `GET /api/skillhub/skills` | `GET /api/skills` (`scope`, `q`, `category`, `page`, `page_size` — no `profile` upstream；`scope=local_all` 用上游目录 + 本地安装状态聚合，并支持 `profile` 按该 Profile 的 skills 目录过滤) |
 | `GET /api/skillhub/categories` | `GET /api/skills/categories` |
 | `GET /api/skillhub/detail?name=` | `GET /api/skills/{name}` |
 | `GET /api/skillhub/content?name=` | 默认 `scope=auto`：仅本地 `{HERMES_HOME}/skills`（无则 404）；`scope=hub` 本地优先否则 `GET /api/skills/{name}/doc` |
@@ -432,13 +454,14 @@ curl -sS -X POST 'http://127.0.0.1:8787/api/integration/notifications/read' \
 | `POST /api/skillhub/skills/no_self_improve/toggle` | Custom 技能加锁/解锁 `{ name, locked, dir_name? }`；Hub 技能返回 403（仅需 `HERMES_INTEGRATION=1`） |
 | `PUT /api/skillhub/skills/no_self_improve` | 全量替换 `skills.no_self_improve`（`{ names: string[] }`；Hub 名会在启动/install sync 补回） |
 
-`GET /api/skillhub/skills` annotates `installed` from `shared_skills_dir`. SkillHub routes do not use WebUI profile cookies or `profile` query/body parameters.
+`GET /api/skillhub/skills` annotates `installed` from local skills dirs (hub/installed/not_installed still scan across profiles for stats/tab counts). Only `scope=local_all` honors the `profile` query (default `default`); other scopes ignore it. SkillHub routes do not use WebUI profile cookies for this list.
 
 Query parameters:
 
 | Param | Default | Meaning |
 |-------|---------|---------|
-| `scope` | `hub` | `hub` (market), `installed`, `not_installed` (`shared_skills_dir`), `custom` (`shared_skills_dir`), `local_all` (聚合 enabled 的 installed hub + custom；自建优先按 `name` 去重，并排除 `skills.disabled` 中的技能) |
+| `scope` | `hub` | `hub` (market), `installed`, `not_installed` (`shared_skills_dir` / all-profiles annotate), `custom` (all-profiles custom scan), `local_all` (聚合指定 `profile` 下已启用的 installed hub + custom；自建优先按 `name` 去重，并排除该 profile `skills.disabled`) |
+| `profile` | `default` | **仅 `scope=local_all` 生效**：只扫描该 Profile 的 skills 目录与其 `config.yaml` 的 `skills.disabled` |
 | `category` | `""` (all) | Hub category filter; empty/`all` = all categories |
 | `q` | — | Search (list only; tab stats ignore `q`) |
 | `all` | — | Only `all=1` returns the full filtered list (ignores `page`/`page_size`; response `page=1`, `page_size=total`) |
@@ -446,7 +469,7 @@ Query parameters:
 | `sort` | `name` | `name` or `mtime` |
 | `order` | `asc` | `asc` or `desc` |
 
-List items always include aligned string fields (empty string when unset) and `mtime` (`null` when unset). Hub upstream `updated_at` is normalized into `mtime`. `hub` / `installed` / `not_installed` fetch the full catalog locally, apply `q` as substring match, sort, then paginate. `local_all` merges `installed` (hub) with `custom` (local self-built) into one list, dedupes by `name` (custom wins), excludes skills marked `disabled` by `skills.disabled`, then applies the same filter/sort/paginate.
+List items always include aligned string fields (empty string when unset) and `mtime` (`null` when unset). Hub upstream `updated_at` is normalized into `mtime`. `hub` / `installed` / `not_installed` fetch the full catalog locally, apply `q` as substring match, sort, then paginate. `local_all` merges installed hub with custom under the requested `profile`, dedupes by `name` (custom wins), excludes that profile's `skills.disabled`, then applies the same filter/sort/paginate.
 
 Response includes global `stats`: `{ hub, installed, not_installed, custom }` across **all** categories (unaffected by list `category` or `q`; only `skills`/`total` follow those filters).
 

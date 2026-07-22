@@ -1,0 +1,20 @@
+类别：skill
+目标：根据可用技能生成一句技能介绍气泡。
+上下文：
+- skills_count: {skills_count}
+- skills:
+{skills_block}
+
+skills_block 格式：每行一个真实存在的技能，形如 `- name：description` 或 `- name`。
+参考模板：
+我具备XX、XX、XX等X项技能，擅长处理XX类工作。
+
+要求：
+- 必须只使用上下文中真实存在的技能 name 或 description，不得编造不存在的技能。
+- 优先使用中文技能名称或中文描述；如果 name 是英文 skill slug、英文目录名或拼音名，例如 ideation、pixel-art、baoyu-comic，不要原样输出，需根据 description 概括为中文能力短语。
+- 选择最多 3 个代表性技能替换 XX、XX、XX。
+- 用 skills_count 替换 X，必须与上下文中的 skills_count 完全一致。
+- 根据真实技能 description 概括擅长处理的工作类型。
+- 没有可用技能时不要调用模型，直接使用降级文案。
+- 强制不超过 50 字。
+返回：只返回文案本身。

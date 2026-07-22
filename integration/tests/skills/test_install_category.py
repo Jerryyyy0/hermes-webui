@@ -52,10 +52,11 @@ def test_annotate_installed_nested_hub_path(tmp_path):
     (installed / "SKILL.md").write_text("# skill", encoding="utf-8")
     (installed / ".hub_installed").write_text("1", encoding="utf-8")
 
-    with patch("integration.skills.skillhub.shared_skills_dir", return_value=skills_dir):
-        result = skillhub.annotate_installed(
-            [{"name": "data-analysis"}, {"name": "other"}],
-        )
+    with patch("api.profiles.list_profiles_api", return_value=[{"name": "default"}]):
+        with patch("integration.skills.skillhub.skills_dir_for_profile", return_value=skills_dir):
+            result = skillhub.annotate_installed(
+                [{"name": "data-analysis"}, {"name": "other"}],
+            )
 
     assert result[0]["installed"] is True
     assert result[0]["hub_installed"] is True
@@ -79,9 +80,11 @@ def test_annotate_installed_long_catalog_name_matches_truncated_leaf(tmp_path):
         encoding="utf-8",
     )
     (installed / ".hub_installed").write_text("1", encoding="utf-8")
+    (installed / ".hub_catalog_name").write_text(catalog_name, encoding="utf-8")
 
-    with patch("integration.skills.skillhub.shared_skills_dir", return_value=skills_dir):
-        result = skillhub.annotate_installed([{"name": catalog_name}])
+    with patch("api.profiles.list_profiles_api", return_value=[{"name": "default"}]):
+        with patch("integration.skills.skillhub.skills_dir_for_profile", return_value=skills_dir):
+            result = skillhub.annotate_installed([{"name": catalog_name}])
 
     assert result[0]["installed"] is True
     assert result[0]["dir_name"] == f"ai-与机器学习/{leaf}"
@@ -109,6 +112,7 @@ def test_install_skill_writes_hub_catalog_name_sidecar(tmp_path, monkeypatch):
     assert result.get("ok") is True
     assert (target / ".hub_catalog_name").read_text(encoding="utf-8") == catalog_name
 
-    with patch("integration.skills.skillhub.shared_skills_dir", return_value=skills_dir):
-        annotated = skillhub.annotate_installed([{"name": catalog_name}])
+    with patch("api.profiles.list_profiles_api", return_value=[{"name": "default"}]):
+        with patch("integration.skills.skillhub.skills_dir_for_profile", return_value=skills_dir):
+            annotated = skillhub.annotate_installed([{"name": catalog_name}])
     assert annotated[0]["installed"] is True

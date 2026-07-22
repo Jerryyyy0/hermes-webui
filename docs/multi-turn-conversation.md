@@ -143,7 +143,31 @@ POST /api/chat/start
   └─ 6. 返回 JSON {stream_id, effective_model, ...}
 ```
 
-### 3.3 Agent 流式执行（`streaming.py` `_run_agent_streaming`）
+### 3.3 取消对话流（`GET /api/chat/cancel`）
+
+```
+GET /api/chat/cancel?stream_id=<stream_id>
+  │
+  ├─ 1. 校验 stream_id
+  ├─ 2. 调用 cancel_stream(stream_id)
+  │     ├─ 设置 cancel_event
+  │     ├─ 调用 agent.interrupt("Cancelled by user")
+  │     ├─ 提前清理 STREAMS / CANCEL_FLAGS / AGENT_INSTANCES
+  │     └─ 清理 session.active_stream_id 与 pending_* 字段
+  │
+  ├─ 3. 如果 cancelled=true，则最多等待 10 秒
+  │     └─ 轮询 ACTIVE_RUNS，旧 stream_id 注销即认为 worker settled
+  │
+  └─ 4. 返回 JSON
+        ├─ cancelled：是否找到并接受取消
+        ├─ settled：worker 是否已退出并注销 ACTIVE_RUNS
+        ├─ stream_id：被取消的流 ID
+        └─ settle_timeout_ms：本次有界等待上限（10000）
+```
+
+`cancelled=true` 只表示取消信号已发出；`settled=true` 才表示后台 worker 已完成清理。若 provider 或工具调用在 10 秒内无法退出，接口返回 `settled=false`，同一会话的新 `/api/chat/start` 仍由后端 409 并发保护兜底。
+
+### 3.4 Agent 流式执行（`streaming.py` `_run_agent_streaming`）
 
 ```
 _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, ...)

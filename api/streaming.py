@@ -70,6 +70,10 @@ from integration.chat_provider_errors import (
     provider_error_payload as _provider_error_payload,
     provider_error_payload_from_classification as _provider_error_payload_from_classification,
 )
+from integration.session_titles.policy import (
+    should_validate_source_language_match as _should_validate_title_source_language_match,
+    title_language_rule as _title_language_rule,
+)
 
 # Global lock for os.environ writes. Per-session locks (_agent_lock) prevent
 # concurrent runs of the SAME session, but two DIFFERENT sessions can still
@@ -2051,7 +2055,7 @@ def _dominant_script(text: str) -> str:
 
 
 def _title_prompt_language_rule(user_text: str) -> str:
-    return "Match the language of the user question.\n"
+    return _title_language_rule(user_text)
 
 
 def _title_language_mismatch(user_text: str, title: str) -> bool:
@@ -2488,7 +2492,7 @@ def _generate_llm_session_title_for_agent(agent, user_text: str, assistant_text:
         return None, status, ''
     title = _sanitize_generated_title(raw)
     if title:
-        if _title_language_mismatch(user_text, title):
+        if _should_validate_title_source_language_match() and _title_language_mismatch(user_text, title):
             return None, 'llm_language_mismatch', str(raw)[:120]
         return title, status, ''
     return None, 'llm_invalid', str(raw)[:120]
@@ -2522,7 +2526,7 @@ def _generate_llm_session_title_via_aux(user_text: str, assistant_text: str, age
         return None, status, ''
     title = _sanitize_generated_title(raw)
     if title:
-        if _title_language_mismatch(user_text, title):
+        if _should_validate_title_source_language_match() and _title_language_mismatch(user_text, title):
             return None, 'llm_language_mismatch_aux', str(raw)[:120]
         return title, status, ''
     return None, 'llm_invalid_aux', str(raw)[:120]
@@ -4658,6 +4662,7 @@ def _run_agent_streaming(
         ephemeral=bool(ephemeral),
     )
     _pre_agent_setup_started = _stream_diag_monotonic_ms()
+    _pre_agent_journal_started = _stream_diag_monotonic_ms()
     try:
         run_journal = RunJournalWriter(session_id, stream_id)
     except Exception:
@@ -4696,6 +4701,12 @@ def _run_agent_streaming(
         STREAM_REASONING_TEXT[stream_id] = ''  # start accumulating reasoning trace (#1361 §A)
         STREAM_LIVE_TOOL_CALLS[stream_id] = []  # start accumulating tool calls (#1361 §B)
         STREAM_LIVE_MANIFEST[stream_id] = {}
+    stream_diag.event(
+        "webui.worker.pre_agent_journal",
+        "会话运行日志与实时流状态已准备完成。",
+        duration_ms=_stream_diag_elapsed_ms(_pre_agent_journal_started),
+        elapsed_ms=_stream_diag_elapsed_ms(stream_diag.start_ms),
+    )
 
     agent = None
     _live_prompt_estimate_tokens = [0]
@@ -4911,6 +4922,11 @@ def _run_agent_streaming(
             return
         event_id = None
         stream_diag.note_queued_event(event)
+        if event == 'token' and stream_diag.first_visible_token_ms is not None:
+            _update_stream_diag_summary(
+                stream_id,
+                first_visible_token_ms=stream_diag.first_visible_token_ms,
+            )
         if run_journal is not None:
             try:
                 journaled = run_journal.append_sse_event(event, data)
@@ -4977,6 +4993,7 @@ def _run_agent_streaming(
     _ckpt_thread = None
     _agent_lock = None
     _streaming_cron_profile_home_token = None
+    _profile_context_started = _stream_diag_monotonic_ms()
     try:
         s = get_session(session_id)
         update_active_run(stream_id, phase="running", session_id=session_id)
@@ -5046,6 +5063,17 @@ def _run_agent_streaming(
                 _resolved_profile_name = get_active_profile_name()
             except Exception:
                 _resolved_profile_name = None
+
+        stream_diag.profile = str(_resolved_profile_name or "")
+        stream_diag.model = str(model or "")
+        stream_diag.provider = str(provider_context or "")
+        stream_diag.event(
+            "webui.worker.profile_context",
+            "会话、Profile 与模型上下文已解析。",
+            duration_ms=_stream_diag_elapsed_ms(_profile_context_started),
+            elapsed_ms=_stream_diag_elapsed_ms(stream_diag.start_ms),
+        )
+        _profile_runtime_started = _stream_diag_monotonic_ms()
         
         _thread_env = _build_agent_thread_env(
             _profile_runtime_env,
@@ -5059,11 +5087,19 @@ def _run_agent_streaming(
         # block other concurrent sessions waiting on _ENV_LOCK (#2024).
         _prewarm_skill_tool_modules()
         _install_streaming_cronjob_profile_wrapper()
+        stream_diag.event(
+            "webui.worker.profile_runtime",
+            "Profile 运行环境与技能模块预热完成。",
+            duration_ms=_stream_diag_elapsed_ms(_profile_runtime_started),
+            elapsed_ms=_stream_diag_elapsed_ms(stream_diag.start_ms),
+        )
         # Still set process-level env as fallback for tools that bypass thread-local
         # Acquire lock only for the env mutation, then release before the agent runs.
         # The finally block re-acquires to restore — keeping critical sections short
         # and preventing a deadlock where the restore would re-enter the same lock.
+        _env_lock_wait_started = _stream_diag_monotonic_ms()
         with _ENV_LOCK:
+            _env_lock_acquired = _stream_diag_monotonic_ms()
             old_profile_env = {key: os.environ.get(key) for key in _profile_runtime_env}
             old_cwd = os.environ.get('TERMINAL_CWD')
             old_exec_ask = os.environ.get('HERMES_EXEC_ASK')
@@ -5088,6 +5124,14 @@ def _run_agent_streaming(
                 # the lock (#2024).
                 if patch_skill_home_modules is not None:
                     patch_skill_home_modules(Path(_profile_home))
+        stream_diag.event(
+            "webui.worker.process_env",
+            "进程级 Profile 环境已切换。",
+            duration_ms=_stream_diag_elapsed_ms(_env_lock_wait_started),
+            elapsed_ms=_stream_diag_elapsed_ms(stream_diag.start_ms),
+            wait_ms=round(max(0.0, _env_lock_acquired - _env_lock_wait_started), 1),
+            hold_ms=_stream_diag_elapsed_ms(_env_lock_acquired),
+        )
         # Lock released — agent runs without holding it
         # ── MCP Server Discovery (lazy import, idempotent) ──
         # MUST run AFTER the HERMES_HOME mutation above — `discover_mcp_tools()`
@@ -5104,11 +5148,18 @@ def _run_agent_streaming(
         # `_servers` by `(profile_home, name)` upstream in hermes-agent; that
         # lives outside this WebUI repo.  This change fixes the headline bug
         # for users who run a single non-default profile per WebUI process.
+        _mcp_discovery_started = _stream_diag_monotonic_ms()
         try:
             from tools.mcp_tool import discover_mcp_tools
             discover_mcp_tools()
         except Exception:
             pass  # MCP not available or not configured — non-fatal
+        stream_diag.event(
+            "webui.worker.mcp_discovery",
+            "MCP 服务发现完成。",
+            duration_ms=_stream_diag_elapsed_ms(_mcp_discovery_started),
+            elapsed_ms=_stream_diag_elapsed_ms(stream_diag.start_ms),
+        )
 
         # Register a gateway-style notify callback so the approval system can
         # push the `approval` SSE event the moment a dangerous command is
@@ -5116,6 +5167,7 @@ def _run_agent_streaming(
         # Without this, the agent thread blocks inside the terminal tool
         # waiting for approval that the UI never knew to ask for, leaving
         # the chat stuck in "Thinking…" forever.
+        _callback_registration_started = _stream_diag_monotonic_ms()
         _approval_registered = False
         _unreg_notify = None
         try:
@@ -5145,6 +5197,14 @@ def _run_agent_streaming(
             _clarify_registered = True
         except ImportError:
             logger.debug("Clarify module not available, falling back to polling")
+        stream_diag.event(
+            "webui.worker.callbacks_registered",
+            "审批与澄清回调注册完成。",
+            duration_ms=_stream_diag_elapsed_ms(_callback_registration_started),
+            elapsed_ms=_stream_diag_elapsed_ms(stream_diag.start_ms),
+            approval_registered=_approval_registered,
+            clarify_registered=_clarify_registered,
+        )
 
         def _clarify_callback_impl(question, choices, sid, cancel_evt, put_event):
             """Bridge Hermes clarify prompts to the WebUI."""
@@ -5210,7 +5270,8 @@ def _run_agent_streaming(
             stream_diag.event(
                 "webui.worker.pre_agent_setup",
                 "Agent 创建前的 WebUI 准备完成，包括运行状态、环境、MCP 和回调注册。",
-                elapsed_ms=_stream_diag_elapsed_ms(_pre_agent_setup_started),
+                duration_ms=_stream_diag_elapsed_ms(_pre_agent_setup_started),
+                elapsed_ms=_stream_diag_elapsed_ms(stream_diag.start_ms),
                 mcp_discovery_ms=None,
                 skill_prewarm_ms=None,
                 env_lock_wait_ms=None,
@@ -5994,8 +6055,28 @@ def _run_agent_streaming(
                 _agent_kwargs['gateway_session_key'] = session_id
             _agent_init_timings = []
             _agent_init_total_ms = [0.0]
+            _model_request_started = [None]
 
             def _agent_event_callback(event_name, payload):
+                if event_name == "agent.model_first_delta":
+                    if stream_diag.first_token_ms is not None:
+                        return
+                    first_token_ms = stream_diag.note_model_first_delta()
+                    model_ttft_ms = _stream_diag_elapsed_ms(_model_request_started[0]) if _model_request_started[0] is not None else None
+                    _update_stream_diag_summary(
+                        stream_id,
+                        first_token_ms=first_token_ms,
+                        model_ttft_ms=model_ttft_ms,
+                    )
+                    stream_diag.event(
+                        "agent.model_first_delta",
+                        "模型返回首个有效token，包括文本、推理或工具调用token。",
+                        duration_ms=model_ttft_ms,
+                        elapsed_ms=first_token_ms,
+                        first_token_ms=first_token_ms,
+                        api_call_count=(payload or {}).get("api_call_count") if isinstance(payload, dict) else None,
+                    )
+                    return
                 if event_name != "agent.init_timing":
                     return
                 if not isinstance(payload, dict):
@@ -6004,18 +6085,19 @@ def _run_agent_streaming(
                 fields = dict(payload)
                 fields.pop("stage", None)
                 fields.pop("name", None)
-                fields.setdefault("elapsed_ms", fields.get("duration_ms"))
+                fields["duration_ms"] = fields.get("duration_ms", fields.get("elapsed_ms"))
+                fields["elapsed_ms"] = _stream_diag_elapsed_ms(stream_diag.start_ms)
                 fields.setdefault("message_zh", "Agent 初始化阶段完成。")
                 event_payload = stream_diag.event(stage_name, str(fields.pop("message_zh")), **fields)
                 _agent_init_timings.append(event_payload)
                 try:
-                    _agent_init_total_ms[0] += float(event_payload.get("elapsed_ms") or 0)
+                    _agent_init_total_ms[0] += float(event_payload.get("duration_ms") or 0)
                 except Exception:
                     pass
                 _update_stream_diag_summary(
                     stream_id,
                     agent_init_total_ms=round(_agent_init_total_ms[0], 1),
-                    agent_init_breakdown={item.get("event"): item.get("elapsed_ms") for item in _agent_init_timings},
+                    agent_init_breakdown={item.get("event"): item.get("duration_ms") for item in _agent_init_timings},
                 )
 
             if 'event_callback' in _agent_params:
@@ -6049,7 +6131,8 @@ def _run_agent_streaming(
                 stream_diag.event(
                     "webui.worker.agent_construct_done",
                     "临时 Agent 构造完成。",
-                    elapsed_ms=_agent_constructor_total_ms,
+                    duration_ms=_agent_constructor_total_ms,
+                    elapsed_ms=_stream_diag_elapsed_ms(stream_diag.start_ms),
                     ephemeral=True,
                 )
                 logger.debug('[webui] Created ephemeral agent for session %s', session_id)
@@ -6118,6 +6201,8 @@ def _run_agent_streaming(
                     "webui.worker.agent_cache_lookup_done",
                     "WebUI Agent 缓存检查完成。",
                     cache_hit=bool(agent is not None),
+                    duration_ms=_stream_diag_elapsed_ms(_agent_cache_started),
+                    elapsed_ms=_stream_diag_elapsed_ms(stream_diag.start_ms),
                 )
 
                 if _identity_mismatch_entry is not None:
@@ -6196,7 +6281,8 @@ def _run_agent_streaming(
                     stream_diag.event(
                         "webui.worker.agent_construct_done",
                         "新 Agent 构造完成。",
-                        elapsed_ms=_agent_constructor_total_ms,
+                        duration_ms=_agent_constructor_total_ms,
+                        elapsed_ms=_stream_diag_elapsed_ms(stream_diag.start_ms),
                         ephemeral=False,
                     )
                     # Register the new agent with the memory lifecycle so
@@ -6260,6 +6346,8 @@ def _run_agent_streaming(
             stream_diag.event(
                 "webui.worker.agent_ready",
                 "Agent 已准备就绪，已汇总缓存复用、构造耗时和内部初始化分段。",
+                duration_ms=_stream_diag_elapsed_ms(_agent_cache_started),
+                elapsed_ms=_stream_diag_elapsed_ms(stream_diag.start_ms),
                 cache_hit=bool(_agent_cache_hit),
                 cache_elapsed_ms=_stream_diag_elapsed_ms(_agent_cache_started),
                 evicted_count=_agent_cache_evicted_count,
@@ -6429,7 +6517,8 @@ def _run_agent_streaming(
             stream_diag.event(
                 "webui.worker.context_prepared",
                 "模型调用前上下文准备完成，包括历史消息读取、去重、附件处理和 API 输入整理。",
-                elapsed_ms=_stream_diag_elapsed_ms(_context_prepare_started),
+                duration_ms=_stream_diag_elapsed_ms(_context_prepare_started),
+                elapsed_ms=_stream_diag_elapsed_ms(stream_diag.start_ms),
                 state_db_load_ms=None,
                 message_count=len(_previous_messages),
                 context_message_count=len(conversation_history),
@@ -6452,6 +6541,7 @@ def _run_agent_streaming(
             )
             _persistent_state_before = _persistent_state_snapshot(_profile_home)
             _run_conversation_started = _stream_diag_monotonic_ms()
+            _model_request_started[0] = _run_conversation_started
             result = agent.run_conversation(
                 user_message=user_message,
                 system_message=workspace_system_msg,
@@ -6463,7 +6553,8 @@ def _run_agent_streaming(
             stream_diag.event(
                 "webui.worker.run_conversation",
                 "Agent 主执行完成，已汇总模型响应、首 token 和工具调用耗时。",
-                elapsed_ms=_run_conversation_ms,
+                duration_ms=_run_conversation_ms,
+                elapsed_ms=_stream_diag_elapsed_ms(stream_diag.start_ms),
                 first_token_ms=stream_diag.first_token_ms,
                 first_reasoning_ms=stream_diag.first_reasoning_ms,
                 first_tool_ms=stream_diag.first_tool_ms,
@@ -7631,7 +7722,8 @@ def _run_agent_streaming(
             stream_diag.event(
                 "webui.worker.finalize",
                 "Agent 输出已完成收尾处理，包括结果合并、用量统计和会话保存。",
-                elapsed_ms=_stream_diag_elapsed_ms(_finalize_started),
+                duration_ms=_stream_diag_elapsed_ms(_finalize_started),
+                elapsed_ms=_stream_diag_elapsed_ms(stream_diag.start_ms),
                 final_save_ms=locals().get('_final_save_ms'),
                 usage_sync_ms=_usage_sync_ms,
                 output_tokens=output_tokens,

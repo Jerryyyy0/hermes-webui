@@ -183,6 +183,8 @@ def test_cancel_nonexistent_stream_returns_not_cancelled(cleanup_test_sessions):
     assert status == 200
     assert data["ok"] is True
     assert data["cancelled"] is False
+    assert data["settled"] is True
+    assert data["settle_timeout_ms"] == 10000
 
 
 def test_server_py_sse_loop_breaks_on_cancel(cleanup_test_sessions):

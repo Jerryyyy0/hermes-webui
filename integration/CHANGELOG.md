@@ -8,6 +8,10 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Added
 
+- **Profile assistant bubbles API** — 新增 `GET /api/integration/assistant_bubbles?profile=<name>`，按固定顺序返回 Profile 助理头像气泡。模型文案独立持久化到 `{profile.path}/assistant_bubbles.json`，不再读写 `info.json`；缺失或损坏时立即返回确定性降级文案并异步自愈。定时任务槽位每次 GET 从目标 Profile cron 状态实时统计，不写回缓存。生成队列全局串行，首次缺失批量填充不插入 5 分钟间隔，后续变更 5 分钟冷却，失败 3 秒冷却。
+
+- **Fixed Chinese session titles** — WebUI automatic and manual title generation now always asks the title model for a Simplified Chinese title, without reading `auxiliary.title_generation.language`. The existing title model/provider/timeout route and topic-first local fallback remain unchanged. The fixed-language policy lives in `integration/session_titles/`; `api/streaming.py` keeps only the prompt and validation seam.
+
 - **Session status and unread cursors** — `GET /api/sessions` 在 integration 开启时为每行返回 `status`（`error` / `in_progress` / `has_new_messages` / `ready`）与独立 `is_unread`；`POST /api/integration/sessions/mark_read` 由服务端推进当前 Profile 会话的已读游标。游标集中存于 `{HERMES_WEBUI_STATE_DIR}/session_status.db`，以 `(profile, session_id)` 隔离；运行与异常事实仍由 Session sidecar 维护，不持久化派生 status。
 
 - **All-profile Gateway startup** — `server.py` 默认异步确保所有可见 Profile 的 Hermes Gateway 已运行，使各 Profile 的 Cron 在 WebUI 启动后自动恢复。命名 Profile 使用独立 Hermes service，已运行实例会跳过；default 开启 `gateway.multiplex_profiles` 时只启动 default；单 Profile 失败不阻塞 WebUI。可用 `HERMES_WEBUI_START_PROFILE_GATEWAYS=0` 关闭。Gateway lifecycle 统一解析并验证 Agent 自身 launcher/venv；对于直接从已发现 Agent 源码根目录或 WebUI 仓库根目录执行 `python -m hermes_cli.main` 的部署，也会在依赖导入与 `--version` 均通过后复用当前 Python 和已验证工作目录。所有探测仍清除 `PYTHONPATH` / `PYTHONHOME`，不会把 Agent 源码注入任意 Python。Gateway runtime resolver 已收口至 `integration/gateway_startup/runtime.py`，WebUI 根目录按模块位置确定、Agent 根目录依次由 `HERMES_WEBUI_AGENT_DIR`、`${HERMES_HOME}/hermes-agent` 与既有自动发现确定。普通 Docker 容器中 `gateway start` 是成功退出但不启动进程的 no-op，新增 `integration/gateway_startup/run_container_services.sh` 作为纯 Profile Gateway supervisor：通过 Agent Profile registry 动态执行各 Profile 的 `gateway run`、遵守 multiplex、写入独立日志、转发退出信号，并在任一受管 Gateway 退出时失败退出；脚本不定位或启动 WebUI。WebUI 会自动识别无 s6 的普通容器并跳过自身 `gateway start` 协调器，外层启动器无需新增环境变量，只需分别启动该脚本与 `server.py`；s6 容器和原生 service manager 行为保持不变，显式 `HERMES_WEBUI_START_PROFILE_GATEWAYS=0/1` 仍可覆盖自动判断。WebUI 与 Agent 可直接使用 `${HERMES_HOME}/hermes-webui` / `${HERMES_HOME}/hermes-agent` 实体目录，无需 `/app` 或软链接。
@@ -23,6 +27,10 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 - **Stream diagnostics logging** — 新增 `HERMES_WEBUI_STREAM_DIAG` 控制的流式执行诊断日志，记录 agent 初始化、上下文准备、运行耗时、最终保存和 worker cleanup summary，便于排查慢流、失败流和资源清理问题。
 
 ### Changed
+
+- **SkillHub `local_all` profile filter** — `GET /api/skillhub/skills?scope=local_all` 支持 `profile`（默认 `default`）：只聚合该 Profile skills 目录下的已安装 hub + 本地 custom，并用该 Profile `config.yaml` 的 `skills.disabled` 过滤。其它 scope 仍忽略 `profile`；`stats` 仍为全局计数。
+
+- **Profile assistant bubbles skill validation relaxed** — `skill` 气泡生成不再校验模型输出是否字面匹配技能 `label` 或中文 `description` 片段；仍要求简体中文、单行格式，并继续拒绝直接输出英文 skill slug。模型概括与技能元数据不完全重合时不再触发 `skill_real_chinese_missing` 失败重试。
 
 - **成果库同步知识库取消总量限制** — `POST /api/integration/knowledge_base/upload_artifacts` 不再限制单次同步的全部文件总大小；单文件 50 MiB 和最多 20 个文件的限制保持不变。
 

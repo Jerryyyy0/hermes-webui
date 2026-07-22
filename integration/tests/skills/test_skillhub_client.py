@@ -252,10 +252,11 @@ def test_annotate_installed_sets_hub_fields(hub_url, tmp_path):
     (installed / "SKILL.md").write_text("# skill", encoding="utf-8")
     (installed / ".hub_installed").write_text("1", encoding="utf-8")
 
-    with patch("integration.skills.skillhub.shared_skills_dir", return_value=skills_dir):
-        result = skillhub.annotate_installed(
-            [{"name": "data-analysis"}, {"name": "other"}],
-        )
+    with patch("api.profiles.list_profiles_api", return_value=[{"name": "default"}]):
+        with patch("integration.skills.skillhub.skills_dir_for_profile", return_value=skills_dir):
+            result = skillhub.annotate_installed(
+                [{"name": "data-analysis"}, {"name": "other"}],
+            )
 
     assert result[0]["installed"] is True
     assert result[0]["hub_installed"] is True

@@ -1,0 +1,21 @@
+类别：assistant_intro
+目标：结合管理端助理名称、助理描述和人格设定，生成一句助理介绍气泡。
+上下文：
+- display_name: {display_name}
+- description: {description}
+- soul: {soul}
+
+参考模板：
+哈喽~，我是XX助理，擅长XXX，可以单击我的头像全方位了解我哟！
+
+要求：
+- 用 display_name 替换 XX。
+- 从 description 中概括擅长方向替换 XXX；description 为空时使用“协助处理日常工作”。
+- soul 只用于调整语气、人设风格和亲和力，不得从 soul 中新增 description 没有的能力。
+- 不要说“我是 AI/模型”。
+- 不要提到 description 中没有的能力。
+- 强制不超过 50 字。
+- 推荐基于文字配 1 个欢迎、笑容类积极 emoji 表情；若加入表情会超过 50 字，则不加表情。
+- 如果使用 emoji，不要在 emoji 前使用普通标点符号（如句号、逗号、顿号、分号、冒号）。
+- 可以使用语气标点符号（如 ~、！、？），但标点符号必须放在 emoji 后面。
+返回：只返回文案本身。

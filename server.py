@@ -737,6 +737,22 @@ def main() -> None:
         daemon=True,
     ).start()
 
+    def _start_assistant_bubbles_safe() -> None:
+        try:
+            from integration.config import integration_enabled
+            from integration.assistant_bubbles.generation import start_pregeneration
+
+            if integration_enabled():
+                start_pregeneration()
+        except Exception as e:
+            print(f'[!!] WARNING: Assistant bubbles pregeneration failed: {e}', flush=True)
+
+    threading.Thread(
+        target=_start_assistant_bubbles_safe,
+        name="assistant-bubbles-pregeneration-start",
+        daemon=True,
+    ).start()
+
     try:
         from api.gateway_watcher import start_watcher
 
