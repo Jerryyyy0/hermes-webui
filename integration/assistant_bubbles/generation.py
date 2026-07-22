@@ -14,6 +14,7 @@ from typing import Any
 
 from integration.assistant_bubbles import collectors, copy, store
 from integration.request_logging.formatting import format_kv, with_timestamp
+from integration.request_logging.logger import console_info, console_warning
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,14 @@ EMOTION_REFRESH_SECONDS = 5 * 60
 def _log_line(event: str, fields: dict[str, Any] | None = None) -> str:
     suffix = format_kv(fields or {})
     return with_timestamp(f"[webui][assistant_bubbles][{event}]" + (f" {suffix}" if suffix else ""))
+
+
+def _emit_info(event: str, fields: dict[str, Any] | None = None) -> None:
+    console_info(_log_line(event, fields))
+
+
+def _emit_warning(event: str, fields: dict[str, Any] | None = None) -> None:
+    console_warning(_log_line(event, fields))
 
 
 @dataclass(frozen=True)
@@ -240,10 +249,24 @@ def _generation_entry(fingerprint: str, *, success: bool) -> dict[str, Any]:
     }
 
 
-def _preview_text(text_or_texts: str | list[str]) -> str:
+def _output_metadata(text_or_texts: str | list[str]) -> dict[str, int]:
     if isinstance(text_or_texts, list):
-        return " | ".join(str(item) for item in text_or_texts)[:160]
-    return str(text_or_texts or "")[:160]
+        return {
+            "output_count": len(text_or_texts),
+            "output_chars": sum(len(str(item)) for item in text_or_texts),
+        }
+    text = str(text_or_texts or "")
+    return {"output_chars": len(text)}
+
+
+def _content_metadata(content: Any) -> dict[str, int]:
+    if isinstance(content, list):
+        return {
+            "output_count": len(content),
+            "output_chars": sum(len(str(item)) for item in content),
+        }
+    text = str(content or "")
+    return {"output_chars": len(text)}
 
 
 def _write_success(
@@ -256,20 +279,18 @@ def _write_success(
     reason: str = "model_generated",
 ) -> None:
     entry = _generation_entry(fingerprint, success=True)
-    logger.info(
-        _log_line(
-            "generation_succeeded",
-            {
-                "profile": task.profile if task else "",
-                "category": category,
-                "fingerprint": fingerprint[:12],
-                "reason": reason,
-                "provider": task.provider if task else None,
-                "model": task.model if task else None,
-                "generated_at": entry.get("generated_at"),
-                "preview": _preview_text(text_or_texts),
-            },
-        )
+    _emit_info(
+        "generation_succeeded",
+        {
+            "profile": task.profile if task else "",
+            "category": category,
+            "fingerprint": fingerprint[:12],
+            "reason": reason,
+            "provider": task.provider if task else None,
+            "model": task.model if task else None,
+            "generated_at": entry.get("generated_at"),
+            **_output_metadata(text_or_texts),
+        },
     )
     store.update_category(profile_path, category, text_or_texts, entry)
 
@@ -303,21 +324,22 @@ def _write_failure(
     entry = _generation_entry(fingerprint, success=False)
     if previous.get("generated_at") is not None:
         entry["generated_at"] = previous.get("generated_at")
-    logger.warning(
-        _log_line(
-            "generation_failed",
-            {
-                "profile": task.profile if task else "",
-                "category": category,
-                "fingerprint": fingerprint[:12],
-                "reason": reason,
-                "provider": task.provider if task else None,
-                "model": task.model if task else None,
-                "retry_after": entry.get("retry_after"),
-            },
-        )
+    has_cached_text = _category_has_cached_text(cache, category)
+    cache_action = "cached_text_preserved" if has_cached_text else "fallback_written"
+    _emit_warning(
+        "generation_failed",
+        {
+            "profile": task.profile if task else "",
+            "category": category,
+            "fingerprint": fingerprint[:12],
+            "reason": reason,
+            "provider": task.provider if task else None,
+            "model": task.model if task else None,
+            "retry_after": entry.get("retry_after"),
+            "cache_action": cache_action,
+        },
     )
-    if not _category_has_cached_text(cache, category):
+    if not has_cached_text:
         fallback = _fallback_for_category(category, context or {})
         store.update_category(profile_path, category, fallback, entry)
         return
@@ -349,6 +371,7 @@ def _generate_with_model(
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": _load_user_prompt(category, context)},
     ]
+    started = time.monotonic()
     try:
         auxiliary_client = importlib.import_module("agent.auxiliary_client")
         call_llm = getattr(auxiliary_client, "call_llm")
@@ -367,33 +390,44 @@ def _generate_with_model(
             )
         content = resp.choices[0].message.content
     except Exception as exc:
-        logger.warning(
-            _log_line(
-                "model_call_failed",
-                {
-                    "profile": task.profile,
-                    "category": category,
-                    "provider": task.provider,
-                    "model": task.model,
-                    "error": exc,
-                },
-            )
+        elapsed_ms = round((time.monotonic() - started) * 1000, 1)
+        _emit_warning(
+            "model_call_failed",
+            {
+                "profile": task.profile,
+                "category": category,
+                "provider": task.provider,
+                "model": task.model,
+                "elapsed_ms": elapsed_ms,
+                "error": exc,
+            },
         )
         return None, "model_call_failed"
+    elapsed_ms = round((time.monotonic() - started) * 1000, 1)
+    _emit_info(
+        "model_call_succeeded",
+        {
+            "profile": task.profile,
+            "category": category,
+            "provider": task.provider,
+            "model": task.model,
+            "elapsed_ms": elapsed_ms,
+            **_content_metadata(content),
+        },
+    )
     result, reason = validate_model_output(category, content, context)
     if result is None:
-        logger.warning(
-            _log_line(
-                "model_output_rejected",
-                {
-                    "profile": task.profile,
-                    "category": category,
-                    "provider": task.provider,
-                    "model": task.model,
-                    "reason": reason,
-                    "preview": str(content or "")[:160],
-                },
-            )
+        _emit_warning(
+            "model_output_rejected",
+            {
+                "profile": task.profile,
+                "category": category,
+                "provider": task.provider,
+                "model": task.model,
+                "reason": reason,
+                "elapsed_ms": elapsed_ms,
+                **_content_metadata(content),
+            },
         )
     return result, reason
 
