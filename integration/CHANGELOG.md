@@ -8,6 +8,8 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Added
 
+- **webui_login MCP header sync** — `GET /api/integration/webui_login` 在带 Bearer 且 identity lookup 返回 200 时，将身份中的 i智库 `account` / `uuid` 写回所有可见 Profile 的 `config.yaml`：仅更新 `mcp_servers.ithink_kb_mcp.headers` 的 `X-IThink-Account` 与 `X-IThink-UUID`；缺字段或无该 MCP server 则跳过；单 Profile 写失败不阻断登录响应。实现见 `integration/identity/mcp_headers_sync.py`。
+
 - **Profile info welcome field** — `info.json` 新增可选 `welcome`（Profile 欢迎语）。`GET /api/profiles` 在 `info.welcome` 返回；`POST /api/profile/info` 可写入/清空；Profiles 面板编辑与新建表单支持配置。建议约 50 字，服务端不校验长度；不驱动 assistant bubbles 或聊天空状态。
 
 - **Profile assistant bubbles API** — 新增 `GET /api/integration/assistant_bubbles?profile=<name>`，按固定顺序返回 Profile 助理头像气泡。模型文案独立持久化到 `{profile.path}/assistant_bubbles.json`，不再读写 `info.json`；缺失或损坏时立即返回确定性降级文案并异步自愈。定时任务槽位每次 GET 从目标 Profile cron 状态实时统计，不写回缓存。生成队列全局串行，首次缺失批量填充不插入 5 分钟间隔，后续变更 5 分钟冷却，失败 3 秒冷却。

@@ -41,6 +41,13 @@ def test_missing_token_returns_not_registered():
     assert isinstance(payload.get("timestamp"), int)
 
 
+def _patch_mcp_sync():
+    return patch(
+        "integration.identity.mcp_headers_sync.sync_ithink_kb_mcp_headers",
+        return_value={"updated": 0, "skipped": 0, "errors": 0},
+    )
+
+
 def test_success_passthrough_200_and_caches_identity():
     identity = {
         "username": "zhangsan",
@@ -54,7 +61,8 @@ def test_success_passthrough_200_and_caches_identity():
             "integration.identity.handlers.lookup_current_identity",
             return_value=(200, identity),
         ):
-            assert try_handle_get(handler, parsed) is True
+            with _patch_mcp_sync():
+                assert try_handle_get(handler, parsed) is True
     handler.send_response.assert_called_with(200)
     payload = _json_payload(handler)
     assert _without_timestamp(payload) == identity
@@ -74,7 +82,8 @@ def test_cached_read_without_bearer():
             "integration.identity.handlers.lookup_current_identity",
             return_value=(200, identity),
         ):
-            try_handle_get(handler, parsed)
+            with _patch_mcp_sync():
+                try_handle_get(handler, parsed)
 
     handler.headers = {}
     with patch("integration.identity.handlers.identity_lookup_enabled", return_value=True):
@@ -95,7 +104,8 @@ def test_cached_read_does_not_include_token():
             "integration.identity.handlers.lookup_current_identity",
             return_value=(200, identity),
         ):
-            try_handle_get(handler, parsed)
+            with _patch_mcp_sync():
+                try_handle_get(handler, parsed)
 
     handler.headers = {}
     with patch("integration.identity.handlers.identity_lookup_enabled", return_value=True):
@@ -116,7 +126,8 @@ def test_upstream_401_passthrough_and_clears_cache():
             "integration.identity.handlers.lookup_current_identity",
             return_value=(200, identity),
         ):
-            try_handle_get(handler, parsed)
+            with _patch_mcp_sync():
+                try_handle_get(handler, parsed)
 
     detail = {"detail": "会话不存在或已超时，请重新登录。"}
     handler.headers = {"Authorization": "bearer bad"}
@@ -171,9 +182,11 @@ def test_lookup_unreachable_returns_502(capsys):
     assert payload["error"] == "identity_lookup_failed"
     assert "connection refused" in payload["message"]
     assert isinstance(payload.get("timestamp"), int)
-    log_line = capsys.readouterr().err.strip()
-    assert _TS_RE.match(log_line)
-    assert "[webui][integration_login][exit]" in log_line
+    err = capsys.readouterr().err
+    login_lines = [ln for ln in err.splitlines() if "[webui][integration_login][exit]" in ln]
+    assert login_lines, err
+    log_line = login_lines[0]
+    assert re.search(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}", log_line)
     assert "status=502" in log_line
     assert "[webui] {" not in log_line
 
