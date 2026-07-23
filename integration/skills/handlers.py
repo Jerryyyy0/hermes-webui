@@ -808,8 +808,26 @@ def _post_skillhub_re_extract(handler, body: dict) -> bool:
         return _respond(handler, result)
     except Exception as exc:
         import logging
-        logging.getLogger(__name__).warning("re-extract endpoint error: %s", exc)
-        return _respond_bad(handler, str(exc), 502)
+        logging.getLogger(__name__).warning("re-extract endpoint error for %s: %s", name, exc)
+        status = 502
+        detail = str(exc)
+        # Parse upstream error response for proper status code
+        if hasattr(exc, "response"):
+            resp = exc.response
+            status = resp.status_code
+            try:
+                err_body = resp.json()
+                detail = err_body.get("detail", detail)
+            except Exception:
+                pass
+        # Map upstream status codes to user-friendly messages
+        if status == 404:
+            detail = f"技能 '{name}' 不存在或无在架版本"
+        elif status == 400:
+            detail = f"技能 '{name}' 无 SKILL.md 内容，无法提取"
+        elif status == 502:
+            detail = "大模型不可用，请稍后重试"
+        return _respond_bad(handler, detail, status)
 
 
 def _get_skillhub_installed_profiles(handler, parsed) -> bool:
