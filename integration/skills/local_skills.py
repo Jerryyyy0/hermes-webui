@@ -26,6 +26,26 @@ def _normalize_category_for_match(value: str) -> str:
     return str(value or "").strip().lower().replace(" ", "-")
 
 
+_UNCATEGORIZED_KEY = "未分类"
+
+
+def _is_uncategorized_match(category_key: str) -> bool:
+    """Check if the category key represents 'uncategorized'."""
+    return _normalize_category_for_match(category_key) == _normalize_category_for_match(_UNCATEGORIZED_KEY)
+
+
+def _is_uncategorized_skill(skill: dict, known_categories: set[str]) -> bool:
+    """Check if a skill should be included in '未分类' filter."""
+    cat = str(skill.get("category") or "").strip()
+    if not cat:
+        return True
+    if _normalize_category_for_match(cat) == _normalize_category_for_match(_UNCATEGORIZED_KEY):
+        return True
+    if known_categories and _normalize_category_for_match(cat) not in known_categories:
+        return True
+    return False
+
+
 _SKILL_META_EXCLUDE = frozenset(
     {".hub_installed", ".category", ".install_name", ".hub_catalog_name", ".user_created", ".detail.json"}
 )
@@ -104,8 +124,7 @@ def prepare_skill_download(name: str, dir_name: str = "") -> dict:
     if is_system_skill(skill_name):
         return {"error": "Cannot download system skill", "status": 403}
 
-    skills_dir = shared_skills_dir()
-    skill_dir = _resolve_skill_dir(skills_dir, skill_name, dir_name)
+    skill_dir, _skills_root = _resolve_skill_dir_in_any_profile(skill_name, dir_name)
     if not skill_dir or not skill_dir.is_dir():
         return {"error": "Skill not found", "status": 404}
 
@@ -260,7 +279,19 @@ def list_installed(
             _log.debug("skip skill %s: %s", skill_md, exc)
 
     if category:
-        all_skills = [s for s in all_skills if s.get("category") == category]
+        if _is_uncategorized_match(category):
+            from integration.skills.skillhub import fetch_categories
+            try:
+                all_categories = fetch_categories()
+            except Exception:
+                all_categories = []
+            known = set()
+            for c in all_categories:
+                if c and not _is_uncategorized_match(c):
+                    known.add(_normalize_category_for_match(c))
+            all_skills = [s for s in all_skills if _is_uncategorized_skill(s, known)]
+        else:
+            all_skills = [s for s in all_skills if _normalize_category_for_match(s.get("category")) == _normalize_category_for_match(category)]
     all_skills = _sort_skills(all_skills)
     try:
         from integration.skills.no_self_improve import apply_lock_fields_batch
@@ -272,6 +303,8 @@ def list_installed(
             skill.setdefault("no_self_improve", hub)
             skill.setdefault("can_lock", not hub)
     categories = sorted({s.get("category") for s in all_skills if s.get("category")})
+    if _UNCATEGORIZED_KEY not in categories:
+        categories.append(_UNCATEGORIZED_KEY)
     return {
         "skills": all_skills,
         "skillhub_enabled": False,
@@ -319,8 +352,23 @@ def _scan_custom_skill_dicts(
             category_file = skill_dir / ".category"
             if category_file.is_file():
                 cat = category_file.read_text(encoding="utf-8").strip() or cat
-            if category and _normalize_category_for_match(cat) != _normalize_category_for_match(category):
-                continue
+            if category:
+                if _is_uncategorized_match(category):
+                    # For "未分类", include skills with empty category, explicitly "未分类",
+                    # or category not in known categories
+                    from integration.skills.skillhub import fetch_categories
+                    try:
+                        all_categories = fetch_categories()
+                    except Exception:
+                        all_categories = []
+                    known = set()
+                    for c in all_categories:
+                        if c and not _is_uncategorized_match(c):
+                            known.add(_normalize_category_for_match(c))
+                    if not _is_uncategorized_skill({"category": cat}, known):
+                        continue
+                elif _normalize_category_for_match(cat) != _normalize_category_for_match(category):
+                    continue
             content = skill_md.read_text(encoding="utf-8")[:4000]
             frontmatter, body = _parse_frontmatter(content)
             if not skill_matches_platform(frontmatter):
@@ -435,8 +483,22 @@ def _filter_custom_skills_in_memory(
     category_key = str(category or "").strip()
     filtered = skills
     if category_key:
-        normalized_key = _normalize_category_for_match(category_key)
-        filtered = [skill for skill in filtered if _normalize_category_for_match(skill.get("category")) == normalized_key]
+        if _is_uncategorized_match(category_key):
+            # For "未分类", include skills with empty category, explicitly "未分类",
+            # or category not in known categories
+            from integration.skills.skillhub import fetch_categories
+            try:
+                all_categories = fetch_categories()
+            except Exception:
+                all_categories = []
+            known = set()
+            for cat in all_categories:
+                if cat and not _is_uncategorized_match(cat):
+                    known.add(_normalize_category_for_match(cat))
+            filtered = [skill for skill in filtered if _is_uncategorized_skill(skill, known)]
+        else:
+            normalized_key = _normalize_category_for_match(category_key)
+            filtered = [skill for skill in filtered if _normalize_category_for_match(skill.get("category")) == normalized_key]
     query = str(q or "").strip().lower()
     if not query:
         return filtered
@@ -456,7 +518,19 @@ def _filter_custom_skills_in_memory(
 
 
 def count_custom_skills(category: str, hub_names: set[str]) -> int:
-    return len(_scan_custom_skill_dicts(shared_skills_dir(), category, hub_names))
+    total = len(_scan_custom_skill_dicts(shared_skills_dir(), category, hub_names))
+    try:
+        from api.profiles import list_profiles_api
+        for p in list_profiles_api():
+            profile_name = str(p.get("name") or "").strip()
+            if not profile_name or profile_name == "default":
+                continue
+            profile_dir = skills_dir_for_profile(profile_name)
+            if profile_dir.exists():
+                total += len(_scan_custom_skill_dicts(profile_dir, category, hub_names))
+    except Exception:
+        pass
+    return total
 
 
 def list_custom_skills(
@@ -566,6 +640,35 @@ def _find_skill_in_any_profile(name: str) -> tuple[Path | None, Path | None]:
             skill_dir, skill_md = _find_skill(name, profile_skills_dir)
             if skill_md:
                 return skill_dir, skill_md
+    except Exception:
+        pass
+    return None, None
+
+
+def _resolve_skill_dir_in_any_profile(name: str, dir_name: str = "") -> tuple[Path | None, Path | None]:
+    """Resolve a skill directory across all profiles, supporting dir_name.
+
+    Returns (skill_dir, skills_dir) where skills_dir is the profile's skills root
+    that contained the skill, or (None, None) if not found.
+    """
+    # Try default profile first
+    skills_dir = shared_skills_dir()
+    skill_dir = _resolve_skill_dir(skills_dir, name, dir_name)
+    if skill_dir and skill_dir.is_dir():
+        return skill_dir, skills_dir
+    # Try other profiles
+    try:
+        from api.profiles import list_profiles_api
+        for p in list_profiles_api():
+            profile_name = str(p.get("name") or "").strip()
+            if not profile_name or profile_name == "default":
+                continue
+            profile_skills_dir = skills_dir_for_profile(profile_name)
+            if not profile_skills_dir.exists():
+                continue
+            skill_dir = _resolve_skill_dir(profile_skills_dir, name, dir_name)
+            if skill_dir and skill_dir.is_dir():
+                return skill_dir, profile_skills_dir
     except Exception:
         pass
     return None, None
@@ -1407,9 +1510,8 @@ def edit_custom_skill(*, name: str, content: str, dir_name: str = "") -> dict:
     if is_system_skill(skill_name):
         return {"error": "Cannot edit system skill", "status": 403}
 
-    skills_dir = shared_skills_dir()
-    skill_dir = _resolve_skill_dir(skills_dir, skill_name, dir_name)
-    if not skill_dir:
+    skill_dir, skills_dir = _resolve_skill_dir_in_any_profile(skill_name, dir_name)
+    if not skill_dir or not skills_dir:
         return {"error": "Skill not found", "status": 404}
     if (skill_dir / ".hub_installed").is_file():
         return {"error": "市场安装的技能不可编辑", "status": 403}
@@ -1485,12 +1587,11 @@ def _remove_skill_from_config_yaml(skill_name: str) -> None:
 
 
 def delete_local_skill(name: str, dir_name: str = "") -> dict:
-    """Remove a hub install or custom skill from shared_skills_dir."""
+    """Remove a hub install or custom skill from any profile."""
     if is_system_skill(name):
         return {"error": "Cannot delete system skill", "status": 403}
-    skills_dir = shared_skills_dir()
-    skill_dir = _resolve_skill_dir(skills_dir, name, dir_name)
-    if not skill_dir:
+    skill_dir, skills_dir = _resolve_skill_dir_in_any_profile(name, dir_name)
+    if not skill_dir or not skills_dir:
         return {"error": "Skill not found", "status": 404}
     hub_installed = (skill_dir / ".hub_installed").is_file()
     skill_md = find_skill_main_file(skill_dir)
@@ -1514,14 +1615,14 @@ def delete_local_skill(name: str, dir_name: str = "") -> dict:
     }
 
 
-def save_skill_detail(name: str, detail: dict, dir_name: str = "") -> dict:
+def save_skill_detail(name: str, detail: dict, dir_name: str = "", profile: str = "default") -> dict:
     """Write .detail.json into the skill directory."""
     skill_name = str(name or "").strip()
     if not skill_name:
         return {"error": "缺少 name", "status": 400}
     if not isinstance(detail, dict):
         return {"error": "detail must be a dict", "status": 400}
-    skills_dir = shared_skills_dir()
+    skills_dir = skills_dir_for_profile(profile) if profile else shared_skills_dir()
     skill_dir = _resolve_skill_dir(skills_dir, skill_name, dir_name)
     if not skill_dir or not skill_dir.is_dir():
         return {"error": "Skill not found", "status": 404}
@@ -1532,7 +1633,7 @@ def save_skill_detail(name: str, detail: dict, dir_name: str = "") -> dict:
     except Exception as exc:
         _log.warning("save_skill_detail: failed to write %s: %s", dest, exc)
         return {"error": str(exc), "status": 500}
-    return {"ok": True, "name": skill_name}
+    return {"ok": True, "name": skill_name, "profile": profile}
 
 
 def extract_zip_skill_content(zip_bytes: bytes) -> dict:
@@ -1582,7 +1683,7 @@ def check_duplicate_skill(
     display_name: str = "",
     exclude_dir_name: str = "",
 ) -> dict:
-    """Check if a skill with the same name or display_name already exists.
+    """Check if a skill with the same name or display_name already exists in any profile.
 
     Returns {"ok": True} if no duplicate, or {"error": str, "status": 409} if duplicate.
     """
@@ -1591,36 +1692,54 @@ def check_duplicate_skill(
     if not check_name and not check_display:
         return {"ok": True}
 
-    skills_dir = shared_skills_dir()
-    if not skills_dir.exists():
-        return {"ok": True}
-
     from agent.skill_utils import iter_skill_index_files
     from tools.skills_tool import _EXCLUDED_SKILL_DIRS, _parse_frontmatter
 
     exclude = str(exclude_dir_name or "").strip().lower()
-    for skill_md in iter_skill_index_files(skills_dir, "SKILL.md"):
-        if any(part in _EXCLUDED_SKILL_DIRS for part in skill_md.parts):
-            continue
-        skill_dir = skill_md.parent
-        dir_name_lower = skill_dir.name.lower()
-        if exclude and dir_name_lower == exclude:
-            continue
-        try:
-            rel = skill_md.relative_to(skills_dir)
-            parts = rel.parts
-            if len(parts) >= 3:
+
+    def _scan_dir(skills_dir: Path) -> dict | None:
+        if not skills_dir.exists():
+            return None
+        for skill_md in iter_skill_index_files(skills_dir, "SKILL.md"):
+            if any(part in _EXCLUDED_SKILL_DIRS for part in skill_md.parts):
                 continue
-            content = skill_md.read_text(encoding="utf-8", errors="replace")
-            fm, _ = _parse_frontmatter(content)
-            if not fm:
+            skill_dir = skill_md.parent
+            dir_name_lower = skill_dir.name.lower()
+            if exclude and dir_name_lower == exclude:
                 continue
-            existing_name = str(fm.get("name") or "").strip().lower()
-            existing_display = str(fm.get("display_name") or "").strip().lower()
-            if check_name and existing_name and check_name == existing_name:
-                return {"error": f"已存在同名技能: {fm.get('name')}", "status": 409}
-            if check_display and existing_display and check_display == existing_display:
-                return {"error": f"已存在同显示名称的技能: {fm.get('display_name')}", "status": 409}
-        except Exception:
-            continue
+            try:
+                rel = skill_md.relative_to(skills_dir)
+                parts = rel.parts
+                if len(parts) >= 3:
+                    continue
+                content = skill_md.read_text(encoding="utf-8", errors="replace")
+                fm, _ = _parse_frontmatter(content)
+                if not fm:
+                    continue
+                existing_name = str(fm.get("name") or "").strip().lower()
+                existing_display = str(fm.get("display_name") or "").strip().lower()
+                if check_name and existing_name and check_name == existing_name:
+                    return {"error": f"已存在同名技能: {fm.get('name')}", "status": 409}
+                if check_display and existing_display and check_display == existing_display:
+                    return {"error": f"已存在同显示名称的技能: {fm.get('display_name')}", "status": 409}
+            except Exception:
+                continue
+        return None
+
+    # Check default profile first
+    result = _scan_dir(shared_skills_dir())
+    if result:
+        return result
+    # Check other profiles
+    try:
+        from api.profiles import list_profiles_api
+        for p in list_profiles_api():
+            profile_name = str(p.get("name") or "").strip()
+            if not profile_name or profile_name == "default":
+                continue
+            result = _scan_dir(skills_dir_for_profile(profile_name))
+            if result:
+                return result
+    except Exception:
+        pass
     return {"ok": True}

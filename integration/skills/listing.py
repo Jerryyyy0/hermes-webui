@@ -7,7 +7,7 @@ from integration.skills.list_item_shape import normalize_skill_list_items
 from integration.skills.mtime_utils import enrich_skills_mtime
 from integration.skills.paths import skills_dir_for_profile
 from integration.skills.sort_utils import sort_skill_items
-from integration.skills.skillhub import _filter_skills_by_category, _filter_skills_by_q
+from integration.skills.skillhub import _filter_skills_by_category, _filter_skills_by_q, _is_uncategorized_match
 
 _VALID_SCOPES = frozenset({"hub", "installed", "not_installed", "custom", "local_all"})
 
@@ -136,7 +136,13 @@ def list_skillhub_skills(
             if str(s.get("name") or "").strip() not in custom_names
         ]
         merged = [skill for skill in merged if not skill.get("disabled")]
-        merged = _filter_skills_by_category(merged, category_key)
+        all_categories = None
+        if _is_uncategorized_match(category_key):
+            try:
+                all_categories = skillhub.fetch_categories()
+            except Exception:
+                all_categories = []
+        merged = _filter_skills_by_category(merged, category_key, all_categories)
         merged = _filter_skills_by_q(merged, q)
         if sort == "mtime":
             merged = enrich_skills_mtime(merged, skills_dir_for_profile(profile_key))

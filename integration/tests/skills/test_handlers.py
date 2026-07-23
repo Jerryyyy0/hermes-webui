@@ -213,3 +213,103 @@ def test_skillhub_content_hub_scope_falls_back_to_hub():
                         assert try_handle_get(handler, parsed) is True
                         get_doc.assert_not_called()
                         fetch_doc.assert_called_once_with("remote-only")
+
+
+def test_skillhub_re_extract_route():
+    handler = MagicMock()
+    body = {"name": "contract_audit"}
+    with patch("integration.skills.handlers.integration_enabled", return_value=True):
+        with patch("integration.skills.handlers.skillhub.re_extract_skill_meta") as re_extract:
+            with patch("integration.skills.handlers.j", return_value=True) as j_fn:
+                re_extract.return_value = {
+                    "name": "contract_audit",
+                    "skill_name": "合同审核助手",
+                    "updated_fields": ["skill_name", "display_description"],
+                    "rows_updated": 1,
+                }
+                parsed = urlparse("/api/skillhub/re-extract")
+                assert try_handle_post(handler, parsed, body) is True
+                re_extract.assert_called_once_with("contract_audit")
+                j_fn.assert_called_once()
+
+
+def test_skillhub_re_extract_requires_name():
+    handler = MagicMock()
+    body = {}
+    with patch("integration.skills.handlers.integration_enabled", return_value=True):
+        with patch("integration.skills.handlers.bad", return_value=True) as bad_fn:
+            parsed = urlparse("/api/skillhub/re-extract")
+            assert try_handle_post(handler, parsed, body) is True
+            bad_fn.assert_called_once()
+            assert bad_fn.call_args.kwargs.get("status") == 400
+
+
+def test_skillhub_re_extract_passes_name():
+    handler = MagicMock()
+    body = {"name": "my-skill"}
+    with patch("integration.skills.handlers.integration_enabled", return_value=True):
+        with patch("integration.skills.handlers.skillhub.re_extract_skill_meta") as re_extract:
+            with patch("integration.skills.handlers.j", return_value=True):
+                re_extract.return_value = {"name": "my-skill", "rows_updated": 1}
+                parsed = urlparse("/api/skillhub/re-extract")
+                assert try_handle_post(handler, parsed, body) is True
+                re_extract.assert_called_once_with("my-skill")
+
+
+def test_skillhub_re_extract_502_error():
+    handler = MagicMock()
+    body = {"name": "some-skill"}
+    with patch("integration.skills.handlers.integration_enabled", return_value=True):
+        with patch("integration.skills.handlers.skillhub.re_extract_skill_meta") as re_extract:
+            with patch("integration.skills.handlers.bad", return_value=True) as bad_fn:
+                re_extract.side_effect = Exception("大模型不可用")
+                parsed = urlparse("/api/skillhub/re-extract")
+                assert try_handle_post(handler, parsed, body) is True
+                bad_fn.assert_called_once()
+                assert bad_fn.call_args.kwargs.get("status") == 502
+
+
+def test_skillhub_re_extract_404_error():
+    import httpx
+    handler = MagicMock()
+    body = {"name": "nonexistent-skill"}
+    mock_resp = MagicMock()
+    mock_resp.status_code = 404
+    mock_resp.json.return_value = {"detail": {"error": "Skill not found", "name": "nonexistent-skill"}}
+    with patch("integration.skills.handlers.integration_enabled", return_value=True):
+        with patch("integration.skills.handlers.skillhub.re_extract_skill_meta") as re_extract:
+            with patch("integration.skills.handlers.bad", return_value=True) as bad_fn:
+                exc = httpx.HTTPStatusError("Not Found", request=MagicMock(), response=mock_resp)
+                re_extract.side_effect = exc
+                parsed = urlparse("/api/skillhub/re-extract")
+                assert try_handle_post(handler, parsed, body) is True
+                bad_fn.assert_called_once()
+                assert bad_fn.call_args.kwargs.get("status") == 404
+                assert "不存在" in str(bad_fn.call_args.args[1])
+
+
+def test_skillhub_re_extract_400_error():
+    import httpx
+    handler = MagicMock()
+    body = {"name": "some-skill"}
+    mock_resp = MagicMock()
+    mock_resp.status_code = 400
+    mock_resp.json.return_value = {"detail": "在架行无 SKILL.md 内容"}
+    with patch("integration.skills.handlers.integration_enabled", return_value=True):
+        with patch("integration.skills.handlers.skillhub.re_extract_skill_meta") as re_extract:
+            with patch("integration.skills.handlers.bad", return_value=True) as bad_fn:
+                exc = httpx.HTTPStatusError("Bad Request", request=MagicMock(), response=mock_resp)
+                re_extract.side_effect = exc
+                parsed = urlparse("/api/skillhub/re-extract")
+                assert try_handle_post(handler, parsed, body) is True
+                bad_fn.assert_called_once()
+                assert bad_fn.call_args.kwargs.get("status") == 400
+                assert "SKILL.md" in str(bad_fn.call_args.args[1])
+
+
+def test_skillhub_re_extract_not_intercepted_when_disabled():
+    handler = MagicMock()
+    body = {"name": "some-skill"}
+    with patch("integration.skills.handlers.integration_enabled", return_value=False):
+        parsed = urlparse("/api/skillhub/re-extract")
+        assert try_handle_post(handler, parsed, body) is False

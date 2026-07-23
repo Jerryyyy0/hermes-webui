@@ -105,6 +105,8 @@ let _agentCommandCachePromise=null;
 let _skillCommandCache=[];
 let _skillCommandLoadPromise=null;
 let _skillCommandCacheReady=false;
+let _cmdSelectedIdx=-1;
+let _agentCommandCacheReady=false;
 
 // Invalidate the /api/models slash-suggestion cache. Called by panels.js
 // after a provider is added or removed so the next /model autocomplete
@@ -218,7 +220,6 @@ function _getSlashSubArgOptions(spec){
   return Promise.resolve([]);
 }
 
-let _agentCommandCacheReady=false;
 async function loadAgentCommandMetadata(force=false){
   if(_agentCommandCacheReady&&!force)return _agentCommandCache||[];
   if(_agentCommandCachePromise&&!force)return _agentCommandCachePromise;
@@ -1541,8 +1542,6 @@ function ensureSkillCommandsLoadedForAutocomplete(){
 }
 
 // ── Autocomplete dropdown ───────────────────────────────────────────────────
-
-let _cmdSelectedIdx=-1;
 
 function showCmdDropdown(matches){
   const dd=$('cmdDropdown');

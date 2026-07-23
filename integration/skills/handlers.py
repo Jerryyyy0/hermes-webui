@@ -253,6 +253,10 @@ def try_handle_post(handler, parsed, body: dict | None) -> bool:
         if not integration_enabled():
             return False
         return _post_skillhub_detail(handler, body)
+    if path == "/api/skillhub/re-extract":
+        if not integration_enabled():
+            return False
+        return _post_skillhub_re_extract(handler, body)
     if not skillhub_enabled():
         return False
     if path == "/api/skillhub/install":
@@ -381,9 +385,15 @@ def _get_skillhub_skills(handler, parsed) -> bool:
         return _respond_bad(handler, str(exc), 502, exc_info=(type(exc), exc, exc.__traceback__))
 
 
+_UNCATEGORIZED_LABEL = "未分类"
+
+
 def _get_skillhub_categories(handler, parsed) -> bool:
     try:
-        return _respond(handler, skillhub.fetch_categories())
+        categories = skillhub.fetch_categories()
+        if _UNCATEGORIZED_LABEL not in categories:
+            categories.append(_UNCATEGORIZED_LABEL)
+        return _respond(handler, categories)
     except Exception as exc:
         return _respond_bad(handler, str(exc), 502, exc_info=(type(exc), exc, exc.__traceback__))
 
@@ -704,20 +714,14 @@ def _post_no_self_improve_toggle(handler, body: dict) -> bool:
     locked = bool(body["locked"])
     dir_name = str(body.get("dir_name", "") or "").strip()
 
-    from integration.skills.paths import shared_skills_dir
-
-    skills_dir = shared_skills_dir()
-    skill_dir = local_skills._resolve_skill_dir(skills_dir, name, dir_name)
+    skill_dir, _skills_root = local_skills._resolve_skill_dir_in_any_profile(name, dir_name)
     if not skill_dir or not skill_dir.is_dir():
         return _respond_bad(handler, f"Skill '{name}' not found", 404)
     if (skill_dir / ".hub_installed").is_file():
         return _respond_bad(handler, "Hub skills are permanently locked", 403)
 
-    if locked:
-        no_self_improve.add_names([name])
-    else:
-        no_self_improve.remove_names([name])
-    return _respond(handler, {"ok": True, "name": name, "locked": locked})
+    updated_profiles = no_self_improve.propagate_lock_to_all_profiles(name, locked)
+    return _respond(handler, {"ok": True, "name": name, "locked": locked, "profiles": updated_profiles})
 
 
 def _put_no_self_improve(handler, body: dict) -> bool:
@@ -742,17 +746,7 @@ def _post_skillhub_ai_meta(handler, body: dict) -> bool:
     description = str(body.get("description", "") or "").strip()
 
     try:
-        from integration.skills.ai_meta import generate_ai_meta
-
-        result = generate_ai_meta(
-            skill_md_content=skill_md_content,
-            name=name,
-            description=description,
-        )
-        import logging
-        _log = logging.getLogger(__name__)
-        detail_json = result.get("detailJson") if isinstance(result, dict) else None
-        _log.info("ai-meta detail_json: %s", detail_json)
+        result = skillhub.extract_ai_meta(skill_md_content, name=name, description=description)
         return _respond(handler, result)
     except Exception as exc:
         import logging
@@ -770,11 +764,70 @@ def _post_skillhub_detail(handler, body: dict) -> bool:
     if not isinstance(detail, dict):
         return _respond_bad(handler, "detail must be an object", 400)
     dir_name = str(body.get("dir_name", "") or "").strip()
-    result = local_skills.save_skill_detail(name, detail, dir_name)
-    status = int(result.get("status") or 0)
-    if result.get("error"):
-        return _respond_bad(handler, result["error"], status or 400)
-    return _respond(handler, result)
+
+    # Get all profiles that have this skill installed
+    try:
+        profiles_result = skillhub.get_skill_installed_profiles(name)
+        profiles = profiles_result.get("installed", [])
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).warning("Failed to get installed profiles for %s: %s", name, exc)
+        profiles = []
+
+    # Save to default profile first
+    results = []
+    default_result = local_skills.save_skill_detail(name, detail, dir_name, profile="default")
+    results.append({"profile": "default", **default_result})
+
+    # Save to other profiles
+    seen_profiles = {"default"}
+    for p in profiles:
+        profile_name = str(p.get("profile") or "").strip()
+        if not profile_name or profile_name in seen_profiles:
+            continue
+        seen_profiles.add(profile_name)
+        profile_dir_name = str(p.get("dir_name") or dir_name).strip()
+        result = local_skills.save_skill_detail(name, detail, profile_dir_name, profile=profile_name)
+        results.append({"profile": profile_name, **result})
+
+    # Check if any profile failed
+    failed = [r for r in results if r.get("error")]
+    if failed and len(failed) == len(results):
+        return _respond_bad(handler, failed[0]["error"], int(failed[0].get("status") or 500))
+
+    return _respond(handler, {"ok": True, "name": name, "results": results})
+
+
+def _post_skillhub_re_extract(handler, body: dict) -> bool:
+    """POST /api/skillhub/re-extract — re-translate and extract skill metadata."""
+    name = str(body.get("name", "") or "").strip()
+    if not name:
+        return _respond_bad(handler, "name required", 400)
+    try:
+        result = skillhub.re_extract_skill_meta(name)
+        return _respond(handler, result)
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).warning("re-extract endpoint error for %s: %s", name, exc)
+        status = 502
+        detail = str(exc)
+        # Parse upstream error response for proper status code
+        if hasattr(exc, "response"):
+            resp = exc.response
+            status = resp.status_code
+            try:
+                err_body = resp.json()
+                detail = err_body.get("detail", detail)
+            except Exception:
+                pass
+        # Map upstream status codes to user-friendly messages
+        if status == 404:
+            detail = f"技能 '{name}' 不存在或无在架版本"
+        elif status == 400:
+            detail = f"技能 '{name}' 无 SKILL.md 内容，无法提取"
+        elif status == 502:
+            detail = "大模型不可用，请稍后重试"
+        return _respond_bad(handler, detail, status)
 
 
 def _get_skillhub_installed_profiles(handler, parsed) -> bool:

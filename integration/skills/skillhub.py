@@ -455,15 +455,42 @@ def compute_scope_stats_from(ctx: _HubCatalogContext, *, custom_count: int) -> d
     }
 
 
+_UNCATEGORIZED_KEY = "未分类"
+
+
 def _normalize_category_for_match(value: str) -> str:
     """Normalize category for comparison: lowercase, spaces to hyphens."""
     return str(value or "").strip().lower().replace(" ", "-")
 
 
-def _filter_skills_by_category(skills: list[dict], category: str) -> list[dict]:
+def _is_uncategorized_match(category_key: str) -> bool:
+    """Check if the category key represents 'uncategorized'."""
+    return _normalize_category_for_match(category_key) == _normalize_category_for_match(_UNCATEGORIZED_KEY)
+
+
+def _filter_skills_by_category(
+    skills: list[dict],
+    category: str,
+    all_categories: list[str] | None = None,
+) -> list[dict]:
     category_key = str(category or "").strip()
     if not category_key:
         return skills
+
+    # Special handling for "未分类": include skills with empty category,
+    # explicitly "未分类", or category not in the known categories list
+    if _is_uncategorized_match(category_key):
+        known = set()
+        if all_categories:
+            for cat in all_categories:
+                if cat and not _is_uncategorized_match(cat):
+                    known.add(_normalize_category_for_match(cat))
+        return [
+            skill
+            for skill in skills
+            if _is_uncategorized_skill(skill, known)
+        ]
+
     # Normalize both sides: lowercase + spaces→hyphens
     # so "AI 与机器学习" matches "AI-与机器学习"
     normalized = _normalize_category_for_match(category_key)
@@ -472,6 +499,18 @@ def _filter_skills_by_category(skills: list[dict], category: str) -> list[dict]:
         for skill in skills
         if _normalize_category_for_match(skill.get("category")) == normalized
     ]
+
+
+def _is_uncategorized_skill(skill: dict, known_categories: set[str]) -> bool:
+    """Check if a skill should be included in '未分类' filter."""
+    cat = str(skill.get("category") or "").strip()
+    if not cat:
+        return True
+    if _normalize_category_for_match(cat) == _normalize_category_for_match(_UNCATEGORIZED_KEY):
+        return True
+    if known_categories and _normalize_category_for_match(cat) not in known_categories:
+        return True
+    return False
 
 
 def list_hub_catalog_filtered_from(
@@ -483,7 +522,13 @@ def list_hub_catalog_filtered_from(
     order: str = "asc",
 ) -> tuple[list[dict], int]:
     """List hub catalog items from a prebuilt context (no extra upstream fetch)."""
-    skills = _filter_skills_by_category(ctx.annotated_all, category)
+    all_categories = None
+    if _is_uncategorized_match(category):
+        try:
+            all_categories = fetch_categories()
+        except Exception:
+            all_categories = []
+    skills = _filter_skills_by_category(ctx.annotated_all, category, all_categories)
     if scope == "installed":
         skills = [skill for skill in skills if skill.get("installed")]
     elif scope == "not_installed":
@@ -980,6 +1025,52 @@ def _remove_skill_from_profile_config(profile_name: str, skill_name: str) -> Non
                 yaml.safe_dump(cfg, f, allow_unicode=True, default_flow_style=False)
     except Exception as exc:
         _log.debug("Could not remove skill from config for %s/%s: %s", profile_name, skill_name, exc)
+
+
+def extract_ai_meta(skill_md_content: str, name: str = "", description: str = "") -> dict:
+    """Extract skill metadata via SkillHub /api/admin/meta/extract endpoint.
+
+    Args:
+        skill_md_content: SKILL.md full content
+        name: skill name (pass-through if already known)
+        description: skill description (pass-through if already known)
+
+    Returns:
+        dict with name, description, skillName, displayDescription, detailJson fields
+    """
+    url = f"{_hub_base()}/api/admin/meta/extract"
+    with _client() as client:
+        resp = client.post(url, json={"content": skill_md_content})
+        resp.raise_for_status()
+        data = resp.json()
+
+    return {
+        "name": name or None,
+        "description": description or None,
+        "skillName": data.get("skill_name", ""),
+        "displayDescription": data.get("display_description", ""),
+        "detailJson": data.get("detail_json"),
+    }
+
+
+def re_extract_skill_meta(name: str) -> dict:
+    """Re-extract and save skill metadata via SkillHub /api/admin/skills/{name}/re-extract.
+
+    Triggers LLM re-translation and extraction for an existing listed skill,
+    saving the results to the database. Only works for listed (status=2) skills.
+
+    Args:
+        name: skill unique identifier
+
+    Returns:
+        dict with name, skill_name, display_description, detail_json,
+        updated_fields, rows_updated
+    """
+    url = f"{_hub_base()}/api/admin/skills/{_skill_path(name)}/re-extract"
+    with _client() as client:
+        resp = client.post(url)
+        resp.raise_for_status()
+        return resp.json()
 
 
 # Backward-compatible alias for tests/callers
