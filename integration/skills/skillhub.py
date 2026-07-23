@@ -1027,5 +1027,51 @@ def _remove_skill_from_profile_config(profile_name: str, skill_name: str) -> Non
         _log.debug("Could not remove skill from config for %s/%s: %s", profile_name, skill_name, exc)
 
 
+def extract_ai_meta(skill_md_content: str, name: str = "", description: str = "") -> dict:
+    """Extract skill metadata via SkillHub /api/admin/meta/extract endpoint.
+
+    Args:
+        skill_md_content: SKILL.md full content
+        name: skill name (pass-through if already known)
+        description: skill description (pass-through if already known)
+
+    Returns:
+        dict with name, description, skillName, displayDescription, detailJson fields
+    """
+    url = f"{_hub_base()}/api/admin/meta/extract"
+    with _client() as client:
+        resp = client.post(url, json={"content": skill_md_content})
+        resp.raise_for_status()
+        data = resp.json()
+
+    return {
+        "name": name or None,
+        "description": description or None,
+        "skillName": data.get("skill_name", ""),
+        "displayDescription": data.get("display_description", ""),
+        "detailJson": data.get("detail_json"),
+    }
+
+
+def re_extract_skill_meta(name: str) -> dict:
+    """Re-extract and save skill metadata via SkillHub /api/admin/skills/{name}/re-extract.
+
+    Triggers LLM re-translation and extraction for an existing listed skill,
+    saving the results to the database. Only works for listed (status=2) skills.
+
+    Args:
+        name: skill unique identifier
+
+    Returns:
+        dict with name, skill_name, display_description, detail_json,
+        updated_fields, rows_updated
+    """
+    url = f"{_hub_base()}/api/admin/skills/{_skill_path(name)}/re-extract"
+    with _client() as client:
+        resp = client.post(url)
+        resp.raise_for_status()
+        return resp.json()
+
+
 # Backward-compatible alias for tests/callers
 fetch_catalog_content = fetch_doc

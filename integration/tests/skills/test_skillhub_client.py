@@ -285,3 +285,83 @@ def test_fetch_doc_uses_doc_path(hub_url):
 
     assert doc["content"] == "# doc"
     assert "/api/skills/data-analysis/doc" in mock_client.get.call_args[0][0]
+
+
+def test_re_extract_skill_meta_success(hub_url):
+    mock_resp = MagicMock()
+    mock_resp.json.return_value = {
+        "name": "contract_audit",
+        "skill_name": "合同审核助手",
+        "display_description": "对上传的合同文本做结构化风险审核…",
+        "detail_json": {"taskGoal": "识别合同中的风险条款"},
+        "updated_fields": ["skill_name", "display_description", "detail_json"],
+        "rows_updated": 1,
+    }
+    mock_resp.raise_for_status = MagicMock()
+    mock_client = MagicMock()
+    mock_client.__enter__ = MagicMock(return_value=mock_client)
+    mock_client.__exit__ = MagicMock(return_value=False)
+    mock_client.post.return_value = mock_resp
+
+    with patch("integration.skills.skillhub._client", return_value=mock_client):
+        result = skillhub.re_extract_skill_meta("contract_audit")
+
+    assert result["name"] == "contract_audit"
+    assert result["skill_name"] == "合同审核助手"
+    assert result["rows_updated"] == 1
+    assert "skill_name" in result["updated_fields"]
+    mock_client.post.assert_called_once()
+    assert "/api/admin/skills/contract_audit/re-extract" in mock_client.post.call_args[0][0]
+
+
+def test_re_extract_skill_meta_encodes_name(hub_url):
+    mock_resp = MagicMock()
+    mock_resp.json.return_value = {"name": "my skill", "updated_fields": [], "rows_updated": 0}
+    mock_resp.raise_for_status = MagicMock()
+    mock_client = MagicMock()
+    mock_client.__enter__ = MagicMock(return_value=mock_client)
+    mock_client.__exit__ = MagicMock(return_value=False)
+    mock_client.post.return_value = mock_resp
+
+    with patch("integration.skills.skillhub._client", return_value=mock_client):
+        skillhub.re_extract_skill_meta("my skill")
+
+    url = mock_client.post.call_args[0][0]
+    assert "/api/admin/skills/my%20skill/re-extract" in url
+
+
+def test_re_extract_skill_meta_404_raises(hub_url):
+    import httpx
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 404
+    mock_resp.raise_for_status.side_effect = httpx.HTTPStatusError(
+        "Not Found", request=MagicMock(), response=mock_resp
+    )
+    mock_client = MagicMock()
+    mock_client.__enter__ = MagicMock(return_value=mock_client)
+    mock_client.__exit__ = MagicMock(return_value=False)
+    mock_client.post.return_value = mock_resp
+
+    with patch("integration.skills.skillhub._client", return_value=mock_client):
+        with pytest.raises(httpx.HTTPStatusError):
+            skillhub.re_extract_skill_meta("nonexistent-skill")
+
+
+def test_re_extract_skill_meta_502_raises(hub_url):
+    import httpx
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 502
+    mock_resp.json.return_value = {"detail": "大模型不可用，未落库，可重试"}
+    mock_resp.raise_for_status.side_effect = httpx.HTTPStatusError(
+        "Bad Gateway", request=MagicMock(), response=mock_resp
+    )
+    mock_client = MagicMock()
+    mock_client.__enter__ = MagicMock(return_value=mock_client)
+    mock_client.__exit__ = MagicMock(return_value=False)
+    mock_client.post.return_value = mock_resp
+
+    with patch("integration.skills.skillhub._client", return_value=mock_client):
+        with pytest.raises(httpx.HTTPStatusError):
+            skillhub.re_extract_skill_meta("some-skill")

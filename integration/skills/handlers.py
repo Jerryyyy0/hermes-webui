@@ -253,6 +253,10 @@ def try_handle_post(handler, parsed, body: dict | None) -> bool:
         if not integration_enabled():
             return False
         return _post_skillhub_detail(handler, body)
+    if path == "/api/skillhub/re-extract":
+        if not integration_enabled():
+            return False
+        return _post_skillhub_re_extract(handler, body)
     if not skillhub_enabled():
         return False
     if path == "/api/skillhub/install":
@@ -742,17 +746,7 @@ def _post_skillhub_ai_meta(handler, body: dict) -> bool:
     description = str(body.get("description", "") or "").strip()
 
     try:
-        from integration.skills.ai_meta import generate_ai_meta
-
-        result = generate_ai_meta(
-            skill_md_content=skill_md_content,
-            name=name,
-            description=description,
-        )
-        import logging
-        _log = logging.getLogger(__name__)
-        detail_json = result.get("detailJson") if isinstance(result, dict) else None
-        _log.info("ai-meta detail_json: %s", detail_json)
+        result = skillhub.extract_ai_meta(skill_md_content, name=name, description=description)
         return _respond(handler, result)
     except Exception as exc:
         import logging
@@ -802,6 +796,20 @@ def _post_skillhub_detail(handler, body: dict) -> bool:
         return _respond_bad(handler, failed[0]["error"], int(failed[0].get("status") or 500))
 
     return _respond(handler, {"ok": True, "name": name, "results": results})
+
+
+def _post_skillhub_re_extract(handler, body: dict) -> bool:
+    """POST /api/skillhub/re-extract — re-translate and extract skill metadata."""
+    name = str(body.get("name", "") or "").strip()
+    if not name:
+        return _respond_bad(handler, "name required", 400)
+    try:
+        result = skillhub.re_extract_skill_meta(name)
+        return _respond(handler, result)
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).warning("re-extract endpoint error: %s", exc)
+        return _respond_bad(handler, str(exc), 502)
 
 
 def _get_skillhub_installed_profiles(handler, parsed) -> bool:
