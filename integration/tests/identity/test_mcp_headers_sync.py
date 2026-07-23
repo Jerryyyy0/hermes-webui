@@ -24,7 +24,7 @@ def setup_function():
     clear_session()
 
 
-def test_extract_prefers_ithinktank_nested_fields():
+def test_extract_uses_only_ithinktank_account_and_uuid():
     identity = {
         "ithinktank": {"account": "nested-acc", "uuid": "nested-uuid", "userId": "nested-uid"},
         "ithinktank_account": "flat-acc",
@@ -33,23 +33,32 @@ def test_extract_prefers_ithinktank_nested_fields():
     assert extract_ithink_account_uuid(identity) == ("nested-acc", "nested-uuid")
 
 
-def test_extract_falls_back_to_user_id_and_flat_fields():
-    identity = {
-        "ithinktank": {"userId": "from-user-id"},
-        "ithinktank_account": "flat-acc",
-    }
-    assert extract_ithink_account_uuid(identity) == ("flat-acc", "from-user-id")
-
-    identity2 = {
-        "ithinktank_account": "only-flat",
-        "ithinktank_user_id": "only-flat-uid",
-    }
-    assert extract_ithink_account_uuid(identity2) == ("only-flat", "only-flat-uid")
+def test_extract_ignores_userId_and_flat_fallbacks():
+    # userId alone is not enough — only ithinktank.uuid is used.
+    assert (
+        extract_ithink_account_uuid(
+            {
+                "ithinktank": {"account": "acc", "userId": "from-user-id"},
+                "ithinktank_account": "flat-acc",
+            }
+        )
+        is None
+    )
+    assert (
+        extract_ithink_account_uuid(
+            {
+                "ithinktank_account": "only-flat",
+                "ithinktank_user_id": "only-flat-uid",
+            }
+        )
+        is None
+    )
 
 
 def test_extract_returns_none_when_missing():
     assert extract_ithink_account_uuid({}) is None
     assert extract_ithink_account_uuid({"ithinktank": {"account": "a"}}) is None
+    assert extract_ithink_account_uuid({"ithinktank": {"uuid": "u"}}) is None
     assert extract_ithink_account_uuid({"ithinktank_user_id": "u"}) is None
 
 
@@ -145,6 +154,59 @@ def test_sync_idempotent_skips_write(tmp_path: Path):
     save_mock.assert_not_called()
 
 
+def test_sync_fills_missing_headers_on_matched_server(tmp_path: Path):
+    """Matched by name: create headers / missing keys instead of skipping."""
+    no_headers = tmp_path / "no_headers"
+    partial = tmp_path / "partial"
+    _write_config(
+        no_headers,
+        {
+            "mcp_servers": {
+                SERVER_NAME: {"url": "http://example/mcp", "timeout": 120},
+                "other": {"url": "http://other", "headers": {"Authorization": "x"}},
+            }
+        },
+    )
+    _write_config(
+        partial,
+        {
+            "mcp_servers": {
+                SERVER_NAME: {
+                    "headers": {
+                        ACCOUNT_KEY: "stale",
+                        "X-IThink-IsPersonal": "1",
+                    }
+                }
+            }
+        },
+    )
+    identity = {"ithinktank": {"account": "gaoxiang", "uuid": "uuid-1"}}
+    profiles = [
+        {"name": "no_headers", "path": str(no_headers)},
+        {"name": "partial", "path": str(partial)},
+    ]
+    with patch("api.profiles.list_profiles_api", return_value=profiles):
+        with patch("api.profiles.get_active_hermes_home", return_value=tmp_path / "none"):
+            stats = sync_ithink_kb_mcp_headers(identity)
+
+    assert stats["updated"] == 2
+    assert stats["errors"] == 0
+
+    filled = yaml.safe_load((no_headers / "config.yaml").read_text(encoding="utf-8"))
+    assert filled["mcp_servers"][SERVER_NAME]["headers"] == {
+        ACCOUNT_KEY: "gaoxiang",
+        UUID_KEY: "uuid-1",
+    }
+    assert filled["mcp_servers"]["other"]["headers"] == {"Authorization": "x"}
+
+    partial_cfg = yaml.safe_load((partial / "config.yaml").read_text(encoding="utf-8"))
+    assert partial_cfg["mcp_servers"][SERVER_NAME]["headers"] == {
+        ACCOUNT_KEY: "gaoxiang",
+        "X-IThink-IsPersonal": "1",
+        UUID_KEY: "uuid-1",
+    }
+
+
 def test_sync_skips_all_when_identity_incomplete():
     with patch("api.profiles.list_profiles_api") as list_mock:
         stats = sync_ithink_kb_mcp_headers({"username": "x"})
@@ -152,7 +214,24 @@ def test_sync_skips_all_when_identity_incomplete():
     list_mock.assert_not_called()
 
 
-def test_sync_isolates_per_profile_errors(tmp_path: Path):
+def test_sync_skip_logs_extract_diagnostics(capsys):
+    stats = sync_ithink_kb_mcp_headers(
+        {
+            "username": "liuweijun",
+            "ithinktank": {"account": "liuweijun", "userId": "only-user-id"},
+        }
+    )
+    assert stats["updated"] == 0
+    err = capsys.readouterr().err
+    assert "skip missing ithink account/uuid" in err
+    assert "reason=missing_uuid" in err
+    assert "username=liuweijun" in err
+    assert "has_ithinktank_account=True" in err
+    assert "has_ithinktank_uuid=False" in err
+    assert "ithinktank_type=dict" in err
+
+
+def test_sync_isolates_errors_and_logs_success_failure(tmp_path: Path, capsys):
     good = tmp_path / "good"
     bad = tmp_path / "bad"
     _write_config(
@@ -163,21 +242,18 @@ def test_sync_isolates_per_profile_errors(tmp_path: Path):
         bad,
         {"mcp_servers": {SERVER_NAME: {"headers": {ACCOUNT_KEY: "old", UUID_KEY: "old"}}}},
     )
-    identity = {"ithinktank_account": "acc", "ithinktank_user_id": "uid"}
+    identity = {"ithinktank": {"account": "acc", "uuid": "uid"}}
     profiles = [
         {"name": "bad", "path": str(bad)},
         {"name": "good", "path": str(good)},
     ]
 
-    real_save = None
     from api.config import _save_yaml_config_file as _real_save
-
-    real_save = _real_save
 
     def _save(path, cfg):
         if Path(path).parent.name == "bad":
             raise OSError("disk full")
-        return real_save(path, cfg)
+        return _real_save(path, cfg)
 
     with patch("api.profiles.list_profiles_api", return_value=profiles):
         with patch("api.profiles.get_active_hermes_home", return_value=tmp_path / "none"):
@@ -188,6 +264,11 @@ def test_sync_isolates_per_profile_errors(tmp_path: Path):
     assert stats["updated"] == 1
     good_cfg = yaml.safe_load((good / "config.yaml").read_text(encoding="utf-8"))
     assert good_cfg["mcp_servers"][SERVER_NAME]["headers"][ACCOUNT_KEY] == "acc"
+
+    err = capsys.readouterr().err
+    assert "profile=good updated ok" in err
+    assert "profile=bad update failed" in err
+    assert "[webui][integration_login][mcp_headers] done" in err
 
 
 def test_handler_bearer_200_calls_sync():

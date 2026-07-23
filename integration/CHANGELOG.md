@@ -8,7 +8,7 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Added
 
-- **webui_login MCP header sync** — `GET /api/integration/webui_login` 在带 Bearer 且 identity lookup 返回 200 时，将身份中的 i智库 `account` / `uuid` 写回所有可见 Profile 的 `config.yaml`：仅更新 `mcp_servers.ithink_kb_mcp.headers` 的 `X-IThink-Account` 与 `X-IThink-UUID`；缺字段或无该 MCP server 则跳过；单 Profile 写失败不阻断登录响应。实现见 `integration/identity/mcp_headers_sync.py`。
+- **webui_login MCP header sync** — `GET /api/integration/webui_login` 在带 Bearer 且 identity lookup 返回 200 时，按 server 名匹配各可见 Profile `config.yaml` 中的 `mcp_servers.ithink_kb_mcp`，仅用 `ithinktank.account` / `ithinktank.uuid` 写入 `X-IThink-Account` / `X-IThink-UUID`（`headers` 或键缺失时补上；无回退到 userId/扁平字段）；无该 server 则跳过；单 Profile 写失败不阻断登录响应。实现见 `integration/identity/mcp_headers_sync.py`。
 
 - **Profile info welcome field** — `info.json` 新增可选 `welcome`（Profile 欢迎语）。`GET /api/profiles` 在 `info.welcome` 返回；`POST /api/profile/info` 可写入/清空；Profiles 面板编辑与新建表单支持配置。建议约 50 字，服务端不校验长度；不驱动 assistant bubbles 或聊天空状态。
 

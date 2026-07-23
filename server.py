@@ -108,7 +108,7 @@ if __name__ == "__main__":
     os.environ["SKILLHUB_URL"] = os.getenv("SKILLHUB_URL", "http://47.93.211.132:18702/")
     os.environ["HERMES_INTEGRATION"] = os.getenv("HERMES_INTEGRATION", "1")
     os.environ["ZHILING_CONTROL_PLANE_URL"] = os.getenv(
-        "ZHILING_CONTROL_PLANE_URL", "http://192.168.1.139:23001/"
+        "ZHILING_CONTROL_PLANE_URL", "http://192.168.1.137:23001/"
     )
     os.environ["ZHILING_LOGOUT_API_URL"] = os.getenv(
         "ZHILING_LOGOUT_API_URL", "http://auth-proxy:8080"

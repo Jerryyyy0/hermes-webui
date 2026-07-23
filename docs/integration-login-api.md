@@ -30,14 +30,14 @@ Sgitg@2026
 
 ### MCP headers 同步（登录成功时）
 
-带 Bearer 且 Control Plane 返回 `200` 时，WebUI 会遍历所有可见 Profile 的 `config.yaml`，仅当存在 `mcp_servers.ithink_kb_mcp` 时更新其 headers：
+带 Bearer 且 Control Plane 返回 `200` 时，WebUI 会遍历所有可见 Profile 的 `config.yaml`，**按 server 名**匹配 `mcp_servers.ithink_kb_mcp`：
 
-| Header | 取值来源（优先级） |
+| Header | 取值来源（无回退） |
 | --- | --- |
-| `X-IThink-Account` | `ithinktank.account` → `ithinktank_account` |
-| `X-IThink-UUID` | `ithinktank.uuid` → `ithinktank.userId` → `ithinktank_user_id` |
+| `X-IThink-Account` | `ithinktank.account` |
+| `X-IThink-UUID` | `ithinktank.uuid` |
 
-其它 headers（例如 `X-IThink-IsPersonal`）保持不变。缺 account/uuid 时整次跳过写盘；单个 Profile 写失败不影响登录 JSON 响应（仍为 `200`）。无 Bearer 读缓存、以及非 `200` 的 lookup 结果，都不会触发同步。
+不使用 `userId`、顶层 `ithinktank_account` / `ithinktank_user_id`、`knowledge_base` 等其它字段。匹配到该 server 后会写入上述两个 header：若 `headers` 或其中任一键不存在则补上，已有同值则跳过写盘。其它 headers（例如 `X-IThink-IsPersonal`）与其它 MCP server 保持不变。身份缺 `ithinktank.account` / `ithinktank.uuid` 时整次跳过写盘；单个 Profile 写失败不影响登录 JSON 响应（仍为 `200`）。无 Bearer 读缓存、以及非 `200` 的 lookup 结果，都不会触发同步。
 
 ---
 

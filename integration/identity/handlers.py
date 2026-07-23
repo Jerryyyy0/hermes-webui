@@ -2,25 +2,24 @@
 
 from __future__ import annotations
 
+import json
 import time
+from typing import Any
 
 from api.helpers import _sanitize_error, j
 
 from integration.config import identity_lookup_enabled
 from integration.identity.client import IdentityLookupError, lookup_current_identity
 
-try:
-    from integration.project_logging import (
-        console_error,
-        console_info,
-        console_warning,
-        format_kv,
-        one_line,
-        with_timestamp,
-    )
-except ImportError:  # pragma: no cover - fallback while request_logging still exists on older trees
-    from integration.request_logging.formatting import format_kv, one_line, with_timestamp
-    from integration.request_logging.logger import console_error, console_info, console_warning
+from integration.project_logging import (
+    console_error,
+    console_info,
+    console_warning,
+    format_kv,
+    one_line,
+    with_timestamp,
+)
+from integration.project_logging.formatting import is_sensitive_key
 from integration.identity.session_store import (
     clear_session,
     get_cached_identity,
@@ -50,6 +49,46 @@ def _response_payload(payload: dict) -> dict:
     body = dict(payload)
     body["timestamp"] = int(time.time())
     return body
+
+
+def _redact_for_log(value: Any) -> Any:
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for key, item in value.items():
+            if is_sensitive_key(str(key)):
+                out[str(key)] = "<redacted>"
+            else:
+                out[str(key)] = _redact_for_log(item)
+        return out
+    if isinstance(value, list):
+        return [_redact_for_log(item) for item in value]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
+
+
+def _log_outgoing_response(*, status: int, body: dict, auth_mode: str) -> None:
+    """Print the exact webui_login response body before sending to the client."""
+    try:
+        body_text = json.dumps(_redact_for_log(body), ensure_ascii=False, separators=(",", ":"))
+    except Exception:
+        body_text = one_line(body, max_len=0)
+    body_text = one_line(body_text, max_len=0)
+    keys = ",".join(sorted(str(k) for k in body.keys())) if isinstance(body, dict) else "-"
+    meta = format_kv({"status": status, "auth_mode": auth_mode, "keys": keys})
+    line = with_timestamp(
+        f"[webui][integration_login][response] outgoing {meta} body={body_text}",
+        {
+            "event": "integration_login",
+            "phase": "response",
+            "status": status,
+            "auth_mode": auth_mode,
+        },
+    )
+    if status >= 400:
+        console_warning(line)
+    else:
+        console_info(line)
 
 
 def _log_integration_login(handler, *, phase: str, **fields) -> None:
@@ -85,7 +124,9 @@ def try_handle_get(handler, parsed) -> bool:
     token = _extract_bearer_token(handler)
     if not token:
         status, payload = get_cached_identity()
-        j(handler, _response_payload(payload), status=status, extra_headers=_NO_STORE)
+        response_body = _response_payload(payload)
+        _log_outgoing_response(status=status, body=response_body, auth_mode="cache")
+        j(handler, response_body, status=status, extra_headers=_NO_STORE)
         return True
 
     try:
@@ -98,17 +139,14 @@ def try_handle_get(handler, parsed) -> bool:
             status=502,
             error="identity_lookup_failed",
         )
-        j(
-            handler,
-            _response_payload(
-                {
-                    "error": "identity_lookup_failed",
-                    "message": _sanitize_error(exc),
-                }
-            ),
-            status=502,
-            extra_headers=_NO_STORE,
+        response_body = _response_payload(
+            {
+                "error": "identity_lookup_failed",
+                "message": _sanitize_error(exc),
+            }
         )
+        _log_outgoing_response(status=502, body=response_body, auth_mode="bearer")
+        j(handler, response_body, status=502, extra_headers=_NO_STORE)
         return True
 
     sync_stats = None
@@ -130,6 +168,27 @@ def try_handle_get(handler, parsed) -> bool:
                         },
                     )
                 )
+            else:
+                if isinstance(sync_stats, dict):
+                    extras = format_kv(
+                        {
+                            "updated": sync_stats.get("updated"),
+                            "skipped": sync_stats.get("skipped"),
+                            "errors": sync_stats.get("errors"),
+                        }
+                    )
+                    summary = with_timestamp(
+                        f"[webui][integration_login][mcp_headers] sync finished {extras}".rstrip(),
+                        {
+                            "event": "integration_login",
+                            "phase": "mcp_headers_done",
+                            **{k: sync_stats.get(k) for k in ("updated", "skipped", "errors")},
+                        },
+                    )
+                    if sync_stats.get("errors"):
+                        console_warning(summary)
+                    else:
+                        console_info(summary)
     elif status == 401:
         clear_session()
 
@@ -146,5 +205,7 @@ def try_handle_get(handler, parsed) -> bool:
         log_fields["mcp_headers_skipped"] = sync_stats.get("skipped")
         log_fields["mcp_headers_errors"] = sync_stats.get("errors")
     _log_integration_login(handler, phase="exit", **log_fields)
-    j(handler, _response_payload(payload), status=status, extra_headers=_NO_STORE)
+    response_body = _response_payload(payload if isinstance(payload, dict) else {})
+    _log_outgoing_response(status=status, body=response_body, auth_mode="bearer")
+    j(handler, response_body, status=status, extra_headers=_NO_STORE)
     return True
