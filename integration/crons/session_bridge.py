@@ -16,8 +16,9 @@ from integration.crons.listing import (
     _profile_home_for_name,
     resolve_owner_profile_for_job,
 )
+from integration.project_logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # When state.db no longer has the target cron session row, fall back to matching
 # owner output .md by the timestamp embedded in cron_<job>_YYYYMMDD_HHMMSS.

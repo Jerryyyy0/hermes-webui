@@ -1,11 +1,17 @@
-"""Human-readable console formatting for WebUI request logs."""
+"""Shared formatting and redaction helpers for WebUI logging."""
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Any, Mapping
 
 _MAX_VALUE_LEN = 240
+
+_SENSITIVE_KEY_RE = re.compile(
+    r"(password|passwd|secret|token|api[_-]?key|authorization|cookie|bearer|session_key|access_token|refresh_token)",
+    re.IGNORECASE,
+)
 
 
 def format_timestamp(ts: Any = None) -> str:
@@ -27,20 +33,7 @@ def format_timestamp(ts: Any = None) -> str:
     return f"{dt:%Y-%m-%d %H:%M:%S}.{dt.microsecond // 1000:03d}"
 
 
-def with_timestamp(line: str, record: Mapping[str, Any] | None = None) -> str:
-    """Prefix a pretty console line with a readable timestamp."""
-    ts = record.get("ts") if record else None
-    return f"{format_timestamp(ts)} {line}"
-
-
-def short_id(value: Any, size: int = 8) -> str:
-    """Return a compact identifier prefix for long values."""
-    text = one_line(value, max_len=0)
-    return text[: max(size, 1)] if text != "-" else text
-
-
 def one_line(value: Any, max_len: int = _MAX_VALUE_LEN) -> str:
-    """Convert a value to safe single-line text for console output."""
     if value is None:
         return "-"
     text = str(value).replace("\r", " ").replace("\n", " ").strip()
@@ -52,6 +45,11 @@ def one_line(value: Any, max_len: int = _MAX_VALUE_LEN) -> str:
     return text
 
 
+def short_id(value: Any, size: int = 8) -> str:
+    text = one_line(value, max_len=0)
+    return text[: max(size, 1)] if text != "-" else text
+
+
 def _quote_if_needed(value: str) -> str:
     if value == "-":
         return value
@@ -61,13 +59,29 @@ def _quote_if_needed(value: str) -> str:
     return value
 
 
-def format_kv(fields: Mapping[str, Any], aliases: Mapping[str, str] | None = None) -> str:
-    """Format present fields as grep-friendly key=value tokens."""
-    aliases = aliases or {}
-    parts: list[str] = []
+def is_sensitive_key(key: str) -> bool:
+    return bool(_SENSITIVE_KEY_RE.search(str(key or "")))
+
+
+def sanitize_fields(fields: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Drop or redact sensitive keys before logging."""
+    if not fields:
+        return {}
+    safe: dict[str, Any] = {}
     for key, value in fields.items():
         if value is None or value == "":
             continue
+        if is_sensitive_key(key):
+            safe[key] = "<redacted>"
+            continue
+        safe[key] = value
+    return safe
+
+
+def format_kv(fields: Mapping[str, Any], aliases: Mapping[str, str] | None = None) -> str:
+    aliases = aliases or {}
+    parts: list[str] = []
+    for key, value in sanitize_fields(fields).items():
         label = aliases.get(key, key)
         text = one_line(value)
         if text == "-":
@@ -76,15 +90,40 @@ def format_kv(fields: Mapping[str, Any], aliases: Mapping[str, str] | None = Non
     return " ".join(parts)
 
 
-def _status(record: Mapping[str, Any]) -> str:
+def with_timestamp(line: str, record: Mapping[str, Any] | None = None) -> str:
+    ts = record.get("ts") if record else None
+    return f"{format_timestamp(ts)} {line}"
+
+
+def format_event_line(
+    *,
+    prefix: str,
+    event: str | None = None,
+    fields: Mapping[str, Any] | None = None,
+    ts: Any = None,
+) -> str:
+    """Format a grep-friendly event line with optional timestamp prefix."""
+    parts = [prefix]
+    if event:
+        parts.append(f"event={one_line(event, max_len=120)}")
+    kv = format_kv(fields or {})
+    if kv:
+        parts.append(kv)
+    line = " ".join(parts)
+    if ts is not None:
+        return with_timestamp(line, {"ts": ts})
+    return with_timestamp(line)
+
+
+def _record_status(record: Mapping[str, Any]) -> str:
     return one_line(record.get("status"))
 
 
-def _method(record: Mapping[str, Any]) -> str:
+def _record_method(record: Mapping[str, Any]) -> str:
     return one_line(record.get("method"))
 
 
-def _path(record: Mapping[str, Any]) -> str:
+def _record_path(record: Mapping[str, Any]) -> str:
     return one_line(record.get("path"))
 
 
@@ -100,11 +139,12 @@ def format_request_line(record: Mapping[str, Any]) -> str:
         {
             "remote": record.get("remote"),
             "forwarded_for": record.get("forwarded_for"),
+            "request_id": short_id(record.get("request_id")) if record.get("request_id") else None,
             "error": record.get("error_summary"),
         }
     )
     suffix = f" {extras}" if extras else ""
-    line = f"[webui][request] {_method(record)} {_path(record)} -> {_status(record)} {ms_text}{suffix}"
+    line = f"{_record_method(record)} {_record_path(record)} -> {_record_status(record)} {ms_text}{suffix}"
     return with_timestamp(line, record)
 
 
@@ -115,13 +155,14 @@ def format_api_error_line(record: Mapping[str, Any]) -> str:
             "source": record.get("source"),
             "remote": record.get("remote"),
             "forwarded_for": record.get("forwarded_for"),
+            "request_id": short_id(record.get("request_id")) if record.get("request_id") else None,
             "error": record.get("error"),
             "message": record.get("message"),
             "traceback": "yes" if record.get("traceback") else None,
         }
     )
     suffix = f" {extras}" if extras else ""
-    line = f"[webui][api_error] {_method(record)} {_path(record)} -> {_status(record)}{suffix}"
+    line = f"[webui][api_error] {_record_method(record)} {_record_path(record)} -> {_record_status(record)}{suffix}"
     return with_timestamp(line, record)
 
 
@@ -162,5 +203,5 @@ def format_slow_request_line(record: Mapping[str, Any], state: str) -> str:
         }
     )
     suffix = f" {extras}" if extras else ""
-    line = f"[webui][slow_request][{one_line(state)}] {_method(record)} {_path(record)}{suffix}"
+    line = f"[webui][slow_request][{one_line(state)}] {_record_method(record)} {_record_path(record)}{suffix}"
     return with_timestamp(line, record)

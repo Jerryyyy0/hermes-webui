@@ -8,7 +8,7 @@ the chat SSE channel.
 from __future__ import annotations
 
 import hashlib
-import os
+import logging
 import threading
 import time
 from collections import Counter
@@ -16,8 +16,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
-from integration.request_logging.formatting import with_timestamp
-from integration.request_logging.logger import console_error, console_info, console_warning
+from integration.project_logging import is_debug_level
+from integration.project_logging import console_error, console_info, console_warning, with_timestamp
 
 STREAM_DIAG_SLOW_MS = 1000.0
 _STREAM_DIAG_PREFIX = "[stream_diag]"
@@ -25,7 +25,7 @@ _SUMMARY_TTL_SECONDS = 15 * 60
 _SUMMARIES: dict[str, dict[str, Any]] = {}
 _SUMMARIES_LOCK = threading.Lock()
 
-_TRUTHY = {"1", "true", "yes", "on", "debug"}
+_TRUTHY = {"1", "true", "yes", "on", "debug"}  # legacy tests may reference mode values
 _CORE_CONSOLE_FIELDS = (
     "event",
     "phase",
@@ -150,20 +150,21 @@ _AGENT_INIT_PHASE = ("P3", "S3.2", "agent initialization")
 
 
 def mode() -> str:
-    raw = str(os.getenv("HERMES_WEBUI_STREAM_DIAG", "") or "").strip().lower()
-    if raw == "debug":
+    if not enabled():
+        return "0"
+    if is_debug_level():
         return "debug"
-    if raw in _TRUTHY:
-        return "1"
-    return "0"
+    return "1"
 
 
 def enabled() -> bool:
-    return mode() != "0"
+    from integration.project_logging.config import resolve_log_level
+
+    return resolve_log_level() <= logging.INFO
 
 
 def debug_enabled() -> bool:
-    return mode() == "debug"
+    return is_debug_level()
 
 
 def monotonic_ms() -> float:

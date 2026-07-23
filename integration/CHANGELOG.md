@@ -8,6 +8,10 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Added
 
+- **webui_login MCP header sync** — `GET /api/integration/webui_login` 在带 Bearer 且 identity lookup 返回 200 时，将身份中的 i智库 `account` / `uuid` 写回所有可见 Profile 的 `config.yaml`：仅更新 `mcp_servers.ithink_kb_mcp.headers` 的 `X-IThink-Account` 与 `X-IThink-UUID`；缺字段或无该 MCP server 则跳过；单 Profile 写失败不阻断登录响应。实现见 `integration/identity/mcp_headers_sync.py`。
+
+- **Profile info welcome field** — `info.json` 新增可选 `welcome`（Profile 欢迎语）。`GET /api/profiles` 在 `info.welcome` 返回；`POST /api/profile/info` 可写入/清空；Profiles 面板编辑与新建表单支持配置。建议约 50 字，服务端不校验长度；不驱动 assistant bubbles 或聊天空状态。
+
 - **Profile assistant bubbles API** — 新增 `GET /api/integration/assistant_bubbles?profile=<name>`，按固定顺序返回 Profile 助理头像气泡。模型文案独立持久化到 `{profile.path}/assistant_bubbles.json`，不再读写 `info.json`；缺失或损坏时立即返回确定性降级文案并异步自愈。定时任务槽位每次 GET 从目标 Profile cron 状态实时统计，不写回缓存。生成队列全局串行，首次缺失批量填充不插入 5 分钟间隔，后续变更 5 分钟冷却，失败 3 秒冷却。
 
 - **Fixed Chinese session titles** — WebUI automatic and manual title generation now always asks the title model for a Simplified Chinese title, without reading `auxiliary.title_generation.language`. The existing title model/provider/timeout route and topic-first local fallback remain unchanged. The fixed-language policy lives in `integration/session_titles/`; `api/streaming.py` keeps only the prompt and validation seam.
@@ -27,6 +31,8 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 - **Stream diagnostics logging** — 新增 `HERMES_WEBUI_STREAM_DIAG` 控制的流式执行诊断日志，记录 agent 初始化、上下文准备、运行耗时、最终保存和 worker cleanup summary，便于排查慢流、失败流和资源清理问题。
 
 ### Changed
+
+- **Unified project logging** — 运行时日志统一收敛到 `integration/project_logging/`，仅使用 `HERMES_WEBUI_LOG_LEVEL` 控制输出级别。`INFO` 启用请求访问、API 错误、启动与 stream_diag 日志；访问日志为紧凑的 `METHOD path -> status` 格式，不再带 `[webui][request]` 标签。`DEBUG` 额外启用 stream_diag debug 字段与慢请求线程栈。直接交互式运行 `python server.py` 仍 tee 到 `{HERMES_WEBUI_STATE_DIR}/server-<port>.log`；`bootstrap.py` / supervisor 重定向 stderr 时自动跳过重复落盘。移除 `HERMES_WEBUI_API_ERROR_LOG*`、`HERMES_WEBUI_SERVER_LOG*`、`HERMES_WEBUI_STREAM_DIAG`、`HERMES_WEBUI_SLOW_REQUEST_*` 等分散日志环境变量；服务运行路径不再使用 `print()` 输出诊断信息。原 `integration/request_logging/` 已并入 `integration/project_logging/`（`request.py` + `formatting.py`），删除重复的格式化与 console 封装。
 
 - **SkillHub `local_all` profile filter** — `GET /api/skillhub/skills?scope=local_all` 支持 `profile`（默认 `default`）：只聚合该 Profile skills 目录下的已安装 hub + 本地 custom，并用该 Profile `config.yaml` 的 `skills.disabled` 过滤。其它 scope 仍忽略 `profile`；`stats` 仍为全局计数。
 

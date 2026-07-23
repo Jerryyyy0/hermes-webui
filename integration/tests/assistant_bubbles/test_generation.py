@@ -1,5 +1,4 @@
 import json
-import logging
 import time
 from unittest.mock import patch
 
@@ -233,7 +232,7 @@ def test_model_route_normalizes_provider_model_picker(tmp_path):
     assert collectors.model_route(profile)["model"] == "anthropic/claude"
 
 
-def test_run_task_logs_generation_success(tmp_path, caplog):
+def test_run_task_logs_generation_success(tmp_path, capsys):
     profile = tmp_path / "profile"
     profile.mkdir()
     (profile / "config.yaml").write_text("model:\n  provider: test\n  default: test-model\n", encoding="utf-8")
@@ -248,18 +247,110 @@ def test_run_task_logs_generation_success(tmp_path, caplog):
         model="test-model",
     )
 
-    caplog.set_level(logging.INFO, logger="integration.assistant_bubbles.generation")
     with patch("integration.assistant_bubbles.generation._generate_with_model", return_value=("成功文案。", "ok")):
         generation._run_task(task)
 
-    assert "[webui][assistant_bubbles][generation_succeeded]" in caplog.text
-    assert "profile=alice" in caplog.text
-    assert "category=assistant_intro" in caplog.text
-    assert "reason=model_generated" in caplog.text
-    assert "成功文案。" in caplog.text
+    err = capsys.readouterr().err
+    assert "[webui][assistant_bubbles][generation_succeeded]" in err
+    assert "profile=alice" in err
+    assert "category=assistant_intro" in err
+    assert "reason=model_generated" in err
+    assert "output_chars=5" in err
+    assert "成功文案。" not in err
 
 
-def test_run_task_skill_failure_writes_fallback_when_no_cached_text(tmp_path):
+def test_generate_with_model_logs_call_success(tmp_path, capsys):
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    context = collectors.collect_context("alice", profile, "assistant_intro")
+    task = generation.BubbleTask(
+        profile="alice",
+        profile_path=str(profile),
+        category="assistant_intro",
+        fingerprint="fp",
+        provider="test",
+        model="test-model",
+    )
+    response = type("Resp", (), {"choices": [type("Choice", (), {"message": type("Msg", (), {"content": "成功文案。"})()})()]})()
+
+    with patch("integration.assistant_bubbles.generation.importlib.import_module") as import_module, patch(
+        "api.profiles.profile_env_for_background_worker"
+    ):
+        import_module.return_value.call_llm.return_value = response
+        result, reason = generation._generate_with_model(task, profile, context)
+
+    assert result == "成功文案。"
+    assert reason == "ok"
+    err = capsys.readouterr().err
+    assert "[webui][assistant_bubbles][model_call_succeeded]" in err
+    assert "profile=alice" in err
+    assert "category=assistant_intro" in err
+    assert "provider=test" in err
+    assert "model=test-model" in err
+    assert "elapsed_ms=" in err
+    assert "output_chars=5" in err
+    assert "成功文案。" not in err
+
+
+def test_generate_with_model_logs_call_failure(tmp_path, capsys):
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    context = collectors.collect_context("alice", profile, "assistant_intro")
+    task = generation.BubbleTask(
+        profile="alice",
+        profile_path=str(profile),
+        category="assistant_intro",
+        fingerprint="fp",
+        provider="test",
+        model="test-model",
+    )
+
+    with patch("integration.assistant_bubbles.generation.importlib.import_module") as import_module:
+        import_module.return_value.call_llm.side_effect = RuntimeError("provider timeout")
+        with patch("api.profiles.profile_env_for_background_worker"):
+            result, reason = generation._generate_with_model(task, profile, context)
+
+    assert result is None
+    assert reason == "model_call_failed"
+    err = capsys.readouterr().err
+    assert "[webui][assistant_bubbles][model_call_failed]" in err
+    assert "profile=alice" in err
+    assert "category=assistant_intro" in err
+    assert "elapsed_ms=" in err
+    assert "provider timeout" in err
+
+
+def test_generate_with_model_logs_output_rejection_without_content(tmp_path, capsys):
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    context = collectors.collect_context("alice", profile, "assistant_intro")
+    task = generation.BubbleTask(
+        profile="alice",
+        profile_path=str(profile),
+        category="assistant_intro",
+        fingerprint="fp",
+        provider="test",
+        model="test-model",
+    )
+    rejected_content = "SECRET_SENSITIVE_OUTPUT_12345\nsecond line"
+    response = type("Resp", (), {"choices": [type("Choice", (), {"message": type("Msg", (), {"content": rejected_content})()})()]})()
+
+    with patch("integration.assistant_bubbles.generation.importlib.import_module") as import_module:
+        import_module.return_value.call_llm.return_value = response
+        with patch("api.profiles.profile_env_for_background_worker"):
+            result, reason = generation._generate_with_model(task, profile, context)
+
+    assert result is None
+    assert reason == "multiline"
+    err = capsys.readouterr().err
+    assert "[webui][assistant_bubbles][model_output_rejected]" in err
+    assert "reason=multiline" in err
+    assert "elapsed_ms=" in err
+    assert "output_chars=" in err
+    assert rejected_content not in err
+
+
+def test_run_task_skill_failure_writes_fallback_when_no_cached_text(tmp_path, capsys):
     profile = tmp_path / "profile"
     profile.mkdir()
     (profile / "config.yaml").write_text("model:\n  provider: test\n  default: test-model\n", encoding="utf-8")
@@ -280,6 +371,9 @@ def test_run_task_skill_failure_writes_fallback_when_no_cached_text(tmp_path):
     with patch("integration.assistant_bubbles.generation._generate_with_model", return_value=(None, "skill_name_missing")):
         generation._run_task(task)
 
+    err = capsys.readouterr().err
+    assert "[webui][assistant_bubbles][generation_failed]" in err
+    assert "cache_action=fallback_written" in err
     cached = store.read_store(profile)
     assert cached is not None
     skill_item = next(item for item in cached["items"] if item["type"] == "skill")
@@ -289,7 +383,7 @@ def test_run_task_skill_failure_writes_fallback_when_no_cached_text(tmp_path):
     assert cached["generation"]["skill"]["retry_after"] is not None
 
 
-def test_run_task_skill_failure_preserves_existing_cached_text(tmp_path):
+def test_run_task_skill_failure_preserves_existing_cached_text(tmp_path, capsys):
     profile = tmp_path / "profile"
     profile.mkdir()
     data = store.empty_store()
@@ -315,6 +409,9 @@ def test_run_task_skill_failure_preserves_existing_cached_text(tmp_path):
         context={"skills_count": 2},
     )
 
+    err = capsys.readouterr().err
+    assert "[webui][assistant_bubbles][generation_failed]" in err
+    assert "cache_action=cached_text_preserved" in err
     cached = store.read_store(profile)
     skill_item = next(item for item in cached["items"] if item["type"] == "skill")
     assert skill_item["text"] == "旧技能文案。"
@@ -322,7 +419,7 @@ def test_run_task_skill_failure_preserves_existing_cached_text(tmp_path):
     assert cached["generation"]["skill"]["retry_after"] is not None
 
 
-def test_run_task_logs_generation_failure(tmp_path, caplog):
+def test_run_task_logs_generation_failure(tmp_path, capsys):
     profile = tmp_path / "profile"
     profile.mkdir()
     (profile / "config.yaml").write_text("model:\n  provider: test\n  default: test-model\n", encoding="utf-8")
@@ -340,10 +437,12 @@ def test_run_task_logs_generation_failure(tmp_path, caplog):
     with patch("integration.assistant_bubbles.generation._generate_with_model", return_value=(None, "model_output_rejected")):
         generation._run_task(task)
 
-    assert "[webui][assistant_bubbles][generation_failed]" in caplog.text
-    assert "profile=alice" in caplog.text
-    assert "category=assistant_intro" in caplog.text
-    assert "reason=model_output_rejected" in caplog.text
+    err = capsys.readouterr().err
+    assert "[webui][assistant_bubbles][generation_failed]" in err
+    assert "profile=alice" in err
+    assert "category=assistant_intro" in err
+    assert "reason=model_output_rejected" in err
+    assert "cache_action=fallback_written" in err
 
 
 def test_run_task_without_default_model_writes_fallback_without_call_llm(tmp_path):

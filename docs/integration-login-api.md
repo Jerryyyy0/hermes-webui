@@ -23,10 +23,21 @@ Sgitg@2026
 
 | 模式 | 请求 | 行为 |
 | --- | --- | --- |
-| 刷新/种子 | 带 `Authorization: Bearer <access_token>` | 转发 Control Plane lookup；`200` 时写入内存缓存并返回身份 |
+| 刷新/种子 | 带 `Authorization: Bearer <access_token>` | 转发 Control Plane lookup；`200` 时写入内存缓存、同步各 Profile `ithink_kb_mcp` headers，并返回身份 |
 | 读缓存 | 无 Bearer | 返回内存中的身份 JSON（**不含** `access_token`） |
 
 进程重启后缓存清空，需至少再调用一次带 Bearer 的查询。`POST /api/integration/webui_logout` 会清空缓存。
+
+### MCP headers 同步（登录成功时）
+
+带 Bearer 且 Control Plane 返回 `200` 时，WebUI 会遍历所有可见 Profile 的 `config.yaml`，仅当存在 `mcp_servers.ithink_kb_mcp` 时更新其 headers：
+
+| Header | 取值来源（优先级） |
+| --- | --- |
+| `X-IThink-Account` | `ithinktank.account` → `ithinktank_account` |
+| `X-IThink-UUID` | `ithinktank.uuid` → `ithinktank.userId` → `ithinktank_user_id` |
+
+其它 headers（例如 `X-IThink-IsPersonal`）保持不变。缺 account/uuid 时整次跳过写盘；单个 Profile 写失败不影响登录 JSON 响应（仍为 `200`）。无 Bearer 读缓存、以及非 `200` 的 lookup 结果，都不会触发同步。
 
 ---
 

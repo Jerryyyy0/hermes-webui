@@ -136,7 +136,7 @@ def test_daemon_thread_exception_is_logged(fresh_hooks, caplog):
     def _boom():
         raise ValueError("simulated SSE handler crash 4633")
 
-    caplog.set_level(logging.ERROR, logger="server")
+    caplog.set_level(logging.ERROR, logger="hermes.webui.server")
 
     t = threading.Thread(target=_boom, name="sse-handler-42", daemon=True)
     t.start()
@@ -188,7 +188,7 @@ def test_main_thread_exception_is_logged(fresh_hooks, caplog):
     stream, stream_path = fresh_hooks
     cv.install_crash_visibility(stream=stream, register_sigusr1_dump=False)
 
-    caplog.set_level(logging.CRITICAL, logger="server")
+    caplog.set_level(logging.CRITICAL, logger="hermes.webui.server")
     try:
         raise RuntimeError("simulated main-thread fatal 4633")
     except RuntimeError:
@@ -208,7 +208,7 @@ def test_keyboard_interrupt_not_treated_as_crash(fresh_hooks, caplog):
     stream, stream_path = fresh_hooks
     cv.install_crash_visibility(stream=stream, register_sigusr1_dump=False)
 
-    caplog.set_level(logging.DEBUG, logger="server")
+    caplog.set_level(logging.DEBUG, logger="hermes.webui.server")
     try:
         raise KeyboardInterrupt()
     except KeyboardInterrupt:
@@ -230,7 +230,7 @@ def test_exit_audit_registered_and_emits(fresh_hooks, monkeypatch, caplog):
     cv.install_crash_visibility(stream=stream, register_sigusr1_dump=False)
     assert cv._exit_audit in registered
 
-    caplog.set_level(logging.INFO, logger="server")
+    caplog.set_level(logging.INFO, logger="hermes.webui.server")
     cv._exit_audit()  # simulate interpreter exit unwinding
 
     stream.flush()
@@ -251,4 +251,4 @@ def test_server_imports_and_calls_install(fresh_hooks):
 
     src = SERVER_SCRIPT.read_text(encoding="utf-8")
     assert "from api.crash_visibility import install_crash_visibility" in src
-    assert "install_crash_visibility()" in src
+    assert "install_crash_visibility(stream=" in src

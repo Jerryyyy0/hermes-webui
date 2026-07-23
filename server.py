@@ -9,6 +9,7 @@ import sys
 import threading
 import time
 import traceback
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 # Ignore SIGPIPE so a dropped client only aborts that write, not the whole WebUI process.
@@ -140,7 +141,6 @@ if __name__ == "__main__":
         "HERMES_EGRESS_POLICY_ENABLED", "1"
     )
     os.environ["HERMES_WEBUI_AGENT_DIR"] = os.getenv("HERMES_WEBUI_AGENT_DIR", "/Users/wzq/Downloads/NLP-PyProject/hermes-agent")
-    os.environ["HERMES_WEBUI_STREAM_DIAG"] = os.getenv("HERMES_WEBUI_STREAM_DIAG", "debug")
 
 from api.auth import check_auth
 from api.config import HOST, PORT, STATE_DIR, SESSION_DIR, DEFAULT_WORKSPACE
@@ -385,7 +385,7 @@ class Handler(BaseHTTPRequestHandler):
     def _safe_webui_log(message: str) -> None:
         """Emit a request log line without letting logging break responses."""
         try:
-            from integration.request_logging.logger import console_info
+            from integration.project_logging import console_info
 
             console_info(message)
         except Exception:
@@ -393,9 +393,17 @@ class Handler(BaseHTTPRequestHandler):
 
     _safe_webui_print = _safe_webui_log
 
+    def _assign_request_id(self) -> None:
+        header_id = ""
+        try:
+            header_id = str(self.headers.get("X-Request-ID") or "").strip()
+        except Exception:
+            header_id = ""
+        self._request_id = header_id[:32] if header_id else uuid.uuid4().hex[:10]
+
     def log_request(self, code: str='-', size: str='-') -> None:
         """Human-readable request logs for each request."""
-        from integration.request_logging.formatting import format_request_line
+        from integration.project_logging import format_request_line
 
         duration_ms = round((time.time() - getattr(self, '_req_t0', time.time())) * 1000, 1)
         remote = '-'
@@ -422,12 +430,15 @@ class Handler(BaseHTTPRequestHandler):
         error_summary = getattr(self, '_api_error_summary', None)
         if error_summary:
             record_data['error_summary'] = error_summary
+        rid = getattr(self, '_request_id', None)
+        if rid:
+            record_data['request_id'] = rid
         self._safe_webui_log(format_request_line(record_data))
 
     @staticmethod
     def _log_unhandled_exception(handler) -> None:
         try:
-            from integration.request_logging import emit_api_error
+            from integration.project_logging import emit_api_error
 
             emit_api_error(
                 handler,
@@ -444,6 +455,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         self._req_t0 = time.time()
         self._api_error_summary = None
+        self._assign_request_id()
         cookie_profile = get_profile_cookie(self)
         if cookie_profile:
             set_request_profile(cookie_profile)
@@ -486,6 +498,7 @@ class Handler(BaseHTTPRequestHandler):
     def _handle_write(self, route_func) -> None:
         self._req_t0 = time.time()
         self._api_error_summary = None
+        self._assign_request_id()
         cookie_profile = get_profile_cookie(self)
         if cookie_profile:
             set_request_profile(cookie_profile)
@@ -526,6 +539,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_OPTIONS(self) -> None:
         """Handle CORS preflight requests."""
         self._req_t0 = time.time()
+        self._assign_request_id()
         self.send_response(200)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
@@ -623,10 +637,11 @@ def _abort_if_already_serving(host: str, port: int) -> None:
             s.settimeout(2)
             data = s.recv(512)
             if data:
-                print(
+                from integration.project_logging import log_error
+
+                log_error(
                     f'[!!] FATAL: Another server is already responding on'
-                    f' {probe_host}:{port}. Stop the existing instance first.',
-                    flush=True,
+                    f' {probe_host}:{port}. Stop the existing instance first.'
                 )
                 sys.exit(1)
     except (ConnectionRefusedError, ConnectionResetError, OSError, socket.timeout):
@@ -636,10 +651,11 @@ def _abort_if_already_serving(host: str, port: int) -> None:
 def main() -> None:
     from api.config import print_startup_config, verify_hermes_imports, _HERMES_FOUND
     from integration.config import print_version_txt
-
+    from integration.project_logging import configure_logging, log_error, log_info, log_warning
     from integration.runtime_logging import setup_runtime_logging
 
     runtime_log = setup_runtime_logging(state_dir=STATE_DIR, port=PORT)
+    configure_logging()
     print_version_txt()
     # Crash visibility FIRST (issue #4633): enable faulthandler + excepthooks +
     # exit audit before any heavy startup work so a native crash or a daemon /
@@ -651,13 +667,12 @@ def main() -> None:
 
     fd_limit = _raise_fd_soft_limit()
     if fd_limit.get("status") == "raised":
-        print(
+        log_info(
             f"[ok] Raised file descriptor soft limit "
-            f"{fd_limit.get('previous_soft')} -> {fd_limit.get('soft')}",
-            flush=True,
+            f"{fd_limit.get('previous_soft')} -> {fd_limit.get('soft')}"
         )
     elif fd_limit.get("status") == "error":
-        print(f"[!!] WARNING: Could not raise file descriptor limit: {fd_limit.get('error')}", flush=True)
+        log_warning(f"[!!] WARNING: Could not raise file descriptor limit: {fd_limit.get('error')}")
 
     fix_credential_permissions()
 
@@ -670,10 +685,12 @@ def main() -> None:
             state_db_path=_active_state_db_path(),
         )
         if result.get("restored"):
-            print(f"[recovery] Restored {result['restored']}/{result['scanned']} sessions from .bak (see #1558).", flush=True)
+            log_info(
+                f"[recovery] Restored {result['restored']}/{result['scanned']} sessions from .bak (see #1558)."
+            )
     except Exception as exc:
         # Recovery is best-effort; never block server startup.
-        print(f"[recovery] startup recovery failed: {exc}", flush=True)
+        log_warning(f"[recovery] startup recovery failed: {exc}")
 
     within_container = False
     try:
@@ -683,41 +700,43 @@ def main() -> None:
         pass
 
     if within_container:
-        print('[ok] Running within container.', flush=True)
+        log_info('[ok] Running within container.')
 
     # Security: warn if binding non-loopback without authentication
     from api.auth import get_oidc_startup_warning, is_auth_enabled
     if HOST not in ('127.0.0.1', '::1', 'localhost') and not is_auth_enabled():
-        print(f'[!!] WARNING: Binding to {HOST} with NO PASSWORD SET.', flush=True)
-        print(f'     Anyone on the network can access your filesystem and agent.', flush=True)
-        print(f'     Set a password via Settings or HERMES_WEBUI_PASSWORD env var.', flush=True)
-        print(f'     To suppress: bind to 127.0.0.1 or set a password.', flush=True)
+        log_warning(f'[!!] WARNING: Binding to {HOST} with NO PASSWORD SET.')
+        log_warning('     Anyone on the network can access your filesystem and agent.')
+        log_warning('     Set a password via Settings or HERMES_WEBUI_PASSWORD env var.')
+        log_warning('     To suppress: bind to 127.0.0.1 or set a password.')
         if within_container:
-            print(f'     Note: You are running within a container, must bind to 0.0.0.0 (IPv4) or :: (IPv6) to publish the port.', flush=True)
+            log_warning(
+                '     Note: You are running within a container, must bind to 0.0.0.0 (IPv4) or :: (IPv6) to publish the port.'
+            )
     elif not is_auth_enabled():
-        print(f'  [tip] No password set. Any process on this machine can read sessions', flush=True)
-        print(f'        and memory via the local API. Set HERMES_WEBUI_PASSWORD to', flush=True)
-        print(f'        enable authentication.', flush=True)
+        log_info('  [tip] No password set. Any process on this machine can read sessions')
+        log_info('        and memory via the local API. Set HERMES_WEBUI_PASSWORD to')
+        log_info('        enable authentication.')
 
     oidc_startup_warning = get_oidc_startup_warning()
     if oidc_startup_warning:
-        print(f'[!!] WARNING: {oidc_startup_warning}', flush=True)
+        log_warning(f'[!!] WARNING: {oidc_startup_warning}')
 
     ok, missing, errors = verify_hermes_imports()
     if not ok and _HERMES_FOUND:
-        print(f'[!!] Warning: Hermes agent found but missing modules: {missing}', flush=True)
+        log_warning(f'[!!] Warning: Hermes agent found but missing modules: {missing}')
         for mod, err in errors.items():
-            print(f'     {mod}: {err}', flush=True)
-        print('     Attempting to install missing dependencies from agent requirements.txt...', flush=True)
+            log_warning(f'     {mod}: {err}')
+        log_warning('     Attempting to install missing dependencies from agent requirements.txt...')
         auto_install_agent_deps()
         ok, missing, errors = verify_hermes_imports()
         if not ok:
-            print(f'[!!] Still missing after install attempt: {missing}', flush=True)
+            log_warning(f'[!!] Still missing after install attempt: {missing}')
             for mod, err in errors.items():
-                print(f'     {mod}: {err}', flush=True)
-            print('     Agent features may not work correctly.', flush=True)
+                log_warning(f'     {mod}: {err}')
+            log_warning('     Agent features may not work correctly.')
         else:
-            print('[ok] Agent dependencies installed successfully.', flush=True)
+            log_info('[ok] Agent dependencies installed successfully.')
 
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     SESSION_DIR.mkdir(parents=True, exist_ok=True)
@@ -729,7 +748,7 @@ def main() -> None:
 
             ensure_all_profile_gateways()
         except Exception as e:
-            print(f'[!!] WARNING: Profile gateway startup failed: {e}', flush=True)
+            log_warning(f'[!!] WARNING: Profile gateway startup failed: {e}')
 
     threading.Thread(
         target=_ensure_profile_gateways_safe,
@@ -745,7 +764,7 @@ def main() -> None:
             if integration_enabled():
                 start_pregeneration()
         except Exception as e:
-            print(f'[!!] WARNING: Assistant bubbles pregeneration failed: {e}', flush=True)
+            log_warning(f'[!!] WARNING: Assistant bubbles pregeneration failed: {e}')
 
     threading.Thread(
         target=_start_assistant_bubbles_safe,
@@ -760,35 +779,35 @@ def main() -> None:
             try:
                 start_watcher()
             except Exception as e:
-                print(f'[!!] WARNING: Gateway watcher failed to start: {e}', flush=True)
+                log_warning(f'[!!] WARNING: Gateway watcher failed to start: {e}')
 
         t = threading.Thread(target=_start_watcher_safe, daemon=True)
         t.start()
         t.join(timeout=5)
         if t.is_alive():
-            print('[tip] Gateway watcher still initializing (non-blocking)', flush=True)
+            log_info('[tip] Gateway watcher still initializing (non-blocking)')
     except Exception as e:
-        print(f'[!!] WARNING: Gateway watcher failed to start: {e}', flush=True)
+        log_warning(f'[!!] WARNING: Gateway watcher failed to start: {e}')
 
     try:
         from api.background_process import start_drain_thread
         if start_drain_thread():
-            print('[ok] bg_task_complete drain thread started', flush=True)
+            log_info('[ok] bg_task_complete drain thread started')
     except Exception as e:
-        print(f'[!!] WARNING: bg_task_complete drain failed to start: {e}', flush=True)
+        log_warning(f'[!!] WARNING: bg_task_complete drain failed to start: {e}')
 
     try:
         from api.background_process import start_session_channel_reaper
         if start_session_channel_reaper():
-            print('[ok] SessionChannel reaper thread started', flush=True)
+            log_info('[ok] SessionChannel reaper thread started')
     except Exception as e:
-        print(f'[!!] WARNING: SessionChannel reaper failed to start: {e}', flush=True)
+        log_warning(f'[!!] WARNING: SessionChannel reaper failed to start: {e}')
 
     try:
         from api.plugins import load_plugins
         load_plugins()
     except Exception as e:
-        print(f'[!!] WARNING: Plugin loading failed: {e}', flush=True)
+        log_warning(f'[!!] WARNING: Plugin loading failed: {e}')
 
     def _bootstrap_no_self_improve_hub_sync() -> None:
         try:
@@ -799,10 +818,9 @@ def main() -> None:
 
             result = sync_hub_skills_to_config()
             if result.get("added") or result.get("removed_stale"):
-                print(
+                log_info(
                     f"[ok] no_self_improve hub sync: added={result.get('added')}, "
-                    f"removed_stale={result.get('removed_stale')}",
-                    flush=True,
+                    f"removed_stale={result.get('removed_stale')}"
                 )
         except Exception:
             logger.exception("hub no_self_improve sync failed")
@@ -825,16 +843,15 @@ def main() -> None:
             ctx.minimum_version = ssl.TLSVersion.TLSv1_2
             ctx.load_cert_chain(TLS_CERT, TLS_KEY)
             httpd.ssl_context = ctx
-            print(f'  TLS enabled: cert={TLS_CERT}, key={TLS_KEY}', flush=True)
+            log_info(f'  TLS enabled: cert={TLS_CERT}, key={TLS_KEY}')
         except Exception as e:
-            print(f'[!!] WARNING: TLS setup failed ({e}), falling back to HTTP', flush=True)
+            log_warning(f'[!!] WARNING: TLS setup failed ({e}), falling back to HTTP')
             scheme = 'http'
 
-    print(f'  Hermes Web UI listening on {scheme}://{HOST}:{PORT}', flush=True)
+    log_info(f'  Hermes Web UI listening on {scheme}://{HOST}:{PORT}')
     if HOST in ('127.0.0.1', '::1') or within_container:
-        print(f'  Remote access: ssh -N -L {PORT}:127.0.0.1:{PORT} <user>@<your-server>', flush=True)
-    print(f'  Then open:     {scheme}://localhost:{PORT}', flush=True)
-    print('', flush=True)
+        log_info(f'  Remote access: ssh -N -L {PORT}:127.0.0.1:{PORT} <user>@<your-server>')
+    log_info(f'  Then open:     {scheme}://localhost:{PORT}')
     try:
         httpd.serve_forever()
     finally:

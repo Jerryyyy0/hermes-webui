@@ -57,8 +57,8 @@ def load_plugins() -> None:
 
         try:
             manifest = json.loads(manifest_path.read_text())
-        except Exception:
-            logger.exception("Failed to parse manifest for plugin %s", entry.name)
+        except Exception as exc:
+            logger.exception("Failed to parse manifest for plugin %s error=%s", entry.name, exc)
             continue
 
         name = manifest.get("name") or entry.name

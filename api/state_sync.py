@@ -17,8 +17,9 @@ import logging
 import os
 from pathlib import Path
 from typing import Optional
+from integration.project_logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 def _get_state_db(profile: Optional[str] = None):

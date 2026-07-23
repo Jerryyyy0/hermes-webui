@@ -31,6 +31,10 @@
     return profileInfo(p).description || '';
   }
 
+  function profileWelcome(p) {
+    return profileInfo(p).welcome || '';
+  }
+
   function logoImg(p, cls) {
     const src = profileLogo(p);
     if (!src) return '';
@@ -339,6 +343,8 @@
       : '';
     const desc = profileDescription(p);
     const descBlock = desc ? `<div class="profile-detail-description">${esc(desc)}</div>` : '';
+    const welcome = profileWelcome(p);
+    const welcomeBlock = welcome ? `<div class="profile-detail-description">${esc(welcome)}</div>` : '';
     body.innerHTML = `
     <div class="main-view-content">
       <div class="detail-card">
@@ -348,6 +354,7 @@
         </div>
         ${headerBlock}
         ${descBlock}
+        ${welcomeBlock}
         ${rows.join('')}
       </div>
     </div>`;
@@ -383,6 +390,10 @@
           <textarea id="profileInfoDescription" rows="3">${esc(info.description || '')}</textarea>
         </div>
         <div class="detail-form-row">
+          <label for="profileInfoWelcome">Welcome message</label>
+          <textarea id="profileInfoWelcome" rows="2" placeholder="About 50 characters">${esc(info.welcome || '')}</textarea>
+        </div>
+        <div class="detail-form-row">
           <label>Logo</label>
           <div id="profileLogoPicker"></div>
         </div>
@@ -408,6 +419,7 @@
     const errEl = $('profileInfoError');
     const displayEl = $('profileInfoDisplayName');
     const descEl = $('profileInfoDescription');
+    const welcomeEl = $('profileInfoWelcome');
     if (!errEl) return;
     errEl.style.display = 'none';
     try {
@@ -415,6 +427,7 @@
         name,
         display_name: displayEl ? (displayEl.value || '') : '',
         description: descEl ? (descEl.value || '') : '',
+        welcome: welcomeEl ? (welcomeEl.value || '') : '',
         ...logoPickerPayload(),
       };
       await api('/api/profile/info', { method: 'POST', body: JSON.stringify(payload) });
@@ -468,6 +481,10 @@
           <textarea id="profileFormDescription" rows="2"></textarea>
         </div>
         <div class="detail-form-row">
+          <label for="profileFormWelcome">Welcome message</label>
+          <textarea id="profileFormWelcome" rows="2" placeholder="About 50 characters"></textarea>
+        </div>
+        <div class="detail-form-row">
           <label>Logo</label>
           <div id="profileLogoPicker"></div>
         </div>
@@ -491,6 +508,7 @@
     const apiKeyEl = $('profileFormApiKey');
     const displayEl = $('profileFormDisplayName');
     const descEl = $('profileFormDescription');
+    const welcomeEl = $('profileFormWelcome');
     const errEl = $('profileFormError');
     if (!nameEl || !errEl) return;
     const name = (nameEl.value || '').trim().toLowerCase();
@@ -518,8 +536,10 @@
       const infoPayload = { name };
       const dn = displayEl ? (displayEl.value || '').trim() : '';
       const ds = descEl ? (descEl.value || '').trim() : '';
+      const welcome = welcomeEl ? (welcomeEl.value || '').trim() : '';
       if (dn) infoPayload.display_name = dn;
       if (ds) infoPayload.description = ds;
+      if (welcome) infoPayload.welcome = welcome;
       Object.assign(infoPayload, logoPickerPayload());
       if (Object.keys(infoPayload).length > 1) {
         await api('/api/profile/info', { method: 'POST', body: JSON.stringify(infoPayload) });

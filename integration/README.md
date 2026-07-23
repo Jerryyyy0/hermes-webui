@@ -24,34 +24,39 @@ If you use a local HTTP proxy (`HTTP_PROXY`, e.g. Clash), add the SkillHub host 
 
 ### API error logging
 
-All JSON API responses with `status >= 400` (via `j()` / `bad()`) emit a timestamped, human-readable `[webui][api_error]` log line through the standard Python `logging` module. Unhandled handler exceptions use the same format with `source=unhandled`. The per-request access log may include an `error=...` summary when an API error was recorded.
+All JSON API responses with `status >= 400` (via `j()` / `bad()`) emit a timestamped, human-readable `[webui][api_error]` log line through the unified project logger. Unhandled handler exceptions use the same format with `source=unhandled`. The per-request access log may include an `error=...` summary when an API error was recorded.
+
+Implementation: [`integration/project_logging/`](project_logging/) (`request.py` for access/API error/slow-request lines).
+
+### Unified project logging
+
+WebUI runtime logs use a single environment variable:
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `HERMES_WEBUI_API_ERROR_LOG` | `1` | Set to `0` to disable API error logs |
-| `HERMES_WEBUI_API_ERROR_LOG_MIN_STATUS` | `400` | Minimum HTTP status to log (e.g. `500` to skip 4xx noise) |
+| `HERMES_WEBUI_LOG_LEVEL` | `INFO` | `DEBUG` / `INFO` / `WARNING` / `ERROR` / `CRITICAL` |
 
-Implementation: [`integration/request_logging/`](request_logging/).
+Behavior notes:
+
+- `INFO` enables per-request access logs, API error logs, startup messages, and stream diagnostics. Access lines use a compact `METHOD path -> status` format without the legacy `[webui][request]` tag.
+- `DEBUG` additionally enables stream diagnostic debug fields and slow-request thread stacks.
+- `WARNING` and above suppress informational request and stream diagnostics.
+
+Log destinations are chosen by launch method, not by extra env vars:
+
+- Direct `python server.py` with an interactive terminal: tee stdout/stderr to `{HERMES_WEBUI_STATE_DIR}/server-<port>.log` (size-rotated) plus `{HERMES_WEBUI_STATE_DIR}/server-<port>-crash.log` for native crash diagnostics.
+- `bootstrap.py`, `ctl.sh`, or another supervisor that redirects stdout/stderr: use that captured log file only; WebUI skips its own tee when stderr is not interactive.
+
+Implementation: [`integration/project_logging/`](project_logging/), [`integration/runtime_logging/`](runtime_logging/).
 
 ### Direct `server.py` runtime logs
 
-When you run `python server.py` directly, WebUI persists stdout and stderr to a size-rotated log file while still teeing output to the terminal. The default paths are:
+When you run `python server.py` directly in an interactive terminal, WebUI persists stdout and stderr to a size-rotated log file while still teeing output to the terminal. The default paths are:
 
 - Main log: `{HERMES_WEBUI_STATE_DIR}/server-<port>.log`
 - Crash diagnostics: `{HERMES_WEBUI_STATE_DIR}/server-<port>-crash.log`
 
-The main log includes startup prints, structured request logs, API error logs, and Python traceback output. Crash diagnostics use a separate append-only stream for `faulthandler` and crash-visibility hooks so native crash output remains stable even when the main log rotates.
-
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `HERMES_WEBUI_SERVER_LOG` | `1` | Set to `0` to disable direct-entry runtime log persistence |
-| `HERMES_WEBUI_SERVER_LOG_PATH` | `{state_dir}/server-<port>.log` | Override the main log path |
-| `HERMES_WEBUI_SERVER_CRASH_LOG_PATH` | beside the main log | Override the crash diagnostic log path |
-| `HERMES_WEBUI_SERVER_LOG_MAX_BYTES` | `10485760` | Rotate the main log before a write would exceed this size |
-| `HERMES_WEBUI_SERVER_LOG_BACKUP_COUNT` | `5` | Number of rotated main log files to keep |
-| `HERMES_WEBUI_SERVER_LOG_EXTERNAL` | unset | Set to `1` when stdout/stderr are already captured by `bootstrap.py` or a supervisor |
-
-`bootstrap.py` sets `HERMES_WEBUI_SERVER_LOG_EXTERNAL=1` for the launched server so its existing `bootstrap-<port>.log` remains the single bootstrap-managed log file and direct-entry logging does not duplicate it.
+The main log includes startup messages, structured request logs, API error logs, and Python traceback output. Crash diagnostics use a separate append-only stream for `faulthandler` and crash-visibility hooks so native crash output remains stable even when the main log rotates.
 
 Implementation: [`integration/runtime_logging/`](runtime_logging/).
 
@@ -89,6 +94,7 @@ When integration is enabled, `GET /api/profiles` enriches each entry with profil
 | Response field | Source |
 |----------------|--------|
 | `info` | `{profile.path}/info.json` (missing file → `{}`) |
+| `info.welcome` | `info.json` → Profile 欢迎语；缺省或缺失时返回 `""` |
 | `info.logo` | Data URI base64 in info.json; PNG/JPEG/GIF/WebP/SVG, invalid/over 10MB omitted from response |
 | `info.pinned` | `info.json` → `pinned: true`（仅置顶时返回） |
 | `info.pin_order` | `info.json` → 置顶组内排序（越小越靠前；仅置顶时返回） |
@@ -100,7 +106,7 @@ Write / update via UI or API:
 | Method | Path | Purpose |
 |--------|------|---------|
 | GET | `/api/profile/logo-presets` | Built-in logo library (`?category=` optional) |
-| POST | `/api/profile/info` | Update `info.json` (`display_name`, `description`, `logo_preset`, `logo_base64`, `remove_logo`) |
+| POST | `/api/profile/info` | Update `info.json` (`display_name`, `description`, `welcome`, `logo_preset`, `logo_base64`, `remove_logo`) |
 | POST | `/api/profile/pin` | Pin/unpin profile (`name`, `pinned`); writes `pinned` + `pin_order` to `info.json` (max 5, includes `default`) |
 
 Example `info.json` — copy [`profiles/info.json.example`](profiles/info.json.example):
@@ -109,6 +115,7 @@ Example `info.json` — copy [`profiles/info.json.example`](profiles/info.json.e
 {
   "display_name": "My Profile",
   "description": "Optional short description",
+  "welcome": "哈喽，我是 My Profile，随时帮你处理日常工作。",
   "logo": "data:image/png;base64,..."
 }
 ```

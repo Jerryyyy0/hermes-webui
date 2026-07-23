@@ -18,6 +18,7 @@ from integration.skills.local_skills import (
     read_detail_json,
     skill_target_dir,
 )
+from integration.project_logging import get_logger
 from integration.skills.list_item_shape import normalize_skill_list_items
 from integration.skills.mtime_utils import enrich_skills_mtime
 from integration.skills.paths import shared_skills_dir, skills_dir_for_profile
@@ -28,7 +29,7 @@ from integration.skills.utils import (
     skill_path_within,
 )
 
-_log = logging.getLogger(__name__)
+_log = get_logger(__name__)
 _TIMEOUT = 30.0
 _HUB_CATALOG_NAME_SIDECAR = ".hub_catalog_name"
 

@@ -1,4 +1,4 @@
-"""Write profile info.json (display_name, description, logo base64)."""
+"""Write profile info.json (display_name, description, welcome, logo base64)."""
 
 from __future__ import annotations
 
@@ -72,6 +72,8 @@ def save_profile_info(name: str, fields: dict) -> dict:
         info["display_name"] = str(fields.get("display_name") or "")
     if "description" in fields:
         info["description"] = str(fields.get("description") or "")
+    if "welcome" in fields:
+        info["welcome"] = str(fields.get("welcome") or "")
 
     logo_preset = fields.get("logo_preset")
     logo_base64 = fields.get("logo_base64")

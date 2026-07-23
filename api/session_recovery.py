@@ -40,8 +40,9 @@ from api.turn_journal import (
     iter_turn_journal_session_ids,
     read_turn_journal,
 )
+from integration.project_logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 def _msg_count(p: Path) -> int:

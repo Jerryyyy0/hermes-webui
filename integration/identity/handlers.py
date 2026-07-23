@@ -7,9 +7,20 @@ import time
 from api.helpers import _sanitize_error, j
 
 from integration.config import identity_lookup_enabled
-from integration.request_logging.formatting import format_kv, one_line, with_timestamp
-from integration.request_logging.logger import console_error, console_info, console_warning
 from integration.identity.client import IdentityLookupError, lookup_current_identity
+
+try:
+    from integration.project_logging import (
+        console_error,
+        console_info,
+        console_warning,
+        format_kv,
+        one_line,
+        with_timestamp,
+    )
+except ImportError:  # pragma: no cover - fallback while request_logging still exists on older trees
+    from integration.request_logging.formatting import format_kv, one_line, with_timestamp
+    from integration.request_logging.logger import console_error, console_info, console_warning
 from integration.identity.session_store import (
     clear_session,
     get_cached_identity,
@@ -100,20 +111,40 @@ def try_handle_get(handler, parsed) -> bool:
         )
         return True
 
+    sync_stats = None
     if status == 200:
         save_session(token, payload)
+        if isinstance(payload, dict):
+            try:
+                from integration.identity.mcp_headers_sync import sync_ithink_kb_mcp_headers
+
+                sync_stats = sync_ithink_kb_mcp_headers(payload)
+            except Exception as exc:
+                console_warning(
+                    with_timestamp(
+                        f"[webui][integration_login][mcp_headers] {one_line(f'sync failed: {exc}')}",
+                        {
+                            "event": "integration_login",
+                            "phase": "mcp_headers_failed",
+                            "error": str(exc),
+                        },
+                    )
+                )
     elif status == 401:
         clear_session()
 
-    _log_integration_login(
-        handler,
-        phase="exit",
-        auth_mode="bearer",
-        status=status,
-        cache_updated=status == 200,
-        cache_cleared=status == 401,
-        username=payload.get("username") if status == 200 and isinstance(payload, dict) else None,
-        error=payload.get("error") if isinstance(payload, dict) else None,
-    )
+    log_fields = {
+        "auth_mode": "bearer",
+        "status": status,
+        "cache_updated": status == 200,
+        "cache_cleared": status == 401,
+        "username": payload.get("username") if status == 200 and isinstance(payload, dict) else None,
+        "error": payload.get("error") if isinstance(payload, dict) else None,
+    }
+    if isinstance(sync_stats, dict):
+        log_fields["mcp_headers_updated"] = sync_stats.get("updated")
+        log_fields["mcp_headers_skipped"] = sync_stats.get("skipped")
+        log_fields["mcp_headers_errors"] = sync_stats.get("errors")
+    _log_integration_login(handler, phase="exit", **log_fields)
     j(handler, _response_payload(payload), status=status, extra_headers=_NO_STORE)
     return True

@@ -16,10 +16,11 @@ from integration.skills.utils import (
     is_system_skill,
     skill_path_within,
 )
+from integration.project_logging import get_logger
 from integration.skills.validate import validate_skill_md_content
 from integration.skills.zip_import import discover_skill_roots
 
-_log = logging.getLogger(__name__)
+_log = get_logger(__name__)
 
 def _normalize_category_for_match(value: str) -> str:
     """Normalize category for comparison: lowercase, spaces to hyphens."""

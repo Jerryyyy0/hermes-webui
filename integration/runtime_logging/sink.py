@@ -9,15 +9,12 @@ from __future__ import annotations
 
 import atexit
 import io
-import os
 import sys
 import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TextIO
 
-_FALSE_VALUES = {"0", "false", "no", "off"}
-_TRUE_VALUES = {"1", "true", "yes", "on"}
 _DEFAULT_MAX_BYTES = 10 * 1024 * 1024
 _DEFAULT_BACKUP_COUNT = 5
 _STDOUT_WRAPPED = False
@@ -37,28 +34,6 @@ class RuntimeLogSetup:
     reason: str | None = None
 
 
-def _env_disabled(name: str, default_enabled: bool = True) -> bool:
-    raw = os.getenv(name)
-    if raw is None or not str(raw).strip():
-        return not default_enabled
-    return str(raw).strip().lower() in _FALSE_VALUES
-
-
-def _env_enabled(name: str) -> bool:
-    return os.getenv(name, "").strip().lower() in _TRUE_VALUES
-
-
-def _env_positive_int(name: str, default: int) -> int:
-    raw = os.getenv(name, "").strip()
-    if not raw:
-        return default
-    try:
-        value = int(raw)
-    except ValueError:
-        return default
-    return value if value > 0 else default
-
-
 def _safe_write(stream: TextIO | None, text: str) -> None:
     if stream is None:
         return
@@ -70,6 +45,24 @@ def _safe_write(stream: TextIO | None, text: str) -> None:
             pass
     except Exception:
         pass
+
+
+def _stderr_is_interactive() -> bool:
+    try:
+        if sys.stderr is None:
+            return False
+        if isinstance(sys.stderr, TeeTextIO):
+            return False
+        return bool(sys.stderr.isatty())
+    except Exception:
+        return False
+
+
+def should_enable_direct_entry_sink(*, enable: bool | None = None) -> bool:
+    """Return whether direct-entry log persistence should be installed."""
+    if enable is not None:
+        return enable
+    return _stderr_is_interactive()
 
 
 class SizeRotatingLogFile:
@@ -228,20 +221,29 @@ def _default_log_path(state_dir: Path, port: int) -> Path:
 
 
 def _crash_log_path(log_path: Path, port: int) -> Path:
-    if os.getenv("HERMES_WEBUI_SERVER_CRASH_LOG_PATH", "").strip():
-        return Path(os.environ["HERMES_WEBUI_SERVER_CRASH_LOG_PATH"]).expanduser().resolve()
     default_name = f"server-{port}-crash.log"
     if log_path.name.startswith("server-") and log_path.name.endswith(".log"):
         default_name = f"{log_path.stem}-crash.log"
     return log_path.with_name(default_name)
 
 
-def setup_runtime_logging(*, state_dir: Path, port: int) -> RuntimeLogSetup:
+def setup_runtime_logging(
+    *,
+    state_dir: Path,
+    port: int,
+    enable: bool | None = None,
+    log_path: Path | None = None,
+    crash_log_path: Path | None = None,
+    max_bytes: int = _DEFAULT_MAX_BYTES,
+    backup_count: int = _DEFAULT_BACKUP_COUNT,
+) -> RuntimeLogSetup:
     """Install persistent direct-entry logging and return crash stream info.
 
     The function is intentionally best-effort. If anything about the log path is
     invalid or unwritable, it reports a warning to the original stderr and lets
     the WebUI continue without persistent direct-entry logs.
+  When stdout/stderr are already redirected by bootstrap or a supervisor,
+  persistence is skipped automatically.
     """
 
     global _SETUP, _STDOUT_WRAPPED, _STDERR_WRAPPED
@@ -249,26 +251,29 @@ def setup_runtime_logging(*, state_dir: Path, port: int) -> RuntimeLogSetup:
         if _SETUP is not None:
             return _SETUP
 
-        if _env_disabled("HERMES_WEBUI_SERVER_LOG", default_enabled=True):
-            _SETUP = RuntimeLogSetup(enabled=False, reason="disabled")
-            return _SETUP
-        if _env_enabled("HERMES_WEBUI_SERVER_LOG_EXTERNAL"):
-            _SETUP = RuntimeLogSetup(enabled=False, reason="external")
+        if not should_enable_direct_entry_sink(enable=enable):
+            reason = "external" if enable is False else "not_interactive"
+            _SETUP = RuntimeLogSetup(enabled=False, reason=reason)
             return _SETUP
 
         state_path = Path(state_dir).expanduser().resolve()
-        raw_log_path = os.getenv("HERMES_WEBUI_SERVER_LOG_PATH", "").strip()
-        log_path = Path(raw_log_path).expanduser().resolve() if raw_log_path else _default_log_path(state_path, port)
-        max_bytes = _env_positive_int("HERMES_WEBUI_SERVER_LOG_MAX_BYTES", _DEFAULT_MAX_BYTES)
-        backup_count = _env_positive_int("HERMES_WEBUI_SERVER_LOG_BACKUP_COUNT", _DEFAULT_BACKUP_COUNT)
-        crash_path = _crash_log_path(log_path, port)
+        resolved_log_path = log_path.expanduser().resolve() if log_path else _default_log_path(state_path, port)
+        resolved_crash_path = (
+            crash_log_path.expanduser().resolve()
+            if crash_log_path
+            else _crash_log_path(resolved_log_path, port)
+        )
 
         original_stdout = sys.stdout
         original_stderr = sys.stderr
         try:
-            sink = SizeRotatingLogFile(log_path, max_bytes=max_bytes, backup_count=backup_count)
-            crash_path.parent.mkdir(parents=True, exist_ok=True)
-            crash_stream = crash_path.open("a", encoding="utf-8", buffering=1)
+            sink = SizeRotatingLogFile(
+                resolved_log_path,
+                max_bytes=max_bytes,
+                backup_count=backup_count,
+            )
+            resolved_crash_path.parent.mkdir(parents=True, exist_ok=True)
+            crash_stream = resolved_crash_path.open("a", encoding="utf-8", buffering=1)
         except Exception as exc:
             _safe_write(original_stderr, f"[webui] WARNING: runtime log persistence disabled: {exc}\n")
             _SETUP = RuntimeLogSetup(enabled=False, reason="open_failed")
@@ -299,10 +304,16 @@ def setup_runtime_logging(*, state_dir: Path, port: int) -> RuntimeLogSetup:
 
         _SETUP = RuntimeLogSetup(
             enabled=True,
-            log_path=log_path,
-            crash_log_path=crash_path,
+            log_path=resolved_log_path,
+            crash_log_path=resolved_crash_path,
             crash_stream=crash_stream,
         )
-        print(f"[webui] Runtime log file: {log_path}", flush=True)
-        print(f"[webui] Crash diagnostic log file: {crash_path}", flush=True)
+        try:
+            from integration.project_logging import log_info
+
+            log_info(f"[webui] Runtime log file: {resolved_log_path}")
+            log_info(f"[webui] Crash diagnostic log file: {resolved_crash_path}")
+        except Exception:
+            _safe_write(original_stderr, f"[webui] Runtime log file: {resolved_log_path}\n")
+            _safe_write(original_stderr, f"[webui] Crash diagnostic log file: {resolved_crash_path}\n")
         return _SETUP

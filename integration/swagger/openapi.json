@@ -1878,8 +1878,8 @@
     "/api/profile/info": {
       "post": {
         "tags": ["Profiles"],
-        "summary": "更新 Profile info.json（display / logo）",
-        "description": "需 `HERMES_INTEGRATION=1`。logo 以 Data URI base64 写入 info.json。",
+        "summary": "更新 Profile info.json（display / welcome / logo）",
+        "description": "需 `HERMES_INTEGRATION=1`。可更新 `display_name`、`description`、`welcome`；logo 以 Data URI base64 写入 info.json。",
         "requestBody": {
           "required": true,
           "content": {
@@ -5847,6 +5847,7 @@
             "properties": {
               "display_name": { "type": "string" },
               "description":  { "type": "string" },
+              "welcome":      { "type": "string", "description": "Profile 欢迎语；缺失时返回空字符串" },
               "logo":         { "type": "string", "description": "data:image/...;base64,..." },
               "pinned":       { "type": "boolean", "description": "仅 true 时返回；来自 info.json" },
               "pin_order":    { "type": "integer", "description": "置顶组内排序，越小越靠前；新置顶为 1 并顺延其余；仅 pinned=true 时返回" }
@@ -5890,6 +5891,7 @@
           "name":          { "type": "string" },
           "display_name":  { "type": "string" },
           "description":   { "type": "string" },
+          "welcome":       { "type": "string", "description": "Profile 欢迎语" },
           "logo_preset":   { "type": "string", "description": "内置 logo id，与 logo_base64 互斥" },
           "logo_base64":   { "type": "string", "description": "Data URI 或 base64，与 logo_preset 互斥" },
           "remove_logo":   { "type": "boolean" }

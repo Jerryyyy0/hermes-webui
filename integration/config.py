@@ -10,7 +10,7 @@ _VERSION_FILE = _REPO_ROOT / "VERSION.txt"
 
 
 def print_version_txt() -> None:
-    """Print repo-root VERSION.txt at server startup (build/update stamp)."""
+    """Log repo-root VERSION.txt at server startup (build/update stamp)."""
     try:
         text = _VERSION_FILE.read_text(encoding="utf-8").strip()
     except FileNotFoundError:
@@ -18,8 +18,12 @@ def print_version_txt() -> None:
     except OSError:
         return
     if text:
-        print(text, flush=True)
-        print("", flush=True)
+        try:
+            from integration.project_logging import log_info
+
+            log_info(text)
+        except Exception:
+            pass
 
 
 def integration_enabled() -> bool:

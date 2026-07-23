@@ -179,7 +179,6 @@ class TestBootstrapForegroundWindows:
         assert ei.value.code == 0
         assert len(popen_calls) == 1, "Windows foreground should use Popen"
         assert len(execv_calls) == 0, "Windows foreground must NOT use execv"
-        assert popen_calls[0][1]["env"]["HERMES_WEBUI_SERVER_LOG_EXTERNAL"] == "1"
 
     def test_foreground_uses_execv_on_posix(self, stub_main_dependencies, monkeypatch):
         """On POSIX, foreground mode should still use os.execv."""

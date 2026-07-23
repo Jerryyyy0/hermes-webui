@@ -121,8 +121,8 @@ def restart_active_profile_gateway(
                                 logger.error(
                                     "Gateway restart process refused to die even after SIGKILL.",
                                 )
-                    except Exception:
-                        logger.exception("Failed to terminate timed out gateway restart process.")
+                    except Exception as exc:
+                        logger.exception("Failed to terminate timed out gateway restart process error=%s", exc)
                 finally:
                     _release_lock()
 
@@ -133,7 +133,7 @@ def restart_active_profile_gateway(
             }
     except Exception as exc:
         _release_lock()
-        logger.exception("Failed to run gateway restart command")
+        logger.exception("Failed to run gateway restart command error=%s", exc)
         return {
             "status": "failed",
             "message": f"Internal error running restart: {type(exc).__name__}: {exc}",
