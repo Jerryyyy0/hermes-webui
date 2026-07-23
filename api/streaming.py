@@ -20,8 +20,9 @@ import traceback
 import copy
 from pathlib import Path
 from typing import Optional
+from integration.project_logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 from api.config import (
     get_config,
@@ -4272,10 +4273,10 @@ def _last_resort_sync_from_core(session, stream_id, agent_lock):
                 stream_id_for_recheck=stream_id,
                 require_stream_dead=False,
             )
-    except Exception:
+    except Exception as exc:
         logger.exception(
-            "_last_resort_sync_from_core failed for session %s",
-            getattr(session, 'session_id', '?'),
+            "_last_resort_sync_from_core failed for session %s error=%s",
+            getattr(session, 'session_id', '?'), exc,
         )
 
 
@@ -4289,7 +4290,7 @@ def _build_session_db_for_stream(state_db_path):
         from hermes_state import SessionDB
         return SessionDB(db_path=state_db_path)
     except Exception as _db_err:
-        print(f"[webui] WARNING: SessionDB init failed - session_search will be unavailable: {_db_err}", flush=True)
+        logger.warning("SessionDB init failed - session_search will be unavailable: %s", _db_err)
         return None
 
 
@@ -5819,7 +5820,7 @@ def _run_agent_streaming(
                 if not resolved_base_url:
                     resolved_base_url = _rt.get("base_url")
             except Exception as _e:
-                print(f"[webui] WARNING: resolve_runtime_provider failed: {_e}", flush=True)
+                logger.warning("resolve_runtime_provider failed: %s", _e)
 
             # Named custom providers (custom:slug) may not be resolvable by
             # hermes_cli.runtime_provider directly. Fall back to config.yaml
@@ -5872,7 +5873,7 @@ def _run_agent_streaming(
                     if _override:
                         _toolsets = _override
             except Exception as _ts_err:
-                print(f"[webui] WARNING: failed to read per-session toolsets for {session_id}: {_ts_err}", flush=True)
+                logger.warning("failed to read per-session toolsets for %s: %s", session_id, _ts_err)
 
             # Fallback model chain from profile config (e.g. for rate-limit or
             # provider recovery). Match Hermes CLI/gateway semantics:
@@ -6529,15 +6530,17 @@ def _run_agent_streaming(
                 sanitize_ms=None if not _stream_diag_debug_enabled() else None,
             )
             logger.info(
-                "[agent_prompt_input] session_id=%s stream_id=%s model=%s provider=%s system_message=%r ephemeral_system_prompt=%r conversation_history=%r user_message=%r",
+                "[agent_prompt_input] session_id=%s stream_id=%s model=%s provider=%s "
+                "system_message_len=%s ephemeral_system_prompt_len=%s "
+                "context_message_count=%s user_message_len=%s",
                 session_id,
                 stream_id,
                 model,
                 model_provider,
-                workspace_system_msg,
-                getattr(agent, 'ephemeral_system_prompt', None),
-                conversation_history,
-                user_message,
+                len(workspace_system_msg or ""),
+                len(getattr(agent, "ephemeral_system_prompt", None) or ""),
+                len(conversation_history),
+                len(str(user_message)) if user_message is not None else 0,
             )
             _persistent_state_before = _persistent_state_snapshot(_profile_home)
             _run_conversation_started = _stream_diag_monotonic_ms()
@@ -7798,7 +7801,7 @@ def _run_agent_streaming(
             error_type=type(e).__name__,
             error=str(e),
         )
-        print('[webui] stream error:\n' + traceback.format_exc(), flush=True)
+        logger.exception("stream error error=%s", e)
         err_str = str(e)
         # Sanitize HTML from provider error responses — some providers return
         # full HTML pages (e.g. nginx "404 page not found") instead of JSON errors.
@@ -8250,16 +8253,13 @@ def cancel_stream(stream_id: str) -> bool:
             agent.interrupt("Cancelled by user")
         except Exception as e:
             # Log but don't block the cancel flow
-            import logging
-            logging.getLogger(__name__).debug(
-                f"Failed to interrupt agent for stream {stream_id}: {e}"
-            )
+            logger.debug("Failed to interrupt agent for stream %s: %s", stream_id, e)
     elif stream_present:
         # Agent not yet stored - cancel_event flag will be checked by agent thread
-        import logging
-        logging.getLogger(__name__).debug(
-            f"Cancel requested for stream {stream_id} before agent ready - "
-            f"cancel_event flag set, will be checked on agent startup"
+        logger.debug(
+            "Cancel requested for stream %s before agent ready - "
+            "cancel_event flag set, will be checked on agent startup",
+            stream_id,
         )
 
     # Clear any pending clarify prompt so the blocked tool call can unwind.

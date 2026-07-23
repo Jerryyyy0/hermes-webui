@@ -54,7 +54,7 @@ __all__ = [
     "main_excepthook",
 ]
 
-_LOGGER = logging.getLogger("server")
+_LOGGER = logging.getLogger("hermes.webui.server")
 
 # Guard so repeated calls (e.g. import + explicit startup call, or a test that
 # re-imports) don't stack duplicate hooks / atexit registrations.
@@ -104,26 +104,23 @@ def _direct_write(text: str) -> None:
 
 
 def _emit(level: int, message: str, *, exc_info=None) -> None:
-    """Emit a diagnostic via logging AND directly to the fault stream.
-
-    Never raises. The direct write is what guarantees visibility in the WebUI
-    log (which configures no logging handlers); the logging call is what lets
-    tests/caplog and any future handler capture the same record.
-    """
+    """Emit a diagnostic to the fault stream and unified logger. Never raises."""
     text = message
     if exc_info is not None:
         try:
             etype, evalue, etb = exc_info
             tb_text = "".join(traceback.format_exception(etype, evalue, etb))
-            text = f"{message}\n{tb_text}".rstrip()
+            if tb_text:
+                text = f"{message}\n{tb_text}".rstrip()
         except Exception:
             text = message
     _direct_write(text)
     try:
+        from integration.project_logging import configure_logging
+
+        configure_logging()
         _LOGGER.log(level, message, exc_info=exc_info)
     except Exception:
-        # If the logging subsystem itself blows up, the direct write above
-        # already captured the diagnostic — swallow so we never re-crash here.
         pass
 
 

@@ -1,0 +1,78 @@
+"""Unified stdlib logging for Hermes WebUI."""
+
+from integration.project_logging.config import (
+    configure_logging,
+    get_logger,
+    is_debug_level,
+    log_error,
+    log_exception_line,
+    log_info,
+    log_line,
+    log_warning,
+    resolve_log_level,
+)
+from integration.project_logging.formatting import (
+    format_api_error_line,
+    format_event_line,
+    format_kv,
+    format_request_line,
+    format_slow_request_line,
+    format_timestamp,
+    one_line,
+    sanitize_fields,
+    short_id,
+    with_timestamp,
+)
+from integration.project_logging.request import (
+    api_error_logging_enabled,
+    api_error_min_status,
+    emit_api_error,
+    error_fields_from_payload,
+    maybe_log_api_response,
+    request_forwarded_for,
+    request_id,
+    request_method,
+    request_path,
+    request_remote,
+    should_log_api_error,
+)
+
+console_info = log_info
+console_warning = log_warning
+console_error = log_error
+
+__all__ = [
+    "api_error_logging_enabled",
+    "api_error_min_status",
+    "configure_logging",
+    "console_error",
+    "console_info",
+    "console_warning",
+    "emit_api_error",
+    "error_fields_from_payload",
+    "format_api_error_line",
+    "format_event_line",
+    "format_kv",
+    "format_request_line",
+    "format_slow_request_line",
+    "format_timestamp",
+    "get_logger",
+    "is_debug_level",
+    "log_error",
+    "log_exception_line",
+    "log_info",
+    "log_line",
+    "log_warning",
+    "maybe_log_api_response",
+    "one_line",
+    "request_forwarded_for",
+    "request_id",
+    "request_method",
+    "request_path",
+    "request_remote",
+    "resolve_log_level",
+    "sanitize_fields",
+    "short_id",
+    "should_log_api_error",
+    "with_timestamp",
+]

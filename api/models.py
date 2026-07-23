@@ -21,6 +21,7 @@ from api.config import (
     LOCK, STREAMS, STREAMS_LOCK, DEFAULT_WORKSPACE, DEFAULT_MODEL, PROJECTS_FILE, HOME,
     get_effective_default_model, _get_session_agent_lock,
 )
+from integration.project_logging import get_logger
 from integration.chat_provider_errors.interruption_copy import (
     INTERRUPTED_NEUTRAL_ZH,
     INTERRUPTED_NO_OUTPUT_ZH,
@@ -38,7 +39,7 @@ from api.agent_sessions import (
     read_session_lineage_metadata,
 )
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 CLI_VISIBLE_SESSION_LIMIT = 20
 # How many messageful cron sessions to surface in the project-chip layer.
 # Needs to exceed CLI_VISIBLE_SESSION_LIMIT so older cron runs stay
@@ -2193,10 +2194,10 @@ def _retry_journal_recovery_in_place(
                 )
             return False
         return False
-    except Exception:
+    except Exception as exc:
         logger.exception(
-            "_retry_journal_recovery_in_place failed for session %s",
-            getattr(session, 'session_id', '?'),
+            "_retry_journal_recovery_in_place failed for session %s error=%s",
+            getattr(session, 'session_id', '?'), exc,
         )
         return False
 
@@ -2593,8 +2594,8 @@ def _repair_stale_pending(session) -> bool:
             )
         finally:
             lock.release()
-    except Exception:
-        logger.exception("_repair_stale_pending failed for session %s", sid)
+    except Exception as exc:
+        logger.exception("_repair_stale_pending failed for session %s error=%s", sid, exc)
         return False
 
 

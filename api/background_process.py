@@ -47,8 +47,9 @@ import threading
 import time
 import uuid
 from typing import Any, Optional
+from integration.project_logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 _DRAIN_THREAD: Optional[threading.Thread] = None
 _DRAIN_STOP = threading.Event()

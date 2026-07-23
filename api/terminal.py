@@ -22,6 +22,10 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from integration.project_logging import get_logger
+
+
+logger = get_logger(__name__)
 
 _TERMINAL_SUPPORTED = sys.platform != "win32"
 
@@ -128,7 +132,7 @@ def _reap_abandoned_spawn(proc: subprocess.Popen) -> bool:
         except (subprocess.TimeoutExpired, ProcessLookupError):
             pass
     if proc.poll() is None:
-        print("terminal abandoned spawn cleanup failed", flush=True)
+        logger.warning("terminal_abandoned_spawn_cleanup_failed")
         return False
     return True
 

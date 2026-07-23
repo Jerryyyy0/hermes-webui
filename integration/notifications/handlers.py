@@ -1,6 +1,6 @@
 """HTTP handlers for notifications API (knowledge base only)."""
 
-import traceback
+import logging
 from urllib.parse import parse_qs
 
 from api.helpers import j
@@ -12,10 +12,13 @@ from integration.notifications.filters import (
     exclude_apply_result_pending,
     filter_by_action_status,
 )
+from integration.project_logging import get_logger
 from integration.notifications.normalize import (
     KB_ID_PREFIX,
     normalize_kb_message,
 )
+
+logger = get_logger(__name__)
 
 DEFAULT_READ_TYPE = "all"
 SUMMARY_READ_TYPE = "unread"
@@ -58,11 +61,8 @@ def _fetch_seen_message_ids(*, account, uuid) -> set[str]:
             for msg in messages
             if msg.get("id") is not None
         }
-    except Exception as e:
-        print(
-            f"[webui] notifications: failed to fetch seen message ids: {e}\n{traceback.format_exc()}",
-            flush=True,
-        )
+    except Exception as exc:
+        logger.exception("notifications: failed to fetch seen message ids error=%s", exc)
         return set()
 
 
@@ -90,10 +90,10 @@ def _fetch_kb_messages(*, account, uuid, read_type, limit, cursor=None):
             normalize_kb_message(msg, read_type=read_type, seen_ids=seen_ids)
             for msg in messages
         ]
-    except Exception as e:
-        print(
-            f"[webui] notifications: failed to fetch kb messages: {e}\n{traceback.format_exc()}",
-            flush=True,
+    except Exception as exc:
+        logger.exception(
+            "notifications: failed to fetch kb messages operation=get_user_messages read_type=%s error=%s",
+            read_type, exc,
         )
         return []
 
@@ -146,10 +146,10 @@ def _fetch_kb_summary(*, account, uuid, read_type):
                 }
             },
         }
-    except Exception as e:
-        print(
-            f"[webui] notifications: failed to fetch kb summary: {e}\n{traceback.format_exc()}",
-            flush=True,
+    except Exception as exc:
+        logger.exception(
+            "notifications: failed to fetch kb summary operation=get_user_messages read_type=%s error=%s",
+            read_type, exc,
         )
         return empty
 
@@ -175,11 +175,8 @@ def _mark_kb_messages_read(kb_ids: list[str]) -> int:
         _, resp = kb_client.post_json("mark_message_read", {"messageId": message_ids})
         if isinstance(resp, dict) and resp.get("code") == 200:
             return len(message_ids)
-    except Exception as e:
-        print(
-            f"[webui] notifications: kb read forward failed: {e}\n{traceback.format_exc()}",
-            flush=True,
-        )
+    except Exception as exc:
+        logger.exception("notifications: kb read forward failed operation=mark_message_read error=%s", exc)
     return 0
 
 
@@ -194,11 +191,8 @@ def _delete_kb_messages(kb_ids: list[str]) -> int:
         _, resp = kb_client.post_json("delete_readed_message", {"messageId": message_ids})
         if isinstance(resp, dict) and resp.get("code") == 200:
             return len(message_ids)
-    except Exception as e:
-        print(
-            f"[webui] notifications: kb delete forward failed: {e}\n{traceback.format_exc()}",
-            flush=True,
-        )
+    except Exception as exc:
+        logger.exception("notifications: kb delete forward failed operation=delete_readed_message error=%s", exc)
     return 0
 
 

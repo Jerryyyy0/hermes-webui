@@ -32,6 +32,7 @@ from api.agent_sessions import (
     is_cli_session_row_visible,
     read_session_lineage_report,
 )
+from integration.project_logging import get_logger
 from api.compression_anchor import visible_messages_for_anchor
 from api.session_events import (
     publish_session_list_changed,
@@ -48,7 +49,7 @@ from api.stream_diagnostics import (
     safe_workspace_hash as _stream_diag_workspace_hash,
 )
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 def _publish_session_list_changed(reason: str, *, profile: str | None = None) -> None:
@@ -1033,7 +1034,7 @@ def _run_cron_tracked(job, profile_home=None, execution_profile_home=None, owner
 
         _with_cron_home(profile_home, _persist_success)
     except Exception as e:
-        logger.exception("Manual cron run failed for job %s", job_id)
+        logger.exception("Manual cron run failed for job %s error=%s", job_id, e)
         try:
             _with_cron_home(profile_home, lambda: mark_job_run(job_id, False, str(e)))  # noqa: F821  e is bound by the enclosing `except ... as e` and the lambda runs synchronously here
         except Exception:
@@ -1318,11 +1319,11 @@ def _clear_stale_stream_state(session) -> bool:
                     stream_id_for_recheck=stream_id,
                     touch_updated_at=False,
                 )
-            except Exception:
+            except Exception as exc:
                 logger.exception(
                     "_clear_stale_stream_state: failed to repair stale pending stream %s "
-                    "for session %s",
-                    stream_id, getattr(session, "session_id", "?"),
+                    "for session %s error=%s",
+                    stream_id, getattr(session, "session_id", "?"), exc,
                 )
                 repaired = False
             if repaired:
@@ -1353,10 +1354,10 @@ def _clear_stale_stream_state(session) -> bool:
             # to the top of the sidebar just because a stale stream flag was
             # repaired during a read/list path.
             session.save(touch_updated_at=False)
-        except Exception:
+        except Exception as exc:
             logger.exception(
-                "_clear_stale_stream_state: save() failed for session %s",
-                getattr(session, "session_id", "?"),
+                "_clear_stale_stream_state: save() failed for session %s error=%s",
+                getattr(session, "session_id", "?"), exc,
             )
     # Patch the caller's stub (if different from the full-load object) so
     # its in-memory active_stream_id matches what just got persisted.
@@ -1491,11 +1492,11 @@ def _allowed_public_origins() -> set[str]:
         if not value:
             continue
         if not (value.startswith('http://') or value.startswith('https://')):
-            import sys
-            print(
+            from integration.project_logging import log_warning
+
+            log_warning(
                 f"[webui] WARNING: HERMES_WEBUI_ALLOWED_ORIGINS entry {value!r} is missing "
-                f"the scheme (expected https://hostname or http://hostname). Entry ignored.",
-                flush=True, file=sys.stderr,
+                f"the scheme (expected https://hostname or http://hostname). Entry ignored."
             )
             continue
         result.add(value)
@@ -4091,7 +4092,7 @@ def _handle_logs(handler, parsed) -> bool:
             "hint": "",
         })
     except Exception as exc:
-        logger.exception("Failed to read whitelisted log file %s", file_key)
+        logger.exception("Failed to read whitelisted log file %s error=%s", file_key, exc)
         return bad(handler, _sanitize_error(exc), status=500)
 
 # ── Insights endpoint ──────────────────────────────────────────────────────────
@@ -5732,7 +5733,7 @@ def handle_get(handler, parsed) -> bool:
         except ValueError as exc:
             return bad(handler, str(exc), status=400)
         except Exception as exc:
-            logger.exception("failed to read worktree status for session %s", sid)
+            logger.exception("failed to read worktree status for session %s error=%s", sid, exc)
             return bad(handler, _sanitize_error(exc), status=500)
 
     if parsed.path == "/api/session/compress/status":
@@ -6137,7 +6138,7 @@ def handle_get(handler, parsed) -> bool:
         except KeyError:
             return bad(handler, "Session not found", 404)
         except Exception as exc:
-            logger.exception("failed to build session manifest for %s", sid)
+            logger.exception("failed to build session manifest for %s error=%s", sid, exc)
             return bad(handler, _sanitize_error(exc), status=500)
 
     if parsed.path == "/api/session/lineage/report":
@@ -7008,7 +7009,7 @@ def handle_get(handler, parsed) -> bool:
         except ValueError as e:
             return bad(handler, str(e))
         except Exception as e:
-            logger.exception("rollback/list failed")
+            logger.exception("rollback/list failed error=%s", e)
             return bad(handler, str(e), status=500)
 
     if parsed.path == "/api/rollback/diff":
@@ -7023,7 +7024,7 @@ def handle_get(handler, parsed) -> bool:
         except ValueError as e:
             return bad(handler, str(e))
         except Exception as e:
-            logger.exception("rollback/diff failed")
+            logger.exception("rollback/diff failed error=%s", e)
             return bad(handler, str(e), status=500)
 
     # ── Plugin shared assets (e.g. /plugins/plugin.css) ──
@@ -7269,7 +7270,7 @@ def handle_post(handler, parsed) -> bool:
         except ValueError as exc:
             bad(handler, str(exc), status=400)
         except Exception as exc:
-            logger.exception("dashboard config save failed")
+            logger.exception("dashboard config save failed error=%s", exc)
             bad(handler, str(exc), status=500)
         return True
 
@@ -7294,7 +7295,7 @@ def handle_post(handler, parsed) -> bool:
             except (TypeError, ValueError) as e:
                 return bad(handler, str(e), status=400)
             except Exception as e:
-                logger.exception("failed to create worktree-backed session")
+                logger.exception("failed to create worktree-backed session error=%s", e)
                 return bad(handler, f"Failed to create worktree: {e}", status=500)
         model, model_provider = _session_model_state_from_request(
             body.get("model"),
@@ -7795,7 +7796,7 @@ def handle_post(handler, parsed) -> bool:
         except ValueError as exc:
             return bad(handler, str(exc), status=400)
         except Exception as exc:
-            logger.exception("failed to remove worktree for session %s", sid)
+            logger.exception("failed to remove worktree for session %s error=%s", sid, exc)
             return bad(handler, _sanitize_error(exc), status=500)
 
     if parsed.path == "/api/session/delete":
@@ -8694,6 +8695,7 @@ def handle_post(handler, parsed) -> bool:
         try:
             return j(handler, probe_provider_endpoint(provider, base_url, api_key))
         except Exception as e:
+            logger.exception("onboarding provider probe failed provider=%s error=%s", provider, e)
             return bad(handler, f"probe failed: {e}", 500)
 
     # ── Session pin (POST) ──
@@ -9208,7 +9210,7 @@ def handle_post(handler, parsed) -> bool:
         except ValueError as e:
             return bad(handler, str(e))
         except Exception as e:
-            logger.exception("rollback/restore failed")
+            logger.exception("rollback/restore failed error=%s", e)
             return bad(handler, str(e), status=500)
 
     # ── MCP Reload (POST) ──
@@ -10055,6 +10057,7 @@ def _handle_terminal_start(handler, body):
     except ValueError as e:
         return bad(handler, str(e), 400)
     except Exception as e:
+        logger.exception("terminal open failed error=%s", e)
         return bad(handler, _sanitize_error(e), 500)
 
 
@@ -10072,6 +10075,7 @@ def _handle_terminal_input(handler, body):
     except ValueError as e:
         return bad(handler, str(e), 400)
     except Exception as e:
+        logger.exception("terminal input failed error=%s", e)
         return bad(handler, _sanitize_error(e), 500)
 
 
@@ -10090,6 +10094,7 @@ def _handle_terminal_resize(handler, body):
     except ValueError as e:
         return bad(handler, str(e), 400)
     except Exception as e:
+        logger.exception("terminal resize failed error=%s", e)
         return bad(handler, _sanitize_error(e), 500)
 
 
@@ -10563,8 +10568,8 @@ def _handle_tts(handler, parsed):
 
     except BrokenPipeError:
         return True
-    except Exception:
-        logger.exception("Edge TTS generation failed")
+    except Exception as exc:
+        logger.exception("Edge TTS generation failed error=%s", exc)
         from api.helpers import bad as _bad
         return _bad(handler, "TTS generation failed", 500)
 def _html_preview_with_blank_base(raw: bytes) -> bytes:
@@ -10599,7 +10604,8 @@ def _serve_inline_html_preview(handler, target: Path, cache_control: str, *, csp
         return j(handler, {"error": "not found"}, status=404)
     except ValueError as e:
         return bad(handler, _sanitize_error(e), 403)
-    except Exception:
+    except Exception as exc:
+        logger.exception("html preview read failed path=%s error=%s", target, exc)
         return bad(handler, "Could not read file", 500)
     finally:
         if fd is not None:
@@ -11929,6 +11935,7 @@ def _handle_cron_run_detail(handler, parsed):
                            "content": content, "snippet": snippet,
                            "usage": usage, "session_id": session_id})
     except Exception as e:
+        logger.exception("cron run detail read failed job_id=%s filename=%s error=%s", job_id, filename, e)
         return j(handler, {"error": str(e)}, status=500)
 
 
@@ -13226,10 +13233,9 @@ def _handle_chat_sync(handler, body):
                 if not _base_url:
                     _base_url = _rt.get("base_url")
             except Exception as _e:
-                print(
-                    f"[webui] WARNING: resolve_runtime_provider failed: {_e}",
-                    flush=True,
-                )
+                from integration.project_logging import log_warning
+
+                log_warning(f"[webui] WARNING: resolve_runtime_provider failed: {_e}")
             if isinstance(_provider, str) and _provider.startswith("custom:"):
                 _cp_key, _cp_base = resolve_custom_provider_connection(_provider)
                 if not _api_key and _cp_key:
@@ -13819,7 +13825,7 @@ def _handle_git_commit_message(handler, body):
     except GitWorkspaceError as e:
         return _git_bad(handler, e)
     except Exception as e:
-        logger.exception("git commit message generation failed")
+        logger.exception("git commit message generation failed error=%s", e)
         return bad(handler, _sanitize_error(e), 500)
 
 
@@ -13850,7 +13856,7 @@ def _handle_git_commit_message_selected(handler, body):
     except GitWorkspaceError as e:
         return _git_bad(handler, e)
     except Exception as e:
-        logger.exception("selected git commit message generation failed")
+        logger.exception("selected git commit message generation failed error=%s", e)
         return bad(handler, _sanitize_error(e), 500)
 
 
@@ -17211,7 +17217,7 @@ def _handle_mcp_reload(handler):
         summary = _run_reload_mcp_command()
         return j(handler, {"ok": True, "summary": summary})
     except Exception as e:
-        logger.exception("MCP reload failed")
+        logger.exception("MCP reload failed error=%s", e)
         return bad(handler, str(e))
 
 

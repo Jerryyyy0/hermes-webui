@@ -200,8 +200,8 @@ def commit_session_memory(session_id: str, agent=None, *, wait: bool = False, ti
 
     try:
         effective_agent.commit_memory_session()
-    except Exception:
-        logger.exception("commit_memory_session() failed for session %s", session_id)
+    except Exception as exc:
+        logger.exception("commit_memory_session() failed for session %s error=%s", session_id, exc)
         with _condition:
             re_entry = _sessions.get(session_id)
             if re_entry is not None:

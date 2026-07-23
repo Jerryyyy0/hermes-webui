@@ -28,10 +28,11 @@ from api.config import (
     save_settings,
     verify_hermes_imports,
 )
+from integration.project_logging import get_logger
 from api.providers import _write_env_file  # shared impl with _ENV_LOCK (#1164)
 from api.workspace import get_last_workspace, load_workspaces
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 _SUPPORTED_PROVIDER_SETUPS = {

@@ -31,11 +31,12 @@ from api.config import (
     unregister_stream_owner,
     update_active_run,
 )
+from integration.project_logging import get_logger
 from api.helpers import _redact_text, redact_session_data
 from api.models import get_session, merge_session_messages_append_only
 from api.run_journal import RunJournalWriter
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # Maps stream_id -> gateway run_id for approval response relay.
 _STREAM_RUN_IDS: dict[str, str] = {}

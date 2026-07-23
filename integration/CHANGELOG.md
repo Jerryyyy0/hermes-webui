@@ -32,6 +32,8 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Changed
 
+- **Unified project logging** — 运行时日志统一收敛到 `integration/project_logging/`，仅使用 `HERMES_WEBUI_LOG_LEVEL` 控制输出级别。`INFO` 启用请求访问、API 错误、启动与 stream_diag 日志；访问日志为紧凑的 `METHOD path -> status` 格式，不再带 `[webui][request]` 标签。`DEBUG` 额外启用 stream_diag debug 字段与慢请求线程栈。直接交互式运行 `python server.py` 仍 tee 到 `{HERMES_WEBUI_STATE_DIR}/server-<port>.log`；`bootstrap.py` / supervisor 重定向 stderr 时自动跳过重复落盘。移除 `HERMES_WEBUI_API_ERROR_LOG*`、`HERMES_WEBUI_SERVER_LOG*`、`HERMES_WEBUI_STREAM_DIAG`、`HERMES_WEBUI_SLOW_REQUEST_*` 等分散日志环境变量；服务运行路径不再使用 `print()` 输出诊断信息。原 `integration/request_logging/` 已并入 `integration/project_logging/`（`request.py` + `formatting.py`），删除重复的格式化与 console 封装。
+
 - **SkillHub `local_all` profile filter** — `GET /api/skillhub/skills?scope=local_all` 支持 `profile`（默认 `default`）：只聚合该 Profile skills 目录下的已安装 hub + 本地 custom，并用该 Profile `config.yaml` 的 `skills.disabled` 过滤。其它 scope 仍忽略 `profile`；`stats` 仍为全局计数。
 
 - **Profile assistant bubbles skill validation relaxed** — `skill` 气泡生成不再校验模型输出是否字面匹配技能 `label` 或中文 `description` 片段；仍要求简体中文、单行格式，并继续拒绝直接输出英文 skill slug。模型概括与技能元数据不完全重合时不再触发 `skill_real_chinese_missing` 失败重试。

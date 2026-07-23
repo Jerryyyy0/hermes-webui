@@ -2,11 +2,23 @@ import json
 import re
 from pathlib import Path
 
+import pytest
+
+from integration.project_logging.config import configure_logging
 import api.models as models
 from api.models import Session
 from api.request_diagnostics import RequestDiagnostics
 
-_TS_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3} ")
+
+@pytest.fixture(autouse=True)
+def _reset_logging_handlers():
+    configure_logging(force=True)
+    yield
+
+_TS_RE = re.compile(
+    r"^(?:(?:INFO|WARNING|ERROR|CRITICAL|DEBUG) )?"
+    r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3} "
+)
 
 
 def _without_ts(line: str) -> str:
@@ -43,7 +55,8 @@ def test_request_diagnostics_timeout_record_includes_stage_without_thread_stacks
 
 
 def test_request_diagnostics_timeout_record_includes_thread_stacks_when_enabled(capsys, monkeypatch):
-    monkeypatch.setenv("HERMES_WEBUI_SLOW_REQUEST_STACKS", "1")
+    monkeypatch.setenv("HERMES_WEBUI_LOG_LEVEL", "DEBUG")
+    configure_logging(force=True)
     diag = RequestDiagnostics(
         "GET",
         "/api/sessions?all_profiles=1",
@@ -114,7 +127,7 @@ def test_issue1855_target_routes_are_wired_to_diagnostics():
     src = Path("api/routes.py").read_text(encoding="utf-8")
 
     assert 'RequestDiagnostics.maybe_start("GET", parsed.path' in src
-    assert "all_sessions(diag=diag, include_lineage_metadata=False)" in src
+    assert "all_sessions(diag=diag)" in src
     assert 'RequestDiagnostics.maybe_start("POST", parsed.path' in src
     assert "_handle_chat_start(handler, body, diag=diag)" in src
     for stage in (

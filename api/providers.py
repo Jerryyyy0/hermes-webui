@@ -2727,7 +2727,7 @@ def set_provider_key(provider_id: str, api_key: str | None) -> dict[str, Any]:
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
     except Exception as exc:
-        logger.exception("Failed to write env file for provider %s", provider_id)
+        logger.exception("Failed to write env file for provider %s error=%s", provider_id, exc)
         return {"ok": False, "error": f"Failed to save API key: {exc}"}
 
     # Invalidate the model cache so the dropdown refreshes on next request.
@@ -2837,5 +2837,5 @@ def _clean_provider_key_from_config(provider_id: str) -> None:
         # reload_config() also acquires _cfg_lock internally.
         if changed:
             reload_config()
-    except Exception:
-        logger.exception("Failed to clean provider key from config.yaml for %s", provider_id)
+    except Exception as exc:
+        logger.exception("Failed to clean provider key from config.yaml for %s error=%s", provider_id, exc)

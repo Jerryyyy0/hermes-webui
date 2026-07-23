@@ -1,8 +1,20 @@
 import re
 
-from api import stream_diagnostics as sd
+import pytest
 
-_TS_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3} ")
+from api import stream_diagnostics as sd
+from integration.project_logging.config import configure_logging
+
+
+@pytest.fixture(autouse=True)
+def _reset_logging_handlers():
+    configure_logging(force=True)
+    yield
+
+_TS_RE = re.compile(
+    r"^(?:(?:INFO|WARNING|ERROR|CRITICAL|DEBUG) )?"
+    r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3} "
+)
 
 
 def _without_ts(line: str) -> str:
@@ -11,7 +23,8 @@ def _without_ts(line: str) -> str:
 
 
 def test_stream_diag_disabled_by_default(monkeypatch, capsys):
-    monkeypatch.delenv("HERMES_WEBUI_STREAM_DIAG", raising=False)
+    monkeypatch.setenv("HERMES_WEBUI_LOG_LEVEL", "WARNING")
+    configure_logging(force=True)
 
     payload = sd.log_event("webui.stream.open", "浏览器已连接聊天流。", stream_id="s1")
 
@@ -21,7 +34,8 @@ def test_stream_diag_disabled_by_default(monkeypatch, capsys):
 
 
 def test_stream_diag_marks_agent_side(monkeypatch):
-    monkeypatch.setenv("HERMES_WEBUI_STREAM_DIAG", "1")
+    monkeypatch.setenv("HERMES_WEBUI_LOG_LEVEL", "INFO")
+    configure_logging(force=True)
 
     payload = sd.log_event("agent_init.basic", "Agent 基础初始化完成。", stream_id="s1")
 
@@ -29,7 +43,8 @@ def test_stream_diag_marks_agent_side(monkeypatch):
 
 
 def test_stream_diag_logs_pretty_sanitized_line(monkeypatch, capsys):
-    monkeypatch.setenv("HERMES_WEBUI_STREAM_DIAG", "1")
+    monkeypatch.setenv("HERMES_WEBUI_LOG_LEVEL", "INFO")
+    configure_logging(force=True)
 
     payload = sd.log_event(
         "webui.worker.context_prepared",
@@ -53,7 +68,8 @@ def test_stream_diag_logs_pretty_sanitized_line(monkeypatch, capsys):
 
 
 def test_stream_diag_timing_fields_are_not_redacted(monkeypatch, capsys):
-    monkeypatch.setenv("HERMES_WEBUI_STREAM_DIAG", "1")
+    monkeypatch.setenv("HERMES_WEBUI_LOG_LEVEL", "INFO")
+    configure_logging(force=True)
 
     payload = sd.log_event(
         "agent.model_first_delta",
@@ -72,7 +88,8 @@ def test_stream_diag_timing_fields_are_not_redacted(monkeypatch, capsys):
 
 
 def test_stream_diag_non_slow_events_are_emitted(monkeypatch, capsys):
-    monkeypatch.setenv("HERMES_WEBUI_STREAM_DIAG", "1")
+    monkeypatch.setenv("HERMES_WEBUI_LOG_LEVEL", "INFO")
+    configure_logging(force=True)
 
     sd.log_event(
         "webui.worker.agent_ready",
@@ -87,7 +104,8 @@ def test_stream_diag_non_slow_events_are_emitted(monkeypatch, capsys):
 
 
 def test_stream_diag_debug_includes_debug_fields(monkeypatch, capsys):
-    monkeypatch.setenv("HERMES_WEBUI_STREAM_DIAG", "debug")
+    monkeypatch.setenv("HERMES_WEBUI_LOG_LEVEL", "DEBUG")
+    configure_logging(force=True)
 
     sd.log_event(
         "webui.worker.agent_import",
@@ -105,7 +123,8 @@ def test_stream_diag_debug_includes_debug_fields(monkeypatch, capsys):
 
 
 def test_stream_diag_summary_and_event_counters(monkeypatch):
-    monkeypatch.setenv("HERMES_WEBUI_STREAM_DIAG", "1")
+    monkeypatch.setenv("HERMES_WEBUI_LOG_LEVEL", "INFO")
+    configure_logging(force=True)
     sd.clear_stream_summary("stream-test")
     diag = sd.StreamDiag(stream_id="stream-test", session_id="session-test", workspace="/tmp/workspace")
 
@@ -128,7 +147,8 @@ def test_stream_diag_summary_and_event_counters(monkeypatch):
 
 
 def test_stream_diag_stage_records_duration_elapsed_and_phase(monkeypatch, capsys):
-    monkeypatch.setenv("HERMES_WEBUI_STREAM_DIAG", "1")
+    monkeypatch.setenv("HERMES_WEBUI_LOG_LEVEL", "INFO")
+    configure_logging(force=True)
     ticks = iter((100.0, 110.0, 125.0, 140.0))
     monkeypatch.setattr(sd, "monotonic_ms", lambda: next(ticks))
     sd.clear_stream_summary("stage-test")
@@ -154,7 +174,8 @@ def test_stream_diag_stage_records_duration_elapsed_and_phase(monkeypatch, capsy
 
 
 def test_stream_diag_stage_keeps_error_outcome(monkeypatch):
-    monkeypatch.setenv("HERMES_WEBUI_STREAM_DIAG", "1")
+    monkeypatch.setenv("HERMES_WEBUI_LOG_LEVEL", "INFO")
+    configure_logging(force=True)
     sd.clear_stream_summary("error-stage")
     diag = sd.StreamDiag(stream_id="error-stage")
 
@@ -169,7 +190,8 @@ def test_stream_diag_stage_keeps_error_outcome(monkeypatch):
 
 
 def test_stream_diag_distinguishes_nested_and_summary_steps(monkeypatch):
-    monkeypatch.setenv("HERMES_WEBUI_STREAM_DIAG", "1")
+    monkeypatch.setenv("HERMES_WEBUI_LOG_LEVEL", "INFO")
+    configure_logging(force=True)
 
     init = sd.log_event("agent_init.tools_registry", "工具注册表初始化完成。")
     agent_import = sd.log_event("webui.worker.agent_import", "Agent 类加载自检完成。")

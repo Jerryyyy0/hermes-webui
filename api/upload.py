@@ -1,6 +1,7 @@
 """
 Hermes Web UI -- File upload: multipart parser and upload handler.
 """
+import logging
 import mimetypes
 import os
 import re as _re
@@ -20,6 +21,9 @@ from api.workspace import (
     rmtree_anchored,
     unlink_anchored,
 )
+from integration.project_logging import get_logger
+
+logger = get_logger(__name__)
 
 
 def _max_extracted_bytes() -> int:
@@ -203,7 +207,8 @@ def _reject_invisible_session(handler, session, profile_override: str | None = N
 
 
 def handle_upload(handler):
-    import traceback as _tb
+    session_id = ""
+    safe_name = ""
     try:
         content_type = handler.headers.get('Content-Type', '')
         content_length = int(handler.headers.get('Content-Length', 0) or 0)
@@ -238,9 +243,19 @@ def handle_upload(handler):
     except ValueError as e:
         status = 413 if _is_upload_too_large_error(e) else 400
         return j(handler, {'error': _upload_value_error_message(e)}, status=status)
-    except Exception:
-        print('[webui] upload error: ' + _tb.format_exc(), flush=True)
-        return j(handler, {'error': '上传失败，请稍后重试'}, status=500)
+    except Exception as exc:
+        logger.exception(
+            "upload failed session_id=%s filename=%s error=%s",
+            session_id or "-",
+            safe_name or "-",
+            exc,
+        )
+        return j(
+            handler,
+            {'error': '上传失败，请稍后重试'},
+            status=500,
+            exc_info=True,
+        )
 
 
 def extract_archive(file_bytes: bytes, filename: str, workspace: Path):
@@ -384,7 +399,7 @@ def extract_archive(file_bytes: bytes, filename: str, workspace: Path):
 
 def handle_upload_extract(handler):
     """Handle archive upload and extraction."""
-    import traceback as _tb
+    session_id = ""
     try:
         content_type = handler.headers.get('Content-Type', '')
         content_length = int(handler.headers.get('Content-Length', 0) or 0)
@@ -409,13 +424,16 @@ def handle_upload_extract(handler):
         return j(handler, {'ok': True, **result})
     except ValueError as e:
         return j(handler, {'error': str(e)}, status=400)
-    except Exception:
-        print('[webui] upload extract error: ' + _tb.format_exc(), flush=True)
+    except Exception as exc:
+        logger.exception(
+            "upload extract failed session_id=%s error=%s",
+            session_id or "-",
+            exc,
+        )
         return j(handler, {'error': 'Archive extraction failed'}, status=500)
 
 
 def handle_transcribe(handler):
-    import traceback as _tb
     temp_path = None
     try:
         content_type = handler.headers.get('Content-Type', '')
@@ -446,8 +464,8 @@ def handle_transcribe(handler):
         return j(handler, {'ok': True, 'transcript': transcript})
     except ValueError as e:
         return j(handler, {'error': str(e)}, status=400)
-    except Exception:
-        print('[webui] transcribe error: ' + _tb.format_exc(), flush=True)
+    except Exception as exc:
+        logger.exception("transcribe failed error=%s", exc)
         return j(handler, {'error': 'Transcription failed'}, status=500)
     finally:
         if temp_path:
@@ -600,7 +618,7 @@ def handle_workspace_upload(handler):
     File:
         file – the uploaded file(s)
     """
-    import traceback as _tb
+    session_id = ""
     try:
         content_type = handler.headers.get('Content-Type', '')
         content_length = int(handler.headers.get('Content-Length', 0) or 0)
@@ -694,7 +712,7 @@ def handle_workspace_upload(handler):
             # raw files instead of extracting.
             is_archive = safe_name.lower().endswith(('.zip', '.tar', '.tar.gz', '.tgz', '.tar.bz2', '.tbz2', '.tar.xz', '.txz'))
             if is_archive:
-                import zipfile, tarfile, traceback as _extract_tb
+                import zipfile, tarfile
                 try:
                     extraction = extract_archive(file_bytes, safe_name, target_dir)
                     # Remove the archive file after successful extraction
@@ -719,7 +737,12 @@ def handle_workspace_upload(handler):
                         unlink_anchored(workspace, dest.resolve())
                     except FileNotFoundError:
                         pass
-                    print(f'[webui] workspace upload extract error: {e}', flush=True)
+                    logger.warning(
+                        "workspace upload extract failed session_id=%s filename=%s error=%s",
+                        session_id,
+                        safe_name,
+                        e,
+                    )
                     results.append({
                         'filename': safe_name,
                         'path': str(target_dir),
@@ -730,8 +753,13 @@ def handle_workspace_upload(handler):
                         'extract_error': str(e) or 'Archive extraction failed',
                     })
                     continue
-                except Exception:
-                    print('[webui] workspace upload extract error: ' + _extract_tb.format_exc(), flush=True)
+                except Exception as exc:
+                    logger.exception(
+                        "workspace upload extract failed session_id=%s filename=%s error=%s",
+                        session_id,
+                        safe_name,
+                        exc,
+                    )
                     try:
                         unlink_anchored(workspace, dest.resolve())
                     except FileNotFoundError:
@@ -743,7 +771,7 @@ def handle_workspace_upload(handler):
                         'mime': mime,
                         'is_image': False,
                         'extracted': False,
-                        'extract_error': 'Archive extraction failed',
+                        'extract_error': str(exc) or 'Archive extraction failed',
                     })
                     continue
 
@@ -761,6 +789,10 @@ def handle_workspace_upload(handler):
         return j(handler, {'files': results, 'count': len(results)})
     except ValueError as e:
         return j(handler, {'error': str(e)}, status=400)
-    except Exception:
-        print('[webui] workspace upload error: ' + _tb.format_exc(), flush=True)
+    except Exception as exc:
+        logger.exception(
+            "workspace upload failed session_id=%s error=%s",
+            session_id or "-",
+            exc,
+        )
         return j(handler, {'error': 'Upload failed'}, status=500)

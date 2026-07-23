@@ -13,8 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from integration.assistant_bubbles import collectors, copy, store
-from integration.request_logging.formatting import format_kv, with_timestamp
-from integration.request_logging.logger import console_info, console_warning
+from integration.project_logging import console_info, console_warning, format_kv, with_timestamp
 
 logger = logging.getLogger(__name__)
 

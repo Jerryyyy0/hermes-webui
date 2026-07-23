@@ -59,9 +59,9 @@ def install_zhiling_split_webui_csrf_hook() -> None:
             return original(handler)
 
         routes_module._check_csrf = _zhiling_split_webui_check_csrf
-    except Exception:
+    except Exception as exc:
         traceback.print_exc()
-        logger.exception("Failed to install Zhiling split WebUI CSRF hook")
+        logger.exception("Failed to install Zhiling split WebUI CSRF hook error=%s", exc)
 
 
 def _fake_handler(**headers):

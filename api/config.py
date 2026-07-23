@@ -36,6 +36,7 @@ from api.plugin_providers import (
     effective_provider_display_name as _effective_provider_display_name,
     is_plugin_model_provider as _is_plugin_model_provider,
 )
+from integration.project_logging import get_logger
 
 HOME = _paths.HOME
 _hermes_home_has_webui_state = _paths._hermes_home_has_webui_state
@@ -88,7 +89,7 @@ SETTINGS_FILE = STATE_DIR / "settings.json"
 LAST_WORKSPACE_FILE = STATE_DIR / "last_workspace.txt"
 PROJECTS_FILE = STATE_DIR / "projects.json"
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # Keep custom provider /v1/models probes below the frontend's generic request
 # timeout even when one upstream is slow or unreachable. The models cache rebuild
@@ -881,15 +882,16 @@ def _warn_state_dir_divergence(warn_prefix: str) -> None:
                         json_files = [f for f in sibling_sessions.glob("*.json") if f.name != "_index.json"]
                         if json_files:
                             # Found a sibling with session data
-                            print(
+                            from integration.project_logging import log_warning
+
+                            log_warning(
                                 f"{warn_prefix}  STATE_DIR is empty but a sibling state directory has session data.\n"
                                 f"        Current : {STATE_DIR}\n"
                                 f"        Sibling : {sibling}\n"
                                 f"        If you switched launch methods (bootstrap.py / ctl.sh / systemd),\n"
                                 f"        the active HERMES_WEBUI_STATE_DIR env var may differ from the\n"
                                 f"        previous run. Set it explicitly to restore access:\n"
-                                f"          export HERMES_WEBUI_STATE_DIR={sibling}",
-                                flush=True,
+                                f"          export HERMES_WEBUI_STATE_DIR={sibling}"
                             )
                             return
     except Exception:
@@ -897,7 +899,9 @@ def _warn_state_dir_divergence(warn_prefix: str) -> None:
 
 
 def print_startup_config() -> None:
-    """Print detected configuration at startup so the user can verify what was found."""
+    """Log detected configuration at startup so the user can verify what was found."""
+    from integration.project_logging import log_info, log_warning
+
     ok = "\033[32m[ok]\033[0m"
     warn = "\033[33m[!!]\033[0m"
     err = "\033[31m[XX]\033[0m"
@@ -915,7 +919,8 @@ def print_startup_config() -> None:
         f"  config file : {_get_config_path()}  {'(found)' if _get_config_path().exists() else '(not found, using defaults)'}",
         "",
     ]
-    print("\n".join(lines), flush=True)
+    for line in lines:
+        log_info(line)
 
     try:
         _warn_state_dir_divergence(warn)
@@ -923,7 +928,7 @@ def print_startup_config() -> None:
         pass
 
     if not _HERMES_FOUND:
-        print(
+        log_warning(
             f"{err}  Could not find the Hermes agent directory.\n"
             "      The server will start but agent features will not work.\n"
             "\n"
@@ -932,8 +937,7 @@ def print_startup_config() -> None:
             "        export HERMES_HOME=/path/to/.hermes\n"
             "\n"
             "      Or clone hermes-agent as a sibling of this repo:\n"
-            "        git clone <hermes-agent-repo> ../hermes-agent\n",
-            flush=True,
+            "        git clone <hermes-agent-repo> ../hermes-agent\n"
         )
 
 

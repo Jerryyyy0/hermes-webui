@@ -9,8 +9,9 @@ import re as _re
 import ssl
 from pathlib import Path
 from api.config import IMAGE_EXTS, MD_EXTS
+from integration.project_logging.config import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 # Treat stalled/closed HTTP clients as normal disconnects.  Long-lived SSE
@@ -250,8 +251,12 @@ def j(handler, payload, status: int=200, extra_headers: dict=None, *, pretty: bo
     (e.g., {'Set-Cookie': '...'}).  Headers are sent before end_headers().
     """
     if log_error is not False and status >= 400:
+        if exc_info is None and status >= 500:
+            import sys
+            if sys.exc_info()[0] is not None:
+                exc_info = True
         try:
-            from integration.request_logging import maybe_log_api_response
+            from integration.project_logging import maybe_log_api_response
             maybe_log_api_response(handler, status, payload, exc_info=exc_info)
         except ImportError:
             pass

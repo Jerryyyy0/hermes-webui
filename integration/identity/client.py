@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import logging
+
 import httpx
 
 from integration.config import zhiling_control_plane_url
+from integration.project_logging import get_logger
 
+logger = get_logger(__name__)
 _TIMEOUT = 10.0
 
 
@@ -29,9 +33,11 @@ def lookup_current_identity(access_token: str) -> tuple[int, dict]:
                 url,
                 headers={"Authorization": f"Bearer {access_token}"},
             )
-            print(f"==============/api/identity/lookup响应：{resp.json()}==============")
     except httpx.HTTPError as exc:
+        logger.warning("identity lookup request failed: %s", type(exc).__name__)
         raise IdentityLookupError(str(exc)) from exc
+
+    logger.info("identity lookup completed status=%s", resp.status_code)
 
     try:
         data = resp.json()

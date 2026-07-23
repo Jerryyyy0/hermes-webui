@@ -17,8 +17,9 @@ import time
 from pathlib import Path
 
 from api.config import STATE_DIR, get_config, load_settings
+from integration.project_logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 # Default session TTL — 30 days. Kept as a module-level constant for backwards

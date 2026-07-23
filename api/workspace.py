@@ -20,8 +20,9 @@ import concurrent.futures
 import threading
 import time
 from pathlib import Path, PurePosixPath
+from integration.project_logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 _ESCAPE_AUTH_TTL_SECONDS = 300
 _ESCAPE_AUTH_LOCK = threading.Lock()

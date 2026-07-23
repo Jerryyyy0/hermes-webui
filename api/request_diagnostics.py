@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
 import sys
 import threading
 import time
@@ -11,24 +10,11 @@ import traceback
 import uuid
 from typing import Any
 
-from integration.request_logging.formatting import format_slow_request_line
-from integration.request_logging.logger import console_warning
-
+from integration.project_logging import is_debug_level
+from integration.project_logging import format_slow_request_line, console_warning
 
 DEFAULT_SLOW_REQUEST_SECONDS = 5.0
 MAX_STACK_FRAMES_PER_THREAD = 40
-_SLOW_REQUEST_STACKS_ENV = "HERMES_WEBUI_SLOW_REQUEST_STACKS"
-
-
-def _env_flag(name: str, *, default: bool = False) -> bool:
-    raw = os.getenv(name, "").strip().lower()
-    if not raw:
-        return default
-    return raw in {"1", "true", "yes", "on"}
-
-
-def _slow_request_include_stacks() -> bool:
-    return _env_flag(_SLOW_REQUEST_STACKS_ENV, default=False)
 
 # Process-global watchdog: a single daemon thread scans all in-flight
 # RequestDiagnostics instances instead of each request spawning its own
@@ -99,14 +85,11 @@ def _watchdog_unregister(request_id: str) -> None:
 
 
 def _slow_request_seconds() -> float:
-    raw = os.getenv("HERMES_WEBUI_SLOW_REQUEST_SECONDS", "").strip()
-    if not raw:
-        return DEFAULT_SLOW_REQUEST_SECONDS
-    try:
-        value = float(raw)
-    except ValueError:
-        return DEFAULT_SLOW_REQUEST_SECONDS
-    return max(0.0, value)
+    return DEFAULT_SLOW_REQUEST_SECONDS
+
+
+def _slow_request_include_stacks() -> bool:
+    return is_debug_level()
 
 
 class RequestDiagnostics:

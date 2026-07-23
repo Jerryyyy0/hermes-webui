@@ -10,8 +10,9 @@ import subprocess
 import threading
 from pathlib import Path
 from typing import Callable
+from integration.project_logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 _DEFAULT_TIMEOUT_SECONDS = 60.0
 _DEFAULT_MAX_WORKERS = 4

@@ -5,8 +5,15 @@ import types
 import pytest
 
 from api.helpers import bad, j
-from integration.request_logging import emit_api_error, error_fields_from_payload, maybe_log_api_response
-from integration.request_logging import policy as log_policy
+from integration.project_logging.config import configure_logging
+from integration.project_logging import emit_api_error, error_fields_from_payload, maybe_log_api_response
+from integration.project_logging import request as log_policy
+
+
+@pytest.fixture(autouse=True)
+def _reset_logging_handlers():
+    configure_logging(force=True)
+    yield
 
 
 class Headers:
@@ -28,7 +35,10 @@ def _handler(**kwargs):
     return types.SimpleNamespace(**defaults)
 
 
-_TS_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3} ")
+_TS_RE = re.compile(
+    r"^(?:(?:INFO|WARNING|ERROR|CRITICAL|DEBUG) )?"
+    r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3} "
+)
 
 
 def _webui_lines(output: str) -> list[str]:
@@ -49,8 +59,8 @@ def test_error_fields_from_payload_bad_shape():
 
 
 def test_bad_logs_structured_api_error(capsys, monkeypatch):
-    monkeypatch.delenv("HERMES_WEBUI_API_ERROR_LOG", raising=False)
-    monkeypatch.delenv("HERMES_WEBUI_API_ERROR_LOG_MIN_STATUS", raising=False)
+    monkeypatch.setenv("HERMES_WEBUI_LOG_LEVEL", "INFO")
+    configure_logging(force=True)
 
     handler = _handler()
     sent = []
@@ -77,7 +87,8 @@ def test_bad_logs_structured_api_error(capsys, monkeypatch):
 
 
 def test_j_logs_502_with_traceback(capsys, monkeypatch):
-    monkeypatch.delenv("HERMES_WEBUI_API_ERROR_LOG", raising=False)
+    monkeypatch.setenv("HERMES_WEBUI_LOG_LEVEL", "INFO")
+    configure_logging(force=True)
 
     handler = _handler()
     handler.send_response = lambda status: None
@@ -105,7 +116,8 @@ def test_j_logs_502_with_traceback(capsys, monkeypatch):
 
 
 def test_log_error_false_skips_logging(capsys, monkeypatch):
-    monkeypatch.delenv("HERMES_WEBUI_API_ERROR_LOG", raising=False)
+    monkeypatch.setenv("HERMES_WEBUI_LOG_LEVEL", "INFO")
+    configure_logging(force=True)
 
     handler = _handler()
     handler.send_response = lambda status: None
@@ -118,18 +130,19 @@ def test_log_error_false_skips_logging(capsys, monkeypatch):
     assert _webui_lines(capsys.readouterr().err) == []
 
 
-def test_api_error_logging_disabled_by_env(capsys, monkeypatch):
-    monkeypatch.setenv("HERMES_WEBUI_API_ERROR_LOG", "0")
+def test_api_error_hidden_by_error_level(capsys, monkeypatch):
+    monkeypatch.setenv("HERMES_WEBUI_LOG_LEVEL", "ERROR")
+    configure_logging(force=True)
 
     handler = _handler()
-    emit_api_error(handler, status=500, message="should not log")
+    emit_api_error(handler, status=400, message="should not log")
 
     assert _webui_lines(capsys.readouterr().err) == []
 
 
-def test_api_error_min_status_env(capsys, monkeypatch):
-    monkeypatch.delenv("HERMES_WEBUI_API_ERROR_LOG", raising=False)
-    monkeypatch.setenv("HERMES_WEBUI_API_ERROR_LOG_MIN_STATUS", "500")
+def test_api_error_404_hidden_at_critical_level(capsys, monkeypatch):
+    monkeypatch.setenv("HERMES_WEBUI_LOG_LEVEL", "CRITICAL")
+    configure_logging(force=True)
 
     handler = _handler()
     maybe_log_api_response(handler, 404, {"error": "not found"})
@@ -156,8 +169,10 @@ def test_server_log_request_includes_error_summary(capsys):
 
     Handler.log_request(handler, "502")
 
-    line = _without_ts(_webui_lines(capsys.readouterr().err)[0])
-    assert line.startswith("[webui][request] POST /api/example -> 502")
+    raw = capsys.readouterr().err.strip()
+    assert raw.startswith("INFO ")
+    line = _without_ts(raw)
+    assert line.startswith("POST /api/example -> 502")
     assert "error=\"502 | upstream_failed | down\"" in line
 
 
@@ -193,9 +208,7 @@ def test_server_unhandled_exception_logs_structured_error(capsys, monkeypatch):
     assert "ValueError" in output
 
 
-def test_policy_helpers_defaults(monkeypatch):
-    monkeypatch.delenv("HERMES_WEBUI_API_ERROR_LOG", raising=False)
-    monkeypatch.delenv("HERMES_WEBUI_API_ERROR_LOG_MIN_STATUS", raising=False)
+def test_policy_helpers_defaults():
     assert log_policy.api_error_logging_enabled() is True
     assert log_policy.api_error_min_status() == 400
     assert log_policy.should_log_api_error(400) is True
