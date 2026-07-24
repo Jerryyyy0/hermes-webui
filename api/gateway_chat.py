@@ -248,6 +248,33 @@ def _gateway_tool_progress_event(payload: dict) -> tuple[str, dict] | None:
     return ("tool_complete" if is_complete else "tool"), event_payload
 
 
+_TIRITH_FINDING_DISPLAY_FIELDS = (
+    "rule_id",
+    "severity",
+    "title",
+    "description",
+    "remediation",
+)
+
+
+def _normalize_tirith_findings(value) -> list[dict[str, str]]:
+    """Keep only the structured display fields supported by WebUI approvals."""
+    if not isinstance(value, list):
+        return []
+    findings = []
+    for finding in value:
+        if not isinstance(finding, dict):
+            continue
+        normalized = {
+            key: str(finding[key]).strip()
+            for key in _TIRITH_FINDING_DISPLAY_FIELDS
+            if finding.get(key) is not None and str(finding[key]).strip()
+        }
+        if normalized:
+            findings.append(normalized)
+    return findings
+
+
 def _gateway_runs_approval_event(payload: dict) -> dict | None:
     """Map a runs-API approval.request payload to the WebUI approval contract."""
     if not isinstance(payload, dict):
@@ -262,12 +289,13 @@ def _gateway_runs_approval_event(payload: dict) -> dict | None:
     approval_id = str(payload.get("approval_id") or payload.get("id") or "").strip()
     risk = str(payload.get("risk_level") or "high").strip()
     choices = payload.get("choices") if isinstance(payload.get("choices"), list) else []
+    tirith_findings = _normalize_tirith_findings(payload.get("tirith_findings"))
     allow_permanent = payload.get("allow_permanent")
     if allow_permanent is None:
         allow_permanent = "always" in choices
     if not (tool or command or description):
         return None
-    return localize_approval_payload({
+    event = {
         "tool": tool,
         "command": command,
         "description": description,
@@ -279,7 +307,10 @@ def _gateway_runs_approval_event(payload: dict) -> dict | None:
         "approval_id": approval_id,
         "choices": choices,
         "allow_permanent": bool(allow_permanent),
-    })
+    }
+    if tirith_findings:
+        event["tirith_findings"] = tirith_findings
+    return localize_approval_payload(event)
 
 
 def _run_gateway_runs_api_streaming(

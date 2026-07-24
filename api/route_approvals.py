@@ -229,7 +229,9 @@ def submit_pending(session_key: str, approval: dict) -> None:
       parallel tool calls each get their own approval slot (fixes #527).
     - Notify any connected SSE subscribers immediately.
     """
-    entry = dict(approval)
+    # Pending state is served by initial SSE snapshots and polling as well as
+    # the live stream, so it must carry the same display-only localization.
+    entry = localize_approval_payload(approval)
     entry.setdefault("approval_id", uuid.uuid4().hex)
     with _lock:
         queue_list = _normalize_pending_queue_locked(session_key)

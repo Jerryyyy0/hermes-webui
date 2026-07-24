@@ -41,7 +41,15 @@ _REASON_TEXT = {
     "command parser limit exceeded": "命令解析器长度超过限制",
     "command parser limit or malformed executable payload": "命令解析器达到限制或可执行载荷格式错误",
     "Tirith security module unavailable": "Tirith 安全模块不可用",
+    "execute_code": "execute_code 脚本执行。该脚本可能创建子进程或修改文件，且不会经过终端命令审批；本次批准仅对当前这次运行有效。",
 }
+
+_EXECUTE_CODE_DESCRIPTION = (
+    "execute_code script execution. The script can spawn subprocesses or "
+    "mutate files without passing through terminal command approval; "
+    "approval is one-shot for this run."
+)
+_EXECUTE_CODE_DESCRIPTION_ZH = _REASON_TEXT["execute_code"]
 
 _SEVERITY_TEXT = {
     "CRITICAL": "严重",
@@ -54,18 +62,41 @@ _SEVERITY_TEXT = {
 _TIRITH_RULE_TEXT = {
     "pipe-to-interpreter": "管道传入解释器",
     "pipe_to_interpreter": "管道传入解释器",
+    "schemeless-url-in-sink-context": "在执行上下文中使用无协议 URL",
+    "schemeless_url_in_sink_context": "在执行上下文中使用无协议 URL",
+    "variation-selector-characters": "检测到 Unicode 变体选择符",
+    "variation_selector_characters": "检测到 Unicode 变体选择符",
+    "variation-selectors": "检测到 Unicode 变体选择符",
+    "variation_selectors": "检测到 Unicode 变体选择符",
+    "unicode-variation-selectors": "检测到 Unicode 变体选择符",
+    "unicode_variation_selectors": "检测到 Unicode 变体选择符",
 }
 
 _TIRITH_TITLE_TEXT = {
     "Pipe to interpreter": "管道传入解释器",
+    "Schemeless URL in sink context": "在执行上下文中使用无协议 URL",
+    "Variation selector characters detected": "检测到 Unicode 变体选择符",
+}
+
+_TIRITH_DESCRIPTION_TEXT = {
+    (
+        "Content contains Unicode variation selectors (VS1-256). These are commonly "
+        "used in emoji sequences but may indicate steganographic encoding or obfuscation"
+    ): (
+        "内容包含 Unicode 变体选择符（VS1-256）。它们常见于 emoji 序列，"
+        "但也可能用于隐写编码或混淆。"
+    ),
+    (
+        "URL without explicit scheme passed to a command that downloads/executes content"
+    ): "无协议 URL 被传给会下载或执行内容的命令，可能造成来源识别或执行风险。",
 }
 
 _PIPE_TO_INTERPRETER_RE = re.compile(
     r"^Command pipes output from '([^']+)' directly to interpreter '([^']+)'\. "
     r"Downloaded content will be executed without inspection\."
 )
-_TIRITH_PIPE_DESCRIPTION_RE = re.compile(
-    r"^\[(?P<severity>[A-Z]+)\] Pipe to interpreter(?:: (?P<detail>[^;]+))?"
+_TIRITH_FINDING_PROSE_RE = re.compile(
+    r"^\[(?P<severity>[A-Z]+)\] (?P<title>[^:;]+)(?:: (?P<detail>.*))?$"
 )
 
 
@@ -81,58 +112,84 @@ def _localize_reason(reason: str) -> str:
     return reason
 
 
+def _localize_tirith_detail(rule_id: str, title: str, description: str) -> str:
+    if rule_id in {"pipe-to-interpreter", "pipe_to_interpreter"} or title == "Pipe to interpreter":
+        pipe_match = _PIPE_TO_INTERPRETER_RE.match(description)
+        if pipe_match:
+            producer, interpreter = pipe_match.groups()
+            return (
+                f"命令将“{producer}”的输出直接传给解释器“{interpreter}”执行，"
+                "下载内容未经检查即会运行。"
+            )
+        if description:
+            return "命令将输出直接传给解释器执行，下载内容未经检查即会运行。"
+    if rule_id in {
+        "schemeless-url-in-sink-context",
+        "schemeless_url_in_sink_context",
+    } or title == "Schemeless URL in sink context":
+        return "无协议 URL 被传给会下载或执行内容的命令，可能造成来源识别或执行风险。"
+    if description in _TIRITH_DESCRIPTION_TEXT:
+        return _TIRITH_DESCRIPTION_TEXT[description]
+    return description
+
+
 def _localize_tirith_finding(finding: Mapping[str, object]) -> str:
     severity = str(finding.get("severity") or "").upper()
     rule_id = str(finding.get("rule_id") or "")
     title = str(finding.get("title") or "").strip()
     description = str(finding.get("description") or "").strip()
-    localized_title = _TIRITH_RULE_TEXT.get(rule_id) or _TIRITH_TITLE_TEXT.get(title) or title
-
-    localized_description = description
-    pipe_match = _PIPE_TO_INTERPRETER_RE.match(description)
-    if pipe_match:
-        producer, interpreter = pipe_match.groups()
-        localized_description = (
-            f"命令将“{producer}”的输出直接传给解释器“{interpreter}”执行，"
-            "下载内容未经检查即会运行。"
-        )
+    localized_title = (
+        _TIRITH_RULE_TEXT.get(rule_id)
+        or _TIRITH_TITLE_TEXT.get(title)
+    )
+    localized_description = _localize_tirith_detail(rule_id, title, description)
 
     prefix = f"[{_SEVERITY_TEXT.get(severity, severity)}] " if severity else ""
-    if localized_title and localized_description:
-        return f"{prefix}{localized_title}：{localized_description}"
     if localized_title:
-        return f"{prefix}{localized_title}"
-    return localized_description
+        return f"{prefix}{localized_title}" + (f"：{localized_description}" if localized_description else "")
+    if title and description:
+        return f"{prefix}{title}：{description}"
+    return f"{prefix}{title or description}".strip()
+
+
+def _localize_tirith_prose_finding(segment: str) -> str:
+    match = _TIRITH_FINDING_PROSE_RE.match(segment.strip())
+    if not match:
+        return _localize_reason(segment)
+    severity = match.group("severity")
+    title = (match.group("title") or "").strip()
+    detail = (match.group("detail") or "").strip()
+    return _localize_tirith_finding(
+        {
+            "severity": severity,
+            "title": title,
+            "description": detail,
+            "rule_id": "",
+        }
+    )
 
 
 def _localize_tirith_description(description: str) -> str:
     body = description.removeprefix("Security scan — ").removeprefix("Security scan: ")
-    pipe_match = _TIRITH_PIPE_DESCRIPTION_RE.match(body)
-    if pipe_match:
-        severity = _SEVERITY_TEXT.get(pipe_match.group("severity"), pipe_match.group("severity"))
-        detail = pipe_match.group("detail") or ""
-        detail_match = _PIPE_TO_INTERPRETER_RE.match(detail)
-        if detail_match:
-            producer, interpreter = detail_match.groups()
-            detail = (
-                f"命令将“{producer}”的输出直接传给解释器“{interpreter}”执行，"
-                "下载内容未经检查即会运行。"
-            )
-        suffix = body[pipe_match.end():].lstrip("; ")
-        localized = f"安全扫描：[{severity}] 管道传入解释器" + (f"：{detail}" if detail else "")
-        return localized + (f"；{_localize_reason_list(suffix)}" if suffix else "")
     if not body:
         return "安全扫描：检测到安全风险"
     if body == "security issue detected":
         return "安全扫描：检测到安全风险"
-    for source, translated in _SEVERITY_TEXT.items():
-        body = body.replace(f"[{source}]", f"[{translated}]")
     if body == "security warning detected (details unavailable)":
         return "安全扫描：检测到安全警告（详情不可用）"
     if body.startswith("tirith timed out"):
         return "安全扫描：Tirith 扫描超时"
     if body.startswith("tirith unavailable"):
         return "安全扫描：Tirith 不可用"
+
+    # Prefer parsing "[SEVERITY] Title: detail" segments so known Tirith titles
+    # localize even when the Agent has not yet attached tirith_findings.
+    segments = [part.strip() for part in body.split("; ") if part.strip()]
+    if any(_TIRITH_FINDING_PROSE_RE.match(segment) for segment in segments):
+        return "安全扫描：" + "；".join(_localize_tirith_prose_finding(segment) for segment in segments)
+
+    for source, translated in _SEVERITY_TEXT.items():
+        body = body.replace(f"[{source}]", f"[{translated}]")
     return f"安全扫描：{body}"
 
 
@@ -151,6 +208,10 @@ def localize_approval_payload(approval: Mapping[str, object]) -> dict:
     """
     payload = dict(approval)
     description = str(payload.get("description") or "").strip()
+    pattern_key = str(payload.get("pattern_key") or "").strip()
+    if pattern_key == "execute_code" or description == _EXECUTE_CODE_DESCRIPTION:
+        payload["display_description_zh"] = _EXECUTE_CODE_DESCRIPTION_ZH
+        return payload
     if description.startswith("Security scan"):
         findings = payload.get("tirith_findings")
         if isinstance(findings, list):
@@ -160,7 +221,12 @@ def localize_approval_payload(approval: Mapping[str, object]) -> dict:
                 if isinstance(item, Mapping)
             ]
             if parts:
-                payload["display_description_zh"] = "安全扫描：" + "；".join(parts)
+                pattern_parts = [
+                    _localize_reason(str(key))
+                    for key in (payload.get("pattern_keys") or [])
+                    if key and not str(key).startswith("tirith:")
+                ]
+                payload["display_description_zh"] = "安全扫描：" + "；".join(parts + pattern_parts)
                 return payload
         payload["display_description_zh"] = _localize_tirith_description(description)
     else:

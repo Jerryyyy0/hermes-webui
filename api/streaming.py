@@ -5620,7 +5620,7 @@ def _run_agent_streaming(
                             with _lock:
                                 p = dict(_pending.get(session_id, {}))
                             if p:
-                                put('approval', p)
+                                put('approval', _localize_approval_payload(p))
                     except ImportError:
                         pass
                     return
