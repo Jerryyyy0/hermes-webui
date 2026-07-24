@@ -14483,6 +14483,7 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str) -> bool:
     pending = None
     found_target = False
     gateway_keys = []
+    allow_permanent = None
     with _lock:
         queue = _pending.get(sid)
         if isinstance(queue, list):
@@ -14526,6 +14527,8 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str) -> bool:
                 # .data dict carries command, pattern_key, pattern_keys.
                 gw_data = getattr(gw_entry, 'data', None) or {}
                 gateway_keys = gw_data.get("pattern_keys") or [gw_data.get("pattern_key", "")]
+                if "allow_permanent" in gw_data:
+                    allow_permanent = bool(gw_data["allow_permanent"])
                 # Peek is not strict — a concurrent resolver may pop a
                 # different gateway entry before we reach
                 # resolve_gateway_approval below, but approve_session is
@@ -14543,17 +14546,24 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str) -> bool:
         else:
             _approval_sse_notify_locked(sid, None, 0)
 
-    # Collect keys from both _pending and _gateway_queues
+    # Collect keys from both _pending and _gateway_queues. The payload is the
+    # runtime authority for permanent approval; do not trust button visibility.
+    if pending and "allow_permanent" in pending:
+        allow_permanent = bool(pending["allow_permanent"])
     keys_from_pending = pending.get("pattern_keys") or [pending.get("pattern_key", "")] if pending else []
     all_keys = [k for k in keys_from_pending if k] + [k for k in gateway_keys if k]
+    if allow_permanent is None:
+        allow_permanent = any(not str(key).startswith("tirith:") for key in all_keys)
     if choice in ("once", "session"):
         for k in all_keys:
             approve_session(sid, k)
     elif choice == "always":
         for k in all_keys:
             approve_session(sid, k)
-            approve_permanent(k)
-        save_permanent_allowlist(_permanent_approved)
+            if allow_permanent and not str(k).startswith("tirith:"):
+                approve_permanent(k)
+        if allow_permanent:
+            save_permanent_allowlist(_permanent_approved)
     # Unblock the agent thread waiting in the gateway approval queue.
     # This is the primary signal when streaming is active — the agent
     # thread is parked in entry.event.wait() and needs to be woken up.

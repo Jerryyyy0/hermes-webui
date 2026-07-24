@@ -71,6 +71,12 @@ from integration.chat_provider_errors import (
     provider_error_payload as _provider_error_payload,
     provider_error_payload_from_classification as _provider_error_payload_from_classification,
 )
+from integration.approval_localization import (
+    localize_approval_payload as _localize_approval_payload,
+)
+from integration.clarify_localization.policy import (
+    clarify_language_rule as _clarify_language_rule,
+)
 from integration.session_titles.policy import (
     should_validate_source_language_match as _should_validate_title_source_language_match,
     title_language_rule as _title_language_rule,
@@ -468,6 +474,7 @@ def _webui_ephemeral_system_prompt(
     if surface_prompt:
         parts.append(surface_prompt)
     parts.append(_WEBUI_PROGRESS_PROMPT)
+    parts.append(_clarify_language_rule())
     delivery_prompt = _webui_delivery_context_prompt(config_data)
     if delivery_prompt:
         parts.append(delivery_prompt)
@@ -5177,7 +5184,7 @@ def _run_agent_streaming(
                 unregister_gateway_notify as _unreg_notify,
             )
             def _approval_notify_cb(approval_data):
-                put('approval', approval_data)
+                put('approval', _localize_approval_payload(approval_data))
             _reg_notify(session_id, _approval_notify_cb)
             _approval_registered = True
         except ImportError:

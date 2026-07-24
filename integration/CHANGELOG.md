@@ -8,6 +8,8 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Added
 
+- **Chinese approval and clarify display copy** — WebUI approval cards now use a Fork-owned Chinese display description while retaining Hermes Agent's canonical English `description` and `pattern_key(s)` for Smart Approval, hooks, and persistent allowlists. Known command-risk reasons and the common Tirith pipe-to-interpreter finding are localized; unknown Tirith evidence remains visible in its original language. WebUI also asks the Agent to write `clarify` questions and choices in Simplified Chinese without translating literal commands, paths, URLs, or configuration values. The response resolver now enforces `allow_permanent` server-side and never permanently stores `tirith:*` keys.
+
 - **webui_login MCP header sync** — `GET /api/integration/webui_login` 在带 Bearer 且 identity lookup 返回 200 时，按 server 名匹配各可见 Profile `config.yaml` 中的 `mcp_servers.ithink_kb_mcp`，仅用 `ithinktank.account` / `ithinktank.uuid` 写入 `X-IThink-Account` / `X-IThink-UUID`（`headers` 或键缺失时补上；无回退到 userId/扁平字段）；无该 server 则跳过；单 Profile 写失败不阻断登录响应。实现见 `integration/identity/mcp_headers_sync.py`。
 
 - **Profile info welcome field** — `info.json` 新增可选 `welcome`（Profile 欢迎语）。`GET /api/profiles` 在 `info.welcome` 返回；`POST /api/profile/info` 可写入/清空；Profiles 面板编辑与新建表单支持配置。建议约 50 字，服务端不校验长度；不驱动 assistant bubbles 或聊天空状态。

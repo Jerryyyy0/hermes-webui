@@ -31,6 +31,7 @@ from api.config import (
     unregister_stream_owner,
     update_active_run,
 )
+from integration.approval_localization import localize_approval_payload
 from integration.project_logging import get_logger
 from api.helpers import _redact_text, redact_session_data
 from api.models import get_session, merge_session_messages_append_only
@@ -266,7 +267,7 @@ def _gateway_runs_approval_event(payload: dict) -> dict | None:
         allow_permanent = "always" in choices
     if not (tool or command or description):
         return None
-    return {
+    return localize_approval_payload({
         "tool": tool,
         "command": command,
         "description": description,
@@ -278,7 +279,7 @@ def _gateway_runs_approval_event(payload: dict) -> dict | None:
         "approval_id": approval_id,
         "choices": choices,
         "allow_permanent": bool(allow_permanent),
-    }
+    })
 
 
 def _run_gateway_runs_api_streaming(

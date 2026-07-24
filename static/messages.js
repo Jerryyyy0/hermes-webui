@@ -3714,8 +3714,7 @@ function showApprovalForSession(sid, pending, pendingCount) {
 function showApprovalCard(pending, pendingCount) {
   const sid = _rememberApprovalPending(pending, pendingCount);
   if (!_approvalPromptBelongsToActiveSession(sid)) return;
-  const keys = pending.pattern_keys || (pending.pattern_key ? [pending.pattern_key] : []);
-  const desc = (pending.description || "") + (keys.length ? " [" + keys.join(", ") + "]" : "");
+  const desc = pending.display_description_zh || pending.description || "";
   const cmd = pending.command || "";
   const sig = JSON.stringify({desc, cmd, sid: pending._session_id || (S.session && S.session.session_id) || null, approval_id: pending.approval_id || null});
   const card = $("approvalCard");

@@ -8,6 +8,7 @@ import threading
 import uuid
 
 from api.session_events import publish_session_list_changed
+from integration.approval_localization import localize_approval_payload
 
 # Approval system (optional -- graceful fallback if agent not available)
 try:
@@ -162,7 +163,7 @@ def reconcile_gateway_pending_mirror_locked(session_key: str) -> tuple[dict | No
         changed = True
 
     if live_token and not live_mirror_present:
-        mirror_entry = dict(live_head_data)
+        mirror_entry = localize_approval_payload(live_head_data)
         mirror_entry.setdefault("approval_id", uuid.uuid4().hex)
         mirror_entry[_GATEWAY_MIRROR_FLAG] = True
         mirror_entry[_GATEWAY_MIRROR_TOKEN] = live_token
