@@ -788,7 +788,14 @@ def _select_cron_session_for_run(
     job_id: str,
     *,
     run_mtime: float | None = None,
+    session_id: str | None = None,
 ) -> tuple[str, str, float | None, str] | None:
+    if session_id:
+        candidates = _cron_session_candidates(conn, job_id)
+        for candidate in candidates:
+            if candidate[0] == session_id:
+                return candidate
+        return None
     candidates = _cron_session_candidates(conn, job_id)
     return _select_cron_session_candidate(candidates, run_mtime=run_mtime)
 
@@ -1234,6 +1241,7 @@ def materialize_cron_session(
     owner_profile: str,
     execution_home: Path,
     run_mtime: float | None = None,
+    session_id: str | None = None,
     fallback_output: str | None = None,
     fallback_filename: str | None = None,
 ) -> str | None:
@@ -1259,7 +1267,12 @@ def materialize_cron_session(
 
     try:
         with closing(sqlite3.connect(str(db_path))) as conn:
-            found = _select_cron_session_for_run(conn, job_id, run_mtime=run_mtime)
+            found = _select_cron_session_for_run(
+                conn,
+                job_id,
+                run_mtime=run_mtime,
+                session_id=session_id,
+            )
             end_reason, ended_at = _cron_session_completion(conn, found[0]) if found else (None, None)
     except sqlite3.Error as exc:
         logger.debug("materialize_cron_session: state.db read failed: %s", exc)

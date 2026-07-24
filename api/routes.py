@@ -979,6 +979,12 @@ def _run_cron_tracked(job, profile_home=None, execution_profile_home=None, owner
 
     job_id = job.get("id", "")
     execution_profile_home = execution_profile_home or profile_home
+    if not str(job.get("_cron_session_id") or "").strip() and job_id:
+        from datetime import datetime
+
+        job["_cron_session_id"] = (
+            f"cron_{job_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        )
 
     def _with_cron_home(home, fn):
         if home is None:
@@ -6033,6 +6039,40 @@ def handle_get(handler, parsed) -> bool:
                 )
             return resp
         except KeyError:
+            # A durable Cron session may exist in the active execution profile's
+            # state.db before its WebUI sidecar is imported. Recover only the
+            # exact requested id; never scan another profile or choose a newer run.
+            if str(sid).startswith("cron_"):
+                try:
+                    from api.profiles import get_active_profile_name
+                    from cron.jobs import get_job
+                    from integration.crons.session_bridge import _cron_job_id_from_session_id
+                    from integration.crons.session_bridge import materialize_cron_session
+
+                    cron_job_id = _cron_job_id_from_session_id(sid)
+                    cron_job = get_job(cron_job_id) if cron_job_id else None
+                    if cron_job:
+                        execution_home = _profile_home_for_cron_job(cron_job)
+                        materialized = materialize_cron_session(
+                            cron_job,
+                            owner_profile=get_active_profile_name() or "default",
+                            execution_home=execution_home,
+                            session_id=sid,
+                        )
+                        if materialized == sid:
+                            s = get_session(sid, metadata_only=(not load_messages))
+                            if load_messages and is_cron_session(sid, getattr(s, "source_tag", None)):
+                                from integration.crons.session_bridge import reconcile_cron_session_transcript
+
+                                if reconcile_cron_session_transcript(s):
+                                    s.save(touch_updated_at=False)
+                            raw = s.compact()
+                            raw["messages"] = list(getattr(s, "messages", []) or []) if load_messages else []
+                            raw["message_count"] = len(raw["messages"])
+                            raw["tool_calls"] = getattr(s, "tool_calls", []) if load_messages else []
+                            return j(handler, {"session": redact_session_data(raw)})
+                except Exception:
+                    logger.debug("cron session recovery failed for %s", sid, exc_info=True)
             # Not a WebUI session -- try CLI store.
             # Before synthesising a read-only CLI stub, verify the id was not a
             # deleted WebUI session. _index.json is the canonical WebUI session

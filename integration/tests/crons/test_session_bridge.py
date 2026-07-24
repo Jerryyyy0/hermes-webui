@@ -174,6 +174,28 @@ def test_materialize_selects_session_for_run_mtime(cron_env, monkeypatch):
     assert sid == "cron_job1_1700000000"
 
 
+def test_materialize_selects_exact_session_id_not_latest_run(cron_env):
+    with closing(sqlite3.connect(str(cron_env["db"]))) as conn:
+        conn.execute(
+            "INSERT INTO sessions VALUES (?, ?, ?, ?)",
+            ("cron_job1_1700000100", "Cron run 2", "cron", 1700000100.0),
+        )
+        conn.commit()
+
+    job = {"id": "job1", "name": "Nightly", "profile": ""}
+    with patch("api.models.get_state_db_session_messages", return_value=[{"role": "user", "content": "hi"}]):
+        from integration.crons.session_bridge import materialize_cron_session
+
+        sid = materialize_cron_session(
+            job,
+            owner_profile="default",
+            execution_home=cron_env["home"],
+            session_id="cron_job1_1700000000",
+        )
+
+    assert sid == "cron_job1_1700000000"
+
+
 def test_batch_materialize_maps_history_runs_by_mtime(cron_env, monkeypatch):
     with closing(sqlite3.connect(str(cron_env["db"]))) as conn:
         conn.execute(
