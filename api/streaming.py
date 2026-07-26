@@ -52,7 +52,7 @@ from api.compression_anchor import is_context_compression_marker, visible_messag
 from api.compression_recovery import stamp_compression_exhausted_recovery
 from api.metering import meter
 from api.run_journal import RunJournalWriter
-from api.todo_state import emit_todo_state
+from api.todo_state import attach_todo_state, emit_todo_state
 from api.turn_journal import append_turn_journal_event_for_stream
 from api.usage import prompt_cache_hit_percent
 from api.models import (
@@ -6080,6 +6080,28 @@ def _sse(handler, event, data):
     handler.wfile.flush()
 
 
+# Bound blocked SSE writes so a slow or backgrounded client cannot pin a worker.
+try:
+    _raw_deadline = os.getenv("HERMES_WEBUI_SSE_WRITE_DEADLINE") or os.getenv("HERMES_SSE_WRITE_DEADLINE")
+    SSE_WRITE_DEADLINE_SECONDS = float(_raw_deadline or "20.0")
+except (TypeError, ValueError):
+    SSE_WRITE_DEADLINE_SECONDS = 20.0
+if SSE_WRITE_DEADLINE_SECONDS <= 0:
+    SSE_WRITE_DEADLINE_SECONDS = 20.0
+
+
+def _sse_set_write_deadline(handler, seconds=None):
+    """Best-effort: arm a socket write deadline on an SSE handler."""
+    if seconds is None:
+        seconds = SSE_WRITE_DEADLINE_SECONDS
+    try:
+        conn = getattr(handler, "connection", None)
+        if conn is not None and hasattr(conn, "settimeout"):
+            conn.settimeout(seconds)
+    except Exception:
+        logger.debug("Failed to arm SSE write deadline", exc_info=True)
+
+
 def _materialize_pending_user_turn_before_error(session) -> bool:
     """Persist the pending user prompt before clearing runtime stream state.
 
@@ -9435,7 +9457,7 @@ def _run_agent_streaming(
                         except Exception:
                             pass
                         _error_payload['session'] = redact_session_data(
-                            s.compact() | {'messages': s.messages, 'tool_calls': s.tool_calls}
+                            _session_payload_with_full_messages(s, tool_calls=s.tool_calls)
                         )
                         _error_payload['session_id'] = s.session_id
                         _error_payload['old_session_id'] = _compression_origin_session_id

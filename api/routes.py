@@ -8,6 +8,7 @@ import copy
 import io
 import gzip
 import json
+from api.sse_chunked import end_sse_headers
 import logging
 import os
 import queue
@@ -67,6 +68,10 @@ from api.stream_diagnostics import (
 )
 
 logger = get_logger(__name__)
+
+from api import route_session_list_cache as _route_session_list_cache
+
+_clear_session_list_cache = _route_session_list_cache._clear_session_list_cache
 
 
 def _publish_session_list_changed(reason: str, *, profile: str | None = None) -> None:
@@ -7938,6 +7943,7 @@ from api.models import (
     _active_stream_ids,
     _session_message_merge_key,
     _session_message_visible_key,
+    _message_timestamp_as_float,
     _is_empty_partial_activity_message,
     _hide_from_default_sidebar,
     prune_session_from_index,
@@ -8167,6 +8173,7 @@ from api.upload import (
 )
 from api.streaming import (
     _sse,
+    _sse_set_write_deadline,
     _run_agent_streaming,
     cancel_stream,
     _materialize_pending_user_turn_before_error,
@@ -10635,6 +10642,8 @@ def handle_get(handler, parsed) -> bool:
             cli_messages = []
             state_db_messages = []
             metadata_summary = None
+            state_db_since_timestamp = None
+            limited_sidecar_messages = None
             _session_profile = getattr(s, 'profile', None) or None
             if is_messaging_session:
                 cli_messages = get_cli_session_messages(sid)

@@ -18,7 +18,17 @@ end-to-end is brittle across its many dependencies).
 """
 from __future__ import annotations
 
-from api.routes import _STATE_DB_DISPLAY_ROW_BACKSTOP, _state_db_backstop_limit_for_display
+from api.routes import (
+    _STATE_DB_DISPLAY_ROW_BACKSTOP,
+    _message_timestamp_as_float,
+    _state_db_backstop_limit_for_display,
+    end_sse_headers,
+)
+
+
+def test_routes_imports_state_db_timestamp_and_sse_header_helpers():
+    assert _message_timestamp_as_float({"timestamp": "1.5"}) == 1.5
+    assert callable(end_sse_headers)
 
 
 class _StubSession:
