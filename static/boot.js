@@ -14,13 +14,19 @@
 // cancelStream: stop the active chat stream.
 // See docs/rfcs/webui-run-state-consistency-contract.md (Invariants #2, #4)
 // for the owner-aware + terminal-settle rationale.
-async function cancelStream(){
+async function cancelStream(reason){
   const sid = S.session && S.session.session_id;
   const streamId = S.activeStreamId;
-  if(!streamId) return;
+  if(!streamId) return false;
+  const _reason = reason || 'explicit-cancel';
+  if(typeof console !== 'undefined' && console.info){
+    console.info('[stream] cancel requested', {reason:_reason, streamId, sessionId:sid});
+  }
   let respBody=null;
+  let respOk=false;
   try{
     const r=await fetch(new URL(`api/chat/cancel?stream_id=${encodeURIComponent(streamId)}`,document.baseURI||location.href).href,{credentials:'include'});
+    respOk=!!(r&&r.ok);
     try{respBody=await r.json();}catch(_){}
   }catch(e){
     if(typeof console !== 'undefined' && console.warn){
@@ -39,7 +45,7 @@ async function cancelStream(){
   // `cancel` event can clear INFLIGHT, render "Task cancelled", and refresh
   // the sidebar. Only clear locally when the backend says there is no active
   // stream left to settle.
-  if(respBody && respBody.cancelled===false && S.activeStreamId===streamId){
+  if(respOk && respBody && respBody.cancelled===false && S.activeStreamId===streamId){
     S.activeStreamId=null;
     setBusy(false);
     if(typeof setComposerStatus==='function') setComposerStatus('');
@@ -48,15 +54,22 @@ async function cancelStream(){
     // distinguish reasons — keep the toast generic and short.
     if(typeof showToast==='function') showToast('Stream is no longer active',2000);
   }
+  return respOk;
 }
 
 async function cancelSessionStream(session){
   const streamId = session&&session.active_stream_id;
   const sid = session&&session.session_id;
-  if(!streamId||!sid) return;
+  if(!streamId||!sid) return false;
+  if(typeof console !== 'undefined' && console.info){
+    console.info('[stream] cancel requested', {reason:'sidebar-stop', streamId, sessionId:sid});
+  }
+  let respOk=false;
   try{
-    await fetch(new URL(`api/chat/cancel?stream_id=${encodeURIComponent(streamId)}`,document.baseURI||location.href).href,{credentials:'include'});
+    const r=await fetch(new URL(`api/chat/cancel?stream_id=${encodeURIComponent(streamId)}`,document.baseURI||location.href).href,{credentials:'include'});
+    respOk=!!(r&&r.ok);
   }catch(e){/* close local stream; keep UI state honest below */}
+  if(!respOk) return false;
   if(typeof closeLiveStream==='function') closeLiveStream(sid, streamId);
   session.active_stream_id=null;
   delete INFLIGHT[sid];
@@ -78,6 +91,7 @@ async function cancelSessionStream(session){
     hideClarifyCard(true, 'cancelled');
   }
   if(typeof renderSessionList==='function') renderSessionList();
+  return true;
 }
 
 async function _savedSessionShouldStaySidebarOnly(sid){
@@ -92,10 +106,90 @@ async function _savedSessionShouldStaySidebarOnly(sid){
 }
 
 // ── Mobile navigation ──────────────────────────────────────────────────────
+// URL prefill boot helpers.
+function _prefillHasDraftText(prefillIntent){
+  return !!(prefillIntent&&prefillIntent.hasText);
+}
+function _rootPrefillNeedsFreshComposer(urlSession, savedLocal, prefillIntent){
+  return !urlSession&&!!savedLocal&&_prefillHasDraftText(prefillIntent);
+}
+function _profileQueryBlocksSavedLocalRestore(profileIntent, urlSession){
+  return !!(profileIntent&&profileIntent.hasParam&&profileIntent.valid&&!urlSession);
+}
+async function _applyComposerPrefillOnBoot(prefillIntent){
+  if(!prefillIntent||!prefillIntent.hasText) return;
+  const msg=(typeof $==='function')?$('msg'):document.getElementById('msg');
+  if(!msg) return;
+  const text=String(prefillIntent.text||'');
+  msg.value=text;
+  if(typeof autoResize==='function') autoResize();
+  else if(typeof updateSendBtn==='function') updateSendBtn();
+  if(typeof msg.focus==='function') msg.focus();
+}
+async function _finalizeComposerPrefillOnBoot(prefillIntent){
+  if(prefillIntent&&prefillIntent.hasParams&&typeof _consumeComposerPrefillParamsFromLocation==='function'){
+    _consumeComposerPrefillParamsFromLocation();
+  }
+  await _applyComposerPrefillOnBoot(prefillIntent);
+}
+
+// Mobile navigation.
 let _workspacePanelMode='closed'; // 'closed' | 'browse' | 'preview'
 
 function _isCompactWorkspaceViewport(){
   return window.matchMedia('(max-width: 900px)').matches;
+}
+
+function _isPhoneWidthViewport(){
+  return window.matchMedia('(max-width: 640px)').matches;
+}
+
+function _isTouchKeyboardViewport(){
+  try{return matchMedia('(hover:none) and (pointer:coarse)').matches&&!_hasFinePointerCoexisting();}catch(_){return false;}
+}
+
+function _syncKeyboardBottomInset(){
+  const root=document.documentElement;
+  if(!root) return;
+  if(!window.visualViewport||!_isTouchKeyboardViewport()){
+    root.style.removeProperty('--keyboard-bottom-inset');
+    return;
+  }
+  const vv=window.visualViewport;
+  // A pinch-zoomed viewport (vv.scale != 1) makes innerHeight - vv.height
+  // reflect the zoom, not the keyboard — on Chromium touch devices with
+  // accessibility "force enable zoom" that yields a large spurious inset that
+  // jitters on pan. Treat only the unzoomed state as keyboard occlusion.
+  if(Math.abs((vv.scale||1)-1)>0.05){
+    root.style.removeProperty('--keyboard-bottom-inset');
+    return;
+  }
+  const inset=Math.max(0,Math.ceil(window.innerHeight-(vv.height+vv.offsetTop)));
+  if(inset>0){
+    root.style.setProperty('--keyboard-bottom-inset',`${inset}px`);
+  }else{
+    root.style.removeProperty('--keyboard-bottom-inset');
+  }
+}
+
+// Mobile PWA viewport reflow guard. When the on-screen keyboard / browser
+// chrome shows or hides, visualViewport (or a plain resize on browsers without
+// it) changes height without a layout invalidation, leaving the phone layout
+// painted against stale geometry. Toggling a one-frame `viewport-reflow` class
+// (which applies a cheap GPU-promotion transform under the @media(max-width:640px)
+// rule) forces a repaint, then we resync the workspace panel + sidebar aria.
+function _forceMobileViewportReflow(){
+  _syncKeyboardBottomInset();
+  if(!_isPhoneWidthViewport()) return;
+  const layout=document.querySelector('.layout');
+  if(!layout) return;
+  document.documentElement.classList.add('viewport-reflow');
+  void layout.offsetWidth;
+  requestAnimationFrame(()=>{
+    document.documentElement.classList.remove('viewport-reflow');
+    try{ syncWorkspacePanelState(); }catch(_){ }
+    try{ if(typeof _syncSidebarAria==='function') _syncSidebarAria(); }catch(_){ }
+  });
 }
 
 function _syncWorkspacePanelInlineWidth(){
@@ -194,6 +288,23 @@ function handleWorkspaceClose(){
   closeWorkspacePanel();
 }
 
+async function _maybeBindFreshDefaultWorkspaceSession(prefillIntent=null){
+  if(_prefillHasDraftText(prefillIntent)) return false;
+  if(S.session) return false;
+  if(_workspacePanelMode!=='browse') return false;
+  if(!S._profileDefaultWorkspace) return false;
+  try{
+    // worktree:false is explicit and load-bearing — this auto-bind runs on
+    // page load, and a config-level worktree default must never leak a fresh
+    // worktree + branch from simply opening the UI (#6022).
+    await newSession(false, {awaitWorkspaceLoad: true, worktree: false});
+    return true;
+  }catch(e){
+    console.warn('[hermes] failed to bind fresh default workspace session', e);
+    return false;
+  }
+}
+
 /**
  * Set a tooltip on a button, preferring the custom CSS tooltip (`data-tooltip`)
  * when the element opts in via the `has-tooltip` class. Falls back to the
@@ -214,6 +325,14 @@ function _setButtonTooltip(btn, text){
   }
 }
 
+function _uiText(key, fallback){
+  if(typeof t==='function'){
+    const val=t(key);
+    if(val&&val!==key) return val;
+  }
+  return fallback;
+}
+
 function syncWorkspacePanelUI(){
   const {layout,panel,toggleBtn,edgeToggleBtn,collapseBtn}= _workspacePanelEls();
   if(!layout||!panel)return;
@@ -226,17 +345,21 @@ function syncWorkspacePanelUI(){
   if(toggleBtn){
     toggleBtn.classList.toggle('active',isOpen);
     toggleBtn.setAttribute('aria-pressed',isOpen?'true':'false');
-    _setButtonTooltip(toggleBtn, isOpen?'Hide workspace panel':'Show workspace panel');
+    const label=_uiText(isOpen?'workspace_panel_hide':'workspace_panel_show', isOpen?'Hide workspace panel':'Show workspace panel');
+    _setButtonTooltip(toggleBtn, label);
+    toggleBtn.setAttribute('aria-label', label);
     toggleBtn.disabled=!canBrowse;
   }
   if(edgeToggleBtn){
     edgeToggleBtn.classList.toggle('active',isOpen);
     edgeToggleBtn.setAttribute('aria-expanded',isOpen?'true':'false');
-    _setButtonTooltip(edgeToggleBtn, isOpen?'Hide workspace panel':'Show workspace panel');
+    const label=_uiText(isOpen?'workspace_panel_hide':'workspace_panel_show', isOpen?'Hide workspace panel':'Show workspace panel');
+    _setButtonTooltip(edgeToggleBtn, label);
+    edgeToggleBtn.setAttribute('aria-label', label);
     edgeToggleBtn.disabled=!canBrowse;
   }
   if(collapseBtn){
-    _setButtonTooltip(collapseBtn, isCompact?'Close workspace panel':'Hide workspace panel');
+    _setButtonTooltip(collapseBtn, isCompact?_uiText('workspace_panel_close','Close workspace panel'):_uiText('workspace_panel_hide','Hide workspace panel'));
   }
   const hasSession=!!S.session;
   ['btnUpDir','btnNewFile','btnNewFolder','btnRefreshPanel'].forEach(id=>{
@@ -246,7 +369,9 @@ function syncWorkspacePanelUI(){
   const clearBtn=$('btnClearPreview');
   if(clearBtn){
     clearBtn.disabled=!isOpen;
-    _setButtonTooltip(clearBtn, hasPreview?'Close preview':'Close');
+    const label=hasPreview?_uiText('workspace_close_preview','Close preview'):_uiText('terminal_close','Close');
+    _setButtonTooltip(clearBtn, label);
+    clearBtn.setAttribute('aria-label', label);
     if(!isCompact) clearBtn.style.display='';
   }
 }
@@ -480,6 +605,10 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
 
   // Raw audio mode preference: send audio file instead of transcribing
   let _rawAudioMode = localStorage.getItem('hermes-raw-audio-mode') === 'true';
+  // Append-on-commit preference: when ON (default), dictated text is appended
+  // to any text already in the composer. When OFF, dictated text replaces the
+  // composer content (the pre-existing behavior).
+  let _dictationAppend = localStorage.getItem('hermes-dictation-append') !== 'false';
   // Capture backend pinned at recording start ('speech' | 'media' | null) so
   // _stopMic / onstop act on the backend that actually started, even if the
   // raw-audio toggle changes mid-recording (#3169 Codex review).
@@ -498,6 +627,17 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
   let _finalText='';
   let _prefix='';
   let _isRecording=false;
+  // Mobile dictation continuity and long-press recording state.
+  let _speechStopRequested=false;
+  let _micWakeLock=null;
+  let _micWakeLockOp=null;
+  let _micRestartCount=0;
+  const _micMaxRestarts=20;
+  let _micHoldTimer=null;
+  let _micHoldActive=false;
+  let _micPointerDown=false;
+  let _micStartSeq=0;
+  const _micHoldThresholdMs=300;
 
   function _setButtonTooltipAndKey(btn, key){
     const text = t(key);
@@ -527,6 +667,23 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
     }
   }
 
+  function _applyRawAudioModePreference(enabled){
+    _rawAudioMode=!!enabled;
+    try{localStorage.setItem('hermes-raw-audio-mode',_rawAudioMode?'true':'false');}catch(_){}
+    const rawAudioCheckbox=document.getElementById('settingsRawAudio');
+    if(rawAudioCheckbox) rawAudioCheckbox.checked=_rawAudioMode;
+    _updateMicTooltip();
+  }
+  window._applyRawAudioModePreference=_applyRawAudioModePreference;
+
+  function _applyDictationAppendPreference(enabled){
+    _dictationAppend=!!enabled;
+    try{localStorage.setItem('hermes-dictation-append',_dictationAppend?'true':'false');}catch(_){}
+    const cb=document.getElementById('settingsDictationAppend');
+    if(cb) cb.checked=_dictationAppend;
+  }
+  window._applyDictationAppendPreference=_applyDictationAppendPreference;
+
   async function _sendRawAudio(blob){
     const ext=(blob.type&&blob.type.includes('ogg'))?'ogg':'webm';
     const file=new File([blob],`voice-input-${Date.now()}.${ext}`,{type:blob.type||`audio/${ext}`});
@@ -547,13 +704,39 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
     }
   }
 
-  function _commitTranscript(text){
+  function _commitTranscript(text, prefixOverride){
+    // `prefixOverride` is the composer content captured at recording start,
+    // passed only by the async server-STT path (recorder.onstop → _transcribeBlob).
+    // The sync browser-SR path doesn't call this function — it commits inline
+    // in sr.onend using _prefix directly.
+    //
+    // Three concerns this function has to balance (Greptile reviews):
+    //   1. Race condition: user types during async transcription → preserve those
+    //      keystrokes. Read live ta.value, not the stale snapshot.
+    //   2. Clear-during-transcription: user clears textarea during async wait →
+    //      respect that intent. Live ta.value (even empty) wins over snapshot.
+    //   3. Browser-SR fallback: if a future caller passes no prefixOverride
+    //      and live ta.value is empty, fall back to _prefix as a safety net.
+    //
+    // Resolution: when prefixOverride IS provided (server-STT path), trust live
+    // ta.value unconditionally — even when empty. Otherwise fall back to _prefix.
     const clean=(text||'').trim();
-    const committed=clean
-      ? (_prefix&&!_prefix.endsWith(' ')&&!_prefix.endsWith('\n')
-          ? _prefix+' '+clean.trimStart()
-          : _prefix+clean)
-      : ta.value;
+    let committed;
+    if(!clean){
+      committed = ta.value;
+    }else if(_dictationAppend){
+      const base = prefixOverride !== undefined ? ta.value : (ta.value || _prefix);
+      if(!base){
+        committed = clean;
+      }else{
+        committed = (!base.endsWith(' ') && !base.endsWith('\n'))
+          ? base+' '+clean.trimStart()
+          : base+clean;
+      }
+    }else{
+      // Replace mode (explicit): dictated text overwrites the composer.
+      committed = clean;
+    }
     ta.value=committed;
     autoResize();
     if(window._micPendingSend){
@@ -574,10 +757,12 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
     return !!(SpeechRecognition&&localStorage.getItem(_micForceMediaRecorderKey)!=='1');
   }
 
-  async function _transcribeBlob(blob){
+  async function _transcribeBlob(blob, prefixSnapshot){
     const ext=(blob.type&&blob.type.includes('ogg'))?'ogg':'webm';
     const form=new FormData();
     form.append('file',new File([blob],`voice-input.${ext}`,{type:blob.type||`audio/${ext}`}));
+    // Snapshot is passed in from the recorder.onstop handler — taken there
+    // BEFORE _setRecording(false) clears _prefix (async server STT path).
     setComposerStatus('Transcribing…');
     try{
       const res=await fetch('api/transcribe',{method:'POST',body:form});
@@ -587,7 +772,7 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
         err.status=res.status;
         throw err;
       }
-      _commitTranscript(data.transcript||'');
+      _commitTranscript(data.transcript||'', prefixSnapshot);
     }catch(err){
       if(_isServerSttUnavailable(err)&&_allowBrowserSttFallback()){
         window._micPendingSend=false;
@@ -611,6 +796,78 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
     }
   }
 
+  // Gate continuous dictation to MOBILE so desktop stays one-shot (single
+  // utterance). An explicit hermes-mic-continuous flag wins in both directions,
+  // mirroring the hermes-voice-continuous pattern: 'true' opts a desktop in,
+  // 'false' opts a mobile out. Absent a flag, coarse-pointer (touch) devices get
+  // continuity and everything else stays single-utterance.
+  function _micDictationContinuous(){
+    try{
+      const flag=localStorage.getItem('hermes-mic-continuous');
+      if(flag==='true') return true;
+      if(flag==='false') return false;
+    }catch(_){}
+    try{ return window.matchMedia('(pointer:coarse)').matches; }catch(_){ return false; }
+  }
+
+  // Only auto-restart the composer-mic session on a natural pause: continuity
+  // must be enabled (mobile/opt-in), the session must still be active speech,
+  // the stop must not have been requested, and we must be under the restart cap.
+  function _micShouldRestartDictation(){
+    return _micDictationContinuous()
+      && !_speechStopRequested
+      && !!window._micActive
+      && _activeCaptureMode==='speech'
+      && _micRestartCount<_micMaxRestarts;
+  }
+
+  // Screen Wake Lock while dictating. All acquire/release ops are chained onto a
+  // single in-flight promise (_micWakeLockOp) so rapid start/stop/visibility
+  // churn runs strictly in order and can't interleave to leak a lock or null
+  // _micWakeLock mid-request.
+  function _acquireMicWakeLock(){
+    if(!navigator.wakeLock) return Promise.resolve();
+    _micWakeLockOp=Promise.resolve(_micWakeLockOp).then(async()=>{
+      if(_micWakeLock) return;
+      if(!window._micActive||_activeCaptureMode!=='speech') return;
+      try{
+        const lock=await navigator.wakeLock.request('screen');
+        // If the session ended while awaiting, don't hold a stale lock.
+        if(!window._micActive||_activeCaptureMode!=='speech'){
+          try{ await lock.release(); }catch(_){}
+          return;
+        }
+        _micWakeLock=lock;
+        _micWakeLock.addEventListener?.('release',()=>{ _micWakeLock=null; },{once:true});
+      }catch(_){
+        _micWakeLock=null;
+      }
+    });
+    return _micWakeLockOp;
+  }
+
+  function _releaseMicWakeLock(){
+    _micWakeLockOp=Promise.resolve(_micWakeLockOp).then(async()=>{
+      const lock=_micWakeLock;
+      _micWakeLock=null;
+      if(!lock) return;
+      try{ await lock.release(); }catch(_){}
+    });
+    return _micWakeLockOp;
+  }
+
+  // The OS drops a screen wake lock when the tab is hidden; reacquire on return
+  // if we're still dictating (release on hide is a no-op if none is held).
+  document.addEventListener('visibilitychange',()=>{
+    if(document.visibilityState==='hidden'){
+      void _releaseMicWakeLock();
+      return;
+    }
+    if(window._micActive&&_activeCaptureMode==='speech'){
+      void _acquireMicWakeLock();
+    }
+  });
+
   function _stopMic(){
     if(!window._micActive) return;
     // Stop the backend that was ACTIVE WHEN RECORDING STARTED — not whatever
@@ -618,6 +875,7 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
     // which would otherwise make us stop the wrong backend and orphan the other
     // (#3169 Codex review). _activeCaptureMode is pinned at start.
     if(recognition && _activeCaptureMode==='speech'){
+      _speechStopRequested=true;
       recognition.stop();
       return;
     }
@@ -633,13 +891,22 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
   function _ensureSpeechRecognition(){
     if(!SpeechRecognition) return null;
     const sr=recognition||new SpeechRecognition();
-    sr.continuous=false;
+    // Desktop dictation stays one-shot (single utterance); mobile / opt-in
+    // devices run continuous so a natural pause doesn't end the session (#5294).
+    sr.continuous=_micDictationContinuous();
     sr.interimResults=true;
     sr.lang=(typeof _locale!=='undefined'&&_locale._speech)||'en-US';
 
     sr.onstart=()=>{ _finalText=''; };
 
     sr.onresult=(event)=>{
+      // #5294: a real result means the continuity restarts are PRODUCTIVE, not a
+      // stolen-audio-session tight loop — reset the restart budget so a long
+      // dictation with many natural pauses isn't silently capped at
+      // _micMaxRestarts. The cap still guards the failure case: consecutive
+      // restarts that yield no speech (onend without an intervening onresult)
+      // keep incrementing and trip the bound.
+      _micRestartCount=0;
       let interim='';
       let final=_finalText;
       for(let i=event.resultIndex;i<event.results.length;i++){
@@ -657,9 +924,32 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
             ? _prefix+' '+_finalText.trimStart()
             : _prefix+_finalText)
         : ta.value;
-      _setRecording(false);
       ta.value=committed;
       autoResize();
+      // Mobile / opt-in continuity: a natural pause ends this recognition run but
+      // the user is still dictating, so restart to keep the session alive. Desktop
+      // (one-shot) and intentional stops (_speechStopRequested) skip this and
+      // finalize. Bounded by _micMaxRestarts so a stolen audio session can't loop.
+      if(_micShouldRestartDictation()){
+        _prefix=committed&&!committed.endsWith(' ')&&!committed.endsWith('\n')
+          ? committed+' '
+          : committed;
+        _finalText='';
+        _micRestartCount++;
+        try{
+          sr.start();
+          return;
+        }catch(err){
+          // Restart failed (e.g. the audio session was taken by another app).
+          // Surface it instead of silently dropping to idle (Greptile P2).
+          showToast(t('mic_error')+String((err&&err.message)||'restart'));
+        }
+      }
+      _speechStopRequested=false;
+      _isRecording=false;
+      _micRestartCount=0;
+      void _releaseMicWakeLock();
+      _setRecording(false);
       if(window._micPendingSend){
         window._micPendingSend=false;
         send();
@@ -668,10 +958,25 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
     };
 
     sr.onerror=(event)=>{
+      // While dictating with continuity on, a no-speech/aborted error is a normal
+      // pause or transient audio-session hiccup — swallow it and let onend restart
+      // (bounded by _micMaxRestarts). Desktop one-shot still surfaces the toast.
+      if((event.error==='no-speech'||event.error==='aborted')
+          && _micDictationContinuous()
+          && window._micActive
+          && _activeCaptureMode==='speech'
+          && !_speechStopRequested
+          && _micRestartCount<_micMaxRestarts){
+        return;
+      }
+      _speechStopRequested=false;
       _setRecording(false);
       window._micPendingSend=false;
       _isRecording=false;
-      if(event.error==='network'||event.error==='not-allowed'){
+      _micRestartCount=0;
+      void _releaseMicWakeLock();
+      if(event.error==='network'||event.error==='not-allowed'
+          ||event.error==='service-not-allowed'||event.error==='audio-capture'){
         // Persist SR failure: next reload will skip SpeechRecognition
         localStorage.setItem(_micForceMediaRecorderKey,'1');
         _forceMediaRecorder=true;
@@ -741,7 +1046,14 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
     _prefix=ta.value;
     if(recognition && !_forceMediaRecorder && !_rawAudioMode){
       _activeCaptureMode='speech';
+      _speechStopRequested=false;
+      _micRestartCount=0;
+      // Refresh continuity gate at start so a settings/orientation change takes
+      // effect for this session (desktop stays one-shot, mobile stays continuous).
+      recognition.continuous=_micDictationContinuous();
+      recognition.lang=(typeof _locale!=='undefined'&&_locale._speech)||'en-US';
       recognition.start();
+      void _acquireMicWakeLock();
       _setRecording(true);
       return;
     }
@@ -751,38 +1063,43 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
       return;
     }
     try{
-      mediaStream=await navigator.mediaDevices.getUserMedia({audio:true});
+      const captureStream=await navigator.mediaDevices.getUserMedia({audio:true});
+      mediaStream=captureStream;
       const preferredTypes=['audio/webm;codecs=opus','audio/webm','audio/ogg;codecs=opus','audio/ogg'];
       const mimeType=preferredTypes.find(type=>window.MediaRecorder.isTypeSupported?.(type))||'';
-      mediaRecorder=new MediaRecorder(mediaStream,mimeType?{mimeType}:undefined);
+      const captureMode=_rawAudioMode?'media-raw':'media-transcribe';
+      const recorder=new MediaRecorder(captureStream,mimeType?{mimeType}:undefined);
       audioChunks=[];
-      mediaRecorder.ondataavailable=e=>{if(e.data&&e.data.size)audioChunks.push(e.data);};
-      mediaRecorder.onerror=()=>{
+      const captureChunks=audioChunks;
+      recorder.ondataavailable=e=>{if(e.data&&e.data.size)captureChunks.push(e.data);};
+      recorder.onerror=()=>{
+        const isCurrentCapture=mediaRecorder===recorder||mediaStream===captureStream;
         _isRecording=false;
-        _setRecording(false);
+        if(mediaRecorder===recorder) mediaRecorder=null;
+        if(isCurrentCapture) _setRecording(false);
         window._micPendingSend=false;
-        _stopTracks();
+        _stopTracks(captureStream);
         showToast(t('mic_network'));
       };
-      mediaRecorder.onstop=async()=>{
+      recorder.onstop=async()=>{
+        const isCurrentCapture=mediaRecorder===recorder||mediaStream===captureStream;
+        if(mediaRecorder===recorder) mediaRecorder=null;
         _isRecording=false;
-        const blob=new Blob(audioChunks,{type:mediaRecorder.mimeType||mimeType||'audio/webm'});
-        _setRecording(false);
-        _stopTracks();
+        const prefixSnapshot=_prefix;
+        const blob=new Blob(captureChunks,{type:recorder.mimeType||mimeType||'audio/webm'});
+        if(isCurrentCapture) _setRecording(false);
+        _stopTracks(captureStream);
         if(blob.size){
-          if(_activeCaptureMode==='media-raw'){
-            await _sendRawAudio(blob);
-          }else{
-            await _transcribeBlob(blob);
-          }
-        }
-        else if(window._micPendingSend){
+          if(captureMode==='media-raw') await _sendRawAudio(blob);
+          else await _transcribeBlob(blob,prefixSnapshot);
+        }else if(window._micPendingSend){
           window._micPendingSend=false;
         }
         _applyDeferredServerSttFlip();
       };
-      _activeCaptureMode=_rawAudioMode?'media-raw':'media-transcribe';
-      mediaRecorder.start();
+      _activeCaptureMode=captureMode;
+      mediaRecorder=recorder;
+      recorder.start();
       _setRecording(true);
     }catch(err){
       _isRecording=false;
@@ -797,15 +1114,182 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
   if(rawAudioCheckbox){
     rawAudioCheckbox.checked = _rawAudioMode;
     rawAudioCheckbox.addEventListener('change', function(){
-      _rawAudioMode = this.checked;
-      localStorage.setItem('hermes-raw-audio-mode', _rawAudioMode ? 'true' : 'false');
-      _updateMicTooltip();
+      _applyRawAudioModePreference(this.checked);
+    });
+  }
+  const appendCheckbox = document.getElementById('settingsDictationAppend');
+  if(appendCheckbox){
+    appendCheckbox.checked = _dictationAppend;
+    appendCheckbox.addEventListener('change', function(){
+      _applyDictationAppendPreference(this.checked);
     });
   }
   _updateMicTooltip();
 })();
 window._micActive=window._micActive||false;
 window._micPendingSend=window._micPendingSend||false;
+
+// ── Default message mode eager default (#5167 / #5145) ──────────────────────
+// The Default message mode preference (queue/interrupt/steer) is read on the
+// send path via `window._defaultMessageMode||'steer'`. The authoritative value
+// only arrives once the async boot IIFE below resolves the `/api/settings`
+// fetch. Without an eager value, every send during that boot window silently
+// falls back, ignoring a saved 'queue'/'interrupt' preference (worse on
+// slow/contended environments like WSL2, see #5132). Mirror the resolved value
+// into localStorage — the same synchronous-source pattern used by hermes-lang /
+// hermes-theme — so the very first send after a reload honors the saved choice.
+const _DEFAULT_MESSAGE_MODES=['queue','interrupt','steer'];
+// Legacy localStorage key (pre-#5145 rename); read it as a fallback so an
+// existing user's persisted busy-input-mode preference survives the rename.
+const _LEGACY_DEFAULT_MESSAGE_MODE_KEY='hermes-busy-input-mode';
+const _DEFAULT_MESSAGE_MODE_KEY='hermes-default-message-mode';
+function _normalizeDefaultMessageMode(mode){
+  return _DEFAULT_MESSAGE_MODES.includes(mode)?mode:'steer';
+}
+function _persistDefaultMessageMode(mode){
+  const m=_normalizeDefaultMessageMode(mode);
+  try{localStorage.setItem(_DEFAULT_MESSAGE_MODE_KEY,m);}catch(_){}
+  return m;
+}
+function _readPersistedDefaultMessageMode(){
+  let stored=null;
+  try{
+    // Prefer the new key; fall back to the legacy key so a pre-rename
+    // preference is honored until the next explicit save rewrites the new key.
+    stored=localStorage.getItem(_DEFAULT_MESSAGE_MODE_KEY);
+    if(stored===null||stored===undefined) stored=localStorage.getItem(_LEGACY_DEFAULT_MESSAGE_MODE_KEY);
+  }catch(_){}
+  return _normalizeDefaultMessageMode(stored);
+}
+window._persistDefaultMessageMode=_persistDefaultMessageMode;
+window._readPersistedDefaultMessageMode=_readPersistedDefaultMessageMode;
+// Eager default set BEFORE the async settings fetch resolves so first sends in
+// the boot window honor the persisted preference instead of the raw default.
+window._defaultMessageMode=_readPersistedDefaultMessageMode();
+
+// ── Extension TTS-engine registry (registerHermesTtsEngine) ──────────────────
+// Defined at MODULE scope (not inside the voice-mode IIFE below) so the public
+// API exists even on browsers without SpeechRecognition / speechSynthesis — an
+// extension can register a TTS engine regardless of STT/browser-TTS support.
+// Lets a trusted local extension contribute a TTS engine that appears in the
+// Settings -> TTS Engine dropdown and is used by BOTH playback paths (voice-mode
+// auto-read and the per-message Listen button). The extension provides an async
+// synthesize(text, opts) that returns audio bytes (ArrayBuffer or Blob); core
+// handles selection, the dropdown option, and playback. Mirrors registerHermesSkin.
+//
+//   window.registerHermesTtsEngine({
+//     id: 'voicevox',            // [a-z0-9_-], not a built-in (browser/edge/elevenlabs/openai)
+//     label: 'VOICEVOX (local)',
+//     synthesize(text, opts) { return Promise<ArrayBuffer|Blob>; }
+//   }) -> true on success, false if rejected
+var _HERMES_TTS_ENGINES = Object.create(null);
+var _HERMES_TTS_RESERVED = { browser:1, edge:1, elevenlabs:1, openai:1 };
+function _hermesTtsValidId(id){ return typeof id==='string' && /^[a-z0-9][a-z0-9_-]{0,31}$/.test(id); }
+function _hermesAddTtsOption(id, label){
+  var sel=document.getElementById('settingsTtsEngine');
+  if(!sel) return;
+  if(sel.querySelector('option[value="'+id+'"]')) return;
+  var opt=document.createElement('option');
+  opt.value=id;
+  opt.textContent=label;   // textContent — never innerHTML (no injection)
+  sel.appendChild(opt);
+}
+window.registerHermesTtsEngine=function(desc){
+  try{
+    if(!desc||typeof desc!=='object') return false;
+    var id=String(desc.id||'').toLowerCase();
+    if(!_hermesTtsValidId(id)) return false;
+    if(_HERMES_TTS_RESERVED[id]) return false;          // can't shadow a built-in
+    if(typeof desc.synthesize!=='function') return false;
+    var label=(typeof desc.label==='string' && desc.label.trim()) ? desc.label.trim().slice(0,48) : id;
+    _HERMES_TTS_ENGINES[id]={ id:id, label:label, synthesize:desc.synthesize };
+    _hermesAddTtsOption(id, label);
+    return true;
+  }catch(_){ return false; }
+};
+window._hermesTtsIsRegistered=function(id){ return !!_HERMES_TTS_ENGINES[id]; };
+// List registered engines (for the settings panel to re-add options on render).
+window._hermesTtsEngineOptions=function(){
+  return Object.keys(_HERMES_TTS_ENGINES).map(function(k){
+    return { id:_HERMES_TTS_ENGINES[k].id, label:_HERMES_TTS_ENGINES[k].label };
+  });
+};
+// Returns a Promise<ArrayBuffer> or null if the engine isn't registered.
+window._hermesTtsSynth=function(id, text, opts){
+  var eng=_HERMES_TTS_ENGINES[id];
+  if(!eng) return null;
+  return Promise.resolve()
+    .then(function(){ return eng.synthesize(text, opts||{}); })
+    .then(function(out){
+      if(!out) throw new Error('empty TTS result');
+      if(out instanceof ArrayBuffer) return out;
+      if(typeof Blob!=='undefined' && out instanceof Blob) return out.arrayBuffer();
+      if(out.buffer instanceof ArrayBuffer) return out.buffer;   // typed array
+      throw new Error('TTS engine returned an unsupported type');
+    });
+};
+
+// ── Session-open hook (for extensions) ────────────────────────────────────
+var _HERMES_SESSION_OPEN_HANDLERS=[];
+window.registerHermesSessionOpenHandler=function(fn){
+  if(typeof fn!=='function') return false;
+  if(_HERMES_SESSION_OPEN_HANDLERS.indexOf(fn)>=0) return false;
+  _HERMES_SESSION_OPEN_HANDLERS.push(fn);
+  return true;
+};
+window._hermesNotifySessionOpen=function(sid, data, opts){
+  opts=opts||{};
+  for(var i=0;i<_HERMES_SESSION_OPEN_HANDLERS.length;i++){
+    try{
+      var result=_HERMES_SESSION_OPEN_HANDLERS[i](sid, data, opts);
+      if(opts.preload===true && result&&result.cancel===true) return {cancel:true};
+    }catch(_){}
+  }
+  return {};
+};
+
+// ── Transcript renderer (for extensions) ───────────────────────────────────
+window.renderTranscript=function(container, messages, opts){
+  if(!container||!Array.isArray(messages)) return container;
+  opts=opts||{};
+  container.innerHTML='';
+  var md=window.renderMd||null;
+  for(var i=0;i<messages.length;i++){
+    var msg=messages[i];
+    if(!msg||!msg.role||msg.role==='tool') continue;
+    var content;
+    if(typeof msg.content==='string'){
+      content=msg.content;
+    }else if(msg.content==null){
+      content='';
+    }else if(Array.isArray(msg.content)){
+      // Multi-part content (OpenAI/Anthropic API style) — concatenate text parts.
+      content=msg.content.map(function(p){return (p&&typeof p.text==='string')?p.text:''}).join('');
+    }else{
+      content=String(msg.content);
+    }
+    if(!content&&opts.skipEmpty) continue;
+    var row=document.createElement('div');
+    row.className='msg-row';
+    row.setAttribute('data-role',msg.role);
+    var body=document.createElement('div');
+    body.className='msg-body';
+    try{
+      if(md){
+        var html=md(content);
+        if(html!=null){body.innerHTML=html}else{body.textContent=content}
+      }else{
+        body.textContent=content;
+      }
+    }catch(_){body.textContent=content}
+    row.appendChild(body);
+    container.appendChild(row);
+  }
+  if(typeof _rehydrateTransparentStreamDom==='function'){
+    try{_rehydrateTransparentStreamDom(container);}catch(_){}
+  }
+  return container;
+};
 
 // ── Turn-based voice mode (#1333) ────────────────────────────────────────
 // Chained flow: listen → send → (agent processes) → TTS response → listen again
@@ -853,7 +1337,49 @@ window._micPendingSend=window._micPendingSend||false;
   // a different session's last assistant reply if the user navigated away
   // between send and stream completion. (Opus pre-release advisor.)
   let _voiceModeThinkingSid=null;
-  const SILENCE_MS=1800; // auto-send after 1.8s silence
+  let _browserTtsKeepAlive=null;
+  let _browserTtsWatchdog=null;
+  let _browserTtsSuppressNextErrorRearm=false;
+  function _voiceSilenceMs(){
+    const _silenceMsRaw=parseInt(localStorage.getItem('hermes-voice-silence-ms'),10);
+    return (Number.isFinite(_silenceMsRaw)&&_silenceMsRaw>0)?Math.max(200,_silenceMsRaw):1800;
+  }
+
+  function _clearBrowserTtsRecovery(){
+    if(_browserTtsKeepAlive){
+      clearInterval(_browserTtsKeepAlive);
+      _browserTtsKeepAlive=null;
+    }
+    if(_browserTtsWatchdog){
+      clearTimeout(_browserTtsWatchdog);
+      _browserTtsWatchdog=null;
+    }
+  }
+
+  function _armBrowserTtsRecovery(clean, rate){
+    _clearBrowserTtsRecovery();
+    _browserTtsSuppressNextErrorRearm=false;
+    const safeRate=(Number.isFinite(rate)&&rate>0)?rate:1;
+    const watchdogMs=Math.max(4000,Math.round((String(clean||'').length/(12*safeRate))*1000)+10000);
+    _browserTtsWatchdog=setTimeout(()=>{
+      if(!_voiceModeActive||_voiceModeState!=='speaking') return;
+      _browserTtsSuppressNextErrorRearm=true;
+      try{ speechSynthesis.cancel(); }catch(_){}
+      _clearBrowserTtsRecovery();
+      _startListening();
+    },watchdogMs);
+    _browserTtsKeepAlive=setInterval(()=>{
+      if(!_voiceModeActive||_voiceModeState!=='speaking'){
+        _clearBrowserTtsRecovery();
+        return;
+      }
+      if(!speechSynthesis.speaking) return;
+      try{
+        speechSynthesis.pause();
+        speechSynthesis.resume();
+      }catch(_){}
+    },10000);
+  }
 
   function _setState(state){
     _voiceModeState=state;
@@ -895,7 +1421,7 @@ window._micPendingSend=window._micPendingSend||false;
       if(_finalText){
         _silenceTimer=setTimeout(()=>{
           _voiceModeSend();
-        },SILENCE_MS);
+        },_voiceSilenceMs());
       }
     };
 
@@ -1187,6 +1713,84 @@ $('btnExportJSON').onclick=()=>{
   const a=document.createElement('a');a.href=url;
   a.download=`hermes-${S.session.session_id}.json`;a.click();
 };
+$('btnShareSession').onclick=async()=>{
+  if(!S.session) return;
+  try{
+    const existing=(S.session&&S.session.share_token)?new URL(`/share/${encodeURIComponent(S.session.share_token)}`,location.origin).href:null;
+    if(existing){
+      const reuse=await showConfirmDialog({
+        title:t('share_session'),
+        message:t('share_session_existing_confirm'),
+        confirmLabel:t('share_session_copy_existing'),
+        cancelLabel:t('share_session_refresh_snapshot'),
+      });
+      if(reuse){
+        await _copyText(existing);
+        showToast(t('share_session_link_copied'));
+        window.open(existing,'_blank','noopener');
+        return;
+      }
+    }
+    const res=await api('/api/share/create',{method:'POST',body:JSON.stringify({session_id:S.session.session_id})});
+    if(res&&res.session) S.session=res.session;
+    const href=new URL(String(res&&res.share&&res.share.url||''),location.origin).href;
+    await _copyText(href);
+    showToast(t('share_session_created'));
+    if(typeof _syncHermesPanelSessionActions==='function') _syncHermesPanelSessionActions();
+    window.open(href,'_blank','noopener');
+  }catch(err){
+    showToast(t('share_session_failed')+(err&&err.message?err.message:String(err||'')),4000,'error');
+  }
+};
+$('btnStopSharingSession').onclick=async()=>{
+  if(!S.session||!S.session.share_token) return;
+  const ok=await showConfirmDialog({
+    title:t('stop_sharing_session'),
+    message:t('stop_sharing_session_confirm'),
+    confirmLabel:t('stop_sharing_session'),
+    danger:true,
+  });
+  if(!ok) return;
+  try{
+    const res=await api('/api/share/revoke',{method:'POST',body:JSON.stringify({session_id:S.session.session_id})});
+    if(res&&res.session) S.session=res.session;
+    showToast(t('share_session_revoked'));
+    if(typeof _syncHermesPanelSessionActions==='function') _syncHermesPanelSessionActions();
+  }catch(err){
+    showToast(t('share_session_revoke_failed')+(err&&err.message?err.message:String(err||'')),4000,'error');
+  }
+};
+function exportSessionHTML(session){
+  const target=session||S.session;
+  if(!target||!target.session_id)return;
+  const sid=target.session_id;
+  const theme=document.documentElement.classList.contains('dark')?'dark':'light';
+  // Capture the live WebUI palette so the export matches the user's active
+  // theme + skin exactly, not just the built-in dark/light fallback. Map each
+  // export-template variable to its WebUI source; getComputedStyle resolves to
+  // the currently rendered colour regardless of which skin is selected.
+  const cs=getComputedStyle(document.documentElement);
+  const read=(...names)=>{for(const n of names){const v=cs.getPropertyValue(n).trim();if(v)return v;}return '';};
+  const palette={
+    'bg':read('--bg'),
+    'panel':read('--surface','--bg'),
+    'panel2':read('--code-bg','--surface'),
+    'border':read('--border'),
+    'text':read('--text'),
+    'muted':read('--muted','--text'),
+    'accent':read('--accent'),
+    'code-bg':read('--code-bg'),
+    'code-border':read('--border2','--border'),
+    'code-text':read('--text'),
+  };
+  // Drop empties so the inlined fallback keeps working for anything we couldn't read.
+  const clean={};for(const k in palette){if(palette[k])clean[k]=palette[k];}
+  const paletteB64=btoa(unescape(encodeURIComponent(JSON.stringify(clean))));
+  const url=`/api/session/export?session_id=${encodeURIComponent(sid)}&format=html&theme=${theme}&palette=${encodeURIComponent(paletteB64)}`;
+  const a=document.createElement('a');a.href=url;
+  a.download=`hermes-${sid}.html`;a.click();
+}
+$('btnExportHTML').onclick=()=>exportSessionHTML();
 $('btnImportJSON').onclick=()=>$('importFileInput').click();
 $('importFileInput').onchange=async(e)=>{
   const file=e.target.files[0];
@@ -1233,6 +1837,7 @@ function _applySessionContextMetadataUpdate(data){
   S.session.context_length=data.session.context_length||0;
   S.session.threshold_tokens=data.session.threshold_tokens||0;
   S.session.last_prompt_tokens=data.session.last_prompt_tokens||0;
+  S.session.post_compression_context_tokens_estimate=data.session.post_compression_context_tokens_estimate||null;
   if(typeof _syncCtxIndicator==='function'){
     const u=S.lastUsage||{};
     const _pick=(latest,stored,dflt=0)=>latest!=null?latest:(stored!=null?stored:dflt);
@@ -1242,6 +1847,7 @@ function _applySessionContextMetadataUpdate(data){
       estimated_cost:_pick(u.estimated_cost,S.session.estimated_cost),
       context_length:S.session.context_length||0,
       last_prompt_tokens:_pick(u.last_prompt_tokens,S.session.last_prompt_tokens),
+      post_compression_context_tokens_estimate:S.session.post_compression_context_tokens_estimate,
       threshold_tokens:S.session.threshold_tokens||0,
     });
   }
@@ -1252,6 +1858,7 @@ $('modelSelect').onchange=async()=>{
   const modelState=(typeof _modelStateForSelect==='function')
     ? _modelStateForSelect($('modelSelect'),selectedModel)
     : {model:selectedModel,model_provider:null};
+  if(typeof clearProfileTransitionReasoningContext==='function') clearProfileTransitionReasoningContext();
   if(typeof closeModelDropdown==='function') closeModelDropdown();
   if(typeof _writePersistedModelState==='function') _writePersistedModelState(modelState.model,modelState.model_provider);
   else try{localStorage.setItem('hermes-webui-model',modelState.model)}catch{}
@@ -1320,6 +1927,28 @@ $('msg').addEventListener('input',()=>{
     hideCmdDropdown();
   }
 });
+// #5514/#5515: re-pin the transcript on ANY composer height change, not only the
+// ones that route through the input->autoResize path. A multi-line paste
+// (WisprFlow), a draft restore, an attachment tray / selection-chip appearing, a
+// programmatic value set, or a font/reflow can all grow the composer and shrink
+// the flex:1 transcript viewport, stranding a pinned reader above the bottom
+// (reads as a "random" upward jump — #5515). Observe the whole #composerWrap
+// (not just #msg) so tray/chip growth is covered too, at one seam. The re-pin is
+// guarded (only fires when genuinely pinned), so it never fights a reader who
+// scrolled away. First callback fires on observe (initial size) — the guard
+// makes that a cheap no-op.
+(()=>{
+  const _cw=$('composerWrap')||$('msg');
+  if(!_cw || typeof ResizeObserver!=='function' || typeof _repinMessagesAfterComposerResize!=='function') return;
+  let _lastComposerH=_cw.offsetHeight;
+  const _ro=new ResizeObserver(()=>{
+    const h=_cw.offsetHeight;
+    if(h<=_lastComposerH){_lastComposerH=h;return;}   // shrink/no-op: enlarges the viewport, can't strand
+    _lastComposerH=h;
+    _repinMessagesAfterComposerResize();               // grow: re-pin the pinned reader
+  });
+  try{ _ro.observe(_cw); }catch(_){ }
+})();
 // Track IME composition for East Asian input. Safari fires the committing
 // keydown AFTER compositionend with isComposing=false, so we also keep a
 // manual flag and reset it on the next tick to swallow that trailing Enter.
@@ -1411,6 +2040,19 @@ document.addEventListener('keydown',async e=>{
       return;
     }
   }
+  // Cmd/Ctrl+/ focuses the message composer without creating a chat.
+  // Match on the '/' CHARACTER (e.key), not the physical key position: on QWERTZ
+  // layouts the physical Slash key produces Ctrl+- (browser zoom-out) and '/' is
+  // typed as Shift+7, so matching the physical code both steals zoom and misses
+  // the real '/' chord. e.key==='/' is layout-correct on every keyboard.
+  if((e.metaKey||e.ctrlKey)&&!e.altKey&&e.key==='/'){
+    const t=e.target;
+    const isText=t&&(t.tagName==='INPUT'||t.tagName==='TEXTAREA'||t.isContentEditable);
+    if(isText) return;
+    const composer=$('msg');
+    if(composer){e.preventDefault();composer.focus();}
+    return;
+  }
   // Enter on approval card = Allow once (when a button inside the card is focused or
   // card is visible and focus is not on an input/textarea/select)
   if(e.key==='Enter'&&!e.metaKey&&!e.ctrlKey&&!e.shiftKey){
@@ -1498,10 +2140,32 @@ function applyEmptyStateSuggestionPref(){
   $('emptyState').classList.toggle('no-suggestions',window._hideEmptyStateSuggestions===true);
 }
 
+function applyEmptyStatePanelPref(){
+  if(!$('emptyState')) return;
+  $('emptyState').classList.toggle('no-welcome',window._hideEmptyStatePanel===true);
+}
+
 window.addEventListener('resize',()=>{
   _syncWorkspacePanelInlineWidth();
   syncWorkspacePanelState();
 });
+
+// On PWAs / mobile browsers that expose visualViewport, keyboard show/hide and
+// URL-bar collapse fire visualViewport resize/scroll rather than window resize.
+// Debounce a reflow so the phone layout repaints against the new geometry.
+if(window.visualViewport){
+  _syncKeyboardBottomInset();
+  let _mobileViewportReflowTimer=0;
+  const _scheduleMobileViewportReflow=()=>{
+    if(_mobileViewportReflowTimer) clearTimeout(_mobileViewportReflowTimer);
+    _mobileViewportReflowTimer=setTimeout(()=>{
+      _mobileViewportReflowTimer=0;
+      _forceMobileViewportReflow();
+    },60);
+  };
+  window.visualViewport.addEventListener('resize', _scheduleMobileViewportReflow);
+  window.visualViewport.addEventListener('scroll', _scheduleMobileViewportReflow);
+}
 
 // Boot: restore last session or start fresh
 // ── Resizable panels ──────────────────────────────────────────────────────
@@ -1896,6 +2560,21 @@ function _applyComposerFooterVisibilitySettings(){
   if(hidden.hide_composer_reasoning&&typeof closeReasoningDropdown==='function') closeReasoningDropdown();
   if(hidden.hide_composer_toolsets&&typeof closeToolsetsDropdown==='function') closeToolsetsDropdown();
   if(hidden.hide_composer_mobile_config&&typeof closeMobileComposerConfig==='function') closeMobileComposerConfig();
+
+  // Hide the divider when all left-group buttons before it are hidden
+  // Stops a lone vertical separator from appearing when attach/saved-prompts/mic/voice are all hidden.
+  const _divider=document.querySelector('.composer-divider');
+  if(_divider){
+    const _leftBtnSelectors=['#btnAttach','#btnSavedPrompts','#btnMic','#btnVoiceMode'];
+    const _allLeftHidden=_leftBtnSelectors.every(sel=>{
+      const el=document.querySelector(sel);
+      return !el||el.classList.contains('composer-control-hidden')||el.style.display==='none';
+    });
+    // Use classList.toggle directly instead of _setComposerControlHidden
+    // so we don't strip the intentional aria-hidden="true" on the decorative divider
+    // when buttons are visible (Greptile feedback).
+    _divider.classList.toggle('composer-control-hidden',_allLeftHidden);
+  }
 }
 window._applyComposerFooterVisibilitySettings=_applyComposerFooterVisibilitySettings;
 
@@ -1906,6 +2585,77 @@ function _applyTitlebarProfileVisibility(){
 }
 window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
 
+function _mirrorSpeechSettingsFromServer(s){
+  if(!s||typeof s!=='object') return;
+  const persistedSpeechKeys = new Set(
+    Array.isArray(s.persisted_speech_keys) ? s.persisted_speech_keys : []
+  );
+  const hasServerValue=(settingKey)=>persistedSpeechKeys.has(settingKey);
+  const defaults={
+    tts_enabled:false,
+    tts_auto_read:false,
+    tts_engine:'browser',
+    tts_voice:'',
+    tts_rate:1,
+    tts_pitch:1,
+    voice_mode_button:false,
+    voice_continuous:false,
+    voice_silence_ms:1800,
+    raw_audio_mode:false,
+  };
+  const cachedValue=(storageKey)=>{
+    try{return localStorage.getItem(storageKey);}catch(_){return null;}
+  };
+  const boolValue=(value)=>value===true||value==='true';
+  const resolveBool=(settingKey,storageKey)=>{
+    const server=hasServerValue(settingKey)?s[settingKey]:defaults[settingKey];
+    const cached=cachedValue(storageKey);
+    if(!hasServerValue(settingKey)&&cached!==null){
+      return boolValue(cached);
+    }
+    return boolValue(server);
+  };
+  const resolveScalar=(settingKey,storageKey)=>{
+    const server=hasServerValue(settingKey)?s[settingKey]:defaults[settingKey];
+    const cached=cachedValue(storageKey);
+    if(!hasServerValue(settingKey)&&cached!==null){
+      return cached;
+    }
+    return server;
+  };
+  const boolKeys=[
+    ['tts_enabled','hermes-tts-enabled'],
+    ['tts_auto_read','hermes-tts-auto-read'],
+    ['voice_mode_button','hermes-voice-mode-button'],
+    ['voice_continuous','hermes-voice-continuous'],
+  ];
+  boolKeys.forEach(([settingKey,storageKey])=>{
+    if(hasServerValue(settingKey)){
+      try{localStorage.setItem(storageKey,resolveBool(settingKey,storageKey)?'true':'false');}catch(_){}
+    }
+  });
+  [
+    ['tts_engine','hermes-tts-engine'],
+    ['tts_voice','hermes-tts-voice'],
+    ['tts_rate','hermes-tts-rate'],
+    ['tts_pitch','hermes-tts-pitch'],
+    ['voice_silence_ms','hermes-voice-silence-ms'],
+  ].forEach(([settingKey,storageKey])=>{
+    if(hasServerValue(settingKey)){
+      try{localStorage.setItem(storageKey,String(resolveScalar(settingKey,storageKey)));}catch(_){}
+    }
+  });
+  if(hasServerValue('raw_audio_mode')){
+    const rawAudioMode=resolveBool('raw_audio_mode','hermes-raw-audio-mode');
+    if(typeof window._applyRawAudioModePreference==='function'){
+      window._applyRawAudioModePreference(rawAudioMode);
+    }else{
+      try{localStorage.setItem('hermes-raw-audio-mode',rawAudioMode?'true':'false');}catch(_){}
+    }
+  }
+}
+window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
+
 (async()=>{
   // Load send key preference
   let _bootSettings={};
@@ -1913,6 +2663,7 @@ window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
   try{
     const s=await api('/api/settings');
     _bootSettings=s;
+    if(typeof checkWebUIVersionSkew==='function'){try{checkWebUIVersionSkew(s);}catch(_){}}
     window._sendKey=s.send_key||'enter';
     // Persist default workspace so the blank new-chat page can show it
     // and workspace actions (New file/folder) work before the first session (#804).
@@ -1924,9 +2675,13 @@ window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
     if(typeof applyConversationOutlinePreference==='function') applyConversationOutlinePreference();
     window._hideEmptyStateSuggestions=s.hide_empty_state_suggestions===true;
     applyEmptyStateSuggestionPref();
+    window._hideEmptyStatePanel=s.hide_empty_state_panel===true;
+    applyEmptyStatePanelPref();
     // #4343: transcript virtualization is EXPERIMENTAL/opt-IN (default OFF).
-    // It caused scroll-up flicker on long sessions, so it's off for everyone
-    // unless explicitly opted in; long transcripts render in full by default.
+    // #4346 Phase B (footer-jitter suppression during virtual-scroll
+    // measurement re-renders) resolved the scroll-up flicker root cause,
+    // but virtualization remains opt-in until battle-tested further.
+    // Users can explicitly enable it via Settings → virtualize_transcript.
     window._virtualizeTranscript=s.virtualize_transcript===true;
     window._showTps=!!s.show_tps;
     window._fadeTextEffect=!!s.fade_text_effect;
@@ -1937,8 +2692,11 @@ window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
     window._whatsNewSummaryEnabled=!!s.whats_new_summary_enabled;
     window._showThinking=s.show_thinking!==false;
     window._simplifiedToolCalling=true;
-    window._chatActivityDisplayMode=s.chat_activity_display_mode==='transparent_stream'?'transparent_stream':'compact_worklog';
+    window._chatActivityDisplayMode=s.chat_activity_display_mode==='transparent_stream'||s.chat_activity_display_mode==='hide_all_activity'
+      ? s.chat_activity_display_mode
+      : 'compact_worklog';
     window._transparentStream=window._chatActivityDisplayMode==='transparent_stream';
+    window._transparentEventTimestamps=s.transparent_stream_event_timestamps!==false;
     window._terminalAutoExpandOnOutput=!!s.terminal_auto_expand_on_output;
     window._worklogDetailsExpandedByDefault=!!(
       Object.prototype.hasOwnProperty.call(s,'worklog_details_expanded_default')
@@ -1955,7 +2713,13 @@ window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
       stringChars:parseInt(s.inflight_state_max_string_chars||60000,10)||60000,
       jsonChars:parseInt(s.inflight_state_max_json_chars||1500000,10)||1500000,
     };
-    window._busyInputMode=(s.busy_input_mode||'queue');
+    // #5162 rename + steer default, layered on the #5170 localStorage mirror:
+    // resolve the mode (new key, legacy busy_input_mode fallback, else 'steer'
+    // via _normalizeDefaultMessageMode) and persist it so the very first send
+    // after a reload honors the saved choice.
+    window._defaultMessageMode=_persistDefaultMessageMode(s.default_message_mode||s.busy_input_mode);
+    window._showBusyPlaceholderHint=!!s.show_busy_placeholder_hint;
+    window._newChatOnWorkspaceSwitch=!!s.new_chat_on_workspace_switch;  // #5473 opt-in
     window._sessionEndlessScrollEnabled=!!s.session_endless_scroll;
     window._botName=s.bot_name||'Hermes';
     if(s.default_model_provider) window._activeProvider=s.default_model_provider;
@@ -2026,6 +2790,14 @@ window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
       setLocale(_lang);
       if(typeof applyLocaleToDOM==='function')applyLocaleToDOM();
     }
+    _mirrorSpeechSettingsFromServer(s);
+    // Apply voice-mode visibility BEFORE computing the divider so the
+    // .composer-divider (#5451) sees #btnVoiceMode final display even
+    // when a server/localStorage sync path flipped the pref between
+    // module init and settings-load completion (round-2 SILENT race).
+    // Note: must use window._applyVoiceModePref — the bare name is
+    // closure-local to the voice-mode IIFE and not visible here.
+    if(typeof window._applyVoiceModePref==='function') window._applyVoiceModePref();
     _applyComposerFooterVisibilitySettings();
     // TTS: apply enabled state on boot so buttons show/hide correctly (#499)
     if(typeof _applyTtsEnabled==='function') _applyTtsEnabled(localStorage.getItem('hermes-tts-enabled')==='true');
@@ -2038,6 +2810,8 @@ window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
     if(typeof applyConversationOutlinePreference==='function') applyConversationOutlinePreference();
     window._hideEmptyStateSuggestions=false;
     applyEmptyStateSuggestionPref();
+    window._hideEmptyStatePanel=false;
+    applyEmptyStatePanelPref();
     window._virtualizeTranscript=false;  // settings-load failed: default-OFF (experimental/opt-in) (#4343)
     window._showTps=false;
     window._fadeTextEffect=false;
@@ -2049,6 +2823,7 @@ window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
     window._simplifiedToolCalling=true;
     window._chatActivityDisplayMode='compact_worklog';
     window._transparentStream=false;
+    window._transparentEventTimestamps=true;
     window._terminalAutoExpandOnOutput=false;
     window._workspaceTodosTab=false;
     if(typeof _applyWorkspaceTodosTabVisibility==='function') _applyWorkspaceTodosTabVisibility();
@@ -2079,6 +2854,15 @@ window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
       setLocale(_lang);
       if(typeof applyLocaleToDOM==='function')applyLocaleToDOM();
     }
+    // Apply voice-mode visibility BEFORE computing the divider so the
+    // .composer-divider (#5451) sees #btnVoiceMode final display even when
+    // a server/localStorage sync path flipped the pref between module init
+    // and settings-load completion (round-2 SILENT race fix; safe no-op on
+    // the failure-fallback path because _applyVoiceModePref is idempotent).
+    // Note: must use window._applyVoiceModePref — the bare name is
+    // closure-local to the voice-mode IIFE and not visible here.
+    if(typeof window._applyVoiceModePref==='function') window._applyVoiceModePref();
+    _applyComposerFooterVisibilitySettings();
     if(typeof _applyTtsEnabled==='function') _applyTtsEnabled(localStorage.getItem('hermes-tts-enabled')==='true');
   }
   // Non-blocking update check (fire-and-forget, once per tab session)
@@ -2088,14 +2872,129 @@ window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
     const _checkUrl='api/updates/check'+(_testUpdates?'?simulate=1':'');
     api(_checkUrl,{method:_testUpdates?'GET':'POST',body:_testUpdates?undefined:JSON.stringify({force:false})}).then(d=>{if(!_testUpdates)sessionStorage.setItem('hermes-update-checked','1');if((d.webui&&d.webui.behind>0)||(d.agent&&d.agent.behind>0))_showUpdateBanner(d);}).catch(()=>{});
   }
-  // Fetch active profile
-  try{const p=await api('/api/profile/active');S.activeProfile=p.name||'default';S.activeProfileIsDefault=!!p.is_default;}catch(e){S.activeProfile='default';S.activeProfileIsDefault=true;}
+  const _bootActiveProfileUnauthRedirectBudget=(()=>{
+    const markerKey='hermes-webui-active-profile-bootstrap-401';
+    let consumed=false;
+    const readAttempted=(storage=sessionStorage)=>{
+      try{
+        const attempted=storage&&storage.getItem?storage.getItem(markerKey)==='1':false;
+        if(attempted) consumed=true;
+        return attempted;
+      }catch(_){
+        return false;
+      }
+    };
+    const markAttempted=(storage=sessionStorage)=>{
+      consumed=true;
+      try{
+        if(storage&&storage.setItem) storage.setItem(markerKey,'1');
+      }catch(_){}
+    };
+    const clearAttempted=(storage=sessionStorage)=>{
+      try{
+        if(storage&&storage.removeItem) storage.removeItem(markerKey);
+      }catch(_){}
+    };
+    const spendOnFallback=(storage=sessionStorage)=>{
+      consumed=true;
+      clearAttempted(storage);
+    };
+    const spendOnRedirect=(storage=sessionStorage)=>{
+      if(consumed) return false;
+      markAttempted(storage);
+      return true;
+    };
+    const redirectToLogin=(nextUrl)=>{
+      // #5578: never nest the login URL into its own next= — if already on a
+      // login-shaped page, reload 'login' bare (the page keeps its inner next).
+      const _p=(window.location.pathname||'').replace(/\/+$/,'');
+      if(/(?:^|\/)login$/.test(_p)){window.location.href='login';return;}
+      window.location.href='login?next='+encodeURIComponent(nextUrl);
+    };
+    return {
+      readAttempted,
+      clearAttempted,
+      spendOnFallback,
+      spendOnRedirect,
+      redirectToLogin,
+      isConsumed:()=>consumed,
+    };
+  })();
+  async function _resolveActiveProfileBootstrapState({
+    loadActiveProfile = () => api('/api/profile/active', {redirect401: false}),
+    getNextUrl = () => window.location.pathname + window.location.search,
+    redirectToLogin = (nextUrl) => {
+      _bootActiveProfileUnauthRedirectBudget.redirectToLogin(nextUrl);
+    },
+    markerStorage = sessionStorage,
+  } = {}) {
+    const alreadyAttempted = _bootActiveProfileUnauthRedirectBudget.readAttempted(markerStorage);
+    try {
+      const p = await loadActiveProfile();
+      if (p && typeof p === 'object' && typeof p.name === 'string') {
+        _bootActiveProfileUnauthRedirectBudget.clearAttempted(markerStorage);
+        if (p.default_workspace) S._profileDefaultWorkspace = p.default_workspace;
+        return {status: 'resolved', profile: p.name || 'default', isDefault: !!p.is_default};
+      }
+      if (p === undefined && !alreadyAttempted) {
+        if (_bootActiveProfileUnauthRedirectBudget.spendOnRedirect(markerStorage)) {
+          redirectToLogin(getNextUrl());
+        }
+        return {status: 'recovery-redirect'};
+      }
+      if (p === undefined) _bootActiveProfileUnauthRedirectBudget.spendOnFallback(markerStorage);
+      else _bootActiveProfileUnauthRedirectBudget.clearAttempted(markerStorage);
+      return {status: 'fallback', profile: 'default', isDefault: true};
+    } catch (e) {
+      _bootActiveProfileUnauthRedirectBudget.clearAttempted(markerStorage);
+      if (!alreadyAttempted && e && e.status === 401) {
+        if (_bootActiveProfileUnauthRedirectBudget.spendOnRedirect(markerStorage)) {
+          redirectToLogin(getNextUrl());
+        }
+        return {status: 'recovery-redirect'};
+      }
+      if (e && e.status === 401) _bootActiveProfileUnauthRedirectBudget.spendOnFallback(markerStorage);
+      return {status: 'fallback', profile: 'default', isDefault: true};
+    }
+  }
+
+  // Fetch active profile with a one-time unauthenticated recovery redirect.
+  const _bootProfileState=await _resolveActiveProfileBootstrapState();
+  S.activeProfile=_bootProfileState.profile||'default';
+  S.activeProfileIsDefault=!!_bootProfileState.isDefault;
   applyBotName();
   // Update profile chip label immediately
   const profileLabel=$('profileChipLabel');
   if(profileLabel) profileLabel.textContent=S.activeProfile||'default';
+  const titleLabel=$('titlebarProfileLabel');
+  if(titleLabel) titleLabel.textContent=S.activeProfile||'default';
+  const profileIntent=(typeof _profileQueryIntentFromLocation==='function')?_profileQueryIntentFromLocation():null;
+  const _savedLocalBeforeProfileSwitch=localStorage.getItem('hermes-webui-session');
+  const _profileSwitchProfileBefore=S.activeProfile||'default';
+  const _profileSwitchIsDefaultBefore=!!S.activeProfileIsDefault;
+  let _profileSwitchCompleted=false;
+  let _profileSwitchChangedProfile=false;
+  if(profileIntent&&profileIntent.hasParam){
+    try{
+      if(profileIntent.valid){
+        if(typeof switchToProfile==='function'){
+          _profileSwitchCompleted=await switchToProfile(profileIntent.name)===true;
+          if(_profileSwitchCompleted){
+            _profileSwitchChangedProfile=(S.activeProfile||'default')!==_profileSwitchProfileBefore||!!S.activeProfileIsDefault!==_profileSwitchIsDefaultBefore;
+            if(typeof _consumeProfileQueryParamFromLocation==='function') _consumeProfileQueryParamFromLocation();
+          }
+        }
+      }else{
+        console.warn('[boot] ignored invalid profile query', profileIntent.name);
+        if(typeof _consumeProfileQueryParamFromLocation==='function') _consumeProfileQueryParamFromLocation();
+      }
+    }catch(e){
+      console.warn('[boot] profile query switch failed', e);
+    }
+  }
+  if(typeof fetchReasoningChip==='function'&&(!_profileSwitchCompleted||!_profileSwitchChangedProfile)) fetchReasoningChip();
   // Fetch available models without blocking session restore. The static HTML
-  // options are enough for first paint; the dynamic provider list can settle
+  // options enough for first paint; the dynamic provider list can settle
   // after the saved session is visible.
   const _hydrateBootModelDropdown=()=>populateModelDropdown({preferProfileDefaultOnFreshBoot:true}).then(()=>{
     const sessionModelState=S.session&&S.session.model
@@ -2131,6 +3030,7 @@ window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
       else if(typeof syncModelChip==='function') syncModelChip();
     }
     if(S.session) syncTopbar();
+    else if(typeof syncReasoningChip==='function') syncReasoningChip();
   }).catch(e=>{
     window._modelDropdownReady=null;
     throw e;
@@ -2166,8 +3066,6 @@ window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
   // re-run when the browser restores the page from bfcache.
   const _srch = document.getElementById('sessionSearch'); if (_srch) _srch.value = '';
   if (typeof syncSessionSearchClear === 'function') syncSessionSearchClear();
-  // Initialize reasoning chip on boot (fixes #1103 — chip hidden until session load)
-  if(typeof fetchReasoningChip==='function') fetchReasoningChip();
   if(typeof refreshProviderQuotaIndicator==='function') refreshProviderQuotaIndicator();
   const urlSession=(typeof _sessionIdFromLocation==='function')?_sessionIdFromLocation():null;
   const pwaLaunchAction=(window.HermesPWA&&typeof window.HermesPWA.launchAction==='function')
@@ -2180,6 +3078,12 @@ window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
       S._bootReady=true;
       syncTopbar();syncWorkspacePanelState();await renderSessionList();if(typeof startGatewaySSE==='function')startGatewaySSE();return;
     }catch(e){console.warn('[pwa] new-chat launch action failed', e);}
+  }
+  const _profileQueryBlocksSavedLocal=_profileQueryBlocksSavedLocalRestore(profileIntent, urlSession);
+  if(_profileQueryBlocksSavedLocal&&_profileSwitchCompleted&&_profileSwitchChangedProfile){
+    try{
+      if(localStorage.getItem('hermes-webui-session')===_savedLocalBeforeProfileSwitch) localStorage.removeItem('hermes-webui-session');
+    }catch(_){}
   }
   const savedLocal=localStorage.getItem('hermes-webui-session');
   const saved=urlSession||savedLocal;
@@ -2268,6 +3172,7 @@ window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
 // chrome aren't left in the stale bfcache snapshot.
 window.addEventListener('pageshow', async (event) => {
   if (!event.persisted) return;  // fresh loads are handled by the IIFE above
+  _syncKeyboardBottomInset();
   const _srch = document.getElementById('sessionSearch');
   if (_srch) _srch.value = '';
   if (typeof syncSessionSearchClear === 'function') syncSessionSearchClear();

@@ -4,6 +4,7 @@ async function api(path,opts={}){
   const url=new URL(rel,document.baseURI||location.href);
   const timeoutMs=Object.prototype.hasOwnProperty.call(opts,'timeoutMs')?opts.timeoutMs:30000;
   const timeoutToast=opts.timeoutToast!==false;
+  const redirect401=opts.redirect401!==false;
   // Retry up to 2 times on network errors (e.g. stale keep-alive after long idle).
   // Server errors (4xx/5xx) and client-side timeouts are NOT retried.
   let lastErr;
@@ -17,6 +18,7 @@ async function api(path,opts={}){
       const fetchOpts={...opts};
       delete fetchOpts.timeoutMs;
       delete fetchOpts.timeoutToast;
+      delete fetchOpts.redirect401;
 
       const useTimeout=Number.isFinite(Number(timeoutMs))&&Number(timeoutMs)>0;
       if(useTimeout&&typeof AbortController!=='undefined'){
@@ -35,7 +37,17 @@ async function api(path,opts={}){
           // 401 means the auth session expired. Redirect to login so the user can
           // re-authenticate. This is especially important for iOS PWA (standalone mode)
           // and for subpath mounts like /hermes/, where /login escapes to the site root.
-          if(res.status===401){window.location.href='login?next='+encodeURIComponent(window.location.pathname+window.location.search);return;}
+if(res.status===401){
+            if(redirect401){
+              const _p=(window.location.pathname||'').replace(/\/+$/,'');
+              if(/(?:^|\/)login$/.test(_p)){
+                window.location.href='login';
+              }else{
+                window.location.href='login?next='+encodeURIComponent(window.location.pathname+window.location.search);
+              }
+            }
+            return;
+          }
           const text=await res.text();
           // Parse JSON error body and surface the human-readable message,
           // rather than showing raw JSON like {"error":"Profile 'x' does not exist."}
@@ -121,6 +133,157 @@ function _restoreExpandedDirs(){
     const raw=localStorage.getItem(key);
     S._expandedDirs=raw?new Set(JSON.parse(raw)):new Set();
   }catch(e){S._expandedDirs=new Set();}
+}
+
+function _escapeGrantStore(){
+  if(!S._escapeGrants) S._escapeGrants = Object.create(null);
+  return S._escapeGrants;
+}
+
+function _normalizeWorkspaceRelPath(path){
+  let raw = String(path || '').trim().replace(/\\/g, '/');
+  if(!raw || raw === '.') return '.';
+  if(raw.startsWith('/')) return '';
+  const parts = [];
+  for(const part of raw.split('/')){
+    if(!part || part === '.') continue;
+    if(part === '..'){
+      if(parts.length) parts.pop();
+      else return '';
+      continue;
+    }
+    parts.push(part);
+  }
+  return parts.length ? parts.join('/') : '.';
+}
+
+function _isSameOrChildPath(base, path){
+  const normalizedBase = _normalizeWorkspaceRelPath(base);
+  const normalizedPath = _normalizeWorkspaceRelPath(path);
+  if(!normalizedBase || !normalizedPath) return false;
+  if(normalizedBase === '.') return true;
+  return normalizedPath === normalizedBase || normalizedPath.startsWith(`${normalizedBase}/`);
+}
+
+function _workspaceEscapeGrantForPath(path){
+  const grants = _escapeGrantStore();
+  const normalizedPath = _normalizeWorkspaceRelPath(path);
+  if(!normalizedPath || !S.session || !S.session.session_id) return null;
+  const sessionId = S.session.session_id;
+  let best = null;
+  for(const root of Object.keys(grants)){
+    const grant = grants[root];
+    if(!grant || grant.sessionId !== sessionId) continue;
+    if(grant.expiresAt && Date.now() >= grant.expiresAt){
+      delete grants[root];
+      continue;
+    }
+    if(!_isSameOrChildPath(root, normalizedPath)) continue;
+    if(!best || root.length > best.root.length) best = {root, grant};
+  }
+  return best ? best.grant : null;
+}
+
+function _workspaceEscapeExactGrant(path){
+  const normalizedPath = _normalizeWorkspaceRelPath(path);
+  const grant = _workspaceEscapeGrantForPath(normalizedPath);
+  if(!grant) return null;
+  return grant.path === normalizedPath ? grant : null;
+}
+
+function _storeWorkspaceEscapeGrant(data){
+  if(!S.session || !data || !data.token) return null;
+  const grants = _escapeGrantStore();
+  const root = _normalizeWorkspaceRelPath(data.path || '');
+  if(!root) return null;
+  const grant = {
+    sessionId: S.session.session_id,
+    path: root,
+    token: String(data.token),
+    expiresAt: Number(data.expires_at || 0) * 1000,
+    isDir: !!data.is_dir,
+  };
+  grants[root] = grant;
+  return grant;
+}
+
+function _clearWorkspaceEscapeGrant(path){
+  const grants = S._escapeGrants;
+  if(!grants) return;
+  const root = _normalizeWorkspaceRelPath(path);
+  if(root && grants[root]) delete grants[root];
+}
+
+function _workspacePathIsReadOnly(path){
+  return !!_workspaceEscapeGrantForPath(path || S.currentDir || '.');
+}
+
+function _workspaceRouteForPath(path, kind, opts={}){
+  const route=_workspaceRouteForPathRel(path, kind, opts);
+  if(!route) return route;
+  const base=(typeof document!=='undefined'&&document.baseURI)||(typeof location!=='undefined'&&location.href)||'';
+  if(!base||!/^https?:\/\//i.test(base)) return route;
+  const rel=route.startsWith('/') ? route.slice(1) : route;
+  return new URL(rel, base).href;
+}
+
+function _workspaceRouteForPathRel(path, kind, opts={}){
+  if(!S.session) return '';
+  const normalizedPath = _normalizeWorkspaceRelPath(path);
+  const grant = _workspaceEscapeGrantForPath(normalizedPath);
+  const sessionId = encodeURIComponent(S.session.session_id);
+  const params = new URLSearchParams({session_id:S.session.session_id, path:normalizedPath || '.'});
+  if(grant){
+    params.set('token', grant.token);
+    if(kind === 'raw' && opts.download) params.set('download', '1');
+    if(kind === 'raw' && opts.inline) params.set('inline', '1');
+    if(kind === 'list') return `/api/escape/list?${params.toString()}`;
+    if(kind === 'read') return `/api/escape/file/read?${params.toString()}`;
+    if(kind === 'raw') return `/api/escape/file/raw?${params.toString()}`;
+  }
+  if(kind === 'list') return `/api/list?session_id=${sessionId}&path=${encodeURIComponent(normalizedPath || '.')}`;
+  if(kind === 'read') return `/api/file?session_id=${sessionId}&path=${encodeURIComponent(normalizedPath || '.')}`;
+  if(kind === 'raw'){
+    const extra = [];
+    if(opts.download) extra.push('download=1');
+    if(opts.inline) extra.push('inline=1');
+    const suffix = extra.length ? `&${extra.join('&')}` : '';
+    return `/api/file/raw?session_id=${sessionId}&path=${encodeURIComponent(normalizedPath || '.')}${suffix}`;
+  }
+  return '';
+}
+
+async function authorizeWorkspaceEscapeNavigation(item){
+  if(!S.session || !item || !item.path) return null;
+  const normalizedPath = _normalizeWorkspaceRelPath(item.path);
+  const exactGrant = _workspaceEscapeExactGrant(normalizedPath);
+  if(!exactGrant){
+    const ok = await showConfirmDialog({
+      title: item.name || normalizedPath,
+      message: t('external_link_open_confirm'),
+      confirmLabel: t('dialog_confirm_btn'),
+      danger: false,
+      hideCancel: true,
+      focusCancel: false,
+    });
+    if(!ok) return null;
+  }
+  try{
+    const data = await api('/api/escape/authorize', {
+      method: 'POST',
+      body: JSON.stringify({
+        session_id: S.session.session_id,
+        path: normalizedPath,
+      }),
+    });
+    const grant = _storeWorkspaceEscapeGrant(data);
+    if(!grant) throw new Error('Missing escape authorization token');
+    showToast(t('external_link_read_only'), 2000);
+    return grant;
+  }catch(e){
+    showToast(t('external_link_grant_expired') || (e && e.message ? e.message : String(e)), 5000, 'error');
+    return null;
+  }
 }
 
 let _workspacePanelActiveTab = 'files';
@@ -797,7 +960,7 @@ function _toWorkspaceRelativePath(path){
   if(_isHermesSkillsPath(path)) return null;
   let rel = _normalizeOsPath(path).replace(/^(?:\.\/)+/, '');
   const ws = S.session && S.session.workspace;
-  if(!ws) return rel || '.';
+if(!ws) return rel || '.';
   const normWs = ws.replace(/\/+$/,'');
   const normWsSlash = normWs + '/';
   if(rel.startsWith('/') || /^[A-Za-z]:/.test(rel)){
@@ -1540,6 +1703,39 @@ function openInBrowser(){
   if(!_previewCurrentPath||!S.session) return;
   const url=`api/file/raw?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(_previewCurrentPath)}&inline=1`;
   window.open(url,'_blank','noopener');
+}
+
+async function copyPreviewRelativePath(){
+  if(!_previewCurrentPath) return;
+  const btn=$('btnCopyPreviewRelPath');
+  if(btn&&btn.disabled) return;
+  if(btn) btn.disabled=true;
+  try{
+    const rel=_normalizeWorkspaceRelPath(_previewCurrentPath)||_previewCurrentPath;
+    if(typeof _copyTextWithFallback==='function'){
+      await _copyTextWithFallback(rel,t('path_copied'),t('path_copy_failed'));
+      return;
+    }
+    try{
+      await navigator.clipboard.writeText(rel);
+      showToast(t('path_copied'));
+    }catch(clipErr){
+      const ta=document.createElement('textarea');
+      ta.value=rel;
+      ta.style.cssText='position:fixed;left:-9999px;top:-9999px;';
+      document.body.appendChild(ta);
+      ta.select();
+      let copied=false;
+      try{copied=document.execCommand('copy');}catch(_){}
+      ta.remove();
+      if(copied) showToast(t('path_copied'));
+      else showToast(t('path_copy_failed')+(clipErr&&clipErr.message?clipErr.message:String(clipErr)));
+    }
+  }catch(err){
+    showToast(t('path_copy_failed')+(err.message||err));
+  }finally{
+    if(btn) btn.disabled=false;
+  }
 }
 
 // ── Workspace upload ──────────────────────────────────────────────────
