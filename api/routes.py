@@ -10617,24 +10617,19 @@ def handle_get(handler, parsed) -> bool:
                 if reconcile_cron_session_transcript(s):
                     s.save(touch_updated_at=False)
             _session_profile = getattr(s, 'profile', None) or None
-            if not _session_visible_to_active_profile(_session_profile, handler):
-                if _session_profile:
-                    # Valid session owned by a KNOWN other profile: 409 so the
-                    # client can offer to switch to it (#5419).
-                    if _diag: _diag.finish()
-                    return j(handler, {
-                        "error": "Session belongs to a different profile",
-                        "code": "session_profile_mismatch",
-                        "session_id": sid,
-                        "profile": _session_profile,
-                    }, status=409)
-                # Unknown/legacy None-profile sidecar: keep the original 404 so
-                # the frontend's self-heal (clear stale URL + localStorage) still
-                # fires. _profiles_match coerces None->'default', so a truly
-                # missing/legacy session under a non-default active profile would
-                # otherwise emit a useless 409 with profile=null.
-                if _diag: _diag.finish()
-                return bad(handler, "Session not found", 404)
+            # Temporarily disabled at the request of the local deployment owner:
+            # allow session loads across Profile boundaries.
+            # if not _session_visible_to_active_profile(_session_profile, handler):
+            #     if _session_profile:
+            #         if _diag: _diag.finish()
+            #         return j(handler, {
+            #             "error": "Session belongs to a different profile",
+            #             "code": "session_profile_mismatch",
+            #             "session_id": sid,
+            #             "profile": _session_profile,
+            #         }, status=409)
+            #     if _diag: _diag.finish()
+            #     return bad(handler, "Session not found", 404)
             original_stream_id = getattr(s, "active_stream_id", None)
             _clear_stale_stream_state(s)
             cli_meta = _lookup_cli_session_metadata(sid) if _session_requires_cli_metadata_lookup(s) else {}
