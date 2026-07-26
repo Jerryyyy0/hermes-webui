@@ -580,11 +580,20 @@ def _resolve_manifest_path(workspace: Path, raw: str | None) -> str:
         return ''
     ws = workspace.expanduser().resolve()
     try:
-        candidate = Path(path).expanduser()
-        if not candidate.is_absolute():
-            candidate = (ws / path).resolve()
+        raw_candidate = Path(path).expanduser()
+        if not raw_candidate.is_absolute():
+            candidate = (ws / raw_candidate).resolve()
+            parts = raw_candidate.parts
+            if (
+                len(parts) > 1
+                and parts[0] == ws.name
+                and not candidate.exists()
+            ):
+                alias_candidate = (ws / Path(*parts[1:])).resolve()
+                if alias_candidate.exists():
+                    candidate = alias_candidate
         else:
-            candidate = candidate.resolve()
+            candidate = raw_candidate.resolve()
         rel = candidate.relative_to(ws)
         rel_str = rel.as_posix()
     except (ValueError, OSError):

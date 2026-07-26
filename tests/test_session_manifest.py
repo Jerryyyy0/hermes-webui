@@ -1794,6 +1794,17 @@ def test_paths_from_last_assistant_message_scans_file_label_without_delivery_reg
     assert _paths_from_last_assistant_message(text, workspace) == ['2026世界杯_7月10日今日战况.docx']
 
 
+def test_paths_from_last_assistant_message_normalizes_duplicate_workspace_prefix(tmp_path):
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir()
+    artifact = workspace / '晚间新闻简报_20260726.pdf'
+    artifact.write_bytes(b'%PDF-1.4')
+
+    text = '已生成：`workspace/晚间新闻简报_20260726.pdf`'
+
+    assert _paths_from_last_assistant_message(text, workspace) == ['晚间新闻简报_20260726.pdf']
+
+
 def test_build_session_manifest_does_not_promote_skill_or_terminal_tool_result_text(tmp_path, monkeypatch):
     workspace = tmp_path / 'ws'
     workspace.mkdir()
