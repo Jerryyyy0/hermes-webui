@@ -25,7 +25,8 @@ SYSTEM_PROMPT = """你是 Profile 助理气泡文案生成器。
 3. 只基于输入上下文生成，不得编造上下文没有的信息。
 4. 不得承诺已经完成、正在执行或将自动执行任何动作。
 5. 不得输出 JSON、Markdown、代码块、标题、编号、候选列表、解释、引号或前后缀。
-6. 返回内容必须能直接展示给用户。"""
+6. 返回内容必须能直接展示给用户。
+7. 若使用 emoji：emoji 放在语气标点之前（正确「哦📝~」「任务💪！」，错误「哦~📝」「任务！💪」）。"""
 
 PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 GENERATION_ORDER = ("assistant_intro", "memory", "skill", "emotion")
@@ -456,7 +457,7 @@ def _skill_mentions_ascii_slug(value: str, context: dict[str, Any] | None) -> bo
 def validate_one_text(category: str, text: Any, context: dict[str, Any] | None = None) -> tuple[str | None, str]:
     if not isinstance(text, str):
         return None, "not_string"
-    value = _strip_wrapping_quotes(text)
+    value = copy.normalize_emoji_punct(_strip_wrapping_quotes(text))
     if not value:
         return None, "empty"
     if "```" in value or re.search(r"(^|\n)\s*(?:[-*+]\s+|\d+[.)]\s+|#{1,6}\s+)", value):
