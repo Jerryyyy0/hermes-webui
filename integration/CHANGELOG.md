@@ -8,6 +8,8 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Added
 
+- **`BACKEND=local` webui_logout short-circuit** — `POST /api/integration/webui_logout` still clears WebUI `hermes_session` and the in-process Zhiling identity cache, but when `BACKEND=local` it returns `200` with `{"status":"ok","login_url":"/"}` without calling auth-proxy `/api/logout`. Empty or `remote` keeps the existing downstream proxy behavior.
+
 - **Chinese approval and clarify display copy** — WebUI approval cards now use a Fork-owned Chinese display description while retaining Hermes Agent's canonical English `description` and `pattern_key(s)` for Smart Approval, hooks, and persistent allowlists. Optional Agent `tirith_findings` are preserved through local SSE, pending mirror, and gateway Runs API normalization (display-field whitelist only). Known Tirith `rule_id`s such as `pipe-to-interpreter` and `schemeless-url-in-sink-context` render Chinese titles/templates; unknown rules keep a Chinese severity prefix with original English evidence. Legacy English prose payloads remain supported as a fallback. WebUI also asks the Agent to write `clarify` questions and choices in Simplified Chinese without translating literal commands, paths, URLs, or configuration values. The response resolver now enforces `allow_permanent` server-side and never permanently stores `tirith:*` keys.
 
 - **webui_login MCP header sync** — `GET /api/integration/webui_login` 在带 Bearer 且 identity lookup 返回 200 时，按 server 名匹配各可见 Profile `config.yaml` 中的 `mcp_servers.ithink_kb_mcp`，仅用 `ithinktank.account` / `ithinktank.uuid` 写入 `X-IThink-Account` / `X-IThink-UUID`（`headers` 或键缺失时补上；无回退到 userId/扁平字段）；无该 server 则跳过；单 Profile 写失败不阻断登录响应。实现见 `integration/identity/mcp_headers_sync.py`。

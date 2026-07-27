@@ -275,7 +275,7 @@ export ZHILING_LOGOUT_API_URL=http://auth-proxy:8080
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| POST | `/api/integration/webui_logout` | 清理 WebUI `hermes_session`，POST `{}` 至 auth-proxy，原样返回 JSON（含 `casdoor_logout_url`、`login_url` 等） |
+| POST | `/api/integration/webui_logout` | 清理 WebUI `hermes_session`，POST `{}` 至 auth-proxy，原样返回 JSON（含 `casdoor_logout_url`、`login_url` 等）；`BACKEND=local` 时跳过 auth-proxy，直接返回 `200` + `{"status":"ok","login_url":"/"}` |
 | GET | `/api/integration/webui_logout` | 返回 `405` + `method_not_allowed` |
 
 示例（容器内或经 WebUI 代理）：

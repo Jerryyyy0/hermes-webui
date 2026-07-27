@@ -6,8 +6,10 @@ import http.cookies
 
 from api.helpers import _sanitize_error, j
 
-from integration.config import zhiling_logout_enabled
+from integration.config import webui_backend_is_local, zhiling_logout_enabled
 from integration.logout.client import ZhilingLogoutError, logout_current_user
+
+_LOCAL_LOGOUT_RESPONSE = {"status": "ok", "login_url": "/"}
 
 
 def _clear_webui_session_cookie_header() -> str:
@@ -63,6 +65,10 @@ def try_handle_post(handler, parsed, body) -> bool:
     from integration.identity.session_store import clear_session
 
     clear_session()
+
+    if webui_backend_is_local():
+        j(handler, _LOCAL_LOGOUT_RESPONSE, status=200, extra_headers=extra_headers)
+        return True
 
     try:
         status, payload = logout_current_user()

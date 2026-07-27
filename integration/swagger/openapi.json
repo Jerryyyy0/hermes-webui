@@ -1629,7 +1629,7 @@
       "post": {
         "tags": ["IntegrationLogout"],
         "summary": "用户容器登出（auth-proxy 代理）",
-        "description": "清理 WebUI `hermes_session` Cookie 后，向 `{ZHILING_LOGOUT_API_URL}/api/logout` 发送 `POST` + `{}`（`ZHILING_LOGOUT_API_URL` 仅为 auth-proxy 根地址，路径 `/api/logout` 在代码中固定；不传浏览器 Cookie）。成功时原样透传 auth-proxy JSON，含 `casdoor_logout_url`、`login_url`、`control_plane_logout_url` 等。若 WebUI 启用了密码/Passkey，调用方还需有效 session Cookie（`credentials: include`）。",
+        "description": "清理 WebUI `hermes_session` Cookie 后，向 `{ZHILING_LOGOUT_API_URL}/api/logout` 发送 `POST` + `{}`（`ZHILING_LOGOUT_API_URL` 仅为 auth-proxy 根地址，路径 `/api/logout` 在代码中固定；不传浏览器 Cookie）。`BACKEND=local` 时跳过 auth-proxy，直接返回 `200` + `{\"status\":\"ok\",\"login_url\":\"/\"}`。空或 `remote` 时成功则原样透传 auth-proxy JSON，含 `casdoor_logout_url`、`login_url`、`control_plane_logout_url` 等。若 WebUI 启用了密码/Passkey，调用方还需有效 session Cookie（`credentials: include`）。",
         "security": [{ "cookieAuth": [] }],
         "requestBody": {
           "required": false,

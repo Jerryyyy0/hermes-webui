@@ -89,6 +89,15 @@ def zhiling_logout_enabled() -> bool:
     return integration_enabled() and bool(zhiling_logout_base_url())
 
 
+def webui_backend_mode() -> str:
+    """BACKEND env: ``local`` skips Zhiling downstream calls; empty/remote use them."""
+    return os.getenv("BACKEND", "").strip().lower()
+
+
+def webui_backend_is_local() -> bool:
+    return webui_backend_mode() == "local"
+
+
 def knowledge_base_url() -> str | None:
     raw = os.getenv("KNOWLEDGE_BASE_URL", "").strip()
     if not raw:

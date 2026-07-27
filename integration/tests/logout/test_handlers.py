@@ -111,3 +111,19 @@ def test_logout_clears_zhiling_identity_cache():
     status, payload = get_cached_identity()
     assert status == 401
     assert payload == {"error": "not_registered"}
+
+
+def test_local_backend_skips_downstream_and_clears_session():
+    handler = MagicMock()
+    handler.headers = {"Cookie": "hermes_session=abc.def"}
+    parsed = urlparse("/api/integration/webui_logout")
+    with patch("integration.logout.handlers.zhiling_logout_enabled", return_value=True):
+        with patch("integration.logout.handlers.webui_backend_is_local", return_value=True):
+            with patch("integration.logout.handlers.logout_current_user") as logout:
+                with patch("api.auth.parse_cookie", return_value="abc.def"):
+                    with patch("api.auth.invalidate_session") as invalidate:
+                        assert try_handle_post(handler, parsed, {}) is True
+    logout.assert_not_called()
+    invalidate.assert_called_once_with("abc.def")
+    handler.send_response.assert_called_with(200)
+    assert _json_payload(handler) == {"status": "ok", "login_url": "/"}
