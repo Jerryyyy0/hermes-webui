@@ -146,6 +146,24 @@ def test_stream_diag_summary_and_event_counters(monkeypatch):
     assert stored["workspace_hash"]
 
 
+def test_stream_diag_reasoning_counts_as_first_visible(monkeypatch):
+    monkeypatch.setenv("HERMES_WEBUI_LOG_LEVEL", "INFO")
+    configure_logging(force=True)
+    # start, model_first_delta, reasoning, token, summary_fields
+    ticks = iter((1000.0, 1100.0, 1400.0, 2000.0, 2100.0))
+    monkeypatch.setattr(sd, "monotonic_ms", lambda: next(ticks))
+    diag = sd.StreamDiag(stream_id="visible-reasoning")
+
+    diag.note_model_first_delta()
+    diag.note_queued_event("reasoning")
+    diag.note_queued_event("token")
+    summary = diag.summary_fields()
+
+    assert summary["first_token_ms"] == 100.0
+    assert summary["first_reasoning_ms"] == 400.0
+    assert summary["first_visible_token_ms"] == 400.0
+    assert summary["event_counts"] == {"reasoning": 1, "token": 1}
+
 def test_stream_diag_stage_records_duration_elapsed_and_phase(monkeypatch, capsys):
     monkeypatch.setenv("HERMES_WEBUI_LOG_LEVEL", "INFO")
     configure_logging(force=True)

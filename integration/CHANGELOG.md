@@ -59,6 +59,8 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Fixed
 
+- **stream_diag first visible includes reasoning** — `P4 S4.3` / `first_visible_token` 现在把 SSE `reasoning` 与 `token` 都算作首个可见文本；思考模型先输出思考时，日志在首个思考字出现时触发，而不再等到最终回答正文。
+
 - **Cron 会话手动续聊 Artifact** — 在已 materialize 的定时任务会话中通过 WebUI 继续对话时，成功 `write_file` 的 Artifact decision 现在会被明确验证后再标记 turn 完成；提取或 SQLite store 写入失败会记录可诊断事件，不再被静默误判为无成果或完成。
 
 - **Cron 同会话继续对话与历史稳定性** — materialized cron session 继续沿用原 `cron_*` ID；打开或继续聊天前会从执行 Profile 的 `state.db` 仅追加补齐执行完成前的原始 cron transcript，避免后续写回丢失早先 assistant 回复，也避免把同 ID WebUI follow-up 回放再次追加成重复轮次。Cron history 同时只读取 `sessions` 行内的执行字段，不再从会随继续聊天增长的 `messages` 推导 preview 或 last activity；output artifact 只按执行结束/开始时间关联。

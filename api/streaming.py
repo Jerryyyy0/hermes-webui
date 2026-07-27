@@ -7078,7 +7078,7 @@ def _run_agent_streaming(
             return
         event_id = None
         stream_diag.note_queued_event(event)
-        if event == 'token' and stream_diag.first_visible_token_ms is not None:
+        if event in ('token', 'reasoning') and stream_diag.first_visible_token_ms is not None:
             _update_stream_diag_summary(
                 stream_id,
                 first_visible_token_ms=stream_diag.first_visible_token_ms,

@@ -15529,7 +15529,7 @@ def _handle_sse_stream(handler, parsed):
                     event_type=event,
                     wait_ms=_stream_diag_elapsed_ms(opened_ms),
                 )
-            if event == "token" and not first_visible_token_logged:
+            if event in ("token", "reasoning") and not first_visible_token_logged:
                 first_visible_token_logged = True
                 worker_summary = _get_stream_diag_summary(stream_id)
                 first_token_ms = worker_summary.get("first_token_ms")
@@ -15539,14 +15539,16 @@ def _handle_sse_stream(handler, parsed):
                     visible_after_first_delta_ms = round(max(0.0, first_visible_token_ms - first_token_ms), 1)
                 _stream_diag_log_event(
                     "webui.stream.first_visible_token",
-                    "聊天流收到首个可见文本片段，用于区分模型首增量与最终文本输出延迟。",
+                    "聊天流收到首个可见文本片段（回答或思考），用于区分模型首增量与浏览器可见输出延迟。",
                     stream_id=stream_id,
                     request_id=request_id,
+                    event_type=event,
                     duration_ms=visible_after_first_delta_ms,
                     elapsed_ms=first_visible_token_ms,
                     wait_ms=_stream_diag_elapsed_ms(opened_ms),
                     first_token_ms=first_token_ms,
                     first_visible_token_ms=first_visible_token_ms,
+                    first_reasoning_ms=worker_summary.get("first_reasoning_ms"),
                 )
             if event_id:
                 _sse_with_id(handler, event, data, event_id)

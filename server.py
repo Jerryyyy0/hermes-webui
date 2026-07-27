@@ -113,7 +113,7 @@ if __name__ == "__main__":
         "ZHILING_LOGOUT_API_URL", "http://auth-proxy:8080"
     )
     os.environ["KNOWLEDGE_BASE_URL"] = os.getenv(
-        "KNOWLEDGE_BASE_URL", "http://47.93.211.132:51419/"
+        "KNOWLEDGE_BASE_URL", "http://8.160.166.12:17862/"
     )
     os.environ["BROWSER_PREVIEW_MODE"] = os.getenv(
         "BROWSER_PREVIEW_MODE", "legacy"
