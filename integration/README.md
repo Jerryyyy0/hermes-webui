@@ -13,6 +13,7 @@ export SKILLHUB_URL=http://127.0.0.1:8000   # optional; SkillHub market only (se
 
 - **Profile enrich** — `GET /api/profiles` adds nested `info` from `info.json`. UI via `hermes_profiles.js` (logo picker, edit, create).
 - **Profile assistant bubbles** — `GET /api/integration/assistant_bubbles?profile=<name>` returns fixed-order short assistant avatar bubbles from independent `<profile.path>/assistant_bubbles.json`; scheduled-task copy is computed live.
+- **WebUI appearance** — `GET /api/integration/webui_appearance` reads `{HERMES_HOME}/webui-appearance/webui-appearance.json` as-is; `GET /api/integration/webui_appearance/file?path=` streams assets under that directory.
 - **Cross-profile cron** — Cron Hub and grouped cron APIs across profiles.
 - **SkillHub** — UI and `/api/skillhub/*` routes are active only when `SKILLHUB_URL` is also set.
 - **Egress policy (iptables)** — gated API to apply iptables open/whitelist policies (see below). **Off by default**; requires `HERMES_EGRESS_POLICY_ENABLED=1`.
@@ -319,6 +320,22 @@ curl -sS -X POST 'http://127.0.0.1:8787/api/integration/workspace/file/delete' \
 
 UI（`HERMES_INTEGRATION=1`）：左侧 Rail / 移动顶栏 **Workspace 文件**（`integrationWorkspace`），`hermes_integration_workspace.js` + `hermes_integration_workspace.css`。左栏为平铺列表（服务端搜索/类型过滤/排序、分页「加载更多」、单行删除与多选批量删除、刷新），中间主区只读预览（文本 / Markdown / 图片 / PDF / HTML / 媒体）。删除后会刷新 session manifest，成果 chip 可标为已过期。与会话绑定的右侧 Workspace 面板（`/api/list` + `session_id`）并存。
 
+### WebUI appearance（`HERMES_INTEGRATION=1`）
+
+只读接口，根目录为进程级 **`{HERMES_HOME}/webui-appearance/`**（默认 `~/.hermes/webui-appearance/`）。配置 JSON 原样返回，不做 schema 校验或字段改写。文件预览 `path` 必须为该目录下的相对路径（如 `src/ly.jpg`）；禁止绝对路径与 `..` 逃逸。
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/api/integration/webui_appearance` | 读取 `webui-appearance.json` 并原样返回 JSON |
+| GET | `/api/integration/webui_appearance/file?path=` | 原始文件字节流（`path` 必填）；`Content-Type` 按扩展名；不设 `Content-Disposition` |
+
+```bash
+curl -sS 'http://127.0.0.1:8787/api/integration/webui_appearance'
+curl -sS 'http://127.0.0.1:8787/api/integration/webui_appearance/file?path=src/ly.jpg' -o ly.jpg
+```
+
+Implementation: [`integration/webui_appearance/`](webui_appearance/). Route seam: `api/routes.py` only imports and delegates the GET handler.
+
 ### 知识库 BFF 代理（`KNOWLEDGE_BASE_URL`）
 
 在用户容器或门户内，前端将 `account` / `uuid` 放入请求体，经 WebUI 转发至下游知识库服务（`POST {KNOWLEDGE_BASE_URL}/knowledge_base/*`）。后端不调用 Zhiling identity lookup。
@@ -488,6 +505,7 @@ Response includes global `stats`: `{ hub, installed, not_installed, custom }` ac
 | `config.py` | `HERMES_INTEGRATION`, `SKILLHUB_URL`, `KNOWLEDGE_BASE_URL`, `ZHILING_CONTROL_PLANE_URL`, `ZHILING_LOGOUT_API_URL`, `ZHILING_IDENTITY_CACHE_TTL_SECONDS`, `skillhub_enabled()`, `knowledge_base_enabled()`, `identity_lookup_enabled()`, `zhiling_identity_cache_ttl_seconds()`, `zhiling_logout_enabled()` |
 | `knowledge_base/` | `/api/integration/knowledge_base/*` → `{KNOWLEDGE_BASE_URL}/knowledge_base/*` |
 | `notifications/` | `/api/integration/notifications/*` — 通知存储（`notifications.db`）与知识库消息聚合 |
+| `webui_appearance/` | `GET /api/integration/webui_appearance` + `/file` — 读 `{HERMES_HOME}/webui-appearance/` 配置与资源 |
 | `identity/` | `GET /api/integration/webui_login` → Control Plane `/api/identity/lookup`；进程内身份缓存（`session_store.py`） |
 | `logout/` | `POST /api/integration/webui_logout` → `{ZHILING_LOGOUT_API_URL}/api/logout` |
 | `skills/skillhub.py` | Upstream httpx client |

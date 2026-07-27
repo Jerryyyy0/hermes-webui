@@ -31,7 +31,8 @@
     { "name": "IntegrationRecordScripts", "description": "录制脚本与关联 CSV（需 HERMES_INTEGRATION=1）。`relate_name` 由前端生成，一个 relate_name 对应一份脚本 JSON 字符串和一份 CSV，存储于 {HERMES_WEBUI_STATE_DIR}/attachments/record_scripts/<relate_name>/。" },
     { "name": "IntegrationNotifications", "description": "通知系统（需 HERMES_INTEGRATION=1 且 KNOWLEDGE_BASE_URL）。知识库通知从下游 get_user_messages 实时聚合；notifications.db 表结构预留，HTTP 层当前不读写本地存储。" },
     { "name": "IntegrationMemory",   "description": "记忆统计（需 HERMES_INTEGRATION=1）。聚合展示会话天数、定时任务和记忆文件。" },
-    { "name": "IntegrationAssistantBubbles", "description": "Profile 助理气泡（需 HERMES_INTEGRATION=1）。读取 `<profile.path>/assistant_bubbles.json` 独立缓存；定时任务槽位实时统计，不写回。" }
+    { "name": "IntegrationAssistantBubbles", "description": "Profile 助理气泡（需 HERMES_INTEGRATION=1）。读取 `<profile.path>/assistant_bubbles.json` 独立缓存；定时任务槽位实时统计，不写回。" },
+    { "name": "IntegrationWebuiAppearance", "description": "WebUI 外观配置（需 HERMES_INTEGRATION=1）。只读读取进程级 `{HERMES_HOME}/webui-appearance/` 下的 JSON 与资源文件；不做 schema 校验或写入。" }
   ],
   "paths": {
 
@@ -1872,6 +1873,46 @@
           },
           "400": { "description": "缺少 profile" },
           "404": { "description": "Profile 不存在" }
+        }
+      }
+    },
+    "/api/integration/webui_appearance": {
+      "get": {
+        "tags": ["IntegrationWebuiAppearance"],
+        "summary": "读取 WebUI 外观配置 JSON",
+        "description": "需 `HERMES_INTEGRATION=1`。读取进程级 `{HERMES_HOME}/webui-appearance/webui-appearance.json` 并原样返回；不做 schema 校验或字段改写。",
+        "responses": {
+          "200": {
+            "description": "外观配置 JSON 对象（原样）",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          },
+          "400": { "description": "配置文件不是合法 JSON" },
+          "404": { "description": "外观配置文件不存在" }
+        }
+      }
+    },
+    "/api/integration/webui_appearance/file": {
+      "get": {
+        "tags": ["IntegrationWebuiAppearance"],
+        "summary": "预览 webui-appearance 目录内文件（原始字节流）",
+        "description": "根目录为 `{HERMES_HOME}/webui-appearance/`。`path` 为该目录相对路径（如 `src/ly.jpg`）。响应为原始文件字节，`Content-Type` 按扩展名映射；不设置 `Content-Disposition`。拒绝绝对路径与路径穿越。",
+        "parameters": [
+          {
+            "name": "path",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string" },
+            "description": "相对 webui-appearance/ 的路径，例如 src/ly.jpg"
+          }
+        ],
+        "responses": {
+          "200": { "description": "文件流（按扩展名 Content-Type）" },
+          "400": { "description": "缺少 path、绝对路径或路径穿越" },
+          "404": { "description": "文件不存在" }
         }
       }
     },

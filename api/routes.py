@@ -11689,6 +11689,14 @@ def handle_get(handler, parsed) -> bool:
         pass
 
     try:
+        from integration.webui_appearance.handlers import try_handle_get as _webui_appearance_try_get
+
+        if _webui_appearance_try_get(handler, parsed) is True:
+            return True
+    except ImportError:
+        pass
+
+    try:
         from integration.record_scripts.handlers import try_handle_get as _record_scripts_try_get
 
         if _record_scripts_try_get(handler, parsed) is True:
