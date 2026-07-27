@@ -1148,6 +1148,71 @@
         }
       }
     },
+    "/api/integration/auth/password/change": {
+      "post": {
+        "tags": ["IntegrationLogin"],
+        "summary": "修改 Casdoor 密码（Control Plane 代理）",
+        "description": "将请求体原样转发至 `{ZHILING_CONTROL_PLANE_URL}/api/auth/password/change`。凭 `username` 与 `old_password` 校验身份，不需要 `Authorization`。需要 `HERMES_INTEGRATION=1` 且配置 `ZHILING_CONTROL_PLANE_URL`。成功且 `reauth_required=true` 时，WebUI 会清理 `hermes_session` Cookie 与 Zhiling 身份缓存。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/PasswordChangeRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "密码修改成功",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PasswordChangeSuccessResponse" }
+              }
+            }
+          },
+          "400": {
+            "description": "新密码不符合强度要求，或新密码与旧密码相同（业务码 402，HTTP 仍为 400）",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PasswordChangeErrorResponse" }
+              }
+            }
+          },
+          "401": {
+            "description": "用户不存在、未启用或旧密码错误",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PasswordChangeErrorResponse" }
+              }
+            }
+          },
+          "422": {
+            "description": "请求体参数校验错误（透传 Control Plane FastAPI 校验）"
+          },
+          "502": {
+            "description": "Control Plane 不可达或修改密码失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    { "$ref": "#/components/schemas/PasswordChangeErrorResponse" },
+                    {
+                      "type": "object",
+                      "required": ["error", "message"],
+                      "properties": {
+                        "success": { "type": "boolean" },
+                        "error": { "type": "string", "enum": ["password_change_failed"] },
+                        "message": { "type": "string", "description": "中文错误说明" }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/integration/knowledge_base/list": {
       "post": {
         "tags": ["IntegrationKnowledgeBase"],
@@ -6457,6 +6522,38 @@
           "control_plane_logout_url": { "type": "string" },
           "casdoor_logout_url": { "type": "string" },
           "cleared_cookie_names": { "type": "array", "items": { "type": "string" } }
+        },
+        "additionalProperties": true
+      },
+      "PasswordChangeRequest": {
+        "type": "object",
+        "required": ["username", "old_password", "new_password"],
+        "properties": {
+          "username": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "old_password": { "type": "string", "minLength": 1, "maxLength": 256 },
+          "new_password": { "type": "string", "minLength": 8, "maxLength": 256 }
+        },
+        "additionalProperties": false
+      },
+      "PasswordChangeSuccessResponse": {
+        "type": "object",
+        "required": ["success", "code", "message", "reauth_required"],
+        "properties": {
+          "success": { "type": "boolean" },
+          "code": { "type": "integer" },
+          "message": { "type": "string" },
+          "reauth_required": { "type": "boolean" },
+          "request_id": { "type": "string" }
+        },
+        "additionalProperties": true
+      },
+      "PasswordChangeErrorResponse": {
+        "type": "object",
+        "properties": {
+          "success": { "type": "boolean" },
+          "code": { "type": "integer" },
+          "message": { "type": "string" },
+          "request_id": { "type": "string" }
         },
         "additionalProperties": true
       },

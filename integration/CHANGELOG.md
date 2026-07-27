@@ -8,6 +8,8 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Added
 
+- **Zhiling password change proxy** — `POST /api/integration/auth/password/change` forwards the JSON body to Control Plane `/api/auth/password/change` (requires `HERMES_INTEGRATION=1` and `ZHILING_CONTROL_PLANE_URL`). Responses are passed through unchanged; on `200` with `reauth_required=true`, WebUI clears `hermes_session` and the Zhiling identity cache. Implementation in `integration/identity/`.
+
 - **WebUI appearance read APIs** — `GET /api/integration/webui_appearance` 原样返回 `{HERMES_HOME}/webui-appearance/webui-appearance.json`；`GET /api/integration/webui_appearance/file?path=` 在同目录下按相对路径返回文件流（锚定路径、拒绝穿越）。实现见 `integration/webui_appearance/`。
 
 - **Chinese approval and clarify display copy** — WebUI approval cards now use a Fork-owned Chinese display description while retaining Hermes Agent's canonical English `description` and `pattern_key(s)` for Smart Approval, hooks, and persistent allowlists. Optional Agent `tirith_findings` are preserved through local SSE, pending mirror, and gateway Runs API normalization (display-field whitelist only). Known Tirith `rule_id`s such as `pipe-to-interpreter` and `schemeless-url-in-sink-context` render Chinese titles/templates; unknown rules keep a Chinese severity prefix with original English evidence. Legacy English prose payloads remain supported as a fallback. WebUI also asks the Agent to write `clarify` questions and choices in Simplified Chinese without translating literal commands, paths, URLs, or configuration values. The response resolver now enforces `allow_permanent` server-side and never permanently stores `tirith:*` keys.

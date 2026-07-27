@@ -263,6 +263,21 @@ curl -sS http://127.0.0.1:8787/api/integration/webui_login
 
 成功时响应体与 Control Plane 一致（原样透传，含 `username`、`organization`、`ithinktank` 等字段）。无缓存时为 HTTP `401` 且 `error` 为 `not_registered` 或 `session_expired`；无效 Bearer token 通常为 HTTP `401` 且 body 含 `detail`；Control Plane 不可达时 WebUI 返回 `502` 且 `error` 为 `identity_lookup_failed`。`POST /api/integration/webui_logout` 会清空身份缓存。
 
+#### 修改密码（Control Plane 代理）
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| POST | `/api/integration/auth/password/change` | 代理 `{ZHILING_CONTROL_PLANE_URL}/api/auth/password/change`；凭 `username` + `old_password` 校验，不需要 Bearer |
+
+请求体：`username`、`old_password`、`new_password`（均必填）。成功时原样透传 Control Plane JSON（含 `reauth_required: true`），并清理 WebUI `hermes_session` 与 Zhiling 身份缓存。Control Plane 不可达时 WebUI 返回 `502` 且 `error` 为 `password_change_failed`。
+
+```bash
+curl -sS -X POST \
+  -H "Content-Type: application/json" \
+  -d '{"username":"test721","old_password":"Sgitg@2026","new_password":"NewPassword2027"}' \
+  http://127.0.0.1:8787/api/integration/auth/password/change
+```
+
 ### Zhiling 用户容器登出（auth-proxy 代理）
 
 在用户容器 compose 网络内，WebUI 后端通过 `ZHILING_LOGOUT_API_URL`（auth-proxy 根地址，不含路径）调用固定接口 `POST /api/logout`，识别当前用户实例（`EXPECTED_USERNAME`），不要求转发浏览器 Cookie。

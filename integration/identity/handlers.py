@@ -9,7 +9,12 @@ from typing import Any
 from api.helpers import _sanitize_error, j
 
 from integration.config import identity_lookup_enabled
-from integration.identity.client import IdentityLookupError, lookup_current_identity
+from integration.identity.client import (
+    IdentityLookupError,
+    PasswordChangeError,
+    change_password,
+    lookup_current_identity,
+)
 
 from integration.project_logging import (
     console_error,
@@ -27,6 +32,7 @@ from integration.identity.session_store import (
 )
 
 _NO_STORE = {"Cache-Control": "no-store"}
+_PASSWORD_CHANGE_PATH = "/api/integration/auth/password/change"
 
 
 def _extract_bearer_token(handler) -> str:
@@ -209,4 +215,42 @@ def try_handle_get(handler, parsed) -> bool:
     response_body = _response_payload(payload if isinstance(payload, dict) else {})
     _log_outgoing_response(status=status, body=response_body, auth_mode="bearer")
     j(handler, response_body, status=status, extra_headers=_NO_STORE)
+    return True
+
+
+def try_handle_post(handler, parsed, body) -> bool:
+    if not identity_lookup_enabled():
+        return False
+    if parsed.path != _PASSWORD_CHANGE_PATH:
+        return False
+
+    request_body = body if isinstance(body, dict) else {}
+    try:
+        status, payload = change_password(request_body)
+    except PasswordChangeError as exc:
+        j(
+            handler,
+            {
+                "success": False,
+                "error": "password_change_failed",
+                "message": f"修改密码服务不可用：{_sanitize_error(exc)}",
+            },
+            status=502,
+            extra_headers=_NO_STORE,
+        )
+        return True
+
+    extra_headers = dict(_NO_STORE)
+    if status == 200 and isinstance(payload, dict) and payload.get("reauth_required") is True:
+        from integration.logout.handlers import _logout_extra_headers
+
+        extra_headers = _logout_extra_headers(handler)
+        clear_session()
+
+    j(
+        handler,
+        payload if isinstance(payload, dict) else {},
+        status=status,
+        extra_headers=extra_headers,
+    )
     return True

@@ -4106,6 +4106,7 @@ def _csrf_exempt_path(path: str) -> bool:
         "/api/auth/passkey/options",
         "/api/auth/passkey/login",
         "/api/csp-report",
+        "/api/integration/auth/password/change",
     }
 
 
@@ -13734,6 +13735,14 @@ def handle_post(handler, parsed) -> bool:
         from integration.logout.handlers import try_handle_post as _logout_try_post
 
         if _logout_try_post(handler, parsed, body) is True:
+            return True
+    except ImportError:
+        pass
+
+    try:
+        from integration.identity.handlers import try_handle_post as _identity_try_post
+
+        if _identity_try_post(handler, parsed, body) is True:
             return True
     except ImportError:
         pass
