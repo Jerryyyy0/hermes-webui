@@ -1,8 +1,7 @@
-"""Resolve paths under ``{HERMES_HOME}/webui-appearance/``."""
+"""Resolve paths under the base ``~/.hermes/webui-appearance/`` directory."""
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 from api.workspace import safe_resolve_ws
@@ -12,7 +11,15 @@ _CONFIG_NAME = "webui-appearance.json"
 
 
 def hermes_home() -> Path:
-    return Path(os.getenv("HERMES_HOME", str(Path.home() / ".hermes"))).expanduser().resolve()
+    """Return the default/root Hermes home, not the runtime profile pointer.
+
+    ``os.environ['HERMES_HOME']`` is mutated per profile during streaming,
+    assistant-bubble generation, cron runs, etc. Appearance assets are
+    process-wide and live under the base home (``default`` profile / ``~/.hermes``).
+    """
+    from api.profiles import _DEFAULT_HERMES_HOME
+
+    return Path(_DEFAULT_HERMES_HOME).resolve()
 
 
 def appearance_root() -> Path:
