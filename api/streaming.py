@@ -1487,6 +1487,8 @@ def _persist_cancelled_turn(session, *, message: str = 'Task cancelled.') -> Non
     session.pending_user_message = None
     session.pending_attachments = []
     session.pending_started_at = None
+    session.pending_user_source = None
+    session.pending_turn_key = None
     if not _session_has_cancel_marker(session):
         agent_name = _preferred_agent_display_name_for_session(session)
         session.messages.append({
@@ -1505,6 +1507,8 @@ def _cleanup_ephemeral_cancelled_turn(session) -> None:
     session.pending_user_message = None
     session.pending_attachments = []
     session.pending_started_at = None
+    session.pending_user_source = None
+    session.pending_turn_key = None
     try:
         import pathlib
         pathlib.Path(session.path).unlink(missing_ok=True)
@@ -1539,34 +1543,79 @@ def _cron_followup_turn_key_matches(session, msg_text: str, turn_key: str) -> bo
     return False
 
 
-def _persist_turn_artifact_paths(s, turn_key: str = '') -> dict[str, object]:
-    """Persist one completed turn's artifact or empty decision and report its outcome."""
+def _stream_artifact_evidence(stream_id: str, turn_key: str) -> list[dict] | None:
+    """Return completed, stream-owned artifact rows without reading another turn."""
+    stream = str(stream_id or '').strip()
+    key = str(turn_key or '').strip()
+    if not stream or not key:
+        return None
+    with STREAMS_LOCK:
+        live = STREAM_LIVE_MANIFEST.get(stream)
+        if not isinstance(live, dict):
+            return None
+        rows = list(live.get('artifacts') or [])
+        for turn in live.get('turns') or []:
+            if isinstance(turn, dict) and str(turn.get('turn_key') or '').strip() == key:
+                rows.extend(turn.get('artifacts') or [])
+    deduped = {}
+    for row in rows:
+        if not isinstance(row, dict) or str(row.get('turn_key') or key).strip() != key:
+            continue
+        path = str(row.get('path') or '').strip()
+        if path:
+            deduped[path] = {
+                'path': path,
+                'source_tool': row.get('source_tool') or 'assistant_prose',
+                'preview': row.get('preview') or 'file',
+            }
+    return list(deduped.values())
+
+
+def _persist_turn_artifact_paths(
+    s,
+    turn_key: str = '',
+    *,
+    stream_id: str = '',
+    terminal_reason: str = 'completed',
+) -> dict[str, object]:
+    """Settle one bound turn without inferring its owner from shared transcript state."""
     session_id = str(getattr(s, 'session_id', '') or '').strip()
-    if not getattr(s, 'messages', None):
-        logger.warning("Manifest artifact decision skipped: session=%s reason=no_messages", session_id)
-        return {'status': 'failed', 'stage': 'validate', 'turn_key': '', 'artifact_count': 0}
     _turn_key = str(turn_key or '').strip()
-    if not _turn_key:
-        for _m in reversed(s.messages):
-            if isinstance(_m, dict) and _m.get('role') == 'user':
-                _turn_key = str(_m.get('_turn_key', '') or '')
-                if _turn_key:
-                    break
     if not _turn_key:
         logger.warning("Manifest artifact decision skipped: session=%s reason=no_turn_key", session_id)
         return {'status': 'failed', 'stage': 'validate', 'turn_key': '', 'artifact_count': 0}
-    try:
-        from api.session_manifest import extract_turn_artifact_entries_for_manifest
+    stream = str(stream_id or '').strip()
+    if stream and str(getattr(s, 'active_stream_id', '') or '').strip() not in ('', stream):
+        return {'status': 'pending', 'stage': 'stale_worker', 'turn_key': _turn_key, 'artifact_count': 0}
 
-        _entries = extract_turn_artifact_entries_for_manifest(s, _turn_key)
-    except Exception:
-        logger.warning(
-            "Manifest artifact extraction failed: session=%s turn=%s",
-            session_id,
-            _turn_key,
-            exc_info=True,
+    evidence_entries = _stream_artifact_evidence(stream, _turn_key) if stream else None
+    _entries = list(evidence_entries or [])
+    needs_transcript_reconcile = evidence_entries is None or str(terminal_reason or '').strip() == 'completed'
+    if needs_transcript_reconcile:
+        if not getattr(s, 'messages', None):
+            return {'status': 'pending', 'stage': 'transcript_unavailable', 'turn_key': _turn_key, 'artifact_count': 0}
+        try:
+            from api.session_manifest import extract_turn_artifact_entries_for_manifest
+            transcript_entries = extract_turn_artifact_entries_for_manifest(s, _turn_key)
+        except Exception:
+            logger.warning(
+                "Manifest artifact extraction failed: session=%s turn=%s",
+                session_id,
+                _turn_key,
+                exc_info=True,
+            )
+            return {'status': 'failed', 'stage': 'extract', 'turn_key': _turn_key, 'artifact_count': 0}
+        # A final assistant reply is durable same-turn evidence. Keep stream-owned
+        # provenance for duplicates while adding any real files it explicitly names.
+        known_paths = {
+            str(entry.get('path') or '').strip()
+            for entry in _entries
+            if isinstance(entry, dict) and str(entry.get('path') or '').strip()
+        }
+        _entries.extend(
+            entry for entry in transcript_entries
+            if isinstance(entry, dict) and str(entry.get('path') or '').strip() not in known_paths
         )
-        return {'status': 'failed', 'stage': 'extract', 'turn_key': _turn_key, 'artifact_count': 0}
 
     _store_entries = [
         {
@@ -1575,14 +1624,15 @@ def _persist_turn_artifact_paths(s, turn_key: str = '') -> dict[str, object]:
             'preview': entry.get('preview') or 'file',
         }
         for entry in _entries
-        if isinstance(entry, dict)
+        if isinstance(entry, dict) and str(entry.get('path') or '').strip()
     ]
     artifact_count = len(_store_entries)
+    if not _store_entries and str(terminal_reason or '').strip() != 'completed':
+        return {'status': 'pending', 'stage': 'evidence_unsettled', 'turn_key': _turn_key, 'artifact_count': 0}
     if not _store_entries:
         _store_entries = [{'path': '', 'source_tool': 'assistant_prose', 'preview': 'file'}]
     try:
         from api.session_manifest_store import upsert_manifest_records
-
         persisted = upsert_manifest_records(s, _turn_key, _store_entries)
     except Exception:
         logger.warning(
@@ -1594,13 +1644,6 @@ def _persist_turn_artifact_paths(s, turn_key: str = '') -> dict[str, object]:
         )
         return {'status': 'failed', 'stage': 'store', 'turn_key': _turn_key, 'artifact_count': artifact_count}
     if len(persisted) != len(_store_entries):
-        logger.warning(
-            "Manifest artifact store write incomplete: session=%s turn=%s entries=%d persisted=%d",
-            session_id,
-            _turn_key,
-            artifact_count,
-            len(persisted),
-        )
         return {'status': 'failed', 'stage': 'store', 'turn_key': _turn_key, 'artifact_count': artifact_count}
     return {
         'status': 'persisted',
@@ -6150,8 +6193,12 @@ def _materialize_pending_user_turn_before_error(session) -> bool:
     stamp_message_source(recovered, pending_source)
     if pending_attachments:
         recovered['attachments'] = pending_attachments
-    from api.session_manifest import _next_turn_key
-    recovered["_turn_key"] = _next_turn_key(session.messages)
+    pending_turn_key = str(getattr(session, 'pending_turn_key', '') or '').strip()
+    if pending_turn_key:
+        recovered['_turn_key'] = pending_turn_key
+    else:
+        from api.session_manifest import _next_turn_key
+        recovered['_turn_key'] = _next_turn_key(session.messages)
     session.messages.append(recovered)
     # Mirror to context_messages so the _recovered flag survives the state.db
     # round-trip (#4283). state.db has no _recovered column, so without this
@@ -7640,16 +7687,13 @@ def _run_agent_streaming(
             _checkpoint_activity = [0]
             _live_tool_event_start_ids = set()
             _live_tool_event_complete_ids = set()
-            _manifest_turn_key = str(stream_turn_key or '').strip()
+            _manifest_turn_key = str(stream_turn_key or getattr(s, 'pending_turn_key', '') or '').strip()
             if not _manifest_turn_key:
-                for _m in reversed(getattr(s, 'messages', None) or []):
-                    if isinstance(_m, dict) and _m.get('role') == 'user':
-                        _manifest_turn_key = str(_m.get('_turn_key', '') or '').strip()
-                        if _manifest_turn_key:
-                            break
-            if not _manifest_turn_key:
-                from api.session_manifest import _next_turn_key
-                _manifest_turn_key = _next_turn_key(getattr(s, 'messages', None) or [])
+                logger.warning(
+                    'Stream %s for session %s has no bound turn key; artifact settlement will remain pending',
+                    stream_id,
+                    session_id,
+                )
             from api.session_manifest import _skills_dir_for_session as _manifest_skills_dir_for_session
             _manifest_skills_dir = _manifest_skills_dir_for_session(s)
             _manifest_default_profile = str(getattr(s, 'profile', None) or '').strip()
@@ -9431,6 +9475,7 @@ def _run_agent_streaming(
                         s.pending_attachments = []
                         s.pending_started_at = None
                         s.pending_user_source = None
+                        s.pending_turn_key = None
                         try:
                             _snapshot_and_append_partial_on_error(s, stream_id)
                         except Exception:
@@ -9877,7 +9922,12 @@ def _run_agent_streaming(
                 s.save()
                 _final_save_ms = _stream_diag_elapsed_ms(_final_save_started)
                 if _cron_followup_turn_key_matches(s, msg_text, _manifest_turn_key):
-                    _artifact_decision = _persist_turn_artifact_paths(s, _manifest_turn_key)
+                    _artifact_decision = _persist_turn_artifact_paths(
+                        s,
+                        _manifest_turn_key,
+                        stream_id=stream_id,
+                        terminal_reason='completed',
+                    )
                 else:
                     _artifact_decision = {
                         'status': 'failed',
@@ -10580,6 +10630,7 @@ def _run_agent_streaming(
                 s.pending_attachments = []
                 s.pending_started_at = None
                 s.pending_user_source = None
+                s.pending_turn_key = None
                 try:
                     _snapshot_and_append_partial_on_error(s, stream_id)
                 except Exception:
@@ -11029,6 +11080,7 @@ def cancel_stream(stream_id: str) -> bool:
     # writer (streaming success/error paths, periodic checkpoint, POST endpoints)
     # so the cancel-path mutation races neither the checkpoint thread nor
     # concurrent undo/retry calls.
+    _cancelled_session = None
     if _cancel_session_id:
         with _get_session_agent_lock(_cancel_session_id):
             try:
@@ -11097,8 +11149,11 @@ def cancel_stream(stream_id: str) -> bool:
                             _user_turn: dict = {
                                 'role': 'user',
                                 'content': _pending_user,
-                                'timestamp': int(time.time()),
+                                'timestamp': int(_pending_started or time.time()),
                             }
+                            _pending_turn_key = str(getattr(_cs, 'pending_turn_key', '') or '').strip()
+                            if _pending_turn_key:
+                                _user_turn['_turn_key'] = _pending_turn_key
                             stamp_message_source(_user_turn, _pending_source)
                             if _pending_atts:
                                 _user_turn['attachments'] = _pending_atts
@@ -11108,10 +11163,12 @@ def cancel_stream(stream_id: str) -> bool:
                         "Failed to recover pending user message on cancel for %s",
                         _cancel_session_id,
                     )
+                _cancel_turn_key = str(getattr(_cs, 'pending_turn_key', '') or '').strip()
                 _cs.active_stream_id = None
                 _cs.pending_user_message = None
                 _cs.pending_attachments = []
                 _cs.pending_started_at = None
+                _cs.pending_user_source = None
                 # Persist any partial assistant text that was streamed before cancel (#893).
                 # Preserving partial content means the user sees what the agent had
                 # produced rather than losing it entirely.  The marker is _partial=True
@@ -11208,6 +11265,16 @@ def cancel_stream(stream_id: str) -> bool:
                         'timestamp': int(time.time()),
                     })
                 _cs.save()
+                if _cancel_turn_key:
+                    _persist_turn_artifact_paths(
+                        _cs,
+                        _cancel_turn_key,
+                        stream_id=stream_id,
+                        terminal_reason='cancelled',
+                    )
+                _cs.pending_turn_key = None
+                _cs.save()
+                _cancelled_session = _redacted_session_payload_with_full_messages(_cs)
             except Exception:
                 logger.debug("Failed to clear session state on cancel for %s", _cancel_session_id)
 
@@ -11219,7 +11286,10 @@ def cancel_stream(stream_id: str) -> bool:
             except Exception:
                 logger.debug("Failed to note cancel event_id %s for stream %s", _cancel_event_id, stream_id, exc_info=True)
         try:
-            q.put_nowait(('cancel', {'message': 'Cancelled by user'}))
+            q.put_nowait((
+                'cancel',
+                _cancel_event_payload('Cancelled by user', session=_cancelled_session),
+            ))
         except Exception:
             logger.debug("Failed to put cancel event to queue")
 

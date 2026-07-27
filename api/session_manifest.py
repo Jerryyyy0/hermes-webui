@@ -673,7 +673,7 @@ def _execution_event_succeeded(event: ToolEvent) -> bool:
 
 
 def _terminal_output_paths(command: str, workspace: Path) -> list[str]:
-    """Return explicit ``-o``/``--output`` operands for a conservative shell subset."""
+    """Return explicit output operands for a conservative shell subset."""
     if not isinstance(command, str) or not command or len(command) > _MAX_TERMINAL_COMMAND_LENGTH:
         return []
     if any(marker in command for marker in ('$', '`', '*', '?', '$(', '<(', '>(', '\\n')):
@@ -723,7 +723,7 @@ def _terminal_output_paths(command: str, workspace: Path) -> list[str]:
             raw = ''
             if token in ('-o', '--output') and index + 1 < len(values):
                 raw = values[index + 1]
-            elif token.startswith('--output='):
+            elif token.startswith('--output=') or token.startswith('--print-to-pdf='):
                 raw = token.split('=', 1)[1]
             if raw:
                 add_output(raw, cwd)

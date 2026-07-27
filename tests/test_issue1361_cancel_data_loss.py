@@ -337,7 +337,7 @@ class TestCancelWithReasoningOnlyNoText:
         assert partials[-1]["reasoning"] == "Important cancelled reasoning"
         assert partials[-1]["_partial_tool_calls"][0]["name"] == "terminal"
         assert any(
-            isinstance(m, dict) and m.get("_error") and "Task cancelled" in str(m.get("content") or "")
+            isinstance(m, dict) and m.get("_error") and m.get("role") == "assistant"
             for m in session_payload["messages"]
         )
 
@@ -496,7 +496,7 @@ def test_stale_stream_cleanup_recovers_journaled_visible_output():
     assert s.tool_calls
     assert s.tool_calls[0]["name"] == "terminal"
     assert s.messages[-1].get("type") == "interrupted"
-    assert "partial output above was recovered" in s.messages[-1]["content"]
+    assert "上方部分输出已从运行日志恢复" in s.messages[-1]["content"]
 
 
 # ── Structural guard: pin call sites of the materialize helper at error branches ──

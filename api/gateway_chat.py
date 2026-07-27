@@ -769,6 +769,7 @@ def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, mode
         session.pending_attachments = []
         session.pending_started_at = None
         session.pending_user_source = None
+        session.pending_turn_key = None
         try:
             _snapshot_and_append_partial_on_error(session, stream_id)
         except Exception:
@@ -815,6 +816,7 @@ def _clear_gateway_pending_state(session: Any, stream_id: str) -> None:
     session.pending_attachments = None
     session.pending_started_at = None
     session.pending_user_source = None
+    session.pending_turn_key = None
     session.save()
 
 
@@ -925,7 +927,7 @@ def _run_gateway_chat_streaming(
     if not manifest_turn_key:
         try:
             gateway_session = get_session(session_id)
-            manifest_turn_key = f"turn:{len(getattr(gateway_session, 'messages', []) or [])}"
+            manifest_turn_key = str(getattr(gateway_session, 'pending_turn_key', '') or '').strip()
         except Exception:
             manifest_turn_key = ""
 
@@ -1317,7 +1319,7 @@ def _run_gateway_chat_streaming(
             # role/content ordering instead of turn order.
             assistant_ts = now + 0.000001
             user_msg = {"role": "user", "content": str(msg_text or ""), "timestamp": now}
-            if str(getattr(s, "source_tag", "") or "") == "cron":
+            if manifest_turn_key:
                 user_msg["_turn_key"] = manifest_turn_key
             pending_source = getattr(s, "pending_user_source", None) or "webui"
             if pending_source != "webui":
@@ -1386,6 +1388,7 @@ def _run_gateway_chat_streaming(
             s.pending_attachments = None
             s.pending_started_at = None
             s.pending_user_source = None
+            s.pending_turn_key = None
             s.workspace = str(workspace)
             s.model = model
             s.model_provider = model_provider
@@ -1415,7 +1418,12 @@ def _run_gateway_chat_streaming(
             from api.streaming import _cron_followup_turn_key_matches, _persist_turn_artifact_paths
 
             if _cron_followup_turn_key_matches(s, msg_text, manifest_turn_key):
-                artifact_decision = _persist_turn_artifact_paths(s, manifest_turn_key)
+                artifact_decision = _persist_turn_artifact_paths(
+                    s,
+                    manifest_turn_key,
+                    stream_id=stream_id,
+                    terminal_reason='completed',
+                )
             else:
                 artifact_decision = {
                     "status": "failed",
@@ -1429,9 +1437,13 @@ def _run_gateway_chat_streaming(
                 "message": "本轮成果保存失败，请稍后重试。",
                 "turn_key": artifact_decision.get("turn_key") or manifest_turn_key,
             })
-        if cancel_event.is_set():
-            _restore_cancelled_success_writeback()
-            return
+        # Artifact persistence and the durable transcript are one completion boundary.
+        # A Stop that arrives after this point may terminate delivery, but cannot roll back
+        # a completed turn and leave orphaned durable artifact rows.
+        with _get_session_agent_lock(session_id):
+            if _stream_writeback_is_current(s, stream_id):
+                s.pending_turn_key = None
+                s.save()
         success_writeback_committed = True
         try:
             from api.goals import evaluate_goal_after_turn, has_active_goal

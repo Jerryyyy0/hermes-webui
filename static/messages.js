@@ -5019,6 +5019,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       try{
         const d=JSON.parse(e.data||'{}');
         if((d.session_id||activeSid)!==activeSid) return;
+        if(d.stream_id&&d.stream_id!==streamId) return;
         if(window.HermesSessionInspector&&typeof window.HermesSessionInspector.applyDelta==='function'){
           window.HermesSessionInspector.applyDelta(d);
         }

@@ -354,7 +354,16 @@ def repair_empty_manifest_turns(
 
     repaired = 0
     for turn_key in sorted(empty_turn_keys):
-        entries = extract_turn_artifact_entries_for_manifest(session, turn_key)
+        try:
+            entries = extract_turn_artifact_entries_for_manifest(session, turn_key)
+        except Exception:
+            logger.warning(
+                "manifest empty-decision repair failed: session=%s turn=%s",
+                getattr(session, "session_id", ""),
+                turn_key,
+                exc_info=True,
+            )
+            continue
         rows = [
             {
                 "path": str(entry.get("path") or "").strip(),

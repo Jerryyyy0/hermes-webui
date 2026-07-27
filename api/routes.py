@@ -13219,6 +13219,7 @@ def handle_post(handler, parsed) -> bool:
             s.pending_attachments = []
             s.pending_started_at = None
             s.pending_user_source = None
+            s.pending_turn_key = None
             s.clear_generation = uuid.uuid4().hex if had_sidecar_messages else None
             # Reset the title via the rename helper so clearing a manually-named
             # session also clears manual_title/llm_title_generated — otherwise the
@@ -18309,6 +18310,7 @@ def _prepare_chat_start_session_for_stream(
     s.pending_attachments = attachments
     s.pending_started_at = started_at if started_at is not None else time.time()
     s.pending_user_source = source
+    s.pending_turn_key = str(turn_key or '').strip() or None
     s.last_error_at = None
     current_title = getattr(s, "title", None)
     if _is_default_or_empty_session_title(current_title):
@@ -18592,6 +18594,9 @@ def _start_chat_stream_for_session(
                             "error": "定时任务会话轮次校验失败，暂时无法继续对话",
                             "_status": 409,
                         }
+                if not prepared_turn_key:
+                    from api.session_manifest import _next_turn_key
+                    prepared_turn_key = _next_turn_key(getattr(s, "messages", None) or [])
                 stream_id = uuid.uuid4().hex
                 diag.stage("save_pending_state") if diag else None
                 was_hidden_empty_session = _is_hidden_empty_session(s)
@@ -18606,7 +18611,11 @@ def _start_chat_stream_for_session(
                     turn_key=prepared_turn_key,
                     source=source,
                 )
-                stream_turn_key = _turn_key_for_pending_user_message(s, msg)
+                stream_turn_key = str(getattr(s, "pending_turn_key", "") or "").strip()
+                if not stream_turn_key:
+                    stream_turn_key = _turn_key_for_pending_user_message(s, msg)
+                    s.pending_turn_key = stream_turn_key
+                    s.save()
                 if prepared_turn_key and stream_turn_key != prepared_turn_key:
                     return {
                         "error": "定时任务会话轮次校验失败，暂时无法继续对话",
@@ -18640,6 +18649,7 @@ def _start_chat_stream_for_session(
                 "workspace": workspace,
                 "model": model,
                 "model_provider": model_provider,
+                "turn_key": stream_turn_key,
                 "created_at": s.pending_started_at,
             },
         )

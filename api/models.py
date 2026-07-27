@@ -931,6 +931,9 @@ def _append_recovered_pending_turn(session, *, timestamp: int | None = None) -> 
     stamp_message_source(recovered, pending_source)
     if session.pending_attachments:
         recovered['attachments'] = list(session.pending_attachments)
+    pending_turn_key = str(getattr(session, 'pending_turn_key', '') or '').strip()
+    if pending_turn_key:
+        recovered['_turn_key'] = pending_turn_key
     session.messages.append(recovered)
     _append_recovered_turn_to_context(session, recovered)
     # The new user turn is now committed to messages (#3831): advance the
@@ -1232,6 +1235,7 @@ class Session:
                  pending_attachments=None,
                  pending_started_at=None,
                  pending_user_source: str=None,
+                 pending_turn_key: str=None,
                  context_messages=None,
                  compression_anchor_visible_idx=None,
                  compression_anchor_message_key=None,
@@ -1317,6 +1321,7 @@ class Session:
         self.pending_attachments = pending_attachments or []
         self.pending_started_at = pending_started_at
         self.pending_user_source = pending_user_source
+        self.pending_turn_key = str(pending_turn_key or '').strip() or None
         self.context_messages = context_messages if isinstance(context_messages, list) else []
         self.compression_anchor_visible_idx = compression_anchor_visible_idx
         self.compression_anchor_message_key = compression_anchor_message_key
@@ -1429,7 +1434,7 @@ class Session:
             'input_tokens', 'output_tokens', 'estimated_cost',
             'cache_read_tokens', 'cache_write_tokens',
             'personality', 'active_stream_id', 'last_error_at',
-            'pending_user_message', 'pending_attachments', 'pending_started_at', 'pending_user_source',
+            'pending_user_message', 'pending_attachments', 'pending_started_at', 'pending_user_source', 'pending_turn_key',
             'compression_anchor_visible_idx', 'compression_anchor_message_key',
             'compression_anchor_summary', 'pre_compression_snapshot',
             'context_engine', 'compression_anchor_engine', 'compression_anchor_mode',
@@ -3188,6 +3193,7 @@ def _apply_core_sync_or_error_marker(
             session.pending_attachments = []
             session.pending_started_at = None
             session.pending_user_source = None
+            session.pending_turn_key = None
             session.save(touch_updated_at=touch_updated_at)
             logger.info(
                 "Session %s: cleared stale pending state for completed stream %s without error marker",
@@ -3209,6 +3215,9 @@ def _apply_core_sync_or_error_marker(
                 recovered['_source'] = pending_source
             if session.pending_attachments:
                 recovered['attachments'] = list(session.pending_attachments)
+            pending_turn_key = str(getattr(session, 'pending_turn_key', '') or '').strip()
+            if pending_turn_key:
+                recovered['_turn_key'] = pending_turn_key
             _append_recovered_turn_to_context(session, recovered)
         recovered_output = _append_journaled_partial_output(
             session,
@@ -3219,6 +3228,7 @@ def _apply_core_sync_or_error_marker(
         session.pending_attachments = []
         session.pending_started_at = None
         session.pending_user_source = None
+        session.pending_turn_key = None
         session.messages.append(
             _build_recovery_marker_with_retry_hook(
                 recovered_output=recovered_output,
@@ -3279,6 +3289,7 @@ def _apply_core_sync_or_error_marker(
             session.pending_attachments = []
             session.pending_started_at = None
             session.pending_user_source = None
+            session.pending_turn_key = None
             has_visible_core_answer = any(
                 isinstance(message, dict)
                 and message.get('role') == 'assistant'
@@ -3330,6 +3341,7 @@ def _apply_core_sync_or_error_marker(
     session.pending_attachments = []
     session.pending_started_at = None
     session.pending_user_source = None
+    session.pending_turn_key = None
     session.messages.append(
         _build_recovery_marker_with_retry_hook(
             recovered_output=recovered_output,
@@ -3687,6 +3699,7 @@ def _sync_sidecar_from_state_db_if_newer(session) -> bool:
         locked.pending_attachments = []
         locked.pending_started_at = None
         locked.pending_user_source = None
+        locked.pending_turn_key = None
         try:
             locked.save(touch_updated_at=True)
         except Exception:
@@ -3705,6 +3718,7 @@ def _sync_sidecar_from_state_db_if_newer(session) -> bool:
         session.pending_attachments = []
         session.pending_started_at = None
         session.pending_user_source = None
+        session.pending_turn_key = None
         logger.info(
             "Session %s: synced sidecar from newer state.db transcript (%d -> %d messages)",
             sid,
