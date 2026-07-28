@@ -5666,7 +5666,9 @@ def _resolve_compatible_session_model_state(
     *,
     profile_provider: str | None = None,
     profile_default_model: str | None = None,
+    profile_config: dict | None = None,
     explicit_model_pick: bool = False,
+    prefer_cached_catalog: bool = False,
 ) -> tuple[str, str | None, bool]:
     """Return (effective_model, effective_provider, model_was_normalized).
 
@@ -5688,9 +5690,24 @@ def _resolve_compatible_session_model_state(
     OpenRouter ``/models``, LM Studio ``/models``, credential pool refresh) —
     those used to wedge the handler for >100s and trigger 502s on default-60s
     reverse proxies, even though the WebUI itself eventually responded.
+
+    ``prefer_cached_catalog=True`` makes the catalog lookup non-blocking: it
+    resolves from the warm/disk cache or a network-free minimal catalog and NEVER
+    triggers a live per-provider rebuild (the Copilot token-exchange HTTPS call
+    that hangs a server-initiated wakeup turn). Human-initiated chat/start leaves
+    this False to keep full live discovery.
     """
     model = str(model_id or "").strip()
     requested_provider = _clean_session_model_provider(model_provider)
+    if model and requested_provider and model.startswith(f"@{requested_provider}:"):
+        try:
+            from api.config import cfg as _active_cfg
+
+            providers_cfg = _active_cfg.get("providers") if isinstance(_active_cfg, dict) else {}
+        except Exception:
+            providers_cfg = {}
+        if isinstance(providers_cfg, dict) and requested_provider in providers_cfg:
+            return model, requested_provider, False
     if model and requested_provider:
         # Only safe when the model itself does not carry an ``@provider:model``
         # qualifier — qualified strings require the catalog to decide whether
@@ -5702,9 +5719,61 @@ def _resolve_compatible_session_model_state(
             and model_prefix == "openai"
         )
         if not explicit_provider and not stale_codex_openai_slash_id:
+            _profile_default = str(profile_default_model or "").strip()
+            _profile_prov = _clean_session_model_provider(profile_provider)
+            _providers_match_for_repair = (
+                _profile_prov is None or _profile_prov == requested_provider
+            )
+            if (
+                _profile_default
+                and "/" in _profile_default
+                and "/" not in model
+                and _profile_default.rsplit("/", 1)[-1] == model
+                and _providers_match_for_repair
+                and (
+                    requested_provider == "custom"
+                    or str(requested_provider).startswith("custom:")
+                )
+            ):
+                return _profile_default, requested_provider, True
+
+            _repaired_model = _repair_bare_custom_provider_model(
+                model,
+                requested_provider,
+                config_obj=profile_config,
+            )
+            if _repaired_model:
+                return _repaired_model, requested_provider, True
+
             return model, requested_provider, False
 
-    catalog = get_available_models()
+    # Default (human chat/start) path calls get_available_models() with NO
+    # kwargs so it stays signature-compatible with the many tests that stub
+    # get_available_models as a zero-arg callable. Only the server-side wakeup
+    # path (prefer_cached_catalog=True) opts into the cache-only mode. Some
+    # tests monkeypatch get_available_models as a zero-arg callable, so probe
+    # the (possibly monkeypatched) signature for ``prefer_cache`` rather than
+    # catching TypeError — a blanket ``except TypeError`` would also swallow a
+    # genuine TypeError raised *inside* get_available_models(prefer_cache=True)
+    # and silently fall back to the slow live provider rebuild that
+    # prefer_cached_catalog=True is meant to avoid.
+    if prefer_cached_catalog:
+        import inspect as _inspect
+
+        try:
+            _gam_accepts_prefer_cache = (
+                "prefer_cache" in _inspect.signature(get_available_models).parameters
+            )
+        except (TypeError, ValueError):
+            # Builtins / C-callables can refuse introspection; assume the
+            # zero-arg stub shape in that case.
+            _gam_accepts_prefer_cache = False
+        if _gam_accepts_prefer_cache:
+            catalog = get_available_models(prefer_cache=True)
+        else:
+            catalog = get_available_models()
+    else:
+        catalog = get_available_models()
     default_model = str(catalog.get("default_model") or DEFAULT_MODEL or "").strip()
 
     # Profile-aware resolution: when the caller supplies profile context
@@ -5725,11 +5794,12 @@ def _resolve_compatible_session_model_state(
         model_provider_from_name = _normalize_provider_id(model_prefix) if "/" in model else ""
 
         model_family = ""
-        model_lower = model.lower()
-        for bare_prefix in ("gpt", "claude", "gemini"):
-            if model_lower.startswith(bare_prefix):
-                model_family = _normalize_provider_id(bare_prefix)
-                break
+        if "/" not in model:
+            model_lower = model.lower()
+            for bare_prefix in ("gpt", "claude", "gemini"):
+                if model_lower.startswith(bare_prefix):
+                    model_family = _normalize_provider_id(bare_prefix)
+                    break
 
         if model_family and model_family != _profile_provider_normalized:
             if explicit_model_pick:
@@ -5755,6 +5825,32 @@ def _resolve_compatible_session_model_state(
         if "/" in model and model_provider_from_name and model_provider_from_name != _profile_provider_normalized:
             _target = _profile_default or default_model
             return _target, profile_provider, True
+
+        # Async server-side continuations (for example delegate_task completion
+        # re-entry) can arrive here with profile context but without a usable
+        # requested_provider, bypassing the fast-path custom-provider repair
+        # above. If the profile's configured custom-provider default is a
+        # slash-qualified model whose suffix matches the bare session model,
+        # repair back to the profile default before the provider call (#5225).
+        if (
+            "/" not in model
+            and _profile_default
+            and "/" in _profile_default
+            and _profile_default.rsplit("/", 1)[-1] == model
+            and (
+                _profile_provider_normalized == "custom"
+                or str(profile_provider).startswith("custom:")
+            )
+        ):
+            return _profile_default, profile_provider, True
+
+        _repaired_model = _repair_bare_custom_provider_model(
+            model,
+            profile_provider,
+            config_obj=profile_config,
+        )
+        if _repaired_model:
+            return _repaired_model, profile_provider, True
 
         return model, profile_provider, False
 
@@ -5789,6 +5885,12 @@ def _resolve_compatible_session_model_state(
         bare_model = bare_for_context.strip()
         if not provider_raw or not bare_model:
             return model, requested_provider, False
+
+        # A fresh, explicit user pick is by definition not a stale artifact, so
+        # honor the @provider:model exactly as chosen — never reroute it via the
+        # active-provider family repair or the cold-catalog fallback below.
+        if explicit_model_pick:
+            return model, provider_raw, False
 
         raw_provider_ids, normalized_provider_ids = _catalog_provider_id_sets(catalog)
         hint_matches_active = (
@@ -5959,6 +6061,8 @@ def _resolve_effective_session_model_for_display(session) -> str:
         requested_provider,
         profile_provider=_pp_provider,
         profile_default_model=_pp_default,
+        profile_config=_pp_cfg,
+        prefer_cached_catalog=True,
     )
     return effective_model or original_model
 
@@ -5971,6 +6075,8 @@ def _resolve_effective_session_model_provider_for_display(session) -> str | None
         requested_provider,
         profile_provider=_pp_provider,
         profile_default_model=_pp_default,
+        profile_config=_pp_cfg,
+        prefer_cached_catalog=True,
     )
     return provider
 
