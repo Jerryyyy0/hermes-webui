@@ -13,6 +13,7 @@
 pyyaml>=6.0
 cryptography>=42.0
 httpx>=0.27
+pypinyin>=0.55
 # OPTIONAL: Office workspace preview/edit support needs these parsers.
 # The workspace file routes return 503 with an install hint when they are absent.
 # Install them only if you want .docx/.xlsx/.pptx preview support:

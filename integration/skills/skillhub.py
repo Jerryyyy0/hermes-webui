@@ -30,7 +30,7 @@ from integration.skills.utils import (
 )
 
 _log = get_logger(__name__)
-_TIMEOUT = 30.0
+_TIMEOUT = 150.0
 _HUB_CATALOG_NAME_SIDECAR = ".hub_catalog_name"
 
 
