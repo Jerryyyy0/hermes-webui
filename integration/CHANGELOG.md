@@ -38,6 +38,10 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Changed
 
+- **Assistant bubbles skill count uses local_all** — `skill` 气泡的 `skills_count` / 技能列表改为与 SkillHub `scope=local_all` 相同：该 Profile 下已启用的 **installed** hub 技能 ∪ **custom** 技能（同名 custom 优先），排除 `skills.disabled`。不再直接 `rglob` Profile `skills/**/SKILL.md`。SkillHub 目录不可用时回退到本地 `.hub_installed` + custom 扫描（相同合并/禁用规则）。实现见 `integration/skills/listing.py` 的 `list_local_all_enabled_skills` 与 `integration/assistant_bubbles/collectors.py`。
+
+- **SkillHub `local_all` name dedupe** — `scope=local_all` 合并结果按 frontmatter `name` 去重（先出现者保留；custom 在前），避免同名多目录把 `total` 抬高，导致与气泡 `skills_count`（按 name 计数）不一致。
+
 - **Unified project logging** — 运行时日志统一收敛到 `integration/project_logging/`，仅使用 `HERMES_WEBUI_LOG_LEVEL` 控制输出级别。`INFO` 启用请求访问、API 错误、启动与 stream_diag 日志；访问日志为紧凑的 `METHOD path -> status` 格式，不再带 `[webui][request]` 标签。`DEBUG` 额外启用 stream_diag debug 字段与慢请求线程栈。直接交互式运行 `python server.py` 仍 tee 到 `{HERMES_WEBUI_STATE_DIR}/server-<port>.log`；`bootstrap.py` / supervisor 重定向 stderr 时自动跳过重复落盘。移除 `HERMES_WEBUI_API_ERROR_LOG*`、`HERMES_WEBUI_SERVER_LOG*`、`HERMES_WEBUI_STREAM_DIAG`、`HERMES_WEBUI_SLOW_REQUEST_*` 等分散日志环境变量；服务运行路径不再使用 `print()` 输出诊断信息。原 `integration/request_logging/` 已并入 `integration/project_logging/`（`request.py` + `formatting.py`），删除重复的格式化与 console 封装。
 
 - **SkillHub `local_all` profile filter** — `GET /api/skillhub/skills?scope=local_all` 支持 `profile`（默认 `default`）：只聚合该 Profile skills 目录下的已安装 hub + 本地 custom，并用该 Profile `config.yaml` 的 `skills.disabled` 过滤。其它 scope 仍忽略 `profile`；`stats` 仍为全局计数。

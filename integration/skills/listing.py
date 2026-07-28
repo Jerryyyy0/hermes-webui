@@ -87,6 +87,90 @@ def _local_all_skills_for_profile(
     return installed_hub, custom_skills
 
 
+def _merge_local_all_skills(
+    installed_hub: list[dict],
+    custom_skills: list[dict],
+) -> list[dict]:
+    """Aggregate installed + custom; custom wins on name; drop disabled.
+
+    Custom scans dedupe by directory, so the same frontmatter ``name`` can appear
+    more than once. Collapse to one row per name (first wins; custom is listed
+    first) so ``total`` matches bubble ``skills_count`` and "N 项技能" semantics.
+    """
+    custom_names = {
+        str(skill.get("name") or "").strip()
+        for skill in custom_skills
+        if str(skill.get("name") or "").strip()
+    }
+    merged = list(custom_skills) + [
+        skill
+        for skill in installed_hub
+        if str(skill.get("name") or "").strip() not in custom_names
+    ]
+    out: list[dict] = []
+    seen: set[str] = set()
+    for skill in merged:
+        if skill.get("disabled"):
+            continue
+        name = str(skill.get("name") or "").strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        out.append(skill)
+    return out
+
+
+def _local_all_enabled_skills_without_hub(profile: str) -> list[dict]:
+    """Local fallback when SkillHub catalog is unavailable: hub-installed markers + custom."""
+    profile_key = _normalize_profile(profile)
+    skills_dir = skills_dir_for_profile(profile_key)
+    disabled = skillhub._disabled_skill_names_for_profile(profile_key)
+    installed_index = skillhub._hub_installed_index(skills_dir)
+    # One synthetic catalog row per installed dir (index may alias multiple names → same dir).
+    by_dir: dict[str, str] = {}
+    for name, dir_name in installed_index.items():
+        dir_key = str(dir_name or "").strip()
+        skill_name = str(name or "").strip()
+        if not dir_key or not skill_name:
+            continue
+        by_dir.setdefault(dir_key, skill_name)
+    synthetic = [{"name": skill_name} for skill_name in by_dir.values()]
+    skillhub.annotate_installed(
+        synthetic,
+        installed_index=installed_index,
+        index_profile=profile_key,
+        locked_names=set(),
+        disabled_names=disabled,
+    )
+    installed_hub = [skill for skill in synthetic if skill.get("installed")]
+    custom_skills = [
+        dict(skill)
+        for skill in local_skills._scan_custom_skill_dicts(
+            skills_dir, "", user_created_only=True
+        )
+    ]
+    for skill in custom_skills:
+        name = str(skill.get("name") or "").strip()
+        skill["disabled"] = name in disabled
+    return _merge_local_all_skills(installed_hub, custom_skills)
+
+
+def list_local_all_enabled_skills(profile: str = "default") -> list[dict]:
+    """Enabled skills for one profile: scope=installed ∪ scope=custom, excluding disabled.
+
+    Same aggregation as ``GET /api/skillhub/skills?scope=local_all&profile=…&all=1``
+    without category/q/pagination. Falls back to local markers when the hub catalog
+    cannot be fetched.
+    """
+    profile_key = _normalize_profile(profile)
+    try:
+        ctx = skillhub.build_hub_catalog_context()
+        installed_hub, custom_skills = _local_all_skills_for_profile(ctx, profile_key)
+        return _merge_local_all_skills(installed_hub, custom_skills)
+    except Exception:
+        return _local_all_enabled_skills_without_hub(profile_key)
+
+
 def list_skillhub_skills(
     category: str = "",
     scope: str = "hub",
@@ -129,13 +213,7 @@ def list_skillhub_skills(
     if scope_key == "local_all":
         # profile filters only this scope: scan that profile's skills dir
         installed_hub, custom_skills = _local_all_skills_for_profile(ctx, profile_key)
-        custom_names = {str(s.get("name") or "").strip() for s in custom_skills}
-        merged = list(custom_skills) + [
-            s
-            for s in installed_hub
-            if str(s.get("name") or "").strip() not in custom_names
-        ]
-        merged = [skill for skill in merged if not skill.get("disabled")]
+        merged = _merge_local_all_skills(installed_hub, custom_skills)
         all_categories = None
         if _is_uncategorized_match(category_key):
             try:

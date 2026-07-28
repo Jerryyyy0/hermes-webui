@@ -134,6 +134,8 @@ Cron and Kanban profile pickers still show profile `name` only (by design).
 
 Bubble cache is stored only in `{profile.path}/assistant_bubbles.json`; it does not read or extend `info.json`. The file stores model-generated text and generation metadata (`fingerprint`, `generated_at`, `last_attempt_at`, `retry_after`) for `assistant_intro`, `memory`, `skill`, and `emotion`. Invalid, missing, or old-schema files are treated as cache misses: the API returns deterministic fallback copy immediately and queues self-healing generation.
 
+The `skill` bubble’s `skills_count` and skill list use the same aggregation as SkillHub `scope=local_all` for that Profile: enabled **installed** hub skills ∪ **custom** skills under the Profile skills dir, excluding names in that Profile’s `skills.disabled`. When the SkillHub catalog is unavailable, generation falls back to local `.hub_installed` markers plus custom scans with the same merge/disable rules.
+
 Generation is process-global and serial (`integration/assistant_bubbles/generation.py`). First fills for missing categories run continuously in priority order without a 5-minute gap; later fingerprint-driven regenerations are rate-limited to at least 5 minutes after the last attempt, while failures retry after 30 seconds. `emotion` also refreshes every 5 minutes even when its input fingerprint is unchanged. `scheduled_task` never calls a model and is never written back: each GET reads the target Profile cron state and replaces the dynamic slot in the response.
 
 | Method | Path | Purpose |
