@@ -26,6 +26,10 @@ class IdentityLookupError(Exception):
     """Control Plane unreachable or misconfigured."""
 
 
+class PasswordChangeError(Exception):
+    """Control Plane password change unreachable or misconfigured."""
+
+
 def _redact_for_log(value: Any) -> Any:
     """Recursively redact sensitive keys before logging response bodies."""
     if isinstance(value, dict):
@@ -43,8 +47,15 @@ def _redact_for_log(value: Any) -> Any:
     return str(value)
 
 
-def _log_lookup_response(*, status: int, data: Any, raw_text: str = "") -> None:
-    """Log full Control Plane identity lookup response body (no truncation)."""
+def _log_downstream_response(
+    *,
+    event: str,
+    log_prefix: str,
+    status: int,
+    data: Any,
+    raw_text: str = "",
+) -> None:
+    """Log full Control Plane response body (no truncation)."""
     body_type = type(data).__name__
     keys = "-"
     if isinstance(data, dict):
@@ -65,13 +76,23 @@ def _log_lookup_response(*, status: int, data: Any, raw_text: str = "") -> None:
     )
     # Append body outside format_kv — format_kv applies a 240-char one_line cap per value.
     line = with_timestamp(
-        f"[webui][integration_login][identity_lookup] downstream response {meta} body={body_text}",
-        {"event": "identity_lookup", "phase": "response", "status": status},
+        f"[webui][{log_prefix}] downstream response {meta} body={body_text}",
+        {"event": event, "phase": "response", "status": status},
     )
     if status >= 400:
         console_warning(line)
     else:
         console_info(line)
+
+
+def _log_lookup_response(*, status: int, data: Any, raw_text: str = "") -> None:
+    _log_downstream_response(
+        event="identity_lookup",
+        log_prefix="integration_login][identity_lookup",
+        status=status,
+        data=data,
+        raw_text=raw_text,
+    )
 
 
 def lookup_current_identity(access_token: str) -> tuple[int, dict]:
@@ -111,4 +132,57 @@ def lookup_current_identity(access_token: str) -> tuple[int, dict]:
         data = {}
     else:
         _log_lookup_response(status=resp.status_code, data=data, raw_text=raw_text)
+    return resp.status_code, data
+
+
+def change_password(body: dict) -> tuple[int, dict]:
+    """Forward password change to Control Plane /api/auth/password/change.
+
+    Returns (status_code, json_body). Does not mutate upstream fields.
+    """
+    base = zhiling_control_plane_url()
+    if not base:
+        raise PasswordChangeError("ZHILING_CONTROL_PLANE_URL not configured")
+
+    url = f"{base}/api/auth/password/change"
+    try:
+        with httpx.Client(timeout=_TIMEOUT, follow_redirects=True) as client:
+            resp = client.post(
+                url,
+                headers={"Content-Type": "application/json"},
+                json=body,
+            )
+    except httpx.HTTPError as exc:
+        logger.warning("password change request failed: %s", type(exc).__name__)
+        raise PasswordChangeError(str(exc)) from exc
+
+    logger.info("password change completed status=%s", resp.status_code)
+
+    raw_text = ""
+    try:
+        raw_text = resp.text or ""
+    except Exception:
+        raw_text = ""
+
+    try:
+        data = resp.json()
+    except Exception:
+        data = {}
+    if not isinstance(data, dict):
+        _log_downstream_response(
+            event="password_change",
+            log_prefix="integration_auth][password_change",
+            status=resp.status_code,
+            data=data,
+            raw_text=raw_text,
+        )
+        data = {}
+    else:
+        _log_downstream_response(
+            event="password_change",
+            log_prefix="integration_auth][password_change",
+            status=resp.status_code,
+            data=data,
+            raw_text=raw_text,
+        )
     return resp.status_code, data

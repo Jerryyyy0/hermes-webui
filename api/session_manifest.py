@@ -580,11 +580,20 @@ def _resolve_manifest_path(workspace: Path, raw: str | None) -> str:
         return ''
     ws = workspace.expanduser().resolve()
     try:
-        candidate = Path(path).expanduser()
-        if not candidate.is_absolute():
-            candidate = (ws / path).resolve()
+        raw_candidate = Path(path).expanduser()
+        if not raw_candidate.is_absolute():
+            candidate = (ws / raw_candidate).resolve()
+            parts = raw_candidate.parts
+            if (
+                len(parts) > 1
+                and parts[0] == ws.name
+                and not candidate.exists()
+            ):
+                alias_candidate = (ws / Path(*parts[1:])).resolve()
+                if alias_candidate.exists():
+                    candidate = alias_candidate
         else:
-            candidate = candidate.resolve()
+            candidate = raw_candidate.resolve()
         rel = candidate.relative_to(ws)
         rel_str = rel.as_posix()
     except (ValueError, OSError):
@@ -664,7 +673,7 @@ def _execution_event_succeeded(event: ToolEvent) -> bool:
 
 
 def _terminal_output_paths(command: str, workspace: Path) -> list[str]:
-    """Return explicit ``-o``/``--output`` operands for a conservative shell subset."""
+    """Return explicit output operands for a conservative shell subset."""
     if not isinstance(command, str) or not command or len(command) > _MAX_TERMINAL_COMMAND_LENGTH:
         return []
     if any(marker in command for marker in ('$', '`', '*', '?', '$(', '<(', '>(', '\\n')):
@@ -714,7 +723,7 @@ def _terminal_output_paths(command: str, workspace: Path) -> list[str]:
             raw = ''
             if token in ('-o', '--output') and index + 1 < len(values):
                 raw = values[index + 1]
-            elif token.startswith('--output='):
+            elif token.startswith('--output=') or token.startswith('--print-to-pdf='):
                 raw = token.split('=', 1)[1]
             if raw:
                 add_output(raw, cwd)

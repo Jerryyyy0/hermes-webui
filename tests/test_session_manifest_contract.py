@@ -52,12 +52,12 @@ def test_messages_js_listens_for_manifest_delta():
     assert '.turn-artifacts' not in manifest_delta_block
 
 
-def test_ui_js_renders_turn_artifacts():
-    src = (REPO / 'static' / 'ui.js').read_text(encoding='utf-8')
+def test_workspace_js_renders_turn_artifacts_by_stable_turn_key():
+    src = (REPO / 'static' / 'workspace.js').read_text(encoding='utf-8')
+    assert 'function getTurnArtifacts(turnKey)' in src
+    assert 'row=>row&&row.turn_key===turnKey' in src
+    assert 'function renderTurnArtifacts' in src
     assert 'data-turn-key' in src or 'dataset.turnKey' in src
-    assert 'renderTurnArtifacts' in src
-    assert 'liveAssistantTurn' in src
-    assert 'data-live-assistant' in src
 
 
 def test_session_manifest_module_has_extractors():
@@ -95,26 +95,23 @@ def test_session_manifest_store_module_contract():
     assert 'ASSISTANT_PROSE_SOURCE_TOOL = "assistant_prose"' in src
 
 
-def test_chat_start_passes_current_turn_key_to_stream_worker():
+def test_chat_start_binds_persisted_turn_key_to_stream_worker():
     src = (REPO / 'api' / 'routes.py').read_text(encoding='utf-8')
-    block = src.split('_prepare_chat_start_session_for_stream(', 1)[1].split('break', 1)[0]
-    assert 'stream_turn_key = _turn_key_for_pending_user_message(s, msg)' in block
-    assert 'worker_kwargs = {"model_provider": model_provider, "stream_turn_key": stream_turn_key}' in src
+    assert 's.pending_turn_key = str(turn_key or \'\').strip() or None' in src
+    assert 'stream_turn_key = str(getattr(s, "pending_turn_key", "") or "").strip()' in src
+    worker_block = src.split('worker_kwargs = {', 1)[1].split('}', 1)[0]
+    assert '"stream_turn_key": stream_turn_key' in worker_block
 
 
-def test_streaming_manifest_turn_key_fallback_uses_last_user_key_first():
+def test_streaming_manifest_turn_key_uses_bound_key_without_transcript_guessing():
     src = (REPO / 'api' / 'streaming.py').read_text(encoding='utf-8')
-    fallback_block = src.split("_manifest_turn_key = str(stream_turn_key or '').strip()", 1)[1]
-    last_user_lookup = fallback_block.index("for _m in reversed(getattr(s, 'messages', None) or [])")
-    next_key_lookup = fallback_block.index('_manifest_turn_key = _next_turn_key(')
-    assert last_user_lookup < next_key_lookup
-    assert "_m.get('role') == 'user'" in fallback_block
-    assert "_m.get('_turn_key', '')" in fallback_block
+    assert "_manifest_turn_key = str(stream_turn_key or getattr(s, 'pending_turn_key', '') or '').strip()" in src
     persist_block = src.split('def _persist_turn_artifact_paths', 1)[1].split('\ndef ', 1)[0]
+    assert '_stream_artifact_evidence' in persist_block
+    assert "'stage': 'stale_worker'" in persist_block
+    assert "'stage': 'transcript_unavailable'" in persist_block
     assert 'upsert_manifest_records' in persist_block
     assert "'status': 'persisted'" in persist_block
-    assert "'stage': 'extract'" in persist_block
-    assert "'stage': 'store'" in persist_block
     assert 'turn_artifacts' not in persist_block
 
 
@@ -122,10 +119,12 @@ def test_completed_transcript_is_saved_before_manifest_decision_and_journal():
     src = (REPO / 'api' / 'streaming.py').read_text(encoding='utf-8')
     block = src.split('Make the completed transcript durable before publishing', 1)[1]
     save_index = block.index('s.save()')
-    manifest_index = block.index('_artifact_decision = _persist_turn_artifact_paths(s, _manifest_turn_key)')
+    manifest_index = block.index('_artifact_decision = _persist_turn_artifact_paths(')
     failure_index = block.index('"event": "artifact_persistence_failed"')
     completed_index = block.index('"event": "completed"')
     assert save_index < manifest_index < failure_index < completed_index
+    assert "stream_id=stream_id" in block[manifest_index:failure_index]
+    assert "terminal_reason='completed'" in block[manifest_index:failure_index]
     assert "_artifact_decision.get('status') == 'persisted'" in block
 
 

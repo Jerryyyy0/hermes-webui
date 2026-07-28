@@ -166,6 +166,19 @@ def test_session_tool_call_requires_explicit_completion(tmp_path):
     assert extract_turn_artifact_entries_for_manifest(session, 'turn:1') == []
 
 
+def test_terminal_chromium_print_to_pdf_output_requires_real_file(tmp_path):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    output = workspace / 'summary.pdf'
+    output.write_bytes(b'%PDF-1.7')
+
+    command = 'chromium --headless --print-to-pdf=summary.pdf report.html'
+
+    assert _terminal_output_paths(command, workspace) == ['summary.pdf']
+    output.unlink()
+    assert _terminal_output_paths(command, workspace) == []
+
+
 def test_terminal_md2word_positional_output_requires_real_file(tmp_path):
     workspace = tmp_path / 'ws'
     workspace.mkdir()

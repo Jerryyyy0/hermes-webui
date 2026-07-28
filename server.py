@@ -11,11 +11,10 @@ import time
 import traceback
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-
-# Ignore SIGPIPE so a dropped client only aborts that write, not the whole WebUI process.
-_SIGPIPE = getattr(signal, "SIGPIPE", None)
-if _SIGPIPE is not None:
-    signal.signal(_SIGPIPE, signal.SIG_IGN)
+def _ignore_sigpipe() -> None:
+    """Keep broken client writes from terminating the server process."""
+    if (sigpipe := getattr(signal, "SIGPIPE", None)) is not None:
+        signal.signal(sigpipe, signal.SIG_IGN)
 
 # Test-mode network isolation keeps subprocess-backed tests hermetic.
 if os.environ.get("HERMES_WEBUI_TEST_NETWORK_BLOCK", "").strip() in ("1", "true", "yes"):
@@ -114,7 +113,7 @@ if __name__ == "__main__":
         "ZHILING_LOGOUT_API_URL", "http://auth-proxy:8080"
     )
     os.environ["KNOWLEDGE_BASE_URL"] = os.getenv(
-        "KNOWLEDGE_BASE_URL", "http://47.93.211.132:51419/"
+        "KNOWLEDGE_BASE_URL", "http://8.160.166.12:17862/"
     )
     os.environ["BROWSER_PREVIEW_MODE"] = os.getenv(
         "BROWSER_PREVIEW_MODE", "legacy"
@@ -143,7 +142,7 @@ if __name__ == "__main__":
     os.environ["HERMES_WEBUI_AGENT_DIR"] = os.getenv("HERMES_WEBUI_AGENT_DIR", "/Users/wzq/Downloads/NLP-PyProject/hermes-agent")
     os.environ["BACKEND"] = os.getenv("BACKEND", "remote")
 
-from api.auth import check_auth
+from api.auth import check_auth, reset_trusted_auth_request_state
 from api.config import HOST, PORT, STATE_DIR, SESSION_DIR, DEFAULT_WORKSPACE
 from api.helpers import (
     j,
@@ -152,7 +151,7 @@ from api.helpers import (
     _CLIENT_DISCONNECT_ERRORS,
 )
 from api.profiles import set_request_profile, clear_request_profile
-from api.routes import handle_delete, handle_get, handle_patch, handle_post, handle_put
+from api.routes import handle_delete, handle_get, handle_patch, handle_post, handle_put, apply_cors_preflight_headers
 from integration.auth.csrf_hooks import install_zhiling_split_webui_csrf_hook
 
 install_zhiling_split_webui_csrf_hook()
@@ -457,6 +456,7 @@ class Handler(BaseHTTPRequestHandler):
         self._req_t0 = time.time()
         self._api_error_summary = None
         self._assign_request_id()
+        reset_trusted_auth_request_state(self)
         cookie_profile = get_profile_cookie(self)
         if cookie_profile:
             set_request_profile(cookie_profile)
@@ -500,6 +500,7 @@ class Handler(BaseHTTPRequestHandler):
         self._req_t0 = time.time()
         self._api_error_summary = None
         self._assign_request_id()
+        reset_trusted_auth_request_state(self)
         cookie_profile = get_profile_cookie(self)
         if cookie_profile:
             set_request_profile(cookie_profile)
@@ -538,13 +539,14 @@ class Handler(BaseHTTPRequestHandler):
         self._handle_write(handle_patch)
 
     def do_OPTIONS(self) -> None:
-        """Handle CORS preflight requests."""
+        """Handle CORS preflight requests (headers emitted by api.routes)."""
         self._req_t0 = time.time()
         self._assign_request_id()
         self.send_response(200)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        apply_cors_preflight_headers(self)
+        # Frame the empty preflight: without Content-Length an HTTP/1.1 keep-alive
+        # 200 is read-until-close, hanging the client until the 30s timeout.
+        self.send_header("Content-Length", "0")
         self.end_headers()
 
     def do_DELETE(self) -> None:
@@ -658,6 +660,8 @@ def main() -> None:
     runtime_log = setup_runtime_logging(state_dir=STATE_DIR, port=PORT)
     configure_logging()
     print_version_txt()
+    _ignore_sigpipe()
+
     # Crash visibility FIRST (issue #4633): enable faulthandler + excepthooks +
     # exit audit before any heavy startup work so a native crash or a daemon /
     # handler-thread exception during startup or serving produces a diagnostic
@@ -853,6 +857,26 @@ def main() -> None:
     if HOST in ('127.0.0.1', '::1') or within_container:
         log_info(f'  Remote access: ssh -N -L {PORT}:127.0.0.1:{PORT} <user>@<your-server>')
     log_info(f'  Then open:     {scheme}://localhost:{PORT}')
+
+    # Route SIGTERM through the existing shutdown cleanup path so in-flight
+    # background session work is drained before the server exits.
+    _shutdown_requested = threading.Event()
+
+    def _request_shutdown(signum, _frame):
+        if _shutdown_requested.is_set():
+            return
+        _shutdown_requested.set()
+        threading.Thread(
+            target=httpd.shutdown,
+            name="webui-sigterm-shutdown",
+            daemon=True,
+        ).start()
+
+    try:
+        signal.signal(signal.SIGTERM, _request_shutdown)
+    except (ValueError, OSError):
+        logger.debug("Could not install SIGTERM handler", exc_info=True)
+
     try:
         httpd.serve_forever()
     finally:
@@ -878,6 +902,5 @@ def main() -> None:
             stop_session_channel_reaper()
         except Exception:
             logger.debug("Failed to stop SessionChannel reaper during shutdown", exc_info=True)
-
 if __name__ == '__main__':
     main()

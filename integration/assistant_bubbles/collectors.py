@@ -13,7 +13,7 @@ import yaml
 PROMPT_VERSIONS = {
     "assistant_intro": "assistant_intro.v2",
     "memory": "memory.v2",
-    "skill": "skill.v4",
+    "skill": "skill.v5",
     "emotion": "emotion.v4",
 }
 
@@ -56,84 +56,23 @@ def _latest_memory(memory_text: str) -> str:
     return values[-1][:500] if values else ""
 
 
-def _disabled_skills(profile_path: Path) -> set[str]:
-    cfg_path = Path(profile_path) / "config.yaml"
-    try:
-        cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) if cfg_path.is_file() else {}
-    except Exception:
-        return set()
-    if not isinstance(cfg, dict):
-        return set()
-    skills_cfg = cfg.get("skills")
-    if not isinstance(skills_cfg, dict):
-        return set()
-    disabled = skills_cfg.get("disabled")
-    platform_disabled = skills_cfg.get("platform_disabled")
-    if isinstance(platform_disabled, dict) and "webui" in platform_disabled:
-        disabled = platform_disabled.get("webui")
-    if isinstance(disabled, str):
-        disabled = [disabled]
-    if not isinstance(disabled, list):
-        return set()
-    return {str(item).strip() for item in disabled if str(item).strip()}
+def collect_skills(profile_name: str) -> list[dict[str, str]]:
+    """Installed hub + custom skills for the profile, excluding disabled (local_all)."""
+    from integration.skills.listing import list_local_all_enabled_skills
 
-
-def _parse_skill_frontmatter(text: str) -> tuple[dict[str, Any], str]:
-    if text.startswith("---"):
-        parts = text.split("---", 2)
-        if len(parts) >= 3:
-            try:
-                meta = yaml.safe_load(parts[1]) or {}
-            except Exception:
-                meta = {}
-            return (meta if isinstance(meta, dict) else {}, parts[2])
-    return {}, text
-
-
-def _has_cjk(text: str) -> bool:
-    return bool(re.search(r"[\u4e00-\u9fff]", text or ""))
-
-
-def _read_skill_detail(skill_dir: Path) -> dict[str, Any]:
-    try:
-        data = json.loads((skill_dir / ".detail.json").read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
-def collect_skills(profile_path: Path) -> list[dict[str, str]]:
-    skills_dir = Path(profile_path) / "skills"
-    disabled = _disabled_skills(profile_path)
-    if not skills_dir.is_dir():
-        return []
+    raw = list_local_all_enabled_skills(profile_name)
     out: list[dict[str, str]] = []
     seen: set[str] = set()
-    for skill_md in sorted(skills_dir.rglob("SKILL.md")):
-        try:
-            text = skill_md.read_text(encoding="utf-8", errors="replace")
-        except OSError:
+    for skill in raw:
+        if not isinstance(skill, dict):
             continue
-        skill_dir = skill_md.parent
-        meta, body = _parse_skill_frontmatter(text)
-        name = str(meta.get("name") or skill_dir.name).strip()
-        if not name or name in seen or name in disabled:
+        name = str(skill.get("name") or "").strip()
+        if not name or name in seen:
             continue
-        detail = _read_skill_detail(skill_dir)
-        display_name = str(detail.get("display_name") or meta.get("display_name") or "").strip()
+        label = str(skill.get("display_name") or name).strip() or name
         desc = str(
-            detail.get("display_description")
-            or meta.get("display_description")
-            or meta.get("description")
-            or ""
+            skill.get("display_description") or skill.get("description") or ""
         ).strip()
-        if not desc:
-            for line in body.splitlines():
-                line = line.strip()
-                if line and not line.startswith("#"):
-                    desc = line
-                    break
-        label = display_name or name
         seen.add(name)
         out.append({"name": name, "label": label, "description": desc})
     return out
@@ -155,7 +94,7 @@ def collect_context(profile_name: str, profile_path: Path, category: str) -> dic
         memory = _read_limited(Path(profile_path) / "memories" / "MEMORY.md")
         context["latest_memory"] = _latest_memory(memory)
     if category == "skill":
-        skills = collect_skills(profile_path)
+        skills = collect_skills(profile_name)
         context["skills"] = skills
         context["skills_count"] = len(skills)
     return context

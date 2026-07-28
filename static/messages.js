@@ -495,6 +495,252 @@ function _appendSelectedTextReplyToComposer(text){
   return true;
 }
 
+let _savedPromptsCache=null;
+
+async function _loadSavedPrompts(){
+  try{
+    const data=await api('/api/prompts');
+    _savedPromptsCache=Array.isArray(data&&data.prompts)?data.prompts:[];
+  }catch(_e){_savedPromptsCache=[];}
+  return _savedPromptsCache;
+}
+
+async function toggleSavedPromptsPopup(){
+  const popup=(typeof $==='function'&&$('savedPromptsPopup'))||document.getElementById('savedPromptsPopup');
+  const btn=(typeof $==='function'&&$('btnSavedPrompts'))||document.getElementById('btnSavedPrompts');
+  if(!popup)return;
+  if(popup.style.display!=='none'){
+    popup.style.display='none';
+    if(btn)btn.setAttribute('aria-expanded','false');
+    return;
+  }
+  popup.innerHTML='<div class="saved-prompts-loading">Loading…</div>';
+  popup.style.display='flex';
+  if(btn)btn.setAttribute('aria-expanded','true');
+  const prompts=await _loadSavedPrompts();
+  popup.innerHTML='';
+  if(!prompts.length){
+    const empty=document.createElement('div');
+    empty.className='saved-prompts-empty';
+    empty.textContent=(typeof t==='function'&&t('saved_prompts_empty'))||'No saved prompts yet.';
+    popup.appendChild(empty);
+  }else{
+    for(const p of prompts){
+      const row=document.createElement('div');
+      row.className='saved-prompt-row';
+      row.setAttribute('role','menuitem');
+      const label=document.createElement('span');
+      label.className='saved-prompt-label';
+      label.textContent=p.label||p.text;
+      label.title=p.text;
+      row.onclick=()=>{
+        insertSavedPromptIntoComposer(p.text);
+        popup.style.display='none';
+        if(btn)btn.setAttribute('aria-expanded','false');
+      };
+      const del=document.createElement('button');
+      del.className='saved-prompt-delete';
+      del.type='button';
+      del.title=(typeof t==='function'&&t('saved_prompts_delete'))||'Delete';
+      del.innerHTML='<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
+      del.onclick=async(e)=>{
+        e.stopPropagation();
+        try{await api('/api/prompts',{method:'DELETE',body:JSON.stringify({id:p.id})});}catch(_e){}
+        _savedPromptsCache=null;
+        await toggleSavedPromptsPopup();
+        await toggleSavedPromptsPopup();
+      };
+      row.appendChild(label);
+      row.appendChild(del);
+      popup.appendChild(row);
+    }
+  }
+  const addRow=document.createElement('div');
+  addRow.className='saved-prompt-add-row';
+  const saveBtn=document.createElement('button');
+  saveBtn.type='button';
+  saveBtn.className='saved-prompt-save-btn';
+  saveBtn.textContent=(typeof t==='function'&&t('saved_prompts_save_current'))||'Save current input';
+  saveBtn.onclick=async()=>{
+    const msgEl=(typeof $==='function'&&$('msg'))||document.getElementById('msg');
+    const text=(msgEl&&msgEl.value||'').trim();
+    if(!text){
+      if(typeof showToast==='function') showToast((typeof t==='function'&&t('saved_prompts_empty_input'))||'Type a prompt first',2000,'error');
+      return;
+    }
+    try{await api('/api/prompts',{method:'POST',body:JSON.stringify({text})});}catch(_e){
+      if(typeof showToast==='function') showToast(_e&&_e.message||'Failed to save prompt',2000,'error');
+      return;
+    }
+    _savedPromptsCache=null;
+    popup.style.display='none';
+    if(btn)btn.setAttribute('aria-expanded','false');
+    if(typeof showToast==='function') showToast((typeof t==='function'&&t('saved_prompts_saved'))||'Prompt saved',1600);
+  };
+  addRow.appendChild(saveBtn);
+  popup.appendChild(addRow);
+}
+
+document.addEventListener('click',(e)=>{
+  const popup=(typeof $==='function'&&$('savedPromptsPopup'))||document.getElementById('savedPromptsPopup');
+  const btn=(typeof $==='function'&&$('btnSavedPrompts'))||document.getElementById('btnSavedPrompts');
+  if(!popup||popup.style.display==='none')return;
+  if(!popup.contains(e.target)&&e.target!==btn&&!(btn&&btn.contains(e.target))){
+    popup.style.display='none';
+    if(btn)btn.setAttribute('aria-expanded','false');
+  }
+},{capture:false});
+function _addNamedContextBlock(text){
+  const id='ctx-'+(++_selectionIdCounter);
+  const name=(_selectedTextReplyT('context_block_name_default','Context'))+' '+_selectionIdCounter;
+  _pendingSelections.push({id, name, text});
+  _renderSelectionChips();
+  return id;
+}
+
+function _removeNamedContextBlock(id){
+  _pendingSelections=_pendingSelections.filter(s=>s.id!==id);
+  if(!_pendingSelections.length)_selectionIdCounter=0;
+  _renderSelectionChips();
+}
+
+function _clearPendingSelections(){
+  _selectionIdCounter=0;
+  if(!_pendingSelections.length)return false;
+  _pendingSelections=[];
+  _renderSelectionChips();
+  return true;
+}
+if(typeof window!=='undefined') window._clearPendingSelections=_clearPendingSelections;
+
+function _selectedContextPreview(text){
+  const normalized=String(text||'').replace(/\r\n?/g,'\n').replace(/\n{3,}/g,'\n\n').trim();
+  if(!normalized)return '';
+  const max=360;
+  return normalized.length>max?normalized.slice(0,max).trimEnd()+'…':normalized;
+}
+
+function _renderSelectionChips(){
+  const wrap=document.getElementById('composerSelectionChips');
+  if(!wrap)return;
+  wrap.innerHTML='';
+  wrap.hidden=!_pendingSelections.length;
+  _pendingSelections.forEach(s=>{
+    const card=document.createElement('article');
+    card.className='selection-context-card';
+    card.dataset.selectionId=s.id;
+    card.setAttribute('aria-label', s.name);
+
+    const accent=document.createElement('div');
+    accent.className='selection-context-accent';
+    accent.setAttribute('aria-hidden','true');
+
+    const body=document.createElement('div');
+    body.className='selection-context-body';
+
+    const header=document.createElement('div');
+    header.className='selection-context-header';
+
+    const name=document.createElement('button');
+    name.type='button';
+    name.className='selection-context-name selection-chip-name';
+    name.textContent=s.name;
+    name.title=_selectedTextReplyT('context_block_rename_hint','Click or press Enter to rename');
+    name.setAttribute('aria-label', `${_selectedTextReplyT('context_block_rename_aria','Rename context block')}: ${s.name}`);
+    name.addEventListener('click',()=>_editSelectionChipName(s.id,card));
+    name.addEventListener('dblclick',()=>_editSelectionChipName(s.id,card));
+    name.addEventListener('keydown',e=>{
+      if(e.key==='Enter'||e.key===' '||e.key==='F2'){
+        e.preventDefault();
+        _editSelectionChipName(s.id,card);
+      }
+    });
+
+    const remove=document.createElement('button');
+    remove.type='button';
+    remove.className='selection-context-remove selection-chip-remove';
+    remove.setAttribute('aria-label', `${_selectedTextReplyT('context_block_remove','Remove context block')}: ${s.name}`);
+    remove.innerHTML='&#x2715;';
+    remove.addEventListener('click',()=>_removeNamedContextBlock(s.id));
+
+    const quote=document.createElement('blockquote');
+    quote.className='selection-context-quote';
+    quote.textContent=_selectedContextPreview(s.text);
+    quote.title=String(s.text||'');
+
+    header.appendChild(name);
+    header.appendChild(remove);
+    body.appendChild(header);
+    body.appendChild(quote);
+    card.appendChild(accent);
+    card.appendChild(body);
+    wrap.appendChild(card);
+  });
+  // #4380: pending selection cards are content the primary Send button must
+  // recognize (they were moved out of the textarea into _pendingSelections),
+  // so refresh the button's enabled/disabled state whenever the set changes —
+  // otherwise a selection-only reply can't be sent via click/tap/mobile.
+  if(typeof updateSendBtn==='function') updateSendBtn();
+}
+
+function _editSelectionChipName(id,chip){
+  const s=_pendingSelections.find(x=>x.id===id);
+  if(!s)return;
+  const nameEl=chip.querySelector('.selection-chip-name');
+  if(!nameEl)return;
+  if(chip.querySelector('.selection-chip-edit'))return;
+  const inp=document.createElement('input');
+  inp.type='text';inp.value=s.name;inp.className='selection-chip-edit';
+  inp.maxLength=120;
+  inp.setAttribute('aria-label', `${_selectedTextReplyT('context_block_rename_aria','Rename context block')}: ${s.name}`);
+  inp.title=_selectedTextReplyT('context_block_rename_hint','Click or press Enter to rename');
+  nameEl.replaceWith(inp);
+  inp.focus();inp.select();
+  let done=false;
+  const restoreFocus=()=>{
+    window.requestAnimationFrame(()=>{
+      const safeId=window.CSS&&CSS.escape?CSS.escape(id):String(id).replace(/"/g,'\\"');
+      const next=document.querySelector(`[data-selection-id="${safeId}"] .selection-chip-name`);
+      if(next&&typeof next.focus==='function')next.focus({preventScroll:true});
+    });
+  };
+  const commit=()=>{ if(done)return; done=true; s.name=(inp.value.trim()||s.name).slice(0,120); _renderSelectionChips(); restoreFocus(); };
+  const cancel=()=>{ if(done)return; done=true; _renderSelectionChips(); restoreFocus(); };
+  inp.addEventListener('blur',commit);
+  inp.addEventListener('keydown',e=>{ if(e.key==='Enter'){e.preventDefault();commit();} if(e.key==='Escape'){cancel();} });
+}
+
+function _composerTextWithPendingSelections(){
+  const composer=(typeof $==='function'&&$('msg'))||document.getElementById('msg');
+  const current=String(composer&&composer.value||'');
+  if(!_pendingSelections.length)return current;
+  const blocks=_pendingSelections.map(s=>`**${s.name}:**\n${_formatSelectedTextReplyQuote(s.text)}`).join('\n\n');
+  return current.trim()?`${current.replace(/\s+$/,'')}\n\n${blocks}\n\n`:`${blocks}\n\n`;
+}
+
+function _clearComposerAfterQueuedSelectionSend(){
+  const sid=arguments.length?arguments[0]:(S.session&&S.session.session_id);
+  const composer=(typeof $==='function'&&$('msg'))||document.getElementById('msg');
+  const draftText=composer?String(composer.value||''):'';
+  const draftFiles=Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[];
+  if(composer)composer.value='';
+  if(sid&&typeof _clearComposerDraft==='function') _clearComposerDraft(sid,draftText,draftFiles);
+  _clearPendingSelections();
+  if(typeof autoResize==='function') autoResize();
+}
+
+function _flushSelectionBlocksToComposer(){
+  if(!_pendingSelections.length)return;
+  const composer=(typeof $==='function'&&$('msg'))||document.getElementById('msg');
+  if(!composer)return;
+  composer.value=_composerTextWithPendingSelections();
+  _clearPendingSelections();
+  composer.focus();
+  try{ composer.setSelectionRange(composer.value.length, composer.value.length); }catch(_e){}
+  composer.dispatchEvent(new Event('input',{bubbles:true}));
+  if(typeof autoResize==='function') autoResize();
+}
+
 function _selectedTextReplyButton(){
   if(_selectedTextReplyBtn)return _selectedTextReplyBtn;
   const btn=document.createElement('button');
@@ -655,6 +901,80 @@ function applySessionTitleUpdate(sid, titleText, options={}){
   return true;
 }
 
+// #5472: when a provider/background error aborts a send, send() has already
+// cleared the composer (`$('msg').value=''`), the persisted draft
+// (`_clearComposerDraft`), and the staged files (uploadPendingFiles() sets
+// `S.pendingFiles=[]`) before the turn was durably accepted server-side. On a
+// start-time throw the turn is never persisted, so the user loses the entire
+// typed message + attachments and must retype. Restore the ORIGINAL captured
+// draft text + staged files so the user can re-send with one key press.
+// Mirrors the draft-restore idiom already used by _trySteer (commands.js) and
+// _stashClarifyDraft.
+//
+// `draftText` and `filesSnapshot` are immutable snapshots captured in send()
+// BEFORE slash rewrites (/moa, bundles) mutate the payload and BEFORE
+// uploadPendingFiles() drains S.pendingFiles — so we restore what the user
+// actually typed, not the transformed send payload.
+function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, clearPromise){
+  const restore=String(draftText||'');
+  const files=Array.isArray(filesSnapshot)?filesSnapshot.filter(Boolean):[];
+  if(!restore&&!files.length) return false;
+
+  // Only mutate the VISIBLE composer / staged tray when the failed send belongs
+  // to the session the user is currently looking at — otherwise a background
+  // send failure would pollute another session's composer. (Codex #5484 catch.)
+  const visibleSid=(S.session&&S.session.session_id)||null;
+  const belongsToVisible=!(sid&&visibleSid&&sid!==visibleSid);
+  let restoredVisible=false;
+  if(belongsToVisible){
+    const inp=$('msg');
+    // Do not clobber a new message the user began typing during the async window.
+    if(inp && !String(inp.value||'').trim()){
+      inp.value=restore;
+      if(typeof autoResize==='function') autoResize();
+      if(typeof updateSendBtn==='function') updateSendBtn();
+      // Re-stage the originally attached files so a one-key resend keeps them.
+      if(files.length){
+        S.pendingFiles=files;
+        if(typeof renderTray==='function') renderTray();
+      }
+      restoredVisible=true;
+    }
+  }
+
+  // Persist the failed session's draft so it survives a reload, ordered AFTER the
+  // send-time _clearComposerDraft POST (text:'') resolves — otherwise the two
+  // same-origin writes can be reordered under HTTP/2 multiplexing and leave the
+  // server draft empty. (Opus #5484 NIT.) Because the persist is deferred, it
+  // must be STALE-AWARE at fire time (Codex #5488 catch): if the failed session
+  // is still visible, re-read the LIVE composer so a post-restore edit is
+  // captured rather than clobbered by the original snapshot; if we restored the
+  // visible session but the user has since switched away, skip entirely (the
+  // session-switch save path already persisted this session's composer).
+  if(sid&&typeof _saveComposerDraftNow==='function'){
+    const _persist=()=>{
+      try{
+        const stillVisible=(S.session&&S.session.session_id)===sid;
+        if(stillVisible){
+          const inp=$('msg');
+          const liveText=inp?String(inp.value||''):restore;
+          _saveComposerDraftNow(sid, liveText, S.pendingFiles?[...S.pendingFiles]:[]);
+        } else if(!restoredVisible){
+          // Background failure (sid was never the visible session): no live
+          // composer to read, so persist the captured snapshot — it's the only copy.
+          _saveComposerDraftNow(sid, restore, []);
+        }
+        // else: restored the visible composer, then the user switched away — the
+        // session-switch save path already saved sid's composer; skip stale write.
+      }catch(_){ }
+    };
+    if(clearPromise&&typeof clearPromise.then==='function') clearPromise.then(_persist,_persist);
+    else _persist();
+  }
+
+  return restoredVisible;
+}
+
 async function send(){
   // Reject concurrent invocations early — before any await yields control.
   // If a send is already in-flight (e.g. queue drain), re-queue the message
@@ -667,7 +987,8 @@ async function send(){
     if(_text && _targetSid){
       const _modelState=_chatPayloadModelState();
       queueSessionMessage(_targetSid,{text:_text,files:[...S.pendingFiles],model:_modelState.model,model_provider:_modelState.model_provider,profile:S.activeProfile||'default'});
-      $('msg').value='';autoResize();
+      _clearComposerAfterQueuedSelectionSend();
+      if(_targetSid&&typeof _clearComposerDraft==='function'&&_targetSid!==(S.session&&S.session.session_id)) _clearComposerDraft(_targetSid,_text,S.pendingFiles?[...S.pendingFiles]:[]);
       S.pendingFiles=[];renderTray();
       updateQueueBadge(_targetSid);
       showToast(`Queued: "${_text.slice(0,40)}${_text.length>40?'…':''}"`,2000);
@@ -676,10 +997,29 @@ async function send(){
   }
   _sendInProgress = true;
   try{
-  const text=$('msg').value.trim();
-  if(!text&&!S.pendingFiles.length){_sendInProgress=false;_sendInProgressSid=null;return;}
+  const options=arguments[0]||{};
+  const literalSlash=!!(options&&options.literalSlash);
+  let text=$('msg').value.trim();
+  if(!text&&!S.pendingFiles.length&&!_pendingSelections.length){_sendInProgress=false;_sendInProgressSid=null;return;}
   // Don't send while an inline message edit is active
   if(document.querySelector('.msg-edit-area')){_sendInProgress=false;_sendInProgressSid=null;return;}
+  _flushSelectionBlocksToComposer();
+  text=$('msg').value.trim();
+  if(!text&&!S.pendingFiles.length){_sendInProgress=false;_sendInProgressSid=null;return;}
+  if(typeof shouldInterceptCompressionRecoveryContinuation==='function'&&shouldInterceptCompressionRecoveryContinuation(text,S.pendingFiles)){
+    if(typeof showCompressionRecoveryContinuationHint==='function') showCompressionRecoveryContinuationHint();
+    _sendInProgress=false;_sendInProgressSid=null;
+    return;
+  }
+
+  // #5472: snapshot the ORIGINAL user-typed composer state now — before slash
+  // rewrites (/moa, bundles) mutate `text` and before uploadPendingFiles()
+  // clears S.pendingFiles. If /api/chat/start throws (turn never durably
+  // started), _restoreComposerDraftAfterFailedSend() puts this exact text +
+  // staged files back so the user can re-send without retyping. Captured as an
+  // immutable snapshot so later reassignments to `text` don't leak into it.
+  const _failedSendDraftText=text;
+  const _failedSendFilesSnapshot=Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[];
 
   // Dismiss handoff hint when user sends a message (resets seen_at).
   if(S.session&&S.session.session_id&&typeof _dismissHandoffHint==='function'){
@@ -690,7 +1030,7 @@ async function send(){
   _clearStaleBusyStateBeforeSend({compressionRunning});
   // If busy or a manual compression is still running, handle based on busy_input_mode
   if(S.busy||compressionRunning){
-    if(text){
+    if(text||S.pendingFiles.length){
       if(!S.session){await newSession();await renderSessionList();}
       // Busy-control slash commands must be intercepted HERE, before the
       // busyMode routing block, so the user can always type /steer, /interrupt,
@@ -698,7 +1038,7 @@ async function send(){
       // Without this intercept they fall through to the queue and execute after
       // the current turn ends — by which point there is no active stream and
       // cmdSteer / cmdInterrupt say "No active task to stop."
-      if(text.startsWith('/')){
+      if(text.startsWith('/')&&!literalSlash){
         const _pc=typeof parseCommand==='function'&&parseCommand(text);
         if(_pc&&['steer','interrupt','queue','terminal','goal'].includes(_pc.name)){
           const _bc=COMMANDS.find(c=>c.name===_pc.name);
@@ -713,26 +1053,25 @@ async function send(){
       if(busyMode==='steer'&&S.activeStreamId&&typeof _trySteer==='function'){
         // Real steer: clear the input first so the user gets immediate
         // feedback, then ship the steer payload via /api/chat/steer.
-        // _trySteer falls back to queue+cancel internally if the agent
-        // isn't running / cached / steer-capable.
+        // _trySteer captures the owner session/files before awaiting uploads,
+        // restores/persists the draft on failure, and clears the owner draft
+        // only after /api/chat/steer accepts.
         $('msg').value='';autoResize();
-        // Do NOT clear pendingFiles yet — _trySteer may fall back to
-        // interrupt+queue and needs the files for queueSessionMessage.
-        // _trySteer clears pendingFiles itself in the fallback path, and
-        // the server returns accepted:true (no files sent) on success.
+        // Do NOT clear pendingFiles yet — _trySteer uploads with clearPending=false,
+        // and a failed steer must keep staged files available for the user's next explicit action.
         await _trySteer(text, /*explicitSteer=*/false);
-        // After _trySteer: clear any remaining files (success path).
-        S.pendingFiles=[];renderTray();
-      } else if(busyMode==='interrupt'){
+        // _trySteer clears staged files only after /api/chat/steer accepts, and
+        // only when the visible session still matches the captured owner sid.
+      } else if(defaultMessageMode==='interrupt'){
         // Queue the message, then cancel so drain re-sends it.
         const _modelState=_chatPayloadModelState();
         queueSessionMessage(S.session.session_id,{text,files:[...S.pendingFiles],model:_modelState.model,model_provider:_modelState.model_provider,profile:S.activeProfile||'default'});
         updateQueueBadge(S.session.session_id);
-        $('msg').value='';autoResize();
+        _clearComposerAfterQueuedSelectionSend(S.session&&S.session.session_id);
         S.pendingFiles=[];renderTray();
         if(S.activeStreamId&&typeof cancelStream==='function'){
-          showToast(t('busy_interrupt_confirm'),2000);
-          await cancelStream();
+          if(await cancelStream('busy-interrupt')) showToast(t('busy_interrupt_confirm'),2000);
+          else showToast(t('cancel_failed'),null,'error');
         } else {
           showToast(`Queued: "${text.slice(0,40)}${text.length>40?'…':''}"`,2000);
         }
@@ -741,7 +1080,7 @@ async function send(){
         // 'steer' mode when no stream is active or _trySteer is unavailable.
         const _modelState=_chatPayloadModelState();
         queueSessionMessage(S.session.session_id,{text,files:[...S.pendingFiles],model:_modelState.model,model_provider:_modelState.model_provider,profile:S.activeProfile||'default'});
-        $('msg').value='';autoResize();
+        _clearComposerAfterQueuedSelectionSend(S.session&&S.session.session_id);
         S.pendingFiles=[];renderTray();
         updateQueueBadge(S.session.session_id);
         showToast(`Queued: "${text.slice(0,40)}${text.length>40?'…':''}"`,2000);
@@ -759,7 +1098,7 @@ async function send(){
   // their assistant response synchronously.  If we pushed AFTER, S.messages
   // would be [assistant, user] and the chat would show the response above
   // the user's own input — reverse chronological order (#840 ordering bug).
-  if(text.startsWith('/')&&!S.pendingFiles.length){
+  if(text.startsWith('/')&&!S.pendingFiles.length&&!literalSlash){
     const _parsedCmd=parseCommand(text);
     const _cmd=_parsedCmd?COMMANDS.find(c=>c.name===_parsedCmd.name):null;
     if(_cmd){
@@ -782,6 +1121,32 @@ async function send(){
       }
     }
     if(_parsedCmd&&!_cmd){
+      if(_parsedCmd.name==='pet'){
+        if(!S.session){await newSession();await renderSessionList();}
+        S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
+        let _petOutput=null;
+        try{
+          _petOutput=typeof handlePetSlashCommand==='function'
+            ? await handlePetSlashCommand(text,{name:'pet'})
+            : {handled:false,message:'Desktop Companion is unavailable in WebUI.'};
+        }catch(e){
+          _petOutput={handled:false,message:`Desktop Companion command error: ${e&&e.message||e}`};
+        }
+        if(_petOutput&&_petOutput.message){
+          S.messages.push({role:'assistant',content:String(_petOutput.message),_ts:Date.now()/1000});
+        }
+        renderMessages();
+        $('msg').value='';autoResize();hideCmdDropdown();return;
+      }
+      if(_parsedCmd.name==='sessions' || _parsedCmd.name==='resume'){
+        // Open the native WebUI session browser rather than sending as chat text (#6224).
+        // Use the mobile-aware opener so phone-width layouts (where expandSidebar is a
+        // no-op) actually reveal the session drawer.
+        if(typeof _openProfileSwitchSessionBrowser==='function') _openProfileSwitchSessionBrowser();
+        else if(typeof expandSidebar==='function') expandSidebar();
+        if(typeof renderSessionList==='function') await renderSessionList();
+        $('msg').value='';autoResize();hideCmdDropdown();return;
+      }
       const _agentCmd=typeof getAgentCommandMetadata==='function'
         ? await getAgentCommandMetadata(_parsedCmd.name)
         : null;
@@ -830,9 +1195,41 @@ async function send(){
   const activeSid=S.session.session_id;
   _sendInProgressSid=activeSid;
 
-  setComposerStatus(S.pendingFiles&&S.pendingFiles.length?'Uploading…':'');
+  // Salvage of #4750 (@harryazj): capture the composer text and clear the
+  // textarea NOW — immediately after capture and BEFORE the uploadPendingFiles()
+  // / forced-skill-directive awaits below. send() re-reads the LIVE composer when
+  // it is re-entered while a send is in flight (the _sendInProgress guard at the
+  // top of this function reads _composerTextWithPendingSelections()). If we
+  // cleared only after the async work — as the pre-fix code did, down at the
+  // _clearComposerDraft site — a re-entrant/interrupt-mode send during the upload
+  // window would read the still-populated DOM and double-submit the same message.
+  // _submittedDraftTextForClear is the sole authority for the send-time draft
+  // signature from here down; no code path below re-reads $('msg').value on the
+  // happy path.
+  const _submittedDraftTextForClear=$('msg').value||'';
+  $('msg').value='';autoResize();
+
+  // #5912 gate CORE fix: snapshot the pending files that belong to THIS send
+  // BEFORE the await, and upload exactly that snapshot. Otherwise a re-entrant /
+  // interrupt-mode send during the upload window inherits the still-live
+  // S.pendingFiles and later re-uploads the first send's attachment. Detach the
+  // snapshot from S.pendingFiles now so files staged AFTER this point belong to
+  // the next send only.
+  const _submittedFiles=[...(S.pendingFiles||[])];
+  const _submittedDraftFilesForClear=[..._submittedFiles];
+  S.pendingFiles=[];
+  if(typeof renderTray==='function')renderTray();
+
+  // #5912 gate SILENT fix: clear the PERSISTED draft here — alongside the
+  // textarea clear, BEFORE any await — so a new draft typed during the upload
+  // window is not clobbered by a delayed text:'' post. Keep the promise so the
+  // #5472 failed-send restore can chain its re-persist after this clear resolves.
+  let _composerDraftClearPromise=null;
+  if (activeSid && typeof _clearComposerDraft === 'function') _composerDraftClearPromise=_clearComposerDraft(activeSid,_submittedDraftTextForClear,_submittedDraftFilesForClear);
+
+  setComposerStatus(_submittedFiles.length?'Uploading…':'');
   let uploaded=[];
-  try{uploaded=await uploadPendingFiles();}
+  try{uploaded=await uploadPendingFiles({files:_submittedFiles, sessionId:activeSid, clearPending:false});}
   catch(e){if(!text){setComposerStatus(`Upload error: ${e.message}`);return;}}
   // Clear the uploading status now that upload is done — if we don't clear here
   // it stays visible for the entire duration of the agent stream, since
@@ -855,12 +1252,13 @@ async function send(){
     }
   }
   if(!msgText){setComposerStatus('Nothing to send');return;}
-
-  $('msg').value='';autoResize();
-  // Clear persisted composer draft since message was sent.
-  if (activeSid && typeof _clearComposerDraft === 'function') _clearComposerDraft(activeSid);
-  const displayText=text||(uploaded.length?`Uploaded: ${uploadedNames.join(', ')}`:'(file upload)');
-  const userMsg={role:'user',content:displayText,attachments:uploaded.length?uploadedNames:undefined,_ts:Date.now()/1000};
+  // Composer textarea + persisted draft were already captured and cleared
+  // immediately after capture (above, salvage of #4750 + #5912 gate fix) to close
+  // the re-entrant double-send race AND avoid clobbering a draft typed during the
+  // upload window. _composerDraftClearPromise / _submittedDraftFilesForClear are
+  // set there; nothing to re-declare here.
+  const displayText=_slashDisplayTextOverride||text||(uploaded.length?`Uploaded: ${uploadedNames.join(', ')}`:'(file upload)');
+  const userMsg={role:'user',content:displayText,attachments:uploaded.length?uploadedNames:undefined,_ts:Date.now()/1000,_pending:true};
   S.toolCalls=[];  // clear tool calls from previous turn
   clearLiveToolCards();  // clear any leftover live cards from last turn
   let optimisticMessages;
@@ -1067,6 +1465,11 @@ async function send(){
     if(!_clarifySessionId || _clarifySessionId===activeSid) hideClarifyCard(true, 'terminal');
     S.messages.push({role:'assistant',content:`**Error:** ${errMsg}`});
     _queueDrainSid=activeSid;renderMessages();setBusy(false);setComposerStatus(`Error: ${errMsg}`);
+    // #5472: the send was rejected before the turn was durably started, so the
+    // composer text + attachments (cleared at send time) would otherwise be
+    // lost. Put back the ORIGINAL captured draft (not the mutated /moa/bundle
+    // payload) and re-stage files so the user can re-send without retyping.
+    _restoreComposerDraftAfterFailedSend(_failedSendDraftText, _failedSendFilesSnapshot, activeSid, _composerDraftClearPromise);
     if(typeof clearOptimisticSessionStreaming==='function') clearOptimisticSessionStreaming(activeSid);
     // Reconcile with server truth after immediately clearing the optimistic spinner.
     if(typeof renderSessionList==='function') void renderSessionList();
@@ -1125,6 +1528,7 @@ function closeLiveStream(sessionId, streamId, source){
         lastAssistantText:INFLIGHT[sessionId].lastAssistantText||'',
         lastReasoningText:INFLIGHT[sessionId].lastReasoningText||'',
         lastRunJournalSeq:INFLIGHT[sessionId].lastRunJournalSeq||0,
+        lastRunJournalEventId:INFLIGHT[sessionId].lastRunJournalEventId||'',
         journalReplayFromStart:true,
         currentActivityBurstId:INFLIGHT[sessionId].currentActivityBurstId||0,
         currentLiveSegmentSeq:INFLIGHT[sessionId].currentLiveSegmentSeq||0,
@@ -1152,6 +1556,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(uploaded.length) INFLIGHT[activeSid].uploaded=[...uploaded];
     if(!Array.isArray(INFLIGHT[activeSid].toolCalls)) INFLIGHT[activeSid].toolCalls=[];
   }
+  const _priorInflightStreamId=String(INFLIGHT[activeSid].streamId||'');
+  if(_priorInflightStreamId&&_priorInflightStreamId!==streamId){
+    INFLIGHT[activeSid].lastRunJournalSeq=0;
+    INFLIGHT[activeSid].lastRunJournalEventId='';
+  }
+  INFLIGHT[activeSid].streamId=streamId;
   if(!Array.isArray(INFLIGHT[activeSid].activityBurstAnchors)) INFLIGHT[activeSid].activityBurstAnchors=[];
   if(INFLIGHT[activeSid].currentActivityBurstId===undefined) INFLIGHT[activeSid].currentActivityBurstId=0;
   if(INFLIGHT[activeSid].currentLiveSegmentSeq===undefined) INFLIGHT[activeSid].currentLiveSegmentSeq=0;
@@ -1348,6 +1758,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       lastAssistantText:inflight.lastAssistantText||'',
       lastReasoningText:inflight.lastReasoningText||'',
       lastRunJournalSeq:inflight.lastRunJournalSeq||0,
+      lastRunJournalEventId:inflight.lastRunJournalEventId||'',
       journalReplayFromStart:!!inflight.journalReplayFromStart,
       currentActivityBurstId:inflight.currentActivityBurstId||0,
       currentLiveSegmentSeq:inflight.currentLiveSegmentSeq||0,
@@ -1358,6 +1769,20 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   function snapshotLiveTurn(){
     if(typeof snapshotLiveTurnHtmlForSession==='function') snapshotLiveTurnHtmlForSession(activeSid);
+  }
+  // Throttled per-frame variant. snapshotLiveTurnHtmlForSession serializes the
+  // whole (growing) live turn via turn.outerHTML — O(n)/frame -> O(n^2) over a
+  // long answer, and a real GC-pressure source. The snapshot only backs
+  // mid-stream session-switch restore, and the switch path (sessions.js) plus
+  // the stream event boundaries (tool/done) already capture synchronously, so a
+  // coarse trailing snapshot during streaming is sufficient. (#5455 WS2.2)
+  let _snapshotLiveTurnTimer=null;
+  function _throttledSnapshotLiveTurn(){
+    if(_snapshotLiveTurnTimer) return;
+    _snapshotLiveTurnTimer=setTimeout(()=>{_snapshotLiveTurnTimer=null;snapshotLiveTurn();},700);
+  }
+  function _cancelThrottledSnapshotTimer(){
+    if(_snapshotLiveTurnTimer){clearTimeout(_snapshotLiveTurnTimer);_snapshotLiveTurnTimer=null;}
   }
   // Throttled variant for token-by-token updates. persistInflightState()
   // calls saveInflightState() which does JSON.parse + JSON.stringify + write
@@ -1373,6 +1798,78 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   function _closeSource(source){
     closeLiveStream(activeSid, streamId, source);
+  }
+  function _clearStreamEndRecovery(){
+    if(_streamEndRecoveryTimer){
+      clearTimeout(_streamEndRecoveryTimer);
+      _streamEndRecoveryTimer=null;
+    }
+    _pendingStreamEndRecovery=false;
+    _streamEndRecoveryAttempts=0;
+  }
+  function _liveStreamEndScenePresent(){
+    if(assistantText||assistantRow) return true;
+    if(String(liveReasoningText||reasoningText||'').trim()) return true;
+    const inflight=INFLIGHT[activeSid];
+    if(inflight&&Array.isArray(inflight.toolCalls)&&inflight.toolCalls.length) return true;
+    if(!_isActiveSession()||typeof document==='undefined') return false;
+    const turn=$('liveAssistantTurn');
+    return !!(turn&&turn.querySelector(
+      '[data-live-assistant="1"],'+
+      '.live-worklog[data-live-worklog-shell="1"],'+
+      '.tool-card-row[data-live-tid],'+
+      '.agent-activity-thinking[data-thinking-active="1"]'
+    ));
+  }
+  function _scheduleStreamEndRecovery(source, delay=180){
+    if(_streamEndRecoveryTimer) clearTimeout(_streamEndRecoveryTimer);
+    _pendingStreamEndRecovery=true;
+    _streamEndRecoveryTimer=setTimeout(()=>{void _runStreamEndRecovery(source);},delay);
+  }
+  function _finalizeStreamEndFallback(source){
+    _clearStreamEndRecovery();
+    if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
+    _cancelThrottledSnapshotTimer();
+    _terminalStateReached=true;
+    _streamFinalized=true;
+    _cancelAnimationFramePendingStreamRender();
+    _streamFadeCleanupReduceMotionListener();
+    _smdEndParser();
+    if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
+    _clearOwnerInflightState();
+    _clearStreamHidden(activeSid, streamId);  // #4416: terminal path, drop hidden tracker
+    _clearStreamNotificationBackground(activeSid, streamId);
+    _flushReasoningToAnchor();
+    _scheduleAnchorRegistryCleanup();
+    _clearAnchorProseIncrementalNode();
+    _clearApprovalForOwner();
+    _clearClarifyForOwner('terminal');
+    if(_isActiveSession()){
+      S.activeStreamId=null;
+      clearLiveToolCards();if(!assistantText)removeThinking();
+      renderMessages({preserveScroll:true});
+    }
+    renderSessionList();
+    _setActivePaneIdleIfOwner();
+    _closeSource(source);
+  }
+  async function _runStreamEndRecovery(source){
+    if(_streamFinalized || _terminalStateReached || !_pendingStreamEndRecovery){
+      _clearStreamEndRecovery();
+      return;
+    }
+    _streamEndRecoveryTimer=null;
+    const status=await _restoreSettledSession(source,{status:true});
+    if(status==='restored'){
+      _clearStreamEndRecovery();
+      return;
+    }
+    if(status==='active'&&_streamEndRecoveryAttempts<10){
+      _streamEndRecoveryAttempts+=1;
+      _scheduleStreamEndRecovery(source,200);
+      return;
+    }
+    _finalizeStreamEndFallback(source);
   }
   function _stripLiveVisibleAssistantEchoFromThinking(text, snippets){
     let out=String(text||'');
@@ -1396,8 +1893,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       burstId:_currentActivityBurstId,
     };
   }
-  function _updateLiveThinkingCard(text){
-    const opts=_liveThinkingPlacement();
+  function _updateLiveThinkingCard(text, options){
+    const opts={
+      ..._liveThinkingPlacement(),
+      ...((options&&typeof options==='object')?options:{}),
+    };
     if(typeof updateThinking==='function') updateThinking(text, opts);
     else appendThinking(text, opts);
   }
@@ -1588,10 +2088,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   let _streamFadeLastArrivalMs=0;
   let _streamFadeArrivalWps=0;
   let _streamFadeLatestAnimationEndAt=0;
-  let _streamFadeAppendOffset=0;
   let _streamFadeVisibleWords=0;
   let _streamFadeHoldUntilMs=0;
-  let _streamFadeCurrentMs=200;
+  let _streamFadeCurrentMs=620;
+  let _streamFadeDomText='';
   let _streamFadeReduceMotionMql=null;
   let _streamFadeReduceMotion=false;
   let _streamFadeReduceMotionOnChange=null;
@@ -1601,13 +2101,1502 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   let _lastRunJournalSeq=reconnecting
     ? Number((INFLIGHT[activeSid]&&INFLIGHT[activeSid].lastRunJournalSeq)||0)
     : 0;
-  let _lastRunJournalEventId='';
-  const _STREAM_FADE_MS=200;
-  const _STREAM_FADE_MAX_MS=350;
-  const _STREAM_FADE_STAGGER_MS=16;
-  const _STREAM_FADE_DONE_MAX_MS=320;
-  const _STREAM_FADE_DONE_DRAIN_MAX_MS=900;
-  const _streamFadeEnabledForStream=window._fadeTextEffect===true;
+  let _lastRunJournalEventId=reconnecting
+    ? String((INFLIGHT[activeSid]&&INFLIGHT[activeSid].lastRunJournalEventId)||'')
+    : '';
+  const _STREAM_FADE_MS=620;
+  const _STREAM_FADE_MAX_MS=900;
+  const _STREAM_FADE_DONE_MAX_MS=1000;
+  const _STREAM_FADE_DONE_DRAIN_MAX_MS=1400;
+  const _anchorApi=(typeof window!=='undefined'&&window.HermesAssistantTurnAnchors)
+    ? window.HermesAssistantTurnAnchors
+    : null;
+  const _anchorRegistryMap=(typeof window!=='undefined')
+    ? (window._liveAnchorRegistries=window._liveAnchorRegistries||new Map())
+    : null;
+  const _existingAnchorRegistry=_anchorRegistryMap?_anchorRegistryMap.get(streamId):null;
+  const _anchorRegistry=_existingAnchorRegistry||(_anchorApi&&typeof _anchorApi.createAssistantTurnAnchorRegistry==='function'
+    ? _anchorApi.createAssistantTurnAnchorRegistry({
+      session_id:activeSid,
+      stream_id:streamId,
+      run_id:null,
+    })
+    : null);
+  let _anchorShadowWarned=false;
+  let _anchorReasoningFlushed=false;
+  let _anchorLocalSeq=0;
+  if(_anchorRegistryMap&&_anchorRegistry) _anchorRegistryMap.set(streamId,_anchorRegistry);
+  function _scheduleAnchorRegistryCleanup(delayMs=600000){
+    if(!_anchorRegistryMap||!_anchorRegistry) return;
+    setTimeout(()=>{
+      if(_anchorRegistryMap.get(streamId)===_anchorRegistry) _anchorRegistryMap.delete(streamId);
+    },delayMs);
+  }
+  // Backstop: schedule an identity-guarded cleanup at creation so this shadow
+  // registry self-expires no matter which teardown path the stream takes
+  // (incl. external ones like sidebar cancelSessionStream() that bypass the
+  // in-closure SSE handlers). Explicit terminal-path calls above just expire it
+  // sooner; this guarantees window._liveAnchorRegistries can't grow unbounded.
+  _scheduleAnchorRegistryCleanup(600000);
+  // Applying an event and painting it are separate outcomes. Reasoning uses the
+  // optional holder to decide whether a temporary visible fallback is needed.
+  function _applyToAnchor(sourceEventType, rawEventData, sseEvent, renderOutcome, options={}){
+    if(renderOutcome&&typeof renderOutcome==='object') renderOutcome.rendered=false;
+    if(!_anchorRegistry||!_anchorApi||typeof _anchorApi.applyAssistantTurnAnchorSourceEvent!=='function') return null;
+    const raw=(rawEventData&&typeof rawEventData==='object')?rawEventData:{};
+    const eventId=(sseEvent&&sseEvent.lastEventId)||raw.event_id||raw.lastEventId||raw.last_event_id||'';
+    const sourceEvent={
+      ...raw,
+      source_event_type:sourceEventType,
+      // Persist a creation timestamp the FIRST time we see this source event, so
+      // the worklog event timestamp (#5700/#5739) survives settlement. Reasoning
+      // events carry no server timestamp; without this, the live DOM shows a
+      // fallback time but the settled scene row rebuilds with created_at:null and
+      // the timestamp disappears. Prefer any real server-supplied stamp; fall back
+      // to now only when none exists. (#5739 gate finding.)
+      created_at:raw.created_at??raw.timestamp??raw.ts??(Date.now()/1000),
+      activitySegmentSeq:raw.activitySegmentSeq??raw.activity_segment_seq??_assistantSegmentSeq,
+      activityBurstId:raw.activityBurstId??raw.activity_burst_id??_currentActivityBurstId,
+    };
+    if(eventId) sourceEvent.event_id=eventId;
+    try{
+      const result=_anchorApi.applyAssistantTurnAnchorSourceEvent(
+        _anchorRegistry,
+        sourceEvent,
+        {session_id:activeSid,stream_id:streamId}
+      );
+      const rendered=options&&options.render===false?false:_renderAnchorLiveScene();
+      if(renderOutcome&&typeof renderOutcome==='object') renderOutcome.rendered=rendered;
+      return result;
+    }catch(err){
+      if(!_anchorShadowWarned&&typeof console!=='undefined'&&console.warn){
+        _anchorShadowWarned=true;
+        console.warn('assistant turn anchor live shadow feed failed',err);
+      }
+      return null;
+    }
+  }
+  function _anchorActivityEvents(){
+    const anchor=_anchorRegistry&&_anchorRegistry.anchor;
+    return anchor&&Array.isArray(anchor.activity_events)?anchor.activity_events:null;
+  }
+  function _findAnchorActivityEventByLocalId(localId, sourceEventType){
+    const events=_anchorActivityEvents();
+    if(!events||!localId) return null;
+    for(let i=events.length-1;i>=0;i--){
+      const event=events[i];
+      if(!event||event.local_id!==localId) continue;
+      if(sourceEventType&&event.source_event_type!==sourceEventType) continue;
+      return event;
+    }
+    return null;
+  }
+  function _latestAnchorCompressionEventIndex(sourceEventType){
+    const events=_anchorActivityEvents();
+    if(!events) return -1;
+    for(let i=events.length-1;i>=0;i--){
+      const event=events[i];
+      if(event&&event.source_event_type===sourceEventType) return i;
+    }
+    return -1;
+  }
+  function _anchorCompressionCompletedAfter(index){
+    const events=_anchorActivityEvents();
+    if(!events) return false;
+    for(let i=events.length-1;i>index;i--){
+      const event=events[i];
+      if(event&&event.source_event_type==='compressed') return true;
+    }
+    return false;
+  }
+  function _ensureAnchorCompressionCompletedOnLiveProgress(sessionId){
+    if(!_anchorRegistry||!_anchorApi) return false;
+    const sid=String(sessionId||activeSid||'');
+    const events=_anchorActivityEvents();
+    const runningIndex=_latestAnchorCompressionEventIndex('compressing');
+    if(runningIndex>=0&&_anchorCompressionCompletedAfter(runningIndex)) return true;
+    const runningEvent=(events&&runningIndex>=0)?events[runningIndex]:null;
+    const basis=String((runningEvent&&(runningEvent.local_id||runningEvent.event_id))||streamId||sid||'compression');
+    const localId=`live-compression-complete:${basis}`;
+    if(_findAnchorActivityEventByLocalId(localId,'compressed')) return true;
+    const eventId=`synthetic:${localId}`;
+    const result=_applyToAnchor('compressed',{
+      event_id:eventId,
+      local_id:localId,
+      session_id:sid,
+      old_session_id:sid,
+      automatic:true,
+      synthetic:true,
+      status:'completed',
+      phase:'done',
+      message:'Context auto-compressed',
+    },{lastEventId:eventId});
+    return !!(result&&(result.applied||result.reason==='duplicate'));
+  }
+  function _replaceAnchorActivityEventByLocalId(localId, sourceEventType, patch){
+    const events=_anchorActivityEvents();
+    if(!events||!localId) return null;
+    for(let i=events.length-1;i>=0;i--){
+      const event=events[i];
+      if(!event||event.local_id!==localId) continue;
+      if(sourceEventType&&event.source_event_type!==sourceEventType) continue;
+      const next={
+        ...event,
+        ...(patch||{}),
+        payload:{
+          ...(event.payload&&typeof event.payload==='object'?event.payload:{}),
+          ...((patch&&patch.payload&&typeof patch.payload==='object')?patch.payload:{}),
+        },
+      };
+      events[i]=next;
+      return next;
+    }
+    return null;
+  }
+  function _nextAnchorLocalSeq(){
+    _anchorLocalSeq+=1;
+    const cursor=Number(_runJournalReplayAfterSeq&&_runJournalReplayAfterSeq());
+    return (Number.isFinite(cursor)?cursor:0)+_anchorLocalSeq;
+  }
+  function _anchorSegmentSeq(){
+    const seq=Number(_assistantSegmentSeq||_currentLiveSegmentSeq||0);
+    return Number.isFinite(seq)&&seq>0?seq:1;
+  }
+  function _anchorSceneActiveMode(){
+    const normalize=value=>value==='transparent_stream'||value==='compact_worklog'||value==='hide_all_activity'?value:'';
+    if(typeof window!=='undefined'){
+      if(typeof window.chatActivityMode==='function'){
+        try{
+          const mode=normalize(window.chatActivityMode());
+          if(mode) return mode;
+        }catch(_){}
+      }
+      const displayMode=normalize(window._chatActivityDisplayMode);
+      if(displayMode) return displayMode;
+      if(window._transparentStream) return 'transparent_stream';
+    }
+    return 'compact_worklog';
+  }
+  function _anchorSceneRowDisplayHintForMode(row, sceneMode){
+    const hints=row&&typeof row==='object'&&row.display_hints&&typeof row.display_hints==='object'
+      ? row.display_hints
+      : null;
+    if(sceneMode==='transparent_stream') return (hints&&hints.transparent_stream)||'chronological_activity';
+    if(sceneMode==='compact_worklog') return (hints&&hints.compact_worklog)||row.display_hint||'activity_row';
+    if(sceneMode==='hide_all_activity') return (hints&&hints.hidden_activity)||'hidden_activity';
+    return row&&row.display_hint||'activity_row';
+  }
+  function _renderAnchorLiveScene(){
+    if(!_anchorRegistry||!_isActiveSession()) return false;
+    if(typeof window==='undefined'||typeof window._renderLiveAnchorActivitySceneForStream!=='function') return false;
+    try{
+      return !!window._renderLiveAnchorActivitySceneForStream(streamId, activeSid, {
+        mode:_anchorSceneActiveMode(),
+      });
+    }catch(err){
+      if(!_anchorShadowWarned&&typeof console!=='undefined'&&console.warn){
+        _anchorShadowWarned=true;
+        console.warn('assistant turn anchor live scene render failed',err);
+      }
+      return false;
+    }
+  }
+  function _projectLiveAnchorActivityScene(){
+    if(!_anchorRegistry||!_anchorApi||typeof _anchorApi.projectAssistantTurnAnchorActivityScene!=='function') return null;
+    try{
+      return _anchorApi.projectAssistantTurnAnchorActivityScene(_anchorRegistry,{mode:_anchorSceneActiveMode()});
+    }catch(_){
+      return null;
+    }
+  }
+  function _anchorSceneMessageRef(message){
+    if(!message||typeof message!=='object') return '';
+    let content=message.content||'';
+    if(Array.isArray(content)){
+      try{
+        content=content.map(part=>{
+          if(part&&typeof part==='object') return part.text||part.content||part.input_text||'';
+          return String(part||'');
+        }).join('\n');
+      }catch(_){ content=''; }
+    }
+    const payload={
+      role:String(message.role||''),
+      content:String(content||'').replace(/\s+/g,' ').trim(),
+      timestamp:message._ts||message.timestamp||'',
+    };
+    return JSON.stringify(payload);
+  }
+  function _anchorSceneMessageText(message){
+    if(!message||typeof message!=='object') return '';
+    let content=message.content||'';
+    if(Array.isArray(content)){
+      try{
+        content=content.map(part=>{
+          if(part&&typeof part==='object') return part.text||part.content||part.input_text||'';
+          return String(part||'');
+        }).join('\n');
+      }catch(_){ content=''; }
+    }
+    return typeof content==='string'?content:String(content||'');
+  }
+  function _anchorSceneContentText(part){
+    if(part===undefined||part===null) return '';
+    if(typeof part==='string') return part;
+    if(typeof part!=='object') return String(part||'');
+    return String(part.text||part.content||part.input_text||part.output_text||part.thinking||part.reasoning||part.summary||'');
+  }
+  function _anchorSceneContentVisibleText(part){
+    if(part===undefined||part===null) return '';
+    if(typeof part==='string') return part;
+    if(typeof part!=='object') return String(part||'');
+    const partType=String(part.type||'');
+    if(partType==='thinking'||partType==='reasoning') return '';
+    const contentText=(partType==='text'||partType==='input_text'||partType==='output_text')?part.content:'';
+    return String(part.text||part.input_text||part.output_text||contentText||'');
+  }
+  function _anchorSceneMessageHasContentToolUse(message){
+    return !!(message&&Array.isArray(message.content)&&message.content.some(part=>part&&typeof part==='object'&&part.type==='tool_use'));
+  }
+  function _anchorSceneFinalAnswerText(message){
+    if(!_anchorSceneMessageHasContentToolUse(message)) return _anchorSceneMessageText(message);
+    const content=Array.isArray(message.content)?message.content:[];
+    let lastToolIndex=-1;
+    for(let i=0;i<content.length;i+=1){
+      const part=content[i];
+      if(part&&typeof part==='object'&&part.type==='tool_use') lastToolIndex=i;
+    }
+    const tailText=content.slice(lastToolIndex+1)
+      .map(part=>_anchorSceneContentVisibleText(part))
+      .filter(text=>_anchorSceneCleanText(text))
+      .join('\n');
+    return _anchorSceneCleanText(tailText)?tailText:'';
+  }
+  function _anchorSceneCleanText(value){
+    return String(value||'').replace(/\s+/g,' ').trim();
+  }
+  function _anchorSceneTextKey(value){
+    return _anchorSceneCleanText(value).toLowerCase();
+  }
+  function _anchorSceneSafePayload(value){
+    if(value===undefined) return undefined;
+    if(value===null||typeof value!=='object') return value;
+    try{
+      return JSON.parse(JSON.stringify(value));
+    }catch(_){
+      return String(value);
+    }
+  }
+  function _anchorSceneToolId(tool){
+    return String(tool&&(tool.tid||tool.id||tool.tool_call_id||tool.tool_use_id||tool.call_id)||'').trim();
+  }
+  function _anchorSceneToolName(tool){
+    const fn=tool&&tool.function&&typeof tool.function==='object'?tool.function:{};
+    return String(tool&&(tool.name||tool.tool_name)||fn.name||'tool').trim()||'tool';
+  }
+  function _anchorSceneToolArgs(tool){
+    if(!tool||typeof tool!=='object') return {};
+    if(tool.args&&typeof tool.args==='object') return _anchorSceneSafePayload(tool.args)||{};
+    if(tool.input&&typeof tool.input==='object') return _anchorSceneSafePayload(tool.input)||{};
+    const fn=tool.function&&typeof tool.function==='object'?tool.function:{};
+    if(typeof fn.arguments==='string'&&fn.arguments.trim()){
+      try{
+        const parsed=JSON.parse(fn.arguments);
+        return parsed&&typeof parsed==='object'?_anchorSceneSafePayload(parsed):{};
+      }catch(_){}
+    }
+    return {};
+  }
+  function _anchorSceneContentTool(part){
+    if(!part||typeof part!=='object') return {};
+    const fn=part.function&&typeof part.function==='object'?part.function:{};
+    return {
+      id:part.id||part.tid||part.tool_call_id||part.tool_use_id||part.call_id,
+      tid:part.tid||part.id||part.tool_call_id||part.tool_use_id||part.call_id,
+      tool_call_id:part.tool_call_id,
+      tool_use_id:part.tool_use_id,
+      call_id:part.call_id,
+      name:part.name||part.tool_name||fn.name||'tool',
+      tool_name:part.tool_name,
+      args:part.args,
+      input:part.input,
+      function:part.function,
+      command:part.command||part.raw_command||part.original_command||part.display_command,
+      preview:part.preview||part.summary,
+      snippet:part.snippet||part.result||part.output,
+      result:part.result,
+      output:part.output,
+      is_error:part.is_error,
+      error:part.error,
+      duration:part.duration,
+      started_at:part.started_at,
+    };
+  }
+  function _anchorSceneStringPayload(value){
+    if(value===undefined||value===null) return '';
+    if(typeof value==='string') return value;
+    try{
+      return JSON.stringify(value);
+    }catch(_){
+      return String(value);
+    }
+  }
+  function _anchorSceneRowBase(role, kind, sourceEventType, orderIndex, messageIndex){
+    const groupKey=Number.isFinite(Number(messageIndex))?`assistant:${Number(messageIndex)}`:`activity:${orderIndex}`;
+    return {
+      row_id:`settled:${activeSid||'session'}:${streamId||'stream'}:${role}:${messageIndex}:${orderIndex}`,
+      order_index:orderIndex,
+      kind,
+      role,
+      display_hint:role==='prose'?'main_prose':role==='thinking'?'collapsed_thinking':role==='tool'?'tool_row':role==='terminal'?'terminal_status_row':'activity_row',
+      display_hints:{
+        compact_worklog:role==='prose'?'main_prose':role==='thinking'?'collapsed_thinking':role==='tool'?'tool_row':role==='terminal'?'terminal_status_row':'activity_row',
+        transparent_stream:'chronological_activity',
+      },
+      source_event_type:sourceEventType,
+      event_id:null,
+      local_id:null,
+      run_id:null,
+      stream_id:streamId||null,
+      seq:orderIndex,
+      status:role==='terminal'?'completed':'completed',
+      created_at:null,
+      identity:{event_id:null,local_id:null,run_id:null,stream_id:streamId||null,seq:orderIndex},
+      group:{
+        group_key:groupKey,
+        activity_burst_id:null,
+        activity_segment_seq:null,
+        assistant_msg_idx:Number.isFinite(Number(messageIndex))?Number(messageIndex):null,
+      },
+      text:'',
+      thinking:null,
+      tool_call_id:null,
+      tool:null,
+      payload:{assistant_msg_idx:Number.isFinite(Number(messageIndex))?Number(messageIndex):null},
+    };
+  }
+  function _anchorSceneProseRow(text, orderIndex, messageIndex){
+    const row=_anchorSceneRowBase('prose','process_prose','settled_message',orderIndex,messageIndex);
+    row.text=String(text||'');
+    row.payload={...row.payload,text:row.text};
+    return row;
+  }
+  function _anchorSceneThinkingRow(text, orderIndex, messageIndex){
+    const row=_anchorSceneRowBase('thinking','reasoning','reasoning',orderIndex,messageIndex);
+    row.text=String(text||'');
+    const preview=_anchorSceneCleanText(text);
+    row.thinking={
+      text:row.text,
+      preview:preview.length>180?`${preview.slice(0,177)}...`:preview,
+      dedupe_key:preview?`thinking:${preview.toLowerCase()}`:'',
+    };
+    row.payload={...row.payload,text:row.text};
+    return row;
+  }
+  function _anchorSceneToolRowFromCall(tool, orderIndex, messageIndex){
+    const row=_anchorSceneRowBase('tool','tool_completed','tool_complete',orderIndex,messageIndex);
+    const tid=_anchorSceneToolId(tool);
+    const name=_anchorSceneToolName(tool);
+    const args=_anchorSceneToolArgs(tool);
+    const command=_anchorSceneStringPayload(tool&&(tool.command||tool.raw_command||tool.original_command||tool.display_command))||_anchorSceneStringPayload(args&&(args.cmd||args.command));
+    const preview=_anchorSceneStringPayload(tool&&(tool.preview||tool.summary));
+    const snippet=_anchorSceneStringPayload(tool&&(tool.snippet||tool.result||tool.output));
+    const isError=!!(tool&&(tool.is_error||tool.error));
+    row.row_id=tid?`settled:${activeSid||'session'}:${streamId||'stream'}:tool:${tid}`:row.row_id;
+    row.tool_call_id=tid||null;
+    row.tool={
+      id:tid||null,
+      name,
+      args,
+      command,
+      preview,
+      snippet,
+      result:_anchorSceneSafePayload(tool&&tool.result)??null,
+      output:_anchorSceneSafePayload(tool&&tool.output)??null,
+      done:true,
+      is_error:isError,
+      duration:tool&&tool.duration!==undefined?tool.duration:null,
+      started_at:tool&&tool.started_at!==undefined?tool.started_at:null,
+      signature:[name,tid||'',JSON.stringify(args||{})].join('|'),
+    };
+    row.payload={
+      ...row.payload,
+      tid:tid||undefined,
+      id:tid||undefined,
+      name,
+      args,
+      command,
+      preview,
+      snippet,
+      is_error:isError,
+      duration:tool&&tool.duration!==undefined?tool.duration:undefined,
+      started_at:tool&&tool.started_at!==undefined?tool.started_at:undefined,
+    };
+    return row;
+  }
+  function _anchorSceneToolRowName(row){
+    const tool=row&&row.tool&&typeof row.tool==='object'?row.tool:{};
+    const payload=row&&row.payload&&typeof row.payload==='object'?row.payload:{};
+    return String(tool.name||payload.name||'tool').trim().toLowerCase();
+  }
+  function _anchorSceneToolRowId(row){
+    const tool=row&&row.tool&&typeof row.tool==='object'?row.tool:{};
+    const payload=row&&row.payload&&typeof row.payload==='object'?row.payload:{};
+    return String(
+      (row&&row.tool_call_id)||
+      tool.id||
+      tool.tid||
+      tool.tool_call_id||
+      tool.tool_use_id||
+      tool.call_id||
+      payload.tid||
+      payload.id||
+      ''
+    ).trim();
+  }
+  function _anchorSceneToolRowsHaveNonConflictingIds(existing, incoming){
+    const existingId=_anchorSceneToolRowId(existing);
+    const incomingId=_anchorSceneToolRowId(incoming);
+    return !existingId||!incomingId||existingId===incomingId;
+  }
+  function _anchorSceneToolRowsHaveDifferentExplicitIds(existing, incoming){
+    const existingId=_anchorSceneToolRowId(existing);
+    const incomingId=_anchorSceneToolRowId(incoming);
+    return !!existingId&&!!incomingId&&existingId!==incomingId;
+  }
+  function _anchorSceneToolRowStartedAt(row){
+    const tool=row&&row.tool&&typeof row.tool==='object'?row.tool:{};
+    const payload=row&&row.payload&&typeof row.payload==='object'?row.payload:{};
+    const value=tool.started_at!==undefined&&tool.started_at!==null&&tool.started_at!==''?tool.started_at:payload.started_at;
+    return value!==undefined&&value!==null&&value!==''?String(value):'';
+  }
+  function _anchorSceneToolRowsHaveSameStartedAt(existing, incoming){
+    const existingStartedAt=_anchorSceneToolRowStartedAt(existing);
+    const incomingStartedAt=_anchorSceneToolRowStartedAt(incoming);
+    return !!existingStartedAt&&!!incomingStartedAt&&existingStartedAt===incomingStartedAt;
+  }
+  function _anchorSceneToolRowBodyText(row){
+    const tool=row&&row.tool&&typeof row.tool==='object'?row.tool:{};
+    const payload=row&&row.payload&&typeof row.payload==='object'?row.payload:{};
+    for(const value of [tool.snippet,payload.snippet,tool.output,payload.output,tool.result,payload.result,tool.preview,payload.preview]){
+      const text=_anchorSceneStringPayload(value).trim();
+      if(text) return text;
+    }
+    return '';
+  }
+  function _anchorSceneToolRowsHaveCompatibleBody(existing, incoming){
+    const existingBody=_anchorSceneToolRowBodyText(existing);
+    const incomingBody=_anchorSceneToolRowBodyText(incoming);
+    return !!existingBody&&!!incomingBody&&(
+      existingBody===incomingBody||
+      existingBody.startsWith(incomingBody)||
+      incomingBody.startsWith(existingBody)
+    );
+  }
+  function _anchorSceneToolRowsHaveCompatibleNames(existing, incoming){
+    const existingName=_anchorSceneToolRowName(existing);
+    const incomingName=_anchorSceneToolRowName(incoming);
+    return !existingName||!incomingName||existingName==='tool'||incomingName==='tool'||existingName===incomingName;
+  }
+  function _anchorSceneToolRowArgs(row){
+    const tool=row&&row.tool&&typeof row.tool==='object'?row.tool:{};
+    const payload=row&&row.payload&&typeof row.payload==='object'?row.payload:{};
+    const args=(tool.args&&typeof tool.args==='object'&&!Array.isArray(tool.args))?tool.args:payload.args;
+    return args&&typeof args==='object'&&!Array.isArray(args)?args:null;
+  }
+  function _anchorSceneObjectContainsSubset(base, subset){
+    if(!base||!subset||typeof base!=='object'||typeof subset!=='object') return false;
+    const stableStringify=(candidate)=>{
+      const normalize=(value)=>{
+        if(!value||typeof value!=='object') return value;
+        if(Array.isArray(value)) return value.map(normalize);
+        const normalized={};
+        Object.keys(value).sort().forEach((key)=>{normalized[key]=normalize(value[key]);});
+        return normalized;
+      };
+      try{return JSON.stringify(normalize(candidate));}catch(_){return JSON.stringify(candidate);}
+    };
+    for(const [key,value] of Object.entries(subset)){
+      if(!Object.prototype.hasOwnProperty.call(base,key)) return false;
+      if(stableStringify(base[key])!==stableStringify(value)) return false;
+    }
+    return true;
+  }
+  function _anchorSceneToolRowsHaveCompatibleInvocation(existing, incoming){
+    const existingTool=existing&&existing.tool&&typeof existing.tool==='object'?existing.tool:{};
+    const incomingTool=incoming&&incoming.tool&&typeof incoming.tool==='object'?incoming.tool:{};
+    const existingPayload=existing&&existing.payload&&typeof existing.payload==='object'?existing.payload:{};
+    const incomingPayload=incoming&&incoming.payload&&typeof incoming.payload==='object'?incoming.payload:{};
+    const existingCommand=_anchorSceneStringPayload(existingTool.command||existingPayload.command).trim();
+    const incomingCommand=_anchorSceneStringPayload(incomingTool.command||incomingPayload.command).trim();
+    if(existingCommand&&incomingCommand) return existingCommand===incomingCommand;
+    const existingArgs=_anchorSceneToolRowArgs(existing);
+    const incomingArgs=_anchorSceneToolRowArgs(incoming);
+    if(!existingArgs||!incomingArgs||!Object.keys(existingArgs).length||!Object.keys(incomingArgs).length) return false;
+    return _anchorSceneObjectContainsSubset(existingArgs,incomingArgs)||_anchorSceneObjectContainsSubset(incomingArgs,existingArgs);
+  }
+  function _anchorSceneToolRowHasInvocationEvidence(row){
+    const tool=row&&row.tool&&typeof row.tool==='object'?row.tool:{};
+    const payload=row&&row.payload&&typeof row.payload==='object'?row.payload:{};
+    const command=_anchorSceneStringPayload(tool.command||payload.command).trim();
+    const args=_anchorSceneToolRowArgs(row);
+    return !!command||!!(args&&Object.keys(args).length);
+  }
+  function _anchorSceneToolRowsCanNameMatch(existing, incoming){
+    if(!_anchorSceneToolRowsHaveCompatibleNames(existing,incoming)) return false;
+    if(_anchorSceneToolRowHasInvocationEvidence(existing)&&_anchorSceneToolRowHasInvocationEvidence(incoming)){
+      return _anchorSceneToolRowsHaveCompatibleInvocation(existing,incoming);
+    }
+    return true;
+  }
+  function _anchorSceneMatchingContentToolRow(contentToolRows, incomingRow, ordinal, usedRows, incomingTotal, idFlexibleRows){
+    if(!Array.isArray(contentToolRows)||!incomingRow) return null;
+    const incomingTid=incomingRow.tool_call_id||(incomingRow.tool&&incomingRow.tool.id);
+    for(const row of contentToolRows){
+      if(!row||usedRows.has(row)) continue;
+      const tid=row.tool_call_id||(row.tool&&row.tool.id);
+      if(tid&&incomingTid&&tid===incomingTid) return row;
+    }
+    if(contentToolRows.length===1&&Number(incomingTotal)===1){
+      const onlyRow=contentToolRows[0];
+      if(onlyRow&&!usedRows.has(onlyRow)&&_anchorSceneToolRowsCanNameMatch(onlyRow,incomingRow)) return onlyRow;
+    }
+    const availableRows=contentToolRows.filter(row=>row&&!usedRows.has(row));
+    if(availableRows.length===1){
+      if(Number(incomingTotal)===1&&_anchorSceneToolRowsCanNameMatch(availableRows[0],incomingRow)) return availableRows[0];
+      if(
+        _anchorSceneToolRowsHaveCompatibleNames(availableRows[0],incomingRow)&&
+        _anchorSceneToolRowsHaveCompatibleInvocation(availableRows[0],incomingRow)
+      ) return availableRows[0];
+    }
+    const reusableRows=contentToolRows.filter(row=>row&&usedRows.has(row));
+    if(
+      reusableRows.length===1&&
+      Number(incomingTotal)===1&&
+      (
+        (
+          _anchorSceneToolRowId(reusableRows[0])&&
+          _anchorSceneToolRowId(incomingRow)&&
+          _anchorSceneToolRowId(reusableRows[0])===_anchorSceneToolRowId(incomingRow)
+        )||
+        (
+          idFlexibleRows&&
+          idFlexibleRows.has(reusableRows[0])&&
+          _anchorSceneToolRowsHaveSameStartedAt(reusableRows[0],incomingRow)&&
+          _anchorSceneToolRowsHaveCompatibleBody(reusableRows[0],incomingRow)
+        )
+      )&&
+      _anchorSceneToolRowsHaveCompatibleNames(reusableRows[0],incomingRow)&&
+      _anchorSceneToolRowsHaveCompatibleInvocation(reusableRows[0],incomingRow)
+    ) return reusableRows[0];
+    for(const row of contentToolRows){
+      if(!row||usedRows.has(row)) continue;
+      const tid=row.tool_call_id||(row.tool&&row.tool.id);
+      if(!tid&&!incomingTid&&_anchorSceneToolRowsCanNameMatch(row,incomingRow)) return row;
+    }
+    return null;
+  }
+  function _anchorSceneMessageReasoningText(message){
+    if(!message||typeof message!=='object') return '';
+    return String(message.reasoning||message._reasoning||message.reasoning_content||message.thinking||'');
+  }
+  function _anchorSceneRowsFromContentParts(message, messageIndex, options){
+    if(!_anchorSceneMessageHasContentToolUse(message)) return null;
+    options=(options&&typeof options==='object')?options:{};
+    const isFinalMessage=!!options.isFinalMessage;
+    const rows=[];
+    const content=Array.isArray(message.content)?message.content:[];
+    let lastToolIndex=-1;
+    for(let i=0;i<content.length;i+=1){
+      const part=content[i];
+      if(part&&typeof part==='object'&&part.type==='tool_use') lastToolIndex=i;
+    }
+    for(let i=0;i<content.length;i+=1){
+      const part=content[i];
+      if(!part||typeof part!=='object'){
+        if(isFinalMessage&&i>lastToolIndex) continue;
+        const text=_anchorSceneContentText(part);
+        if(_anchorSceneCleanText(text)) rows.push(_anchorSceneProseRow(text,rows.length,messageIndex));
+        continue;
+      }
+      if(part.type==='text'||part.type==='input_text'||part.type==='output_text'){
+        if(isFinalMessage&&i>lastToolIndex&&_anchorSceneContentVisibleText(part)) continue;
+        const text=_anchorSceneContentText(part);
+        if(_anchorSceneCleanText(text)) rows.push(_anchorSceneProseRow(text,rows.length,messageIndex));
+        continue;
+      }
+      if(part.type==='thinking'||part.type==='reasoning'){
+        const text=_anchorSceneContentText(part);
+        if(_anchorSceneCleanText(text)) rows.push(_anchorSceneThinkingRow(text,rows.length,messageIndex));
+        continue;
+      }
+      if(part.type==='tool_use'){
+        rows.push(_anchorSceneToolRowFromCall(_anchorSceneContentTool(part),rows.length,messageIndex));
+      }
+    }
+    return rows;
+  }
+  // #4622: a settled tool row built from messages[].tool_calls (state.db/sidecar)
+  // can lack the result body — terminal stdout, or the diff/output that a
+  // patch/edit card renders — because the persisted row carries only a short
+  // preview (or, on a cold/paginated load, nothing). The full body lives on the
+  // live S.toolCalls entry at settle time. When a settled row and a live call
+  // match by tool id, restore the missing body fields from the live call onto
+  // the settled row's tool+payload (only when the settled value is empty — never
+  // clobber a genuine persisted body), so the rebuilt card shows full output +
+  // the Show-more expander + the rendered diff. Returns true if it enriched.
+  function _enrichSettledToolRowBodyFromLive(row, live){
+    if(!row||typeof row!=='object'||!live||typeof live!=='object') return false;
+    const tool=(row.tool&&typeof row.tool==='object')?row.tool:(row.tool={});
+    const payload=(row.payload&&typeof row.payload==='object')?row.payload:(row.payload={});
+    let enriched=false;
+    const _empty=v=>v===undefined||v===null||v==='';
+    // Result body: _anchorSceneToolCallFromRow renders tool.snippet||payload.snippet
+    // (||payload.result||payload.output) as the card output + diff source, so
+    // restore the snippet onto both tool+payload when the settled row has none.
+    const liveSnippet=_anchorSceneStringPayload(live.snippet||live.result||live.output);
+    // Restore the live body when the settled snippet is missing OR is a bounded
+    // preview of the live one. The backend persists a capped preview
+    // (_TOOL_RESULT_SNIPPET_MAX = 4000 chars in api/streaming.py), so a long
+    // terminal/tool output settles to that 4000-char prefix, not to empty —
+    // #4622's actual symptom. Treat a settled snippet as restorable when the
+    // live snippet is strictly longer AND the settled value is a prefix of it
+    // AND the settled value is at/over the persistence cap (i.e. it's a
+    // truncated preview, not a genuinely short real value we must not clobber).
+    const _SETTLED_SNIPPET_CAP=4000;
+    const _isBoundedPreview=(settled,full)=>(
+      typeof settled==='string'&&typeof full==='string'&&
+      full.length>settled.length&&settled.length>=_SETTLED_SNIPPET_CAP&&
+      full.startsWith(settled)
+    );
+    const _settledSnippet=(!_empty(tool.snippet)?tool.snippet:(!_empty(payload.snippet)?payload.snippet:''));
+    const _snippetRestorable=(_empty(tool.snippet)&&_empty(payload.snippet))||_isBoundedPreview(_settledSnippet,liveSnippet);
+    if(liveSnippet&&_snippetRestorable){
+      tool.snippet=liveSnippet; payload.snippet=liveSnippet; enriched=true;
+    }
+    // Command (shell detail-lead) + args (diff/input reconstruction, the "Full" tab).
+    const liveCommand=_anchorSceneStringPayload(live.command||live.raw_command);
+    if(liveCommand&&_empty(tool.command)&&_empty(payload.command)){
+      tool.command=liveCommand; payload.command=liveCommand; enriched=true;
+    }
+    if(!_empty(live.started_at)&&_empty(tool.started_at)&&_empty(payload.started_at)){
+      tool.started_at=live.started_at; payload.started_at=live.started_at; enriched=true;
+    }
+    const liveArgs=_anchorSceneToolArgs(live);
+    if(liveArgs&&typeof liveArgs==='object'&&Object.keys(liveArgs).length){
+      const mergeMissingArgs=(existing)=>{
+        const base=(existing&&typeof existing==='object'&&!Array.isArray(existing))?{...existing}:{};
+        let changed=!(existing&&typeof existing==='object'&&!Array.isArray(existing));
+        for(const [key,value] of Object.entries(liveArgs)){
+          if(!Object.prototype.hasOwnProperty.call(base,key)){
+            base[key]=value;
+            changed=true;
+          }
+        }
+        return changed?base:existing;
+      };
+      const nextToolArgs=mergeMissingArgs(tool.args);
+      const nextPayloadArgs=mergeMissingArgs(payload.args);
+      if(nextToolArgs!==tool.args){ tool.args=nextToolArgs; enriched=true; }
+      if(nextPayloadArgs!==payload.args){ payload.args=nextPayloadArgs; enriched=true; }
+    }
+    return enriched;
+  }
+  function _anchorSceneRowsByMessageIndex(messages, turnStart, lastAsstIndex, options){
+    options=(options&&typeof options==='object')?options:{};
+    const byIdx=new Map();
+    const add=(idx,row)=>{
+      if(!byIdx.has(idx)) byIdx.set(idx,[]);
+      byIdx.get(idx).push(row);
+    };
+    // Pre-index S.toolCalls by assistant_msg_idx for O(m+n) lookup
+    const toolsByIdx=new Map();
+    if(S.toolCalls) for(const tc of S.toolCalls){
+      const ti=typeof tc.toolIdx==='number'? tc.toolIdx : parseInt(tc.assistant_msg_idx,10);
+      if(Number.isFinite(ti)){
+        if(!toolsByIdx.has(ti)) toolsByIdx.set(ti,[]);
+        toolsByIdx.get(ti).push(tc);
+      }
+    }
+    let encounter=0;
+    const endIndex=options&&options.includeFinal?lastAsstIndex+1:lastAsstIndex;
+    for(let idx=turnStart+1;idx<endIndex;idx+=1){
+      const message=messages[idx];
+      if(!message||message.role!=='assistant') continue;
+      const pool=[];
+      const text=_anchorSceneMessageText(message);
+      const contentRows=_anchorSceneRowsFromContentParts(message,idx,{isFinalMessage:idx===lastAsstIndex});
+      const hasOrderedContentRows=Array.isArray(contentRows)&&contentRows.length>0;
+      const contentToolRows=[];
+      const usedContentToolRows=new Set();
+      const idFlexibleContentToolRows=new Set();
+      const seenToolIds=new Set();
+      const rowByToolId=new Map();
+      if(hasOrderedContentRows){
+        for(const row of contentRows){
+          pool.push({...row,_phase:1,_encounter:encounter++,_fromContent:true});
+          const tid=row.tool_call_id||(row.tool&&row.tool.id);
+          if(tid){ seenToolIds.add(tid); rowByToolId.set(tid,row); }
+          if(row.role==='tool') contentToolRows.push(row);
+        }
+      }else if(_anchorSceneCleanText(text)){
+        pool.push({..._anchorSceneProseRow(text,0,idx),_phase:2,_encounter:encounter++});
+      }
+      const reasoning=_anchorSceneMessageReasoningText(message);
+      if(_anchorSceneCleanText(reasoning)&&_anchorSceneTextKey(reasoning)!==_anchorSceneTextKey(text)){
+        pool.push({..._anchorSceneThinkingRow(reasoning,0,idx),_phase:0,_encounter:encounter++});
+      }
+      const messageTools=[];
+      if(Array.isArray(message.tool_calls)) messageTools.push(...message.tool_calls);
+      if(Array.isArray(message._partial_tool_calls)) messageTools.push(...message._partial_tool_calls);
+      let messageToolOrdinal=0;
+      for(const tool of messageTools){
+        const row=_anchorSceneToolRowFromCall(tool,0,idx);
+        const tid=row.tool_call_id||(row.tool&&row.tool.id);
+        if(tid&&seenToolIds.has(tid)){
+          const existing=rowByToolId.get(tid);
+          if(existing){
+            _enrichSettledToolRowBodyFromLive(existing, tool);
+            if(contentToolRows.includes(existing)) usedContentToolRows.add(existing);
+          }
+          messageToolOrdinal+=1;
+          continue;
+        }
+        const contentMatch=_anchorSceneMatchingContentToolRow(contentToolRows,row,messageToolOrdinal,usedContentToolRows,messageTools.length,idFlexibleContentToolRows);
+        if(contentMatch){
+          if(_anchorSceneToolRowsHaveDifferentExplicitIds(contentMatch,row)) idFlexibleContentToolRows.add(contentMatch);
+          _enrichSettledToolRowBodyFromLive(contentMatch, tool);
+          if(tid){ seenToolIds.add(tid); rowByToolId.set(tid,contentMatch); }
+          usedContentToolRows.add(contentMatch);
+          messageToolOrdinal+=1;
+          continue;
+        }
+        pool.push({...row,_phase:1,_encounter:encounter++});
+        if(tid){ seenToolIds.add(tid); rowByToolId.set(tid,row); }
+        messageToolOrdinal+=1;
+      }
+      // Merge S.toolCalls for this index, dedup by tool id. When a live call
+      // matches a settled row already in the pool, don't just skip it —
+      // restore any result body the settled row is missing (#4622): the live
+      // S.toolCalls entry carries the full terminal output / patch diff that the
+      // persisted state.db row may have dropped to a short preview or nothing.
+      let liveToolOrdinal=0;
+      for(const tool of (toolsByIdx.get(idx)||[])){
+        if(!tool||typeof tool!=='object') continue;
+        const toolIdx=Number(tool.assistant_msg_idx);
+        if(!Number.isFinite(toolIdx)||toolIdx!==idx) continue;
+        const row=_anchorSceneToolRowFromCall(tool,0,idx);
+        const tid=row.tool_call_id||(row.tool&&row.tool.id);
+        if(tid&&seenToolIds.has(tid)){
+          const existing=rowByToolId.get(tid);
+          if(existing){
+            _enrichSettledToolRowBodyFromLive(existing, tool);
+            if(contentToolRows.includes(existing)) usedContentToolRows.add(existing);
+          }
+          liveToolOrdinal+=1;
+          continue;
+        }
+        const liveTools=toolsByIdx.get(idx)||[];
+        const contentMatch=_anchorSceneMatchingContentToolRow(contentToolRows,row,liveToolOrdinal,usedContentToolRows,liveTools.length,idFlexibleContentToolRows);
+        if(contentMatch){
+          if(_anchorSceneToolRowsHaveDifferentExplicitIds(contentMatch,row)) idFlexibleContentToolRows.add(contentMatch);
+          _enrichSettledToolRowBodyFromLive(contentMatch, tool);
+          if(tid){ seenToolIds.add(tid); rowByToolId.set(tid,contentMatch); }
+          usedContentToolRows.add(contentMatch);
+          liveToolOrdinal+=1;
+          continue;
+        }
+        if(tid){ seenToolIds.add(tid); rowByToolId.set(tid,row); }
+        pool.push({...row,_phase:1,_encounter:encounter++});
+        liveToolOrdinal+=1;
+      }
+      // Stable sort by (phase, started_at, encounter). Once a message has an
+      // ordered content[] scene, preserve that content bucket order exactly.
+      const useStartedAt=!hasOrderedContentRows;
+      pool.sort((a,b)=>{
+        if(a._phase!==b._phase) return a._phase-b._phase;
+        if(useStartedAt){
+          const aTime=(a.tool&&a.tool.started_at!=null)?a.tool.started_at:Infinity;
+          const bTime=(b.tool&&b.tool.started_at!=null)?b.tool.started_at:Infinity;
+          if(aTime!==bTime) return aTime-bTime;
+        }
+        return a._encounter-b._encounter;
+      });
+      // Emit with sequential order_index values, strip temp props.
+      // Rows were built with orderIndex=0, so their row_id/seq still encode 0.
+      // Rewrite order_index AND regenerate the index-derived identity fields
+      // (row_id/seq) from the final per-bucket position, so two anonymous rows
+      // (no tool id) at the same message index don't collide on the same row_id
+      // and get silently deduped by _completeSettledAnchorSceneForTurn().
+      for(const row of pool){
+        const {_phase,_encounter,_fromContent,...clean}=row;
+        const oi=byIdx.has(idx)?byIdx.get(idx).length:0;
+        clean.order_index=oi;
+        clean.seq=oi;
+        if(clean.identity&&typeof clean.identity==='object') clean.identity={...clean.identity,seq:oi};
+        // Tool rows with a tool id carry a tid-based row_id (already unique) —
+        // only regenerate the default index-based row_id form.
+        const indexRowId=`settled:${activeSid||'session'}:${streamId||'stream'}:${clean.role}:${idx}:0`;
+        if(clean.row_id===indexRowId){
+          clean.row_id=`settled:${activeSid||'session'}:${streamId||'stream'}:${clean.role}:${idx}:${oi}`;
+        }
+        add(idx,clean);
+      }
+    }
+    return byIdx;
+  }
+  function _anchorSceneExistingRowKey(row){
+    if(!row||typeof row!=='object') return '';
+    if(row.role==='tool'){
+      const tool=row.tool&&typeof row.tool==='object'?row.tool:{};
+      return `tool:${row.tool_call_id||tool.id||tool.tid||tool.tool_call_id||tool.tool_use_id||tool.call_id||row.row_id||''}`;
+    }
+    if(row.role==='prose'||row.role==='thinking') return `${row.role}:${_anchorSceneTextKey(row.text)}`;
+    return `${row.role||row.kind}:${row.source_event_type||''}:${row.status||''}:${row.row_id||''}`;
+  }
+  function _anchorSceneRowHasLiveIdentity(row){
+    if(!row||typeof row!=='object') return false;
+    const identity=row.identity&&typeof row.identity==='object'?row.identity:{};
+    const values=[row.row_id,row.local_id,row.event_id,identity.local_id,identity.event_id];
+    if(values.some(value=>String(value||'').startsWith('live-'))) return true;
+    // Provider tool-call IDs do not use the live prefix. A stream owner without
+    // a settled assistant index still identifies a projected live row.
+    const group=row.group&&typeof row.group==='object'?row.group:{};
+    const hasStreamOwner=!!(row.stream_id||row.run_id||identity.stream_id||identity.run_id);
+    const hasAssistantMessageIndex=group.assistant_msg_idx!==undefined&&group.assistant_msg_idx!==null;
+    return hasStreamOwner&&!hasAssistantMessageIndex;
+  }
+  function _anchorSceneMessageRowsHaveThinking(messageRows){
+    if(!(messageRows instanceof Map)) return false;
+    for(const bucket of messageRows.values()){
+      if(Array.isArray(bucket)&&bucket.some(row=>row&&row.role==='thinking')) return true;
+    }
+    return false;
+  }
+  function _anchorSceneSettleLiveRunningRow(row, hasSettledThinking){
+    if(!row||typeof row!=='object') return row;
+    if(row.role!=='thinking'&&row.role!=='prose'&&row.role!=='tool') return row;
+    if(String(row.status||'').toLowerCase()!=='running') return row;
+    if(!_anchorSceneRowHasLiveIdentity(row)) return row;
+    if(row.role==='thinking'&&hasSettledThinking) return null;
+    const sealed={...row,status:'completed'};
+    if(row.payload&&typeof row.payload==='object'){
+      sealed.payload={...row.payload,status:'completed'};
+      if(row.role==='tool') sealed.payload.done=true;
+    }
+    if(row.role==='tool'&&row.tool&&typeof row.tool==='object'){
+      sealed.tool={...row.tool,done:true};
+    }
+    return sealed;
+  }
+  function _anchorSceneRowLooksLikeFinalAnswer(rowTextKey, finalKey){
+    if(!rowTextKey||!finalKey) return false;
+    if(rowTextKey===finalKey) return true;
+    // #4587: align with the renderer's _anchorSceneProseMatchesFinalAnswer — a
+    // prefix-like overlap only counts as "the final answer" (and is dropped from
+    // the scene) when it's a NEAR-complete match (ratio>=0.9). A shorter
+    // intermediate-prose row that merely happens to be a prefix of the final
+    // answer is legitimate progress narration and must be PRESERVED, not dropped.
+    if(!(finalKey.startsWith(rowTextKey)||rowTextKey.startsWith(finalKey))) return false;
+    const shorter=Math.min(rowTextKey.length,finalKey.length);
+    const longer=Math.max(rowTextKey.length,finalKey.length);
+    return shorter>=80&&longer>0&&(shorter/longer)>=0.9;
+  }
+  function _anchorSceneRowTextOverlapsExisting(rowTextKey, seenTextKeys){
+    if(!rowTextKey||!Array.isArray(seenTextKeys)) return false;
+    for(const existing of seenTextKeys){
+      if(!existing) continue;
+      if(rowTextKey===existing) return true;
+      const minLen=Math.min(rowTextKey.length,existing.length);
+      if(minLen>=80&&(rowTextKey.includes(existing)||existing.includes(rowTextKey))) return true;
+    }
+    return false;
+  }
+  function _anchorSceneTurnDurationForSettlement(lastAsst, base){
+    if(lastAsst&&lastAsst._turnDuration!==undefined&&lastAsst._turnDuration!==null) return lastAsst._turnDuration;
+    if(base&&base.turn_duration!==undefined&&base.turn_duration!==null) return base.turn_duration;
+    const session=(typeof S!=='undefined'&&S&&S.session)?S.session:null;
+    // The `pending_started_at` fallback below is the START of an IN-FLIGHT turn.
+    // For a SETTLED turn that recorded no live duration, computing
+    // `now - pending_started_at` is wrong: pending_started_at is either stale
+    // (left over from an earlier turn / a session that sat idle) or belongs to a
+    // different, still-pending turn — which rendered a bogus "Processed 15h 32m"
+    // on fresh conversations (#4930). Only use it while a turn is actually in
+    // flight; otherwise show no duration rather than a fabricated one.
+    const turnInFlight=!!(session&&(session.active_stream_id||session.pending_user_message));
+    if(!turnInFlight) return undefined;
+    const candidates=[
+      session&&session.pending_started_at,
+      session&&session.active_started_at,
+      session&&session.run_started_at,
+      session&&session.started_at,
+    ];
+    for(const raw of candidates){
+      const started=Number(raw);
+      if(Number.isFinite(started)&&started>0){
+        const elapsed=(Date.now()/1000)-started;
+        if(Number.isFinite(elapsed)&&elapsed>=0) return elapsed;
+      }
+    }
+    return undefined;
+  }
+  function _completeSettledAnchorSceneForTurn(messages, lastAsstIndex, projectedScene){
+    if(!Array.isArray(messages)||lastAsstIndex<0) return projectedScene;
+    const lastAsst=messages[lastAsstIndex];
+    if(!lastAsst||lastAsst.role!=='assistant') return projectedScene;
+    let turnStart=-1;
+    for(let idx=lastAsstIndex-1;idx>=0;idx-=1){
+      if(messages[idx]&&messages[idx].role==='user'){
+        turnStart=idx;
+        break;
+      }
+    }
+    const base=(projectedScene&&typeof projectedScene==='object')?projectedScene:{};
+    const sceneMode=base.mode==='transparent_stream'||base.mode==='hide_all_activity' ? base.mode : _anchorSceneActiveMode();
+    const messageFinalAnswer=_anchorSceneFinalAnswerText(lastAsst);
+    const finalAnswer=_anchorSceneCleanText(messageFinalAnswer)
+      ? messageFinalAnswer
+      : (typeof base.final_answer==='string'?base.final_answer:'');
+    const finalKey=_anchorSceneTextKey(finalAnswer);
+    const messageRows=_anchorSceneRowsByMessageIndex(messages,turnStart,lastAsstIndex,{includeFinal:true});
+    const hasSettledThinking=_anchorSceneMessageRowsHaveThinking(messageRows);
+    const rows=[];
+    const seen=new Set();
+    const seenTextKeys=[];
+    const projectedRows=Array.isArray(base.activity_rows)?base.activity_rows:[];
+    const orderedRows=[];
+    for(const row of projectedRows){
+      if(row&&row.role==='terminal') continue;
+      orderedRows.push(row);
+    }
+    for(let idx=turnStart+1;idx<=lastAsstIndex;idx+=1){
+      const bucket=messageRows.get(idx)||[];
+      for(const row of bucket) orderedRows.push(row);
+    }
+    for(const row of projectedRows){
+      if(row&&row.role==='terminal') orderedRows.push(row);
+    }
+    // #5758 gap: final-segment eligibility must be judged against the LIVE
+    // projection's own chronology. The settled per-message tool rows appended
+    // into orderedRows above re-list tools that ran EARLIER in the turn, so an
+    // index over the combined list pushes the "after the last tool row"
+    // boundary past the final segment's live-prose accumulator — its stale
+    // prefix snapshot then survives into the persisted scene and renders as a
+    // duplicate of the answer's beginning. A live-prose row belongs to the
+    // final segment iff no PROJECTED tool row follows it; pre-tool narration
+    // that happens to prefix the final answer stays protected.
+    const lastProjectedToolIndex=projectedRows.reduce((last,row,idx)=>(row&&row.role==='tool')?idx:last,-1);
+    const finalSegmentLiveProseRows=new WeakSet();
+    projectedRows.forEach((row,idx)=>{
+      if(idx>lastProjectedToolIndex&&row&&row.role==='prose'&&row.kind==='process_prose'&&String(row.source_event_type||'')==='token'&&String(row.local_id||'').startsWith('live-prose:')) finalSegmentLiveProseRows.add(row);
+    });
+    const rowIsLiveTokenFinalPrefix=(row,textKey,finalSegmentEligible)=>finalSegmentEligible&&row&&row.role==='prose'&&row.kind==='process_prose'&&String(row.source_event_type||'')==='token'&&String(row.local_id||'').startsWith('live-prose:')&&textKey&&finalKey&&textKey.length<finalKey.length&&finalKey.startsWith(textKey);
+    const pushRow=(row)=>{
+      if(!row||typeof row!=='object') return;
+      const finalSegmentEligible=finalSegmentLiveProseRows.has(row);
+      row=_anchorSceneSettleLiveRunningRow(row,hasSettledThinking);
+      if(!row||typeof row!=='object') return;
+      const textKey=_anchorSceneTextKey(row.text);
+      if(rowIsLiveTokenFinalPrefix(row,textKey,finalSegmentEligible)) return;
+      const isTextual=row.role==='prose'||row.role==='thinking';
+      if(isTextual&&_anchorSceneRowLooksLikeFinalAnswer(textKey,finalKey)) return;
+      if(isTextual&&_anchorSceneRowTextOverlapsExisting(textKey,seenTextKeys)) return;
+      const key=_anchorSceneExistingRowKey(row);
+      if(key&&seen.has(key)) return;
+      if(key) seen.add(key);
+      if(isTextual&&textKey) seenTextKeys.push(textKey);
+      rows.push({
+        ...row,
+        display_hint:_anchorSceneRowDisplayHintForMode(row,sceneMode),
+        order_index:rows.length,
+        seq:rows.length,
+      });
+    };
+    orderedRows.forEach((row)=>pushRow(row));
+    const scene={
+      ...base,
+      version:'activity_scene_v1',
+      mode:sceneMode,
+      identity:{
+        ...((base.identity&&typeof base.identity==='object')?base.identity:{}),
+        source_message_refs:messages.slice(turnStart+1,lastAsstIndex+1)
+          .filter(m=>m&&m.role==='assistant')
+          .map(m=>_anchorSceneMessageRef(m)),
+      },
+      lifecycle:(base.lifecycle&&typeof base.lifecycle==='object')?{...base.lifecycle}:{},
+      final_answer:_anchorSceneCleanText(finalAnswer)?finalAnswer:'',
+      final_message_ref:_anchorSceneMessageRef(lastAsst),
+      turn_duration:_anchorSceneTurnDurationForSettlement(lastAsst,base),
+      terminal_state:base.terminal_state||((base.lifecycle&&base.lifecycle.terminal_state)||null),
+      activity_rows:rows,
+    };
+    return scene;
+  }
+  let _persistAnchorSceneWarned=false;
+  function _anchorSceneMessageOffsetForPersist(){
+    const raw=(typeof _oldestIdx!=='undefined')?_oldestIdx:0;
+    const offset=Number(raw);
+    return Number.isFinite(offset)&&offset>0?Math.floor(offset):0;
+  }
+  function _anchorSceneAbsoluteMessageIndexForPersist(messageIndex, offset){
+    const idx=Number(messageIndex);
+    const off=Number(offset);
+    if(!Number.isFinite(idx)||idx<0) return messageIndex;
+    return idx+(Number.isFinite(off)&&off>0?Math.floor(off):0);
+  }
+  function _persistSettledAnchorScene(message, scene, messageIndex){
+    if(!activeSid||!message||!scene||typeof api!=='function') return;
+    try{
+      const messageOffset=_anchorSceneMessageOffsetForPersist();
+      api('/api/session/anchor-scene',{
+        method:'POST',
+        timeoutMs:8000,
+        timeoutToast:false,
+        body:JSON.stringify({
+          session_id:activeSid,
+          stream_id:streamId,
+          message_index:_anchorSceneAbsoluteMessageIndexForPersist(messageIndex,messageOffset),
+          message_window_index:messageIndex,
+          message_offset:messageOffset,
+          message_ref:_anchorSceneMessageRef(message),
+          scene,
+        }),
+      }).catch(err=>{
+        if(!_persistAnchorSceneWarned&&typeof console!=='undefined'&&console.warn){
+          _persistAnchorSceneWarned=true;
+          console.warn('anchor activity scene persistence failed',err);
+        }
+      });
+    }catch(err){
+      if(!_persistAnchorSceneWarned&&typeof console!=='undefined'&&console.warn){
+        _persistAnchorSceneWarned=true;
+        console.warn('anchor activity scene persistence failed',err);
+      }
+    }
+  }
+  function _anchorSceneHasWorklogWorthyRows(scene){
+    if(scene&&scene.mode==='hide_all_activity') return false;
+    if(typeof window!=='undefined'&&typeof window.isFinalAnswerOnlyMode==='function'&&window.isFinalAnswerOnlyMode()) return false;
+    // A worklog (the collapsible "已处理 …" rail) is only meaningful when the turn
+    // actually DID worklog-worthy work — a tool call, a thinking/reasoning pass, or
+    // a compression lifecycle card. A turn that only streamed prose (e.g. a long
+    // plain-text answer, or a degeneration burst that flooded the body with repeated
+    // tokens) projects an activity scene whose rows are ALL `prose`/`terminal`. Folding
+    // such a turn into a collapsed worklog hides the whole answer and, at STREAM_DONE,
+    // shrinks the transcript by the full streamed height → the browser clamps a
+    // bottom-pinned viewport back to the top (the "jump back" report). Require at least
+    // one genuinely worklog-worthy row before promoting the turn to a worklog.
+    const rows=Array.isArray(scene&&scene.activity_rows)?scene.activity_rows:[];
+    for(const row of rows){
+      if(!row||typeof row!=='object') continue;
+      const role=String(row.role||'');
+      if(role==='tool'||role==='thinking') return true;
+      if(role==='lifecycle'){
+        const source=String(row.source_event_type||'');
+        // compression cards are worklog-worthy; a bare terminal/done lifecycle is not.
+        if(source==='compressing'||source==='compressed') return true;
+      }
+    }
+    return false;
+  }
+  function _anchorSceneHasOwnedOutcomes(scene){
+    return !!(
+      (Array.isArray(scene&&scene.artifacts)&&scene.artifacts.length)
+      || (Array.isArray(scene&&scene.side_effects)&&scene.side_effects.length)
+    );
+  }
+  function _attachProjectedAnchorSceneToLastAssistant(messages){
+    if(!_anchorRegistry||!Array.isArray(messages)) return false;
+    let lastAsst=null;
+    let lastAsstIndex=-1;
+    for(let i=messages.length-1;i>=0;i--){
+      const candidate=messages[i];
+      if(candidate&&candidate.role==='assistant'){
+        lastAsst=candidate;
+        lastAsstIndex=i;
+        break;
+      }
+    }
+    if(!lastAsst) return false;
+    const projectedScene=_projectLiveAnchorActivityScene();
+    const scene=_completeSettledAnchorSceneForTurn(messages,lastAsstIndex,projectedScene);
+    const hasOwnedOutcomes=_anchorSceneHasOwnedOutcomes(scene);
+    if(scene&&Array.isArray(scene.activity_rows)&&(scene.activity_rows.length||hasOwnedOutcomes)){
+      const hasWorklogRows=_anchorSceneHasWorklogWorthyRows(scene);
+      const shouldPersistScene=hasWorklogRows||scene.mode==='hide_all_activity'||hasOwnedOutcomes;
+      if(!shouldPersistScene) return false;
+      lastAsst._anchor_stream_id=streamId;
+      lastAsst._anchor_activity_scene=scene;
+      _persistSettledAnchorScene(lastAsst, scene, lastAsstIndex);
+      return hasWorklogRows;
+    }
+    return false;
+  }
+  function _upsertAnchorProcessProse(displayText, options={}){
+    const text=String(displayText||'').trim();
+    if(!text||!_anchorRegistry) return null;
+    const segmentSeq=Number(options.segmentSeq||_anchorSegmentSeq());
+    const localId=`live-prose:${streamId}:${segmentSeq}`;
+    const existing=_findAnchorActivityEventByLocalId(localId,'token');
+    if(existing){
+      const replaced=_replaceAnchorActivityEventByLocalId(localId,'token',{
+        status:options.sealed?'completed':'running',
+        payload:{text,activitySegmentSeq:segmentSeq,activityBurstId:_currentActivityBurstId},
+      });
+      _renderAnchorLiveScene();
+      return replaced;
+    }
+    _applyToAnchor('token',{
+      text,
+      local_id:localId,
+      seq:_nextAnchorLocalSeq(),
+      status:options.sealed?'completed':'running',
+      activitySegmentSeq:segmentSeq,
+      activityBurstId:_currentActivityBurstId,
+    },null);
+    return _findAnchorActivityEventByLocalId(localId,'token');
+  }
+  // Persistent incremental renderer for anchor-scene live prose rows. The compact
+  // worklog re-renders the whole scene each frame; rendering the growing prose via
+  // renderMd(fullText) every frame is O(n^2) over a long answer. Instead keep a
+  // per-segment smd parser + node (the SAME safe renderer as the main live body)
+  // and feed only the delta, then hand the persistent node back to the ui.js scene
+  // builder. Returns null whenever smd or a stable key is unavailable so the caller
+  // falls back to the full renderMd path — identical structure, just not
+  // incremental. (#5455 WS2.1)
+  const _anchorProseSmdCache = new Map();
+  function _finalizeAnchorProseIncrementalNode(st){
+    if(!st || !st.parser || st.finalized) return;
+    const body=st.node&&st.node.querySelector&&st.node.querySelector('.msg-body');
+    window.smd.parser_end(st.parser);
+    if(body){
+      if(typeof _smdMediaTailFlush === 'function') _smdMediaTailFlush(st.parser);
+      if(typeof _sanitizeSmdLinks === 'function') _sanitizeSmdLinks(body);
+      if(typeof enhanceMarkdownTables === 'function') enhanceMarkdownTables(body);
+    }
+    if(typeof _smdMediaTailClear === 'function') _smdMediaTailClear(st.parser);
+    if(typeof _smdClearParserIdentity === 'function') _smdClearParserIdentity(body, st.parser);
+    st.finalized = true;
+  }
+  function _anchorProseIncrementalNode(key, text, options){
+    if(!window.smd || !key || typeof _safeSmdRenderer!=='function') return null;
+    const finalize=!!(options&&options.finalize);
+    const value=String(text||'');
+    const fade=typeof _shouldUseLiveProseFade==='function'&&_shouldUseLiveProseFade();
+    let st;
+    try{
+      st=_anchorProseSmdCache.get(key);
+      // Self-heal desyncs (edit/sanitize made the text no longer a pure append):
+      // rebuild the parser+node from scratch, mirroring the _smdWrite guard.
+      if(st && st.writtenText && !value.startsWith(st.writtenText)) st=null;
+      if(st && st.fade!==fade) st=null;
+      if(st && st.finalized && st.writtenText!==value){
+        const body=st.node&&st.node.querySelector&&st.node.querySelector('.msg-body');
+        if(typeof _smdMediaTailClear === 'function') _smdMediaTailClear(st.parser);
+        if(typeof _smdClearParserIdentity === 'function') _smdClearParserIdentity(body, st.parser);
+        _anchorProseSmdCache.delete(key);
+        st=null;
+      }
+      if(!st){
+        const node=document.createElement('div');
+        node.className='assistant-segment';
+        node.setAttribute('data-anchor-scene-prose','1');
+        const body=document.createElement('div');
+        body.className='msg-body';
+        if(body.classList) body.classList.toggle('stream-fade-active',fade);
+        node.appendChild(body);
+        const baseRenderer=fade?_streamFadeRenderer(body):_safeSmdRenderer(body);
+        const renderer=_smdRendererWithoutUnderscoreEmphasis(baseRenderer);
+        st={node,parser:window.smd.parser(renderer),writtenText:'',fade};
+        _smdBindParserIdentity(renderer,st.parser,body);
+        _anchorProseSmdCache.set(key,st);
+        // Bound memory across turns: keys embed the stream id, so stale entries
+        // from finished streams age out here.
+        if(_anchorProseSmdCache.size>32){
+          const oldest=_anchorProseSmdCache.keys().next().value;
+          if(oldest!==key) _anchorProseSmdCache.delete(oldest);
+        }
+      }
+      const body=st.node&&st.node.querySelector&&st.node.querySelector('.msg-body');
+      if(body&&body.classList) body.classList.toggle('stream-fade-active',fade);
+      const delta=value.slice(st.writtenText.length);
+      if(delta){
+        window.smd.parser_write(st.parser,delta);
+        st.writtenText=value;
+      }
+      if(finalize){
+        _finalizeAnchorProseIncrementalNode(st);
+      }
+      st.node.dataset.rawText=value;
+      return st.node;
+    }catch(_){
+      if(st){
+        const body=st.node&&st.node.querySelector&&st.node.querySelector('.msg-body');
+        if(typeof _smdMediaTailClear === 'function') _smdMediaTailClear(st.parser);
+        if(typeof _smdClearParserIdentity === 'function') _smdClearParserIdentity(body, st.parser);
+      }
+      _anchorProseSmdCache.delete(key);
+      return null;
+    }
+  }
+  window.__anchorProseIncrementalNode=_anchorProseIncrementalNode;
+  function _clearAnchorProseIncrementalNode(){
+    if(typeof window!=='undefined'&&window.__anchorProseIncrementalNode===_anchorProseIncrementalNode) window.__anchorProseIncrementalNode=null;
+    // Clear the per-parser MEDIA tail for each cached smd parser.
+    // _anchorProseSmdCache is a Map<key, {parser, ...}>; we can't
+    // iterate a WeakMap to clean up, but WeakMap keys become eligible
+    // for GC once the parser objects are released by the cache clear
+    // below, so the WeakMap entries are automatically removed. The
+    // explicit _smdMediaTailClear per-parser is a best-effort guard
+    // for cache entries that may hold the last strong reference.
+    if(typeof _anchorProseSmdCache!=='undefined'&&_anchorProseSmdCache.size){
+      _anchorProseSmdCache.forEach(function(st){
+        if(st&&st.parser&&typeof _smdMediaTailFlush==='function'){
+          _smdMediaTailFlush(st.parser);
+        }
+        if(st&&st.parser&&typeof _smdMediaTailClear==='function'){
+          _smdMediaTailClear(st.parser);
+        }
+      });
+    }
+    _anchorProseSmdCache.clear();
+  }
+  function _anchorHasReasoningEvents(){
+    const events=_anchorActivityEvents();
+    return !!(events&&events.some(event=>event&&event.source_event_type==='reasoning'));
+  }
+  function _upsertAnchorReasoning(text, options={}){
+    const clean=String(text||'').trim();
+    const placement=_liveThinkingPlacement();
+    const segmentSeq=Number(options.segmentSeq||placement.segmentSeq||_anchorSegmentSeq());
+    const localId=String(options.localId||`live-reasoning:${streamId}:${segmentSeq}`);
+    if(options&&typeof options==='object'){
+      options.anchorReasoningLocalId=localId;
+      options.segmentSeq=segmentSeq;
+      if(options.burstId===undefined) options.burstId=_currentActivityBurstId;
+    }
+    if(!clean||!_anchorRegistry||window._showThinking===false) return null;
+    const existing=_findAnchorActivityEventByLocalId(localId,'reasoning');
+    if(existing){
+      const replaced=_replaceAnchorActivityEventByLocalId(localId,'reasoning',{
+        status:options.sealed?'completed':'running',
+        payload:{text:clean,activitySegmentSeq:segmentSeq,activityBurstId:_currentActivityBurstId},
+      });
+      return _renderAnchorLiveScene()?replaced:null;
+    }
+    const renderOutcome={rendered:false};
+    _applyToAnchor('reasoning',{
+      text:clean,
+      local_id:localId,
+      seq:_nextAnchorLocalSeq(),
+      status:options.sealed?'completed':'running',
+      activitySegmentSeq:segmentSeq,
+      activityBurstId:_currentActivityBurstId,
+    },null,renderOutcome);
+    return renderOutcome.rendered?_findAnchorActivityEventByLocalId(localId,'reasoning'):null;
+  }
+  function _compactVisibleEchoText(value){
+    return String(value||'').replace(/\s+/g,'');
+  }
+  function _stripCompactEchoSuffix(value, suffix){
+    const raw=String(value||'');
+    const candidate=_compactVisibleEchoText(suffix);
+    if(!raw||!candidate) return {text:raw,removed:false};
+    const windowSize=Math.max(String(suffix||'').length*3,4096);
+    const offset=Math.max(0,raw.length-windowSize);
+    const tail=raw.slice(offset);
+    for(let idx=0;idx<=tail.length;idx+=1){
+      if(_compactVisibleEchoText(tail.slice(idx))===candidate){
+        return {text:raw.slice(0,offset+idx).trimEnd(),removed:true};
+      }
+    }
+    return {text:raw,removed:false};
+  }
+  function _stripAnchorReasoningEcho(visible){
+    const events=_anchorActivityEvents();
+    if(!events||!visible) return false;
+    for(let i=events.length-1;i>=0;i-=1){
+      const event=events[i];
+      if(!event||event.source_event_type!=='reasoning') continue;
+      const payload=(event.payload&&typeof event.payload==='object')?event.payload:{};
+      const rawText=String(payload.text||payload.reasoning||payload.thinking||'');
+      const stripped=_stripCompactEchoSuffix(rawText, visible);
+      if(!stripped.removed) continue;
+      const nextText=String(stripped.text||'').trim();
+      if(nextText){
+        _replaceAnchorActivityEventByLocalId(event.local_id,'reasoning',{
+          payload:{text:nextText},
+        });
+      }else{
+        events.splice(i,1);
+      }
+      _renderAnchorLiveScene();
+      return true;
+    }
+    return false;
+  }
+  function _removeLiveReasoningEchoRows(visible){
+    const turn=$('liveAssistantTurn');
+    const blocks=turn&&typeof _assistantTurnBlocks==='function'?_assistantTurnBlocks(turn):null;
+    if(!blocks||!visible) return false;
+    let removed=false;
+    const selector=[
+      '.agent-activity-thinking[data-anchor-scene-row="1"]',
+      '.agent-activity-thinking[data-live-thinking="1"]',
+      '.wl-reason[data-worklog-anchor-reason="1"]',
+      '.wl-reason[data-worklog-reason-source="reasoning"]'
+    ].join(',');
+    blocks.querySelectorAll(selector).forEach(row=>{
+      const textNode=row.querySelector&&(
+        row.querySelector('.thinking-card-body pre') ||
+        row.querySelector('.thinking-card-body')
+      );
+      const text=String((textNode&&textNode.textContent)||row.textContent||'');
+      if(!_stripCompactEchoSuffix(text, visible).removed) return;
+      row.remove();
+      removed=true;
+    });
+    if(removed&&typeof _syncToolCallGroupSummary==='function'){
+      blocks.querySelectorAll('.tool-worklog-group,.tool-call-group').forEach(group=>{
+        _syncToolCallGroupSummary(group);
+      });
+    }
+    return removed;
+  }
+  function _stripLiveReasoningEcho(visible){
+    let removed=false;
+    const durable=_stripCompactEchoSuffix(reasoningText, visible);
+    if(durable.removed){
+      reasoningText=durable.text;
+      removed=true;
+    }
+    const live=_stripCompactEchoSuffix(liveReasoningText, visible);
+    if(live.removed){
+      liveReasoningText=live.text;
+      removed=true;
+    }
+    const anchorRemoved=_stripAnchorReasoningEcho(visible);
+    const domRemoved=_removeLiveReasoningEchoRows(visible);
+    if(removed) syncInflightAssistantMessage();
+    if((removed||anchorRemoved||domRemoved)&&!String(liveReasoningText||'').trim()&&typeof removeThinking==='function'){
+      removeThinking();
+    }
+    return removed||anchorRemoved||domRemoved;
+  }
+  function _flushReasoningToAnchor(){
+    if(_anchorReasoningFlushed||!reasoningText) return;
+    _anchorReasoningFlushed=true;
+    if(_anchorHasReasoningEvents()) return;
+    _upsertAnchorReasoning(reasoningText,{sealed:true,localId:`live-reasoning:${streamId}:final`});
+  }
+  function _sourceEventTypeForSnapshotAnchorRow(row){
+    const source=String(row&&row.source_event_type||'').trim();
+    if(source&&source!=='runtime_journal_snapshot') return source;
+    const role=String(row&&row.role||'').trim();
+    const kind=String(row&&row.kind||'').trim();
+    if(role==='prose'||kind==='process_prose') return 'token';
+    if(role==='thinking'||kind==='reasoning') return 'reasoning';
+    if(role==='tool') return row&&row.status==='running'?'tool':'tool_complete';
+    // Terminal statuses are done/cancel/error/apperror — never invent a
+    // compression start from a running terminal row (false "Compressing context").
+    if(role==='terminal'||kind==='terminal_status'){
+      const termStatus=String(row&&row.status||'').trim().toLowerCase();
+      if(termStatus==='cancelled'||termStatus==='canceled'||termStatus==='interrupted') return 'cancel';
+      if(termStatus==='error'||termStatus==='failed'||termStatus==='errored') return 'error';
+      if(termStatus==='running') return '';
+      return 'done';
+    }
+    // lifecycle_status is shared by compressing + compressed. Prefer explicit
+    // cues; do not default every lifecycle row to a running compress divider.
+    if(role==='lifecycle'||kind==='lifecycle_status'){
+      const phase=String(row&&(row.phase||row.status)||'').trim().toLowerCase();
+      const text=String(row&&(row.text||row.message||row.label)||'').trim().toLowerCase();
+      if(
+        phase==='done'||phase==='completed'||phase==='compressed'
+        || text.includes('auto-compressed')
+        || text.includes('compression finished')
+        || (text.includes('compressed')&&!text.includes('compressing'))
+      ) return 'compressed';
+      if(
+        phase==='running'||phase==='compressing'
+        || text.includes('compressing context')
+        || text.includes('compacting context')
+        || text.includes('preflight compression')
+        || text.includes('pre-api compression')
+        || text.includes('context too large')
+        || text.includes('compression attempt')
+        || (text.includes('compressing')&&!text.includes('skipping'))
+      ) return 'compressing';
+      return '';
+    }
+    return '';
+  }
+  function _hydrateAnchorRegistryFromActivityScene(scene){
+    if(!_anchorRegistry||!_anchorApi||typeof _anchorApi.applyAssistantTurnAnchorSourceEvent!=='function') return false;
+    if(!scene||scene.version!=='activity_scene_v1'||!Array.isArray(scene.activity_rows)||!scene.activity_rows.length) return false;
+    const sceneIdentity=(scene.identity&&typeof scene.identity==='object')?scene.identity:{};
+    const sceneStreamId=sceneIdentity.stream_id||streamId;
+    const sceneRunId=sceneIdentity.run_id||sceneStreamId;
+    const sceneKey=[
+      sceneRunId||'',
+      sceneStreamId||'',
+      scene.activity_rows.length,
+      scene.activity_rows.map(row=>row&&row.row_id||row&&row.local_id||'').join('|'),
+    ].join(':');
+    if(_anchorRegistry._hydrated_activity_scene_key===sceneKey) return true;
+    const rows=scene.activity_rows;
+    for(let i=0;i<rows.length;i+=1){
+      const row=rows[i];
+      if(!row||typeof row!=='object') continue;
+      const sourceType=_sourceEventTypeForSnapshotAnchorRow(row);
+      if(!sourceType) continue;
+      const payload={
+        ...((row.payload&&typeof row.payload==='object')?row.payload:{}),
+      };
+      if(row.text&&!payload.text) payload.text=row.text;
+      if(row.tool&&typeof row.tool==='object'){
+        payload.name=payload.name||row.tool.name;
+        payload.args=payload.args||row.tool.args;
+        payload.preview=payload.preview||row.tool.preview;
+        payload.snippet=payload.snippet||row.tool.snippet;
+        payload.tid=payload.tid||row.tool.tid||row.tool.id;
+        payload.id=payload.id||row.tool.id||row.tool.tid;
+        payload.is_error=payload.is_error||row.tool.is_error;
+        payload.duration=payload.duration||row.tool.duration;
+      }
+      if(row.group&&typeof row.group==='object'){
+        payload.activitySegmentSeq=payload.activitySegmentSeq||row.group.activity_segment_seq;
+        payload.activityBurstId=payload.activityBurstId||row.group.activity_burst_id;
+      }
+      const rowIdentity=(row.identity&&typeof row.identity==='object')?row.identity:{};
+      const sourceEvent={
+        ...payload,
+        source_event_type:sourceType,
+        local_id:row.local_id||row.row_id||`snapshot:${sceneStreamId}:${i}`,
+        event_id:row.event_id||null,
+        seq:row.seq??undefined,
+        status:row.status||undefined,
+        stream_id:row.stream_id||rowIdentity.stream_id||sceneStreamId,
+        run_id:row.run_id||rowIdentity.run_id||sceneRunId,
+        // Carry the row's persisted creation timestamp through hydration so the
+        // worklog event timestamp (#5700/#5739) survives a settled-snapshot rebuild
+        // (payload may not carry created_at even when the row does). (#5739 gate.)
+        created_at:payload.created_at??row.created_at??undefined,
+      };
+      try{
+        _anchorApi.applyAssistantTurnAnchorSourceEvent(_anchorRegistry,sourceEvent,{session_id:activeSid,stream_id:sceneStreamId,run_id:sceneRunId});
+      }catch(err){
+        if(!_anchorShadowWarned&&typeof console!=='undefined'&&console.warn){
+          _anchorShadowWarned=true;
+          console.warn('assistant turn anchor snapshot hydration failed',err);
+        }
+        return false;
+      }
+    }
+    _anchorRegistry._hydrated_activity_scene_key=sceneKey;
+    return true;
+  }
+  _hydrateAnchorRegistryFromActivityScene(INFLIGHT[activeSid]&&INFLIGHT[activeSid].anchorActivityScene);
 
   function _mergeSettledToolCallsWithLiveMetadata(rawCalls){
     const liveCalls=Array.isArray(S.toolCalls)?S.toolCalls:[];
@@ -1649,8 +3638,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // Also handles DSML-prefixed variants from DeepSeek/Bedrock, including
     // spacing variants like "<｜DSML |function_calls" and truncated prefixes.
     if(!s) return s;
-    const lo=String(s).toLowerCase();
-    if(lo.indexOf('function_calls')===-1 && lo.indexOf('dsml')===-1) return s;
+    // Case-insensitive presence check without allocating a full lowercased copy
+    // of the (growing) text on every call — cuts per-token/per-frame GC pressure.
+    // Equivalent to the previous toLowerCase()+indexOf gate. (#5455 WS2.3)
+    if(!/function_calls|dsml/i.test(String(s))) return s;
     // Support both plain <function_calls> and DSML-prefixed variants.
     s=s.replace(/<(?:\s*｜\s*DSML\s*[｜|]\s*)?function_calls>[\s\S]*?<\/(?:\s*｜\s*DSML\s*[｜|]\s*)?function_calls>/gi,'');
     // Also remove truncated opening tags (missing closing ">" at stream tail).
@@ -1687,6 +3678,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const baseRenderer=fade ? _streamFadeRenderer(el) : window.smd.default_renderer(el);
     const renderer=_smdRendererWithoutUnderscoreEmphasis(baseRenderer);
     _smdParser=window.smd.parser(renderer);
+    _smdBindParserIdentity(renderer,_smdParser,el);
   }
   function _smdRendererWithoutUnderscoreEmphasis(renderer){
     if(!renderer||!window.smd) return renderer;
@@ -1719,13 +3711,24 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(_streamingKatexTimer){clearTimeout(_streamingKatexTimer);_streamingKatexTimer=null;}
     if(_smdParser&&window.smd){
       try{window.smd.parser_end(_smdParser);}catch(_){}
-      // parser_end may flush remaining markdown that creates new links/images —
-      // re-sanitize the body before the DOM is handed off to highlightCode / renderMessages.
-      if(assistantBody){_sanitizeSmdLinks(assistantBody);enhanceMarkdownTables(assistantBody);}
     }
+    // parser_end may emit one final add_text chunk; flush MEDIA tails after it
+    // so a final extensionless URL is rendered before the settled re-render.
+    if(typeof _smdMediaTailFlush==='function') _smdMediaTailFlush(_smdParser);
+    if(typeof _smdMediaTailFlush==='function') _smdMediaTailFlush(__SMD_PARSER_FALLBACK);
+    // parser_end / tail flush may create new links/images — re-sanitize the
+    // body before the DOM is handed off to highlightCode / renderMessages.
+    if(assistantBody){_sanitizeSmdLinks(assistantBody);enhanceMarkdownTables(assistantBody);}
+    // Clear the per-parser MEDIA tail buffer — any incomplete MEDIA
+    // prefix the parser was holding is no longer relevant.
+    if(typeof _smdMediaTailClear==='function') _smdMediaTailClear(_smdParser);
+    if(typeof _smdClearParserIdentity==='function') _smdClearParserIdentity(assistantBody,_smdParser);
     _smdParser=null;
     _smdWrittenLen=0;
     _smdWrittenText='';
+    // Clear the fallback MEDIA tail buffer too; fallback chunks are keyed
+    // by __SMD_PARSER_FALLBACK, not null.
+    if(typeof _smdMediaTailClear==='function') _smdMediaTailClear(__SMD_PARSER_FALLBACK);
   }
   function _scheduleStreamingKatex(){
     if(_streamingKatexTimer) return;
@@ -1762,8 +3765,16 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   // Allowed URL schemes for anchors and images rendered from agent-streamed markdown.
   // Raw file:// anchors are rewritten to /api/media before the user can click them.
-  const _SMD_SAFE_URL_RE=/^(?:https?:|mailto:|tel:|\/|#|\?|\.|api|session\/)/i;
+  const _SMD_SAFE_URL_RE=/^(?:https?:|mailto:|tel:|message:|\/|#|\?|\.|api|session\/)/i;
+  // ui.js owns the image-only data URI policy. It loads before this script;
+  // fail closed if that contract is unavailable rather than inventing a second
+  // allowlist that can drift from settled rendering.
   const _SMD_SAFE_IMG_URL_RE=/^(?:https?:|mailto:|tel:|\/|#|\?|\.)/i;
+  function _smdImgSrcAllowed(v){
+    const s=String(v||'');
+    if(/^data:/i.test(s)) return typeof _isSafeDataImageUri==='function'&&_isSafeDataImageUri(s);
+    return _SMD_SAFE_IMG_URL_RE.test(s);
+  }
   function _smdLinkHref(raw){
     const href=String(raw||'');
     if(/^session:\/\//i.test(href)){
@@ -1806,7 +3817,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const _im=root.querySelectorAll('img[src]');
     for(let i=0;i<_im.length;i++){
       const n=_im[i],v=n.getAttribute('src')||'';
-      if(!_SMD_SAFE_IMG_URL_RE.test(v)){n.removeAttribute('src');n.setAttribute('data-blocked-scheme','1');}
+      if(!_smdImgSrcAllowed(v)){n.removeAttribute('src');n.setAttribute('data-blocked-scheme','1');}
     }
   }
 
@@ -1819,10 +3830,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _streamFadeLastArrivalMs=0;
     _streamFadeArrivalWps=0;
     _streamFadeLatestAnimationEndAt=0;
-    _streamFadeAppendOffset=0;
     _streamFadeVisibleWords=0;
     _streamFadeHoldUntilMs=0;
     _streamFadeCurrentMs=_STREAM_FADE_MS;
+    _streamFadeDomText='';
   }
   function _cancelAnimationFramePendingStreamRender(){
     if(_pendingRafHandle===null) return;
@@ -1833,6 +3844,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   function _shouldUseStreamFade(){
     return _streamFadeEnabledForStream;
+  }
+  function _shouldUseTransparentStreamFade(){
+    return typeof isTransparentStream==='function'&&isTransparentStream();
+  }
+  function _shouldUseLiveProseFade(){
+    return !_streamFadeReduceMotionEnabled() && (_shouldUseStreamFade() || _shouldUseTransparentStreamFade());
   }
   function _streamFadeSkipNode(node){
     if(!node||node.nodeType!==1) return false;
@@ -1871,12 +3888,33 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const renderer=window.smd.default_renderer(el);
     const baseAddText=renderer.add_text;
     const baseSetAttr=renderer.set_attr;
+    const parserFor = (data)=>{
+      return _smdParserKey(data, el);
+    };
+    const writeFadeText=(writeParent, writeData, writeText)=>{
+      if(!writeParent||_streamFadeSkipNode(writeParent)){
+        _smdAppendPlainText(writeParent, writeData, writeText, baseAddText);
+        return;
+      }
+      _streamFadeAppendText(writeParent, writeText);
+    };
     renderer.add_text=(data,text)=>{
       const parent=data&&data.nodes&&data.nodes[data.index];
       if(!parent||_streamFadeSkipNode(parent)){baseAddText(data,text);return;}
+      // MEDIA-in-stream: if this chunk carries a MEDIA:<ref> token, defer to
+      // the shared interceptor so the token becomes a real media element
+      // instead of plain text. The fade renderer would otherwise wrap every
+      // word in a stream-fade-word span, leaving MEDIA: paths visible.
+      const parser=parserFor(data);
+      const hasMediaTail=!!(_SMD_MEDIA_TAIL&&parser&&_SMD_MEDIA_TAIL.has&&_SMD_MEDIA_TAIL.has(parser));
+      const value=String(text||'');
+      const hasMediaPrefixTail=!!_smdMediaPrefixTail(value);
+      if(/MEDIA:/.test(value)||hasMediaTail||hasMediaPrefixTail){
+        _smdMediaAwareAddText(baseAddText, parent, data, text, _SMD_MEDIA_TAIL, parser, writeFadeText);
+        return;
+      }
       const frag=document.createDocumentFragment();
       const wordRe=/(\S+)(\s*)/g;
-      const value=String(text||'');
       const reduceMotion=_streamFadeReduceMotionEnabled();
       const appendStartedAt=performance.now();
       let last=0, match, changed=false;
@@ -1892,13 +3930,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         const span=document.createElement('span');
         span.className='stream-fade-word is-new';
         const fadeMs=_streamFadeCurrentMs||_STREAM_FADE_MS;
-        const delayMs=_streamFadeAppendOffset*_STREAM_FADE_STAGGER_MS;
-        span.style.animationDelay=delayMs+'ms';
         if(fadeMs!==_STREAM_FADE_MS) span.style.setProperty('--stream-fade-ms',fadeMs+'ms');
         span.textContent=match[1];
         frag.appendChild(span);
-        _streamFadeAppendOffset+=1;
-        _streamFadeLatestAnimationEndAt=Math.max(_streamFadeLatestAnimationEndAt,appendStartedAt+delayMs+fadeMs);
+        _streamFadeLatestAnimationEndAt=Math.max(_streamFadeLatestAnimationEndAt,appendStartedAt+fadeMs);
         if(match[2]) frag.appendChild(document.createTextNode(match[2]));
         last=match.index+match[0].length;
         changed=true;
@@ -1910,7 +3945,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     renderer.set_attr=(data,attr,value)=>{
       const isHref=window.smd&&attr===window.smd.HREF;
       const isSrc=window.smd&&attr===window.smd.SRC;
-      const safeUrl=isSrc?_SMD_SAFE_IMG_URL_RE:_SMD_SAFE_URL_RE;
+      const allowed=isSrc?_smdImgSrcAllowed(value):_SMD_SAFE_URL_RE.test(String(value||''));
       if(isHref&&/^(file|workspace|session):\/\//i.test(String(value||''))){
         baseSetAttr(data,attr,_smdLinkHref(value));
         if(/^session:\/\//i.test(String(value||''))){
@@ -1919,7 +3954,259 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }
         return;
       }
-      if((isHref||isSrc)&&!safeUrl.test(String(value||''))){
+      if((isHref||isSrc)&&!allowed){
+        const node=data&&data.nodes&&data.nodes[data.index];
+        if(node&&node.setAttribute) node.setAttribute('data-blocked-scheme','1');
+        return;
+      }
+      baseSetAttr(data,attr,value);
+    };
+    return renderer;
+  }
+  // Safe renderer: wraps default_renderer with a set_attr hook that validates
+  // href/src URL schemes inline — no post-hoc DOM-wide querySelectorAll needed.
+  // Unlike _streamFadeRenderer, this does NOT wrap add_text, so smd adds new
+  // DOM nodes as plain text nodes (no animation spans). Used on the non-fade
+  // streaming path to eliminate _sanitizeSmdLinks(assistantBody) O(DOM) scans
+  // on every token event (#WebUI-perf).
+  // MEDIA-in-stream fix: also wraps add_text so MEDIA:<ref> tokens that arrive
+  // mid-turn are converted to inline media elements at insert time, matching
+  // what the full renderMd() pipeline does on the settled assistant message.
+  // Without this, streamed prose shows MEDIA:C:\... as literal text until the
+  // turn settles and the full re-render swaps it for the real <img>.
+  // SAFETY & CROSS-CHUNK SPLITS (Greptile #1 + #2):
+  //   1. Prose slices go back to the owning text writer (text nodes or
+  //      fade spans), NOT through DOMParser — mixed prose with HTML entities /
+  //      malicious <img onerror> stays as literal text.
+  //   2. Each MEDIA token's HTML (from _inlineMediaHtmlForRef) is handed
+  //      to DOMParser one at a time — only trusted markup is parsed.
+  //   3. A MEDIA prefix split across smd flushes (e.g. "MEDIA:" then
+  //      "foo.png") is buffered in a per-parser tail buffer and completed
+  //      on the next add_text call.
+  const _MEDIA_TAIL_MAX = 4096; // bytes; defensive cap on per-parser buffer
+  const _SMD_MEDIA_PREFIX = 'MEDIA:';
+  function _smdMediaPrefixTail(value){
+    const text=String(value||'');
+    const max=Math.min(_SMD_MEDIA_PREFIX.length,text.length);
+    for(let len=max;len>0;len-=1){
+      const suffix=text.slice(text.length-len);
+      if(_SMD_MEDIA_PREFIX.startsWith(suffix)) return suffix;
+    }
+    return '';
+  }
+  function _smdAppendPlainText(parent, data, text, baseAddText){
+    const value=String(text||'');
+    if(parent&&parent.appendChild&&typeof document!=='undefined'&&document.createTextNode){
+      parent.appendChild(document.createTextNode(value));
+      return;
+    }
+    if(baseAddText) baseAddText(data,value);
+  }
+  function _smdMediaWriteText(parent, data, baseAddText, writeText, text){
+    if(writeText){
+      writeText(parent, data, String(text||''));
+      return;
+    }
+    if(baseAddText) baseAddText(data,String(text||''));
+  }
+  function _smdMediaTailSet(tailMap, parser, chunk, parent, baseAddText, data, writeText){
+    if(!tailMap||!parser) return;
+    if(chunk) tailMap.set(parser, {chunk, parent, baseAddText, data, writeText});
+    else tailMap.delete(parser);
+  }
+  function _smdMediaTailEntryChunk(entry){
+    return entry && typeof entry==='object' && Object.prototype.hasOwnProperty.call(entry,'chunk') ? entry.chunk : entry;
+  }
+  function _smdMediaTailSameOwner(entry, parent, baseAddText, writeText){
+    return !!entry && entry.parent===parent && entry.baseAddText===baseAddText && entry.writeText===writeText;
+  }
+  function _smdMediaRefHasReliableBoundary(rawRef){
+    const raw=String(rawRef||'');
+    if(/[?#]$/.test(raw)) return false;
+    const ref=raw.split(/[?#]/,1)[0];
+    return /\.(?:png|jpe?g|gif|webp|bmp|ico|svg|avif|mp4|webm|mov|m4v|mkv|avi|ogv|mp3|wav|ogg|m4a|aac|wma|opus|flac|oga|pdf|html?|csv|diff|patch|excalidraw)$/i.test(ref);
+  }
+  function _smdMediaTailFlushEntry(entry){
+    const chunk=_smdMediaTailEntryChunk(entry);
+    if(!chunk) return;
+    const m=/^MEDIA:([^\s\)\]]+)$/.exec(String(chunk));
+    const emitted=!!(m && entry && entry.parent && _smdAppendMediaNode(entry.parent, m[1]));
+    if(!emitted && entry) _smdMediaWriteText(entry.parent, entry.data, entry.baseAddText, entry.writeText, chunk);
+  }
+  function _smdMediaTailFlush(parser){
+    if(!_SMD_MEDIA_TAIL||!parser||!_SMD_MEDIA_TAIL.get) return;
+    const entry=_SMD_MEDIA_TAIL.get(parser);
+    if(!entry) return;
+    _SMD_MEDIA_TAIL.delete(parser);
+    _smdMediaTailFlushEntry(entry);
+  }
+  function _smdMediaAwareAddText(baseAddText, parent, data, text, tailMap, parser, writeText){
+    const value=String(text||'');
+    const tails=tailMap||(typeof _SMD_MEDIA_TAIL!=='undefined'&&_SMD_MEDIA_TAIL)||null;
+    const writeCurrent=(chunk)=>_smdMediaWriteText(parent, data, baseAddText, writeText, chunk);
+    if(!value){
+      writeCurrent('');
+      return;
+    }
+    // Pull any pending tail from a previous (split) chunk, then clear it;
+    // this call will either complete it, re-buffer it, or flush it as text.
+    let leadEntry = tails && parser && tails.get ? tails.get(parser) : null;
+    let lead = _smdMediaTailEntryChunk(leadEntry);
+    if(lead && !_smdMediaTailSameOwner(leadEntry, parent, baseAddText, writeText)){
+      if(tails && parser && tails.delete) tails.delete(parser);
+      _smdMediaTailFlushEntry(leadEntry);
+      leadEntry=null;
+      lead='';
+    }else if(lead && tails && parser && tails.delete){
+      tails.delete(parser);
+    }
+    const combined = lead ? lead + value : value;
+    // Fast path: no MEDIA tokens in the (possibly combined) string.
+    if(!/MEDIA:/.test(combined)){
+      const prefixTail=_smdMediaPrefixTail(combined);
+      if(prefixTail && tails && parser && prefixTail.length < _MEDIA_TAIL_MAX){
+        const stable=combined.slice(0, combined.length-prefixTail.length);
+        if(stable) writeCurrent(stable);
+        _smdMediaTailSet(tails, parser, prefixTail, parent, baseAddText, data, writeText);
+        return;
+      }
+      writeCurrent(combined);
+      return;
+    }
+    // Walk the combined string, slicing into prose + MEDIA token runs.
+    // Prose runs go through the owning text writer. MEDIA tokens go through
+    // the single-token DOMParser helper only after a delimiter or
+    // reliable filename suffix proves the ref is complete.
+    const re=/MEDIA:([^\s\)\]]+)/g;
+    let last=0, m;
+    let unmatchedTail=null;
+    while((m=re.exec(combined))){
+      const matchEnd = m.index + m[0].length;
+      if(m.index>last){
+        const slice = combined.slice(last, m.index);
+        writeCurrent(slice);
+      }
+      if(matchEnd===combined.length && !_smdMediaRefHasReliableBoundary(m[1])){
+        const candidate = combined.slice(m.index);
+        if(candidate.length < _MEDIA_TAIL_MAX){
+          unmatchedTail = candidate;
+        } else {
+          writeCurrent(candidate);
+        }
+        last = combined.length;
+        break;
+      }
+      if(!_smdAppendMediaNode(parent, m[1])) writeCurrent(m[0]);
+      last = matchEnd;
+    }
+    // Tail buffer — hold trailing bytes that look like an unterminated
+    // MEDIA prefix; flush any prose before the partial MEDIA suffix.
+    const rest = combined.slice(last);
+    if(rest){
+      const tailMatch = /MEDIA:[^\s\)\]]*$/.exec(rest);
+      const prefixTail = tailMatch ? '' : _smdMediaPrefixTail(rest);
+      const tailValue = tailMatch ? tailMatch[0] : prefixTail;
+      if(tailValue && rest.length < _MEDIA_TAIL_MAX){
+        const tailStart = tailMatch ? tailMatch.index : rest.length-prefixTail.length;
+        if(tailStart>0) writeCurrent(rest.slice(0, tailStart));
+        unmatchedTail = tailValue;
+      } else {
+        writeCurrent(rest);
+      }
+    }
+    if(tails && parser){
+      _smdMediaTailSet(tails, parser, unmatchedTail, parent, baseAddText, data, writeText);
+    }
+  }
+  // Single-token DOM splice. Only ever fed the output of
+  // _inlineMediaHtmlForRef (trusted markup fragment). Plain text
+  // goes through baseAddText → createTextNode — NEVER here.
+  function _smdAppendMediaNode(parent, rawRef){
+    if(!parent||!rawRef) return false;
+    const mediaHtml = (typeof _inlineMediaHtmlForRef==='function')
+      ? _inlineMediaHtmlForRef(String(rawRef))
+      : '';
+    if(!mediaHtml) return false;
+    let host=null;
+    try{
+      const doc=new DOMParser().parseFromString('<div>'+mediaHtml+'</div>','text/html');
+      host=doc.body&&doc.body.firstChild;
+    }catch(_){ host=null; }
+    if(!host||!host.childNodes||!host.childNodes.length) return false;
+    const frag=document.createDocumentFragment();
+    while(host.firstChild) frag.appendChild(host.firstChild);
+    parent.appendChild(frag);
+    _smdScheduleMediaPostProcess(parent);
+    return true;
+  }
+  function _smdScheduleMediaPostProcess(root){
+    if(!root) return;
+    if(typeof _postProcessWithAnchorSuppression!=='function'
+      && typeof postProcessRenderedMessages!=='function'
+      && typeof _applyMediaPlaybackPreferences!=='function') return;
+    const run=()=>{
+      try{
+        if(typeof _postProcessWithAnchorSuppression==='function') _postProcessWithAnchorSuppression(root);
+        else if(typeof postProcessRenderedMessages==='function') postProcessRenderedMessages(root);
+        if(typeof _applyMediaPlaybackPreferences==='function') _applyMediaPlaybackPreferences(root);
+      }catch(_){}
+    };
+    if(typeof requestAnimationFrame==='function') requestAnimationFrame(run);
+    else if(typeof setTimeout==='function') setTimeout(run,0);
+    else run();
+  }
+  // Per-parser tail buffer keyed by parser instance so concurrent
+  // smd parsers (live prose + anchor-scene rows + tool-card streams)
+  // keep their own pending bytes. Cleared inside _smdEndParser /
+  // _clearAnchorProseIncrementalNode on stream end.
+  const _SMD_MEDIA_TAIL = (typeof WeakMap!=='undefined') ? new WeakMap() : new Map();
+  // Sentinel for parserFor fallback — a dedicated object instead of
+  // a string, so WeakMap.set doesn't throw TypeError when all three
+  // parser-identity sources are unavailable (Greptile #3).
+  const __SMD_PARSER_FALLBACK = {};
+  function _smdParserKey(data, el){
+    return (data && data.parser) || (el && el.__smdParser) || __SMD_PARSER_FALLBACK;
+  }
+  function _smdBindParserIdentity(renderer, parser, el){
+    if(renderer&&renderer.data) renderer.data.parser=parser;
+    if(el) el.__smdParser=parser;
+  }
+  function _smdClearParserIdentity(el, parser){
+    if(!el || (parser && el.__smdParser!==parser)) return;
+    try{delete el.__smdParser;}catch(_){el.__smdParser=null;}
+  }
+  function _smdMediaTailClear(parser){
+    if(_SMD_MEDIA_TAIL && parser) _SMD_MEDIA_TAIL.delete(parser);
+    // Also clear the fallback key if it was ever set
+    if(_SMD_MEDIA_TAIL && parser === __SMD_PARSER_FALLBACK) _SMD_MEDIA_TAIL.delete(parser);
+  }
+  function _safeSmdRenderer(el){
+    const renderer=window.smd.default_renderer(el);
+    const baseSetAttr=renderer.set_attr;
+    const baseAddText=renderer.add_text;
+    const writePlainText=(writeParent, writeData, writeText)=>{
+      _smdAppendPlainText(writeParent, writeData, writeText, baseAddText);
+    };
+    const parserFor = (data)=>{
+      return _smdParserKey(data, el);
+    };
+    renderer.add_text=(data,text)=>{
+      const parent=data&&data.nodes&&data.nodes[data.index];
+      _smdMediaAwareAddText(baseAddText, parent, data, text, _SMD_MEDIA_TAIL, parserFor(data), writePlainText);
+    };
+    renderer.set_attr=(data,attr,value)=>{
+      const isHref=window.smd&&attr===window.smd.HREF;
+      const isSrc=window.smd&&attr===window.smd.SRC;
+      const allowed=isSrc?_smdImgSrcAllowed(value):_SMD_SAFE_URL_RE.test(String(value||''));
+      if(isHref&&/^(file|workspace|session):\/\//i.test(String(value||''))){
+        baseSetAttr(data,attr,_smdLinkHref(value));
+        if(/^session:\/\//i.test(String(value||''))){
+          const node=data&&data.nodes&&data.nodes[data.index];
+          if(node&&node.classList) node.classList.add('session-link');
+        }
+        return;
+      }
+      if((isHref||isSrc)&&!allowed){
         const node=data&&data.nodes&&data.nodes[data.index];
         if(node&&node.setAttribute) node.setAttribute('data-blocked-scheme','1');
         return;
@@ -1931,6 +4218,39 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _streamFadeWordCountOf(text){
     const m=String(text||'').match(/\S+/g);
     return m?m.length:0;
+  }
+  function _streamFadeAppendText(el, text){
+    if(!el) return;
+    const value=String(text||'');
+    if(!value) return;
+    const reduceMotion=_streamFadeReduceMotionEnabled();
+    const frag=document.createDocumentFragment();
+    const wordRe=/(\S+)(\s*)/g;
+    const appendStartedAt=performance.now();
+    let last=0, match, changed=false;
+    while((match=wordRe.exec(value))){
+      if(match.index>last) frag.appendChild(document.createTextNode(value.slice(last,match.index)));
+      if(reduceMotion){
+        frag.appendChild(document.createTextNode(match[1]));
+      }else{
+        const span=document.createElement('span');
+        span.className='stream-fade-word is-new';
+        const fadeMs=_streamFadeCurrentMs||_STREAM_FADE_MS;
+        if(fadeMs!==_STREAM_FADE_MS) span.style.setProperty('--stream-fade-ms',fadeMs+'ms');
+        span.textContent=match[1];
+        frag.appendChild(span);
+        _streamFadeLatestAnimationEndAt=Math.max(_streamFadeLatestAnimationEndAt,appendStartedAt+fadeMs);
+      }
+      if(match[2]) frag.appendChild(document.createTextNode(match[2]));
+      last=match.index+match[0].length;
+      changed=true;
+    }
+    if(!changed){
+      frag.appendChild(document.createTextNode(value));
+    }else if(last<value.length){
+      frag.appendChild(document.createTextNode(value.slice(last)));
+    }
+    el.appendChild(frag);
   }
   function _streamFadePauseAfter(text, paragraphBreakIndex){
     if(paragraphBreakIndex>=0) return 90;
@@ -2035,17 +4355,36 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const next=_streamFadeNextText(displayText);
     if(!next.changed) return next.caughtUp;
     assistantBody.classList.add('stream-fade-active');
-    if(!_smdParser&&window.smd){
-      if(_smdReconnect){assistantBody.innerHTML='';_smdReconnect=false;}
-      _smdNewParser(assistantBody,true);
+    if(!_shouldUseTransparentStreamFade()){
+      if(!_smdParser&&window.smd){
+        if(_smdReconnect){assistantBody.innerHTML='';_smdReconnect=false;}
+        _smdNewParser(assistantBody,true);
+      }
+      if(_smdParser){
+        _smdWrite(next.text,true);
+      }else{
+        assistantBody.innerHTML=renderMd ? renderMd(next.text||'') : esc(next.text||'');
+        _sanitizeSmdLinks(assistantBody);
+      }
+      _streamFadeDomText=String(next.text||'');
+      return next.caughtUp;
     }
     if(_smdParser){
-      _streamFadeAppendOffset=0;
-      _smdWrite(next.text,true);
-    }else{
-      assistantBody.innerHTML=renderMd ? renderMd(next.text||'') : esc(next.text||'');
-      _sanitizeSmdLinks(assistantBody);
+      _smdEndParser();
+      assistantBody.textContent='';
+      _streamFadeDomText='';
     }
+    _smdReconnect=false;
+    if(!_streamFadeDomText&&assistantBody.textContent){
+      assistantBody.textContent='';
+    }
+    if(!String(next.text||'').startsWith(_streamFadeDomText)){
+      assistantBody.textContent='';
+      _streamFadeDomText='';
+    }
+    const delta=String(next.text||'').slice(_streamFadeDomText.length);
+    if(delta) assistantBody.appendChild(document.createTextNode(delta));
+    _streamFadeDomText=String(next.text||'');
     return next.caughtUp;
   }
   function _streamFadeCurrentDisplayText(){
@@ -2061,6 +4400,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(!assistantBody){onDone();return;}
       const target=_streamFadeCurrentDisplayText();
       const caughtUp=_renderStreamingFadeMarkdown(target);
+      const anchorProcessText=_streamFadeDomText||target;
+      if(anchorProcessText) _upsertAnchorProcessProse(anchorProcessText);
       scrollIfPinned();
       if(caughtUp){
         // parser_end can flush pending markdown text; include that final text in
@@ -2126,6 +4467,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const inflight=INFLIGHT[activeSid];
       if(inflight){
         inflight.lastRunJournalSeq=seq;
+        inflight.lastRunJournalEventId=raw;
         if(typeof _throttledPersist==='function') _throttledPersist();
       }
     }
@@ -2405,12 +4747,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _lastRenderMs=performance.now();
       const parsed=_parseStreamState();
       _renderLiveThinking(parsed);
+      const displayText = segmentStart===0
+        ? parsed.displayText                          // first segment: uses think-tag stripping
+        : _stripXmlToolCalls(assistantText.slice(segmentStart));
+      let anchorProcessText=displayText;
       if(assistantBody){
-        const displayText = segmentStart===0
-          ? parsed.displayText                          // first segment: uses think-tag stripping
-          : _stripXmlToolCalls(assistantText.slice(segmentStart));
-        if(_shouldUseStreamFade()){
+        if(_shouldUseLiveProseFade()){
           const caughtUp=_renderStreamingFadeMarkdown(displayText);
+          anchorProcessText=_streamFadeDomText||'';
           if(!caughtUp&&!_streamFinalized){
             setTimeout(()=>_scheduleRender(), 33);
           }
@@ -2437,10 +4781,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }
         if(typeof _syncLiveWorklogReasonsForAnchor==='function') _syncLiveWorklogReasonsForAnchor(assistantRow, displayText);
       }
+      if(anchorProcessText) _upsertAnchorProcessProse(anchorProcessText);
       scrollIfPinned();
-      snapshotLiveTurn();
+      _throttledSnapshotLiveTurn();
     };
-    const frameIntervalMs=_shouldUseStreamFade()?33:66;
+    const frameIntervalMs=_shouldUseLiveProseFade()?33:66;
     if(sinceLastMs>=frameIntervalMs){
       _pendingRafHandle=requestAnimationFrame(_doRender);
     } else {
@@ -2493,10 +4838,21 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       syncInflightAssistantMessage();
       if(!S.session||S.session.session_id!==activeSid) return;
       _completeAutomaticCompressionOnLiveProgress(activeSid);
-      const parsed=_parseStreamState();
       if(_freshSegment) appendThinking('', _liveThinkingPlacement());
-      if(String((parsed&&parsed.displayText)||'').trim()||assistantRow) ensureAssistantRow();
-      _scheduleRender();
+      // Once the assistant row exists its creation gate is already satisfied, and
+      // the throttled _doRender re-parses once per frame anyway — so the per-token
+      // full-text parse here is pure waste (O(n)/token -> O(n^2) over the answer).
+      // Still call ensureAssistantRow() every token exactly as before (cheap; it
+      // also starts a new segment on a post-tool _freshSegment). Only the parse is
+      // skipped, and only once the row exists. (#5455 WS2.3)
+      if(assistantRow){
+        ensureAssistantRow();
+        _scheduleRender();
+      }else{
+        const parsed=_parseStreamState();
+        if(String((parsed&&parsed.displayText)||'').trim()) ensureAssistantRow();
+        _scheduleRender(parsed);
+      }
     });
 
     source.addEventListener('interim_assistant',e=>{
@@ -2576,14 +4932,24 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('reasoning',e=>{
       if(_terminalStateReached||_streamFinalized) return;
+      if(!_ownsActiveStreamOrBackground()) return;
       const d=JSON.parse(e.data);
       const text=d.text||'';
       reasoningText += text;
       liveReasoningText += text;
       if(d.text&&S.session&&S.session.session_id===activeSid) _completeAutomaticCompressionOnLiveProgress(activeSid);
       syncInflightAssistantMessage();
-      if(text&&S.session&&S.session.session_id===activeSid){
-        _updateLiveThinkingCard(_liveThinkingText());
+      if(text&&S.session&&S.session.session_id===activeSid&&S.activeStreamId===streamId){
+        const liveThinkingText=_liveThinkingText();
+        const anchorReasoningFallback={};
+        if(!_upsertAnchorReasoning(liveThinkingText, anchorReasoningFallback)){
+          _updateLiveThinkingCard(liveThinkingText,{
+            ...anchorReasoningFallback,
+            anchorRenderFallback:true,
+            sessionId:activeSid,
+            streamId,
+          });
+        }
       }
     });
 
@@ -2653,6 +5019,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       try{
         const d=JSON.parse(e.data||'{}');
         if((d.session_id||activeSid)!==activeSid) return;
+        if(d.stream_id&&d.stream_id!==streamId) return;
         if(window.HermesSessionInspector&&typeof window.HermesSessionInspector.applyDelta==='function'){
           window.HermesSessionInspector.applyDelta(d);
         }
@@ -2726,7 +5093,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('approval',e=>{
       const d=JSON.parse(e.data);
-      showApprovalForSession(activeSid, d, 1);
+      _applyToAnchor('approval',d,e);
+      showApprovalForSession(activeSid, d, d.pending_count || 1);
       playAttentionSound(_attentionSoundKey(activeSid,'approval',1));
       sendBrowserNotification('Approval required',d.description||'Tool approval needed');
     });
@@ -2743,6 +5111,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       try{ d=JSON.parse(e.data||'{}'); }catch(_){}
       if((d.session_id||activeSid)!==activeSid) return;
       if(!S.session||S.session.session_id!==activeSid) return;
+      _applyToAnchor('state_saved',d,e,null,{render:false});
       _showPersistentStateToast(d.kind, d.name||'', {created:String(d.action||'').toLowerCase()==='created'});
     });
 
@@ -2844,6 +5213,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _streamFinalized=true;
       _terminalStateReached=true;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
+      _cancelThrottledSnapshotTimer();
       const _doneData=JSON.parse(e.data);
       const _finishDone=()=>{
         // Bug A fix: cancel any pending rAF and mark stream finalized before
@@ -2867,6 +5237,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           _smdEndParser();
         }
         const d=_doneData;
+        _flushReasoningToAnchor();
+        _applyToAnchor('done',{
+          status:d.status||'completed',
+          usage:d.usage||null,
+          created_at:d.created_at||null,
+        },_doneEvent);
+        _scheduleAnchorRegistryCleanup();
+        _clearAnchorProseIncrementalNode();
         const isActiveSession=_isSessionCurrentPane(activeSid);
         const isSessionViewed=_isSessionActivelyViewed(activeSid);
         const completedSession=d.session||{session_id:activeSid};
@@ -2933,7 +5311,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           if(d.usage){
             const _doneUsageFallback={...(S.lastUsage||{})};
             if(S.session){
-              for(const _usageField of ['context_length','threshold_tokens','last_prompt_tokens']){
+              for(const _usageField of ['context_length','threshold_tokens','last_prompt_tokens','post_compression_context_tokens_estimate']){
                 if(_doneUsageFallback[_usageField]==null&&S.session[_usageField]!=null){
                   _doneUsageFallback[_usageField]=S.session[_usageField];
                 }
@@ -3023,7 +5401,34 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           if(typeof _messageRenderableMessageCount==='function'&&typeof _messageRenderWindowSize!=='undefined'){
             _messageRenderWindowSize=Math.max(typeof _currentMessageRenderWindowSize==='function'?_currentMessageRenderWindowSize():50, _messageRenderableMessageCount());
           }
+          // #4650 review: the agent turn that just completed may have changed
+          // server-side reasoning config (e.g. a `/reasoning <level>` slash
+          // command writes agent.reasoning_effort) WITHOUT changing the model/
+          // provider cache key. Invalidate the reasoning-chip cache once at the
+          // turn boundary so the following syncTopbar() refetches the authoritative
+          // effort exactly once (not per-token — the storm short-circuit is intact).
+          if(typeof _lastReasoningFetchKey!=='undefined') _lastReasoningFetchKey=null;
+          // Arm one-shot keep-open so the JUST-settled worklog stays open on the
+          // settle render (height-stable swap, no shrink jump). Disarm, then run a
+          // scroll-PRESERVING collapse pass for BOTH pin states so the worklog
+          // returns to its copied live/user disclosure state (a pinned follower's
+          // scrollToBottom() only settles scroll, it does NOT re-render, so without
+          // this pass the forced-open DOM would persist for them). This unarmed
+          // render also populates the cache with the correctly-collapsed DOM, and
+          // the same-frame JS restore absorbs the collapse so there is no jump.
+          // (#5260 gate-cert: keep-open must be transient + uncached for everyone.)
+          // #6385: capture the scroll snapshot from the LIVE DOM before arming
+          // keep-open, so the collapse render below anchors to the content the
+          // reader was actually viewing — not to a stale intermediate state where
+          // the worklog was temporarily expanded.
+          const _doneLiveScrollSnapshot=typeof _captureMessageScrollSnapshot==='function'
+            ? _captureMessageScrollSnapshot()
+            : null;
+          if(typeof _armKeepSettledWorklogOpen==='function') _armKeepSettledWorklogOpen(_settledStreamId);
           syncTopbar();renderMessages({preserveScroll:true});
+          if(typeof _disarmKeepSettledWorklogOpen==='function') _disarmKeepSettledWorklogOpen();
+          if(typeof _renderMessagesWithScrollSnapshot==='function') _renderMessagesWithScrollSnapshot({_prescrollSnapshot:_doneLiveScrollSnapshot});
+          else renderMessages({preserveScroll:true});
           if(shouldFollowOnDone&&typeof scrollToBottom==='function') scrollToBottom();
           if(typeof noteWorkspaceMutationsFromToolCalls==='function') noteWorkspaceMutationsFromToolCalls(S.toolCalls);
           loadDir('.', { preservePreview: true });
@@ -3048,7 +5453,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         playNotificationSound();
         sendBrowserNotification('Response complete',assistantText?assistantText.slice(0,100):'Task finished');
       };
-      if(_shouldUseStreamFade()&&assistantBody){
+      if(_shouldUseLiveProseFade()&&assistantBody){
         _cancelAnimationFramePendingStreamRender();
         _drainStreamFadeBeforeDone(_finishDone);
         return;
@@ -3195,6 +5600,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
       _terminalStateReached=true;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
+      _cancelThrottledSnapshotTimer();
+      _clearAnchorProseIncrementalNode();
       _streamFinalized=true;
       _cancelAnimationFramePendingStreamRender();
       _streamFadeCleanupReduceMotionListener();
@@ -3236,7 +5643,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
               if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(S.session.session_id);
             }
           } else {
-            S.messages.push({role:'assistant',content:`**${label}:** ${message}${hint}`,provider_details:details,provider_details_label:detailsLabel,_error:true});
+            const recovery=(d.compression_recovery&&typeof d.compression_recovery==='object')?d.compression_recovery:null;
+            S.messages.push({role:'assistant',content:`**${label}:** ${d.message}${hint}`,provider_details:details,provider_details_label:detailsLabel,_compressionRecovery:recovery||undefined});
+            _attachProjectedAnchorSceneToLastAssistant(S.messages);
           }
         }catch(_){
           S.messages.push({role:'assistant',content:'**发生错误：** 请求处理失败，请查看服务端日志。',_error:true});
@@ -3297,13 +5706,16 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // Attempt one reconnect if the stream is still active server-side
       if(!_reconnectAttempted && streamId){
         _reconnectAttempted=true;
-        setComposerStatus('Reconnecting…');
-        setTimeout(async()=>{
+        const _retryDelays=[1500,3000,5000,8000,12000,20000];
+        setComposerStatus(`Reconnecting… (1/${_retryDelays.length})`);
+        const _probeReconnect=async(attempt=0)=>{
+          if(_terminalStateReached || _streamFinalized) return;
+          if(!_isSessionCurrentPane(activeSid)) return;
           try{
             const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
             if(st.active){
               setComposerStatus('Reconnected');
-              _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}`,document.baseURI||location.href).href,{withCredentials:true}));
+              _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
               return;
             }
             if(st.replay_available){
@@ -3317,13 +5729,60 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           if(await _restoreSettledSession(source)) return;
           if(_deferStreamErrorIfOffline()) return;
           if(_deferStreamErrorIfPageHidden(source)) return;
+          const nextDelay=_retryDelays[attempt+1];
+          if(nextDelay){
+            setComposerStatus(`Reconnecting… (${attempt+2}/${_retryDelays.length})`);
+            setTimeout(()=>{void _probeReconnect(attempt+1);}, nextDelay);
+            return;
+          }
+          // Last-ditch: the stream may have finished while we were retrying.
+          // _restoreSettledSession polls the full session API (not just stream
+          // status) and can recover a completed response without an error banner.
+          // This is especially important on iOS where Tailscale reconnects can
+          // take longer than the retry window.
+          setComposerStatus('Restoring session…');
+          let _restoreTimedOut=false;
+          const _restoreTimer=setTimeout(()=>{
+            // If _restoreSettledSession hangs (flaky Tailscale), don't leave
+            // the UI stuck on "Restoring session…" forever. Fall through to
+            // _handleStreamError after 8s.
+            _restoreTimedOut=true;
+            if(!_terminalStateReached&&!_streamFinalized){
+              if(_deferStreamErrorIfOffline()) return;
+              if(_deferStreamErrorIfPageHidden(source)) return;
+              _flushReasoningToAnchor();
+              _scheduleAnchorRegistryCleanup(120000);
+              _handleStreamError(source);
+            }
+          },8000);
+          try{
+            if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})){
+              if(_restoreTimedOut) return; // timer already fired _handleStreamError
+              clearTimeout(_restoreTimer);
+              return;
+            }
+          }catch(_){
+            // _restoreSettledSession threw. If the timer already fired,
+            // _handleStreamError was called there; we return below.
+            // Otherwise the code below cancels the timer and calls it directly.
+          }
+          if(_restoreTimedOut) return; // timer already fired _handleStreamError
+          clearTimeout(_restoreTimer);
+          if(_terminalStateReached||_streamFinalized) return;
+          if(_deferStreamErrorIfOffline()) return;
+          if(_deferStreamErrorIfPageHidden(source)) return;
+          _flushReasoningToAnchor();
+          _scheduleAnchorRegistryCleanup(120000);
           _handleStreamError(source);
-        },1500);
+        };
+        setTimeout(()=>{void _probeReconnect(0);},_retryDelays[0]);
         return;
       }
-      if(await _restoreSettledSession(source)) return;
+      if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})) return;
       if(_deferStreamErrorIfOffline()) return;
       if(_deferStreamErrorIfPageHidden(source)) return;
+      _flushReasoningToAnchor();
+      _scheduleAnchorRegistryCleanup(120000);
       _handleStreamError(source);
     });
 
@@ -3331,6 +5790,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
       _terminalStateReached=true;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
+      _cancelThrottledSnapshotTimer();
+      _clearAnchorProseIncrementalNode();
       _streamFinalized=true;
       _cancelAnimationFramePendingStreamRender();
       _streamFadeCleanupReduceMotionListener();
@@ -3394,7 +5855,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     return `${m.role}|${ts}|${body.slice(0,160)}`;
   }
-  const _EPHEMERAL_TURN_FIELDS=['_turnUsage','_turnDuration','_turnTps','_gatewayRouting','_statusCard'];
+  const _EPHEMERAL_TURN_FIELDS=['_turnUsage','_turnDuration','_turnTps','_gatewayRouting','_statusCard','_anchor_stream_id','_anchor_activity_scene'];
+  function _isHistoricalAnchorActivityScene(scene){
+    if(!scene||typeof scene!=='object') return false;
+    const identity=scene.identity&&typeof scene.identity==='object'?scene.identity:null;
+    const turnId=identity&&typeof identity.turn_id==='string'?identity.turn_id:'';
+    return turnId.indexOf('historical:')===0;
+  }
   function _carryForwardEphemeralTurnFields(prevMessages, nextMessages){
     if(!Array.isArray(prevMessages)||!Array.isArray(nextMessages)) return nextMessages;
     if(!prevMessages.length||!nextMessages.length) return nextMessages;
@@ -3409,6 +5876,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const k=_messageIdentityKey(nm); if(!k) continue;
       const pm=prevIdx.get(k); if(!pm) continue;
       for(const f of _EPHEMERAL_TURN_FIELDS){
+        if(f==='_anchor_activity_scene'&&_isHistoricalAnchorActivityScene(pm[f])) continue;
         if(pm[f]!=null && nm[f]==null) nm[f]=pm[f];
       }
     }
@@ -3432,6 +5900,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(!session) return false;
       if(session.active_stream_id||session.pending_user_message) return false;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
+      _cancelThrottledSnapshotTimer();
+      _clearAnchorProseIncrementalNode();
       _streamFinalized=true;
       _cancelAnimationFramePendingStreamRender();
       _streamFadeCleanupReduceMotionListener();
@@ -3502,6 +5972,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // Opus review Q1: mirror done/apperror/cancel finalization so any pending rAF
     // cannot fire after renderMessages() has settled the DOM with the error message.
     if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
+    _cancelThrottledSnapshotTimer();
+    _clearAnchorProseIncrementalNode();
     _streamFinalized=true;
     _cancelAnimationFramePendingStreamRender();
     _streamFadeCleanupReduceMotionListener();
@@ -3571,7 +6043,75 @@ function transcript(){
   return lines.join('\n');
 }
 
-function autoResize(){const el=$('msg');el.style.height='auto';el.style.height=Math.min(el.scrollHeight,200)+'px';updateSendBtn();}
+let _composerAutoResizeRaf=0;
+let _composerLastResizeValue='';
+function autoResize(){
+  if(_composerAutoResizeRaf && typeof cancelAnimationFrame==='function'){
+    cancelAnimationFrame(_composerAutoResizeRaf);
+    _composerAutoResizeRaf=0;
+  }
+  const el=$('msg');
+  const _nextValue=String(el.value||'');
+  const _isAppendOnly=_nextValue.length>_composerLastResizeValue.length&&_nextValue.startsWith(_composerLastResizeValue);
+  const _fitsCurrentHeight=el.scrollHeight<=el.offsetHeight;
+  // Only a direct append at the natural one-row height can skip the height
+  // round trip. Replacements and an already-tall composer must remeasure so the
+  // textarea can shrink back to its natural height.
+  // Parse min-height with a STRICT finite-pixel check: getComputedStyle can
+  // return a non-px value (e.g. a percentage `min-height`) that parseFloat would
+  // read as a bogus pixel number (parseFloat("50%")===50), which would wrongly
+  // enable the fast path and leave the composer stuck tall. Reject anything that
+  // is not exactly "<number>px" so those cases fail closed to the full resize.
+  const _minHeightRaw=_isAppendOnly&&_fitsCurrentHeight?getComputedStyle(el).minHeight:'';
+  const _minHeight=/^(?:\d+(?:\.\d+)?|\.\d+)px$/.test(_minHeightRaw)?parseFloat(_minHeightRaw):NaN;
+  const _isAtMinimumHeight=Number.isFinite(_minHeight)&&el.offsetHeight<=Math.ceil(_minHeight)+1;
+  if(_isAppendOnly&&_fitsCurrentHeight&&_isAtMinimumHeight){
+    _composerLastResizeValue=_nextValue;
+    updateSendBtn();
+    return;
+  }
+  const _prevComposerH=el.offsetHeight;
+  // #5514: autoResize() momentarily sets the textarea to height:'auto' (collapses
+  // a multi-row composer toward its 1-row min) before reading scrollHeight and
+  // restoring the measured height. That transient collapse GROWS the flex:1
+  // #messages viewport, and reading scrollHeight forces a synchronous reflow — so
+  // the browser CLAMPS a bottom-anchored scrollTop DOWN by the collapse delta and
+  // does NOT restore it when the height snaps back. The reader is left stranded
+  // Δpx above the bottom on EVERY keystroke while the composer is multi-row (Δ ∝
+  // composer height), and the clamp's async scroll event also sticky-unpins the
+  // reader (_messageUserUnpinned=true), dead-ending the grow-path re-pin below and
+  // stream auto-follow until they manually scroll back. #5516's net-growth gate
+  // never caught this because a steady-state keystroke has no NET height change.
+  // Root-cause fix: snapshot the transcript's scrollTop BEFORE the height
+  // round-trip and restore it AFTER, undoing the transient clamp within the same
+  // synchronous task so the poisoning scroll event never fires. This protects
+  // pinned readers AND near-bottom readers who scrolled up to re-read (their exact
+  // position is preserved), takes no _programmaticScroll latch, and is inert to
+  // iOS dynamic-toolbar reflows. A genuine NET grow/shrink still lands the reader
+  // Δnet off-bottom; the grow-gated re-pin below (and the #composerWrap
+  // ResizeObserver) then snap a still-pinned reader to the true bottom.
+  const _msgs=$('messages');
+  const _prevScrollTop=_msgs?_msgs.scrollTop:0;
+  el.style.height='auto';
+  el.style.height=Math.min(el.scrollHeight,200)+'px';
+  _composerLastResizeValue=_nextValue;
+  if(_msgs&&_msgs.scrollTop!==_prevScrollTop) _msgs.scrollTop=_prevScrollTop;
+  updateSendBtn();
+  // Genuine NET growth (a new row that keeps the composer taller than before)
+  // still shrinks the settled viewport, so a pinned reader must be re-pinned to
+  // the true bottom. Guarded to fire only on real growth and only when genuinely
+  // pinned (the helper no-ops for a scrolled-away reader). The #composerWrap
+  // ResizeObserver is the safety net for growth paths that don't route here.
+  if(el.offsetHeight>_prevComposerH && typeof _repinMessagesAfterComposerResize==='function') _repinMessagesAfterComposerResize();
+}
+function scheduleComposerAutoResize(){
+  if(typeof requestAnimationFrame!=='function'){autoResize();return;}
+  if(_composerAutoResizeRaf) return;
+  _composerAutoResizeRaf=requestAnimationFrame(()=>{
+    _composerAutoResizeRaf=0;
+    autoResize();
+  });
+}
 
 
 // ── YOLO mode state ──
@@ -3728,7 +6268,9 @@ function showApprovalCard(pending, pendingCount) {
   const counter = $("approvalCounter");
   if (counter) {
     if (pendingCount && pendingCount > 1) {
-      counter.textContent = "1 of " + pendingCount + " pending";
+      counter.textContent = (typeof t === "function")
+        ? t("approval_pending_count", pendingCount)
+        : ("1 of " + pendingCount + " pending");
       counter.style.display = "";
     } else {
       counter.style.display = "none";
@@ -4239,7 +6781,11 @@ function showClarifyCard(pending) {
   _clarifySessionId = sid;
   _clarifyId = pending.clarify_id || null;
   _clarifySignature = sig;
-  _startClarifyCountdown(pending);
+  if (Number(pending.timeout_seconds) > 0) {
+    _startClarifyCountdown(pending);
+  } else {
+    _clearClarifyCountdownTimer();
+  }
   if (!sameClarify) {
     _clarifyVisibleSince = Date.now();
     _clearClarifyHideTimer();

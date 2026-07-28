@@ -10,6 +10,10 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 - **`BACKEND=local` webui_logout short-circuit** — `POST /api/integration/webui_logout` still clears WebUI `hermes_session` and the in-process Zhiling identity cache, but when `BACKEND=local` it returns `200` with `{"status":"ok","login_url":"/"}` without calling auth-proxy `/api/logout`. Empty or `remote` keeps the existing downstream proxy behavior.
 
+- **Zhiling password change proxy** — `POST /api/integration/auth/password/change` forwards the JSON body to Control Plane `/api/auth/password/change` (requires `HERMES_INTEGRATION=1` and `ZHILING_CONTROL_PLANE_URL`). Responses are passed through unchanged; on `200` with `reauth_required=true`, WebUI clears `hermes_session` and the Zhiling identity cache. Implementation in `integration/identity/`.
+
+- **WebUI appearance read APIs** — `GET /api/integration/webui_appearance` 原样返回 `{HERMES_HOME}/webui-appearance/webui-appearance.json`；`GET /api/integration/webui_appearance/file?path=` 在同目录下按相对路径返回文件流（锚定路径、拒绝穿越）。实现见 `integration/webui_appearance/`。
+
 - **Chinese approval and clarify display copy** — WebUI approval cards now use a Fork-owned Chinese display description while retaining Hermes Agent's canonical English `description` and `pattern_key(s)` for Smart Approval, hooks, and persistent allowlists. Optional Agent `tirith_findings` are preserved through local SSE, pending mirror, and gateway Runs API normalization (display-field whitelist only). Known Tirith `rule_id`s such as `pipe-to-interpreter` and `schemeless-url-in-sink-context` render Chinese titles/templates; unknown rules keep a Chinese severity prefix with original English evidence. Legacy English prose payloads remain supported as a fallback. WebUI also asks the Agent to write `clarify` questions and choices in Simplified Chinese without translating literal commands, paths, URLs, or configuration values. The response resolver now enforces `allow_permanent` server-side and never permanently stores `tirith:*` keys.
 
 - **webui_login MCP header sync** — `GET /api/integration/webui_login` 在带 Bearer 且 identity lookup 返回 200 时，按 server 名匹配各可见 Profile `config.yaml` 中的 `mcp_servers.ithink_kb_mcp`，仅用 `ithinktank.account` / `ithinktank.uuid` 写入 `X-IThink-Account` / `X-IThink-UUID`（`headers` 或键缺失时补上；无回退到 userId/扁平字段）；无该 server 则跳过；单 Profile 写失败不阻断登录响应。实现见 `integration/identity/mcp_headers_sync.py`。
@@ -36,6 +40,10 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Changed
 
+- **Assistant bubbles skill count uses local_all** — `skill` 气泡的 `skills_count` / 技能列表改为与 SkillHub `scope=local_all` 相同：该 Profile 下已启用的 **installed** hub 技能 ∪ **custom** 技能（同名 custom 优先），排除 `skills.disabled`。不再直接 `rglob` Profile `skills/**/SKILL.md`。SkillHub 目录不可用时回退到本地 `.hub_installed` + custom 扫描（相同合并/禁用规则）。实现见 `integration/skills/listing.py` 的 `list_local_all_enabled_skills` 与 `integration/assistant_bubbles/collectors.py`。
+
+- **SkillHub `local_all` name dedupe** — `scope=local_all` 合并结果按 frontmatter `name` 去重（先出现者保留；custom 在前），避免同名多目录把 `total` 抬高，导致与气泡 `skills_count`（按 name 计数）不一致。
+
 - **Unified project logging** — 运行时日志统一收敛到 `integration/project_logging/`，仅使用 `HERMES_WEBUI_LOG_LEVEL` 控制输出级别。`INFO` 启用请求访问、API 错误、启动与 stream_diag 日志；访问日志为紧凑的 `METHOD path -> status` 格式，不再带 `[webui][request]` 标签。`DEBUG` 额外启用 stream_diag debug 字段与慢请求线程栈。直接交互式运行 `python server.py` 仍 tee 到 `{HERMES_WEBUI_STATE_DIR}/server-<port>.log`；`bootstrap.py` / supervisor 重定向 stderr 时自动跳过重复落盘。移除 `HERMES_WEBUI_API_ERROR_LOG*`、`HERMES_WEBUI_SERVER_LOG*`、`HERMES_WEBUI_STREAM_DIAG`、`HERMES_WEBUI_SLOW_REQUEST_*` 等分散日志环境变量；服务运行路径不再使用 `print()` 输出诊断信息。原 `integration/request_logging/` 已并入 `integration/project_logging/`（`request.py` + `formatting.py`），删除重复的格式化与 console 封装。
 
 - **SkillHub `local_all` profile filter** — `GET /api/skillhub/skills?scope=local_all` 支持 `profile`（默认 `default`）：只聚合该 Profile skills 目录下的已安装 hub + 本地 custom，并用该 Profile `config.yaml` 的 `skills.disabled` 过滤。其它 scope 仍忽略 `profile`；`stats` 仍为全局计数。
@@ -58,6 +66,8 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 - **Chat apperror `content_filtered` type** — Provider 内容审核拦截（如 `data_inspection_failed`、`content_filter`、`content_policy_violation`、`moderation`）不再落到通用 `error` 兜底文案，新增 `content_filtered` 分类，中文文案「内容被审核拦截 / 输入内容被模型服务的内容审核策略拦截」，`details_label` 为「审核详情」。分类与文案集中在 `integration/chat_provider_errors/`（`classify.py`、`messages.py`），`api/streaming.py` 接缝不动。分类顺序：`content_filtered` / `compression_exhausted` 等 provider 专有 code 优先于 `404`/`401`/`429` 弱状态码匹配，避免 chatcmpl ID 子串误判（见下条 Fixed）。
 
 ### Fixed
+
+- **stream_diag first visible includes reasoning** — `P4 S4.3` / `first_visible_token` 现在把 SSE `reasoning` 与 `token` 都算作首个可见文本；思考模型先输出思考时，日志在首个思考字出现时触发，而不再等到最终回答正文。
 
 - **Cron 会话手动续聊 Artifact** — 在已 materialize 的定时任务会话中通过 WebUI 继续对话时，成功 `write_file` 的 Artifact decision 现在会被明确验证后再标记 turn 完成；提取或 SQLite store 写入失败会记录可诊断事件，不再被静默误判为无成果或完成。
 

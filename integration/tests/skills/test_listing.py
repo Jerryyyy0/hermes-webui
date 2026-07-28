@@ -459,6 +459,100 @@ def test_local_all_skills_for_profile_applies_profile_disabled(tmp_path):
     assert custom_skills[0]["disabled"] is True
 
 
+def test_merge_local_all_skills_custom_wins_and_drops_disabled():
+    installed_hub = [
+        {"name": "shared", "disabled": False},
+        {"name": "hub-only", "disabled": False},
+        {"name": "hub-off", "disabled": True},
+    ]
+    custom = [
+        {"name": "shared", "custom": True, "disabled": False},
+        {"name": "custom-off", "custom": True, "disabled": True},
+        {"name": "custom-only", "custom": True, "disabled": False},
+    ]
+    merged = listing._merge_local_all_skills(installed_hub, custom)
+    assert [s["name"] for s in merged] == ["shared", "custom-only", "hub-only"]
+    assert merged[0].get("custom") is True
+
+
+def test_merge_local_all_skills_dedupes_duplicate_custom_names():
+    """Custom scan keys by dir; same name in two dirs must count once in local_all."""
+    installed_hub = [{"name": "hub-only", "disabled": False}]
+    custom = [
+        {"name": "dup", "dir_name": "a/dup", "custom": True, "disabled": False},
+        {"name": "dup", "dir_name": "b/dup", "custom": True, "disabled": False},
+        {"name": "unique", "dir_name": "unique", "custom": True, "disabled": False},
+    ]
+    merged = listing._merge_local_all_skills(installed_hub, custom)
+    assert [s["name"] for s in merged] == ["dup", "unique", "hub-only"]
+    assert merged[0]["dir_name"] == "a/dup"
+
+
+def test_list_local_all_enabled_skills_uses_hub_path():
+    installed_hub = [
+        {"name": "hub-a", "disabled": False},
+        {"name": "hub-off", "disabled": True},
+    ]
+    custom = [{"name": "custom-1", "disabled": False}]
+    ctx = _ctx_with_annotated([])
+    with patch("integration.skills.listing.skillhub.build_hub_catalog_context", return_value=ctx):
+        with patch(
+            "integration.skills.listing._local_all_skills_for_profile",
+            return_value=(installed_hub, custom),
+        ) as local_all:
+            result = listing.list_local_all_enabled_skills("team-a")
+    local_all.assert_called_once_with(ctx, "team-a")
+    assert [s["name"] for s in result] == ["custom-1", "hub-a"]
+
+
+def test_list_local_all_enabled_skills_falls_back_without_hub(tmp_path):
+    skills_dir = tmp_path / "skills"
+    hub = skills_dir / "hub-skill"
+    hub.mkdir(parents=True)
+    (hub / "SKILL.md").write_text(
+        "---\nname: hub-skill\ndescription: Hub installed skill.\n---\n",
+        encoding="utf-8",
+    )
+    (hub / ".hub_installed").write_text("", encoding="utf-8")
+    custom = skills_dir / "custom-skill"
+    custom.mkdir(parents=True)
+    (custom / "SKILL.md").write_text(
+        "---\nname: custom-skill\ndescription: Custom skill.\n---\n",
+        encoding="utf-8",
+    )
+    (custom / ".user_created").write_text("", encoding="utf-8")
+
+    with patch(
+        "integration.skills.listing.skillhub.build_hub_catalog_context",
+        side_effect=RuntimeError("SKILLHUB_URL not configured"),
+    ):
+        with patch("integration.skills.listing.skills_dir_for_profile", return_value=skills_dir):
+            with patch(
+                "integration.skills.listing.skillhub._disabled_skill_names_for_profile",
+                return_value={"hub-skill"},
+            ):
+                with patch(
+                    "integration.skills.listing.local_skills._scan_custom_skill_dicts",
+                    return_value=[
+                        {
+                            "name": "custom-skill",
+                            "installed": True,
+                            "hub_installed": False,
+                            "custom": True,
+                            "disabled": False,
+                        }
+                    ],
+                ):
+                    with patch(
+                        "integration.skills.listing.skillhub._hub_installed_index",
+                        return_value={"hub-skill": "hub-skill"},
+                    ):
+                        result = listing.list_local_all_enabled_skills("default")
+
+    names = sorted(s["name"] for s in result)
+    assert names == ["custom-skill"]
+
+
 def test_annotate_installed_index_profile_and_disabled_override(tmp_path):
     skills_dir = tmp_path / "skills"
     skill_dir = skills_dir / "demo"

@@ -7,6 +7,7 @@ from integration.skills.handlers import try_handle_get, try_handle_post
 from integration.egress.handlers import try_handle_get as try_handle_egress_get
 from integration.egress.handlers import try_handle_post as try_handle_egress_post
 from integration.identity.handlers import try_handle_get as try_handle_identity_get
+from integration.identity.handlers import try_handle_post as try_handle_identity_post
 from integration.logout.handlers import try_handle_get as try_handle_logout_get
 from integration.logout.handlers import try_handle_post as try_handle_logout_post
 
@@ -61,6 +62,13 @@ def test_identity_handlers_noop_for_other_paths_when_enabled():
     handler = MagicMock()
     with patch("integration.identity.handlers.identity_lookup_enabled", return_value=True):
         assert try_handle_identity_get(handler, urlparse("/api/skills")) is False
+        assert try_handle_identity_post(handler, urlparse("/api/skills/save"), {}) is False
+
+
+def test_identity_password_change_noop_for_login_path_when_enabled():
+    handler = MagicMock()
+    with patch("integration.identity.handlers.identity_lookup_enabled", return_value=True):
+        assert try_handle_identity_post(handler, urlparse("/api/integration/webui_login"), {}) is False
 
 
 def test_logout_handlers_noop_when_disabled():

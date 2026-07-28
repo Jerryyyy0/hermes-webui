@@ -48,9 +48,11 @@ _CORE_CONSOLE_FIELDS = (
     "run_conversation_ms",
     "first_token_ms",
     "first_visible_token_ms",
+    "first_reasoning_ms",
     "final_save_ms",
     "error_type",
     "error",
+    "event_type",
 )
 _DEBUG_CONSOLE_FIELDS = (
     "request_id",
@@ -77,6 +79,7 @@ _FIELD_ALIASES = {
     "run_conversation_ms": "run",
     "first_token_ms": "first_token",
     "first_visible_token_ms": "first_visible_token",
+    "first_reasoning_ms": "first_reasoning",
     "final_save_ms": "save",
     "cache_elapsed_ms": "cache",
     "phase": "phase",
@@ -84,6 +87,7 @@ _FIELD_ALIASES = {
     "phase_name": "phase_name",
     "outcome": "outcome",
     "hold_ms": "hold",
+    "event_type": "event_type",
     "event_callback_supported": "callback_supported",
     "event_callback_passed": "callback_passed",
     "event_callback_will_be_passed": "callback_will_pass",
@@ -103,6 +107,7 @@ _MS_FIELDS = {
     "run_conversation_ms",
     "first_token_ms",
     "first_visible_token_ms",
+    "first_reasoning_ms",
     "final_save_ms",
     "cache_elapsed_ms",
 }
@@ -136,7 +141,7 @@ _EVENT_PHASES = {
     "webui.worker.agent_ready": ("P3", "SUMMARY", "agent preparation total"),
     "webui.worker.context_prepared": ("P4", "S4.1", "context preparation"),
     "agent.model_first_delta": ("P4", "S4.2", "model request to first delta"),
-    "webui.stream.first_visible_token": ("P4", "S4.3", "first delta to visible token"),
+    "webui.stream.first_visible_token": ("P4", "S4.3", "first delta to visible text"),
     "webui.worker.run_conversation": ("P4", "SUMMARY", "model execution total"),
     "webui.worker.finalize": ("P5", "S5.1", "finalize and persist"),
     "webui.worker.cleanup_summary": ("P5", "SUMMARY", "worker total"),
@@ -451,9 +456,10 @@ class StreamDiag:
         now_elapsed = elapsed_ms(self.start_ms)
         if self.first_event_ms is None:
             self.first_event_ms = now_elapsed
-        if event_type == "token" and self.first_visible_token_ms is None:
+        # "Visible" means UI text the user can read: answer tokens or thinking.
+        if event_type in ("token", "reasoning") and self.first_visible_token_ms is None:
             self.first_visible_token_ms = now_elapsed
-        elif event_type == "reasoning" and self.first_reasoning_ms is None:
+        if event_type == "reasoning" and self.first_reasoning_ms is None:
             self.first_reasoning_ms = now_elapsed
         elif str(event_type or "").startswith("tool") and self.first_tool_ms is None:
             self.first_tool_ms = now_elapsed

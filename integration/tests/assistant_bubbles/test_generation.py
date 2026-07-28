@@ -58,37 +58,56 @@ def test_emotion_refreshes_after_5_minutes():
     assert generation.should_generate("emotion", "same", cache, now=now) is True
 
 
-def test_collect_skills_prefers_real_chinese_display_metadata(tmp_path):
-    skill = tmp_path / "skills" / "ideation"
-    skill.mkdir(parents=True)
-    (skill / "SKILL.md").write_text("---\nname: ideation\n---\nGenerate ideas.\n", encoding="utf-8")
-    (skill / ".detail.json").write_text(
-        json.dumps({"display_name": "创意构思", "display_description": "生成创意点子"}, ensure_ascii=False),
-        encoding="utf-8",
-    )
+def test_collect_skills_maps_local_all_display_metadata():
+    raw = [
+        {
+            "name": "ideation",
+            "display_name": "创意构思",
+            "display_description": "生成创意点子",
+            "description": "Generate ideas.",
+        },
+        {
+            "name": "plain-english",
+            "display_name": "",
+            "description": "Generate concise English summaries.",
+        },
+    ]
 
-    skills = collectors.collect_skills(tmp_path)
+    with patch(
+        "integration.skills.listing.list_local_all_enabled_skills",
+        return_value=raw,
+    ):
+        skills = collectors.collect_skills("default")
 
     assert skills == [
         {"name": "ideation", "label": "创意构思", "description": "生成创意点子"},
+        {
+            "name": "plain-english",
+            "label": "plain-english",
+            "description": "Generate concise English summaries.",
+        },
     ]
-    assert collectors.skills_block(skills) == "- 创意构思：生成创意点子"
-
-
-def test_collect_skills_keeps_skills_without_chinese_display_text(tmp_path):
-    skill = tmp_path / "skills" / "plain-english"
-    skill.mkdir(parents=True)
-    (skill / "SKILL.md").write_text(
-        "---\nname: plain-english\ndescription: Generate concise English summaries.\n---\n",
-        encoding="utf-8",
+    assert collectors.skills_block(skills) == (
+        "- 创意构思：生成创意点子\n"
+        "- plain-english：Generate concise English summaries."
     )
 
-    skills = collectors.collect_skills(tmp_path)
 
-    assert skills == [
-        {"name": "plain-english", "label": "plain-english", "description": "Generate concise English summaries."},
-    ]
-    assert collectors.skills_block(skills) == "- plain-english：Generate concise English summaries."
+def test_collect_skills_uses_profile_name_for_local_all():
+    calls: list[str] = []
+
+    def fake_list(profile: str):
+        calls.append(profile)
+        return [{"name": "a", "display_name": "甲", "description": "desc"}]
+
+    with patch(
+        "integration.skills.listing.list_local_all_enabled_skills",
+        side_effect=fake_list,
+    ):
+        skills = collectors.collect_skills("team-a")
+
+    assert calls == ["team-a"]
+    assert skills == [{"name": "a", "label": "甲", "description": "desc"}]
 
 
 def test_skill_prompt_uses_full_skill_count_and_block():
@@ -354,22 +373,32 @@ def test_run_task_skill_failure_writes_fallback_when_no_cached_text(tmp_path, ca
     profile = tmp_path / "profile"
     profile.mkdir()
     (profile / "config.yaml").write_text("model:\n  provider: test\n  default: test-model\n", encoding="utf-8")
-    skills_dir = profile / "skills" / "writer"
-    skills_dir.mkdir(parents=True)
-    (skills_dir / "SKILL.md").write_text("---\nname: writer\ndescription: 写作辅助\n---\n", encoding="utf-8")
-    context = collectors.collect_context("alice", profile, "skill")
-    fingerprint = collectors.fingerprint_for("skill", context)
-    task = generation.BubbleTask(
-        profile="alice",
-        profile_path=str(profile),
-        category="skill",
-        fingerprint=fingerprint,
-        provider="test",
-        model="test-model",
-    )
+    local_skills = [
+        {"name": "writer", "display_name": "写作", "description": "写作辅助"},
+    ]
+    with patch(
+        "integration.skills.listing.list_local_all_enabled_skills",
+        return_value=local_skills,
+    ):
+        context = collectors.collect_context("alice", profile, "skill")
+        fingerprint = collectors.fingerprint_for("skill", context)
+        task = generation.BubbleTask(
+            profile="alice",
+            profile_path=str(profile),
+            category="skill",
+            fingerprint=fingerprint,
+            provider="test",
+            model="test-model",
+        )
 
-    with patch("integration.assistant_bubbles.generation._generate_with_model", return_value=(None, "skill_name_missing")):
-        generation._run_task(task)
+        with patch(
+            "integration.assistant_bubbles.generation._generate_with_model",
+            return_value=(None, "skill_name_missing"),
+        ), patch(
+            "integration.skills.listing.list_local_all_enabled_skills",
+            return_value=local_skills,
+        ):
+            generation._run_task(task)
 
     err = capsys.readouterr().err
     assert "[webui][assistant_bubbles][generation_failed]" in err

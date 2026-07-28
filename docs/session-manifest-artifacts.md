@@ -19,11 +19,13 @@ lineage_key + profile + turn_key + record_kind + path
 1. 工具事件和最终 assistant 提取必须限定在当前 turn slice。
 2. 中间 assistant prose 不提取路径。
 3. 不扫描 terminal stdout、目录列表、heredoc/Python 源码或整个 workspace。
-4. 非空 DB decision 是该 turn 的权威记录，不重扫、不覆盖。
+4. 非空 DB decision 是该 turn 的权威记录；正常完成结算时，同轮最终 assistant 明确列出且存在的文件会追加到该 decision，重复路径保留工具来源。
 5. Empty decision 只能用同轮完整 transcript 的强证据原子修复。
 6. Read-repair 不更新 session recency 或 session-list 事件。
 7. 同一稳定 `tool_call_id` 的重放不得跨 turn 重复归属。
 8. 工具来源只接受成功 completed 事件；成功文件读取只建立同 turn 瞬态 evidence，不进入 wire/store。
+
+
 
 ## 2. Decision-first 构建流程
 
@@ -42,6 +44,8 @@ flowchart TD
   keepEmpty --> wire
   persist --> wire
 ```
+
+
 
 `build_session_manifest()` 仍会派生 todos/references 和 turn 结构，但 artifacts 的最终权威来源遵循上图。
 
@@ -75,14 +79,18 @@ turn_key = user._turn_key 或 turn:<user_msg_idx>
 
 ## 4. Artifact 证据来源
 
-| 来源 | `source_tool` | 证据 |
-| --- | --- | --- |
-| Workspace mutation | 实际工具名 | 结构化参数与 diff |
-| Skill mutation | `skill_manage` 或实际写入工具 | mutation action、skill name/path、真实 `SKILL.md` |
-| Terminal | `terminal` | 成功命令中的静态 `-o`/`--output` 操作数 |
-| Media | `media` | assistant 显式 `MEDIA:<local-path>` |
-| Final assistant | `assistant_prose` | 当前 turn 最后一条 assistant 中的既存 workspace 文件名/路径 |
-| Legacy | 原有 source 或规范化值 | `session.turn_artifacts`，仅 lineage 完全无 decision 时 |
+
+| 来源                 | `source_tool`          | 证据                                                |
+| ------------------ | ---------------------- | ------------------------------------------------- |
+| Workspace mutation | 实际工具名                  | 结构化参数与 diff                                       |
+| Skill mutation     | `skill_manage` 或实际写入工具 | mutation action、skill name/path、真实 `SKILL.md`     |
+| Terminal           | `terminal`             | 成功命令中的静态 `-o`/`--output`/`--print-to-pdf` 操作数     |
+| Media              | `media`                | assistant 显式 `MEDIA:<local-path>`                 |
+| Final assistant    | `assistant_prose`      | 当前 turn 最后一条 assistant 中的既存 workspace 文件名/路径      |
+| Legacy             | 原有 source 或规范化值        | `session.turn_artifacts`，仅 lineage 完全无 decision 时 |
+
+
+
 
 ### 4.1 Mutation 工具
 
@@ -120,18 +128,20 @@ Mutation 工具可以先形成内部记录；最终 wire 再判断是否可预�
 - Wire path 是 canonical skill 名，不是磁盘绝对路径。
 - Integration/SkillHub 不可用、skill 不存在或仍为 `in_progress` 时不输出正常预览行；有充分历史 provenance 时可输出 `expired`。
 
-### 4.3 `MEDIA:`
 
-`_MEDIA_TOKEN_RE` 只读取 assistant 消息中的显式 `MEDIA:`。远程 URL 跳过。Workspace 内 media 规范化为相对路径；允许的 workspace 外本地 media 保留绝对路径并走 session media preview。
 
-User 消息中的 `MEDIA:`、工具结果 JSON 的相似字段和普通 URL 都不作为 media artifact。
+### 4.3 MEDIA:
+
+_MEDIA_TOKEN_RE 只读取 assistant 消息中的显式 MEDIA:。远程 URL 跳过。Workspace 内 media 规范化为相对路径；允许的 workspace 外本地 media 保留绝对路径并走 session media preview。
+
+User 消息中的 MEDIA:、工具结果 JSON 的相似字段和普通 URL 都不作为 media artifact。
 
 ### 4.4 最后一条 assistant
 
-每个 turn 只扫描最后一条 `role=assistant`。`_paths_from_last_assistant_message()` 使用：
+每个 turn 只扫描最后一条 role=assistant。_paths_from_last_assistant_message() 使用：
 
-- `_BROAD_FILENAME_EXT_RE`：绝对路径、相对路径、裸文件名；
-- `_LAST_ASSISTANT_TILDE_PATH_RE`：`~/...` 路径候选。
+- _BROAD_FILENAME_EXT_RE：绝对路径、相对路径、裸文件名；
+- _LAST_ASSISTANT_TILDE_PATH_RE：~/... 路径候选。
 
 显式相对/绝对路径直接走路径安全与预览 gate。裸文件名不从正文中的目录描述补全，而按以下优先级选择首个唯一 exact-basename 匹配：当前 turn 的成功强工具/MEDIA 路径、当前构建中此前 turn 已确认 artifact 路径、workspace 根目录真实文件。任一优先级层出现多个不同路径时视为歧义并跳过，且不降级到下一层。后续纯问答 turn 若最后一条 assistant 明确列出一个能唯一解析的既有文件，仍可产生该 turn 的 `assistant_prose` artifact。
 
@@ -144,7 +154,7 @@ User 消息中的 `MEDIA:`、工具结果 JSON 的相似字段和普通 URL 都�
 - 不超过每轮候选上限；
 - canonical path 去重。
 
-因此最终回复表格中的 `` `报告.html` `` 可成为成果；不存在的 `` `摘要.md` `` 不会被推断补全。中间 assistant 即使写出绝对路径或“文件位置”也不产生 prose artifact。
+因此最终回复表格中的 ``报告.html`` 可成为成果；不存在的 ``摘要.md`` 不会被推断补全。中间 assistant 即使写出绝对路径或“文件位置”也不产生 prose artifact。
 
 ### 4.5 Read evidence
 
@@ -212,7 +222,7 @@ python .../md2word.py INPUT OUTPUT [options]
 final assistant 已进入 s.messages
 → 当前 user._turn_key 与 stream/SSE key 一致
 → s.save() 持久化 transcript
-→ _persist_turn_artifact_paths(stream_turn_key)
+→ _persist_turn_artifact_paths(stream_turn_key) 合并 stream-owned 工具证据与同轮最终 assistant 的真实文件
 → upsert_manifest_records()
 → completed journal event
 ```
@@ -253,6 +263,8 @@ Expired 行：
 - 同 path 的 source 优先级为 mutation tool > `media` / `assistant_prose`；
 - skill 按 canonical skill 名去重。
 
+
+
 ## 8. SSE
 
 - `extract_manifest_delta_from_tool_event()`：`tool_start` 不产生 artifact/reference；只有成功 `tool_complete` 可产生工具候选。文件 read 永不产生公开 delta，成功 `skill_view` 可产生 reference。
@@ -260,27 +272,33 @@ Expired 行：
 - 候选未通过 preview gate 时不发送。
 - SSE 只更新 Inspector 乐观态；per-turn chips 以 `done` 后 GET 为准。
 
+
+
 ## 9. 关键函数
 
-| 函数 | 职责 |
-| --- | --- |
-| `build_session_manifest` | GET manifest 总入口 |
-| `_message_turns` / `_turn_message_slice` | Turn 分组与切片 |
-| `_collect_tool_events` | Transcript/tool_calls → ToolEvent |
-| `_collect_media_artifact_events` | `MEDIA:` → events |
-| `_collect_final_assistant_artifact_events` | 当前轮末条 prose → events |
-| `_tool_event_succeeded` | 统一工具成功门槛 |
-| `ARTIFACT_EXCLUSION_READ_TOOLS` | 文件读取瞬态排除分类 |
-| `_terminal_output_paths` | 受控 terminal 输出操作数 |
-| `_extract_turn_artifact_entries` | 单 turn 共享提取 |
-| `_resolve_manifest_path` | 路径规范化 |
-| `_artifact_path_is_real` | Reconcile/持久化存在性闸门 |
-| `upsert_manifest_records` | 普通 store upsert |
-| `replace_manifest_turn_records` | 原子替换单 turn decision |
-| `repair_empty_manifest_turns` | Empty-only read-repair |
-| `backfill_missing_manifest_records` | Lineage 无 decision 时 backfill |
-| `_row_to_wire` / `_rows_to_wire` | Wire 与 expired projection |
-| `_persist_turn_artifact_paths` | Turn 完成持久化 |
+
+| 函数                                         | 职责                                |
+| ------------------------------------------ | --------------------------------- |
+| `build_session_manifest`                   | GET manifest 总入口                  |
+| `_message_turns` / `_turn_message_slice`   | Turn 分组与切片                        |
+| `_collect_tool_events`                     | Transcript/tool_calls → ToolEvent |
+| `_collect_media_artifact_events`           | `MEDIA:` → events                 |
+| `_collect_final_assistant_artifact_events` | 当前轮末条 prose → events              |
+| `_tool_event_succeeded`                    | 统一工具成功门槛                          |
+| `ARTIFACT_EXCLUSION_READ_TOOLS`            | 文件读取瞬态排除分类                        |
+| `_terminal_output_paths`                   | 受控 terminal 输出操作数                 |
+| `_extract_turn_artifact_entries`           | 单 turn 共享提取                       |
+| `_resolve_manifest_path`                   | 路径规范化                             |
+| `_artifact_path_is_real`                   | Reconcile/持久化存在性闸门                |
+| `upsert_manifest_records`                  | 普通 store upsert                   |
+| `replace_manifest_turn_records`            | 原子替换单 turn decision               |
+| `repair_empty_manifest_turns`              | Empty-only read-repair            |
+| `backfill_missing_manifest_records`        | Lineage 无 decision 时 backfill     |
+| `_row_to_wire` / `_rows_to_wire`           | Wire 与 expired projection         |
+| `_persist_turn_artifact_paths`             | Turn 完成持久化                        |
+
+
+
 
 ## 10. 测试
 
@@ -299,3 +317,4 @@ Expired 行：
 - Empty decision 原子修复、profile/lineage 隔离和幂等；
 - Expired provenance；
 - Transcript save 早于 manifest decision。
+

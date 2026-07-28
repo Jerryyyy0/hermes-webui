@@ -9,7 +9,12 @@ from typing import Any
 from api.helpers import _sanitize_error, j
 
 from integration.config import identity_lookup_enabled
-from integration.identity.client import IdentityLookupError, lookup_current_identity
+from integration.identity.client import (
+    IdentityLookupError,
+    PasswordChangeError,
+    change_password,
+    lookup_current_identity,
+)
 
 from integration.project_logging import (
     console_error,
@@ -27,6 +32,7 @@ from integration.identity.session_store import (
 )
 
 _NO_STORE = {"Cache-Control": "no-store"}
+_PASSWORD_CHANGE_PATH = "/api/integration/auth/password/change"
 
 
 def _extract_bearer_token(handler) -> str:
@@ -149,46 +155,47 @@ def try_handle_get(handler, parsed) -> bool:
         j(handler, response_body, status=502, extra_headers=_NO_STORE)
         return True
 
-    sync_stats = None
+    # sync_stats = None
     if status == 200:
         save_session(token, payload)
-        if isinstance(payload, dict):
-            try:
-                from integration.identity.mcp_headers_sync import sync_ithink_kb_mcp_headers
-
-                sync_stats = sync_ithink_kb_mcp_headers(payload)
-            except Exception as exc:
-                console_warning(
-                    with_timestamp(
-                        f"[webui][integration_login][mcp_headers] {one_line(f'sync failed: {exc}')}",
-                        {
-                            "event": "integration_login",
-                            "phase": "mcp_headers_failed",
-                            "error": str(exc),
-                        },
-                    )
-                )
-            else:
-                if isinstance(sync_stats, dict):
-                    extras = format_kv(
-                        {
-                            "updated": sync_stats.get("updated"),
-                            "skipped": sync_stats.get("skipped"),
-                            "errors": sync_stats.get("errors"),
-                        }
-                    )
-                    summary = with_timestamp(
-                        f"[webui][integration_login][mcp_headers] sync finished {extras}".rstrip(),
-                        {
-                            "event": "integration_login",
-                            "phase": "mcp_headers_done",
-                            **{k: sync_stats.get(k) for k in ("updated", "skipped", "errors")},
-                        },
-                    )
-                    if sync_stats.get("errors"):
-                        console_warning(summary)
-                    else:
-                        console_info(summary)
+        # Temporarily disabled: sync ithink_kb_mcp headers on login.
+        # if isinstance(payload, dict):
+        #     try:
+        #         from integration.identity.mcp_headers_sync import sync_ithink_kb_mcp_headers
+        #
+        #         sync_stats = sync_ithink_kb_mcp_headers(payload)
+        #     except Exception as exc:
+        #         console_warning(
+        #             with_timestamp(
+        #                 f"[webui][integration_login][mcp_headers] {one_line(f'sync failed: {exc}')}",
+        #                 {
+        #                     "event": "integration_login",
+        #                     "phase": "mcp_headers_failed",
+        #                     "error": str(exc),
+        #                 },
+        #             )
+        #         )
+        #     else:
+        #         if isinstance(sync_stats, dict):
+        #             extras = format_kv(
+        #                 {
+        #                     "updated": sync_stats.get("updated"),
+        #                     "skipped": sync_stats.get("skipped"),
+        #                     "errors": sync_stats.get("errors"),
+        #                 }
+        #             )
+        #             summary = with_timestamp(
+        #                 f"[webui][integration_login][mcp_headers] sync finished {extras}".rstrip(),
+        #                 {
+        #                     "event": "integration_login",
+        #                     "phase": "mcp_headers_done",
+        #                     **{k: sync_stats.get(k) for k in ("updated", "skipped", "errors")},
+        #                 },
+        #             )
+        #             if sync_stats.get("errors"):
+        #                 console_warning(summary)
+        #             else:
+        #                 console_info(summary)
     elif status == 401:
         clear_session()
 
@@ -200,12 +207,50 @@ def try_handle_get(handler, parsed) -> bool:
         "username": payload.get("username") if status == 200 and isinstance(payload, dict) else None,
         "error": payload.get("error") if isinstance(payload, dict) else None,
     }
-    if isinstance(sync_stats, dict):
-        log_fields["mcp_headers_updated"] = sync_stats.get("updated")
-        log_fields["mcp_headers_skipped"] = sync_stats.get("skipped")
-        log_fields["mcp_headers_errors"] = sync_stats.get("errors")
+    # if isinstance(sync_stats, dict):
+    #     log_fields["mcp_headers_updated"] = sync_stats.get("updated")
+    #     log_fields["mcp_headers_skipped"] = sync_stats.get("skipped")
+    #     log_fields["mcp_headers_errors"] = sync_stats.get("errors")
     _log_integration_login(handler, phase="exit", **log_fields)
     response_body = _response_payload(payload if isinstance(payload, dict) else {})
     _log_outgoing_response(status=status, body=response_body, auth_mode="bearer")
     j(handler, response_body, status=status, extra_headers=_NO_STORE)
+    return True
+
+
+def try_handle_post(handler, parsed, body) -> bool:
+    if not identity_lookup_enabled():
+        return False
+    if parsed.path != _PASSWORD_CHANGE_PATH:
+        return False
+
+    request_body = body if isinstance(body, dict) else {}
+    try:
+        status, payload = change_password(request_body)
+    except PasswordChangeError as exc:
+        j(
+            handler,
+            {
+                "success": False,
+                "error": "password_change_failed",
+                "message": f"修改密码服务不可用：{_sanitize_error(exc)}",
+            },
+            status=502,
+            extra_headers=_NO_STORE,
+        )
+        return True
+
+    extra_headers = dict(_NO_STORE)
+    if status == 200 and isinstance(payload, dict) and payload.get("reauth_required") is True:
+        from integration.logout.handlers import _logout_extra_headers
+
+        extra_headers = _logout_extra_headers(handler)
+        clear_session()
+
+    j(
+        handler,
+        payload if isinstance(payload, dict) else {},
+        status=status,
+        extra_headers=extra_headers,
+    )
     return True
