@@ -23,8 +23,17 @@ def normalize_order(raw: str | None) -> str:
     return value
 
 
+def _to_pinyin(text: str) -> str:
+    try:
+        from pypinyin import lazy_pinyin, Style
+        return "".join(lazy_pinyin(text, style=Style.NORMAL)).casefold()
+    except Exception:
+        return text.casefold()
+
+
 def _name_sort_key(skill: dict) -> str:
-    return str(skill.get("display_name") or skill.get("name") or "").casefold()
+    name = str(skill.get("display_name") or skill.get("name") or "")
+    return _to_pinyin(name)
 
 
 def _mtime_sort_key(skill: dict) -> float:
