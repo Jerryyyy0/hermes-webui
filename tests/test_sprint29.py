@@ -457,6 +457,20 @@ class TestSanitizeError:
         result = _sanitize_error(e)
         assert "C:\\Users\\hermes" not in result
 
+    def test_relative_nested_path_preserved(self):
+        from api.helpers import _sanitize_error
+        e = FileNotFoundError("Not a directory: notes/github-trending")
+        result = _sanitize_error(e)
+        assert result == "Not a directory: notes/github-trending"
+        assert "<path>" not in result
+
+    def test_absolute_path_in_message_still_stripped(self):
+        from api.helpers import _sanitize_error
+        e = FileNotFoundError("Path does not exist: /Users/wzq/workspace/tt")
+        result = _sanitize_error(e)
+        assert "/Users" not in result
+        assert "<path>" in result
+
     def test_live_404_does_not_leak_path(self, webui_server):
         """Live server: file-not-found errors must not expose filesystem paths."""
         body, status = post("/api/file/read", {"path": "../../etc/passwd"})

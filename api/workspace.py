@@ -1234,10 +1234,23 @@ def rename_anchored(root: Path, source: Path, dest: Path) -> None:
         os.close(src_parent_fd)
 
 
+def _require_directory(target: Path, rel: str) -> None:
+    """Raise FileNotFoundError distinguishing missing paths from non-directories."""
+    try:
+        st = target.stat()
+    except FileNotFoundError:
+        raise FileNotFoundError(f"Path does not exist: {rel}") from None
+    except OSError:
+        # Permission / I/O failures: fall through to the non-directory message
+        # rather than claiming the path is missing.
+        raise FileNotFoundError(f"Not a directory: {rel}") from None
+    if not stat.S_ISDIR(st.st_mode):
+        raise FileNotFoundError(f"Not a directory: {rel}")
+
+
 def list_dir(workspace: Path, rel: str='.'):
     target = safe_resolve_ws(workspace, rel)
-    if not target.is_dir():
-        raise FileNotFoundError(f"Not a directory: {rel}")
+    _require_directory(target, rel)
     ws_resolved = workspace.resolve()
     target_resolved = target.resolve()
     entries = []
@@ -1612,8 +1625,7 @@ def _collect_workspace_file_entries(workspace: Path, rel: str) -> list[dict]:
     """Walk workspace under *rel* and collect file metadata entries."""
     workspace_root = workspace.expanduser().resolve()
     target = safe_resolve_ws(workspace, rel)
-    if not target.is_dir():
-        raise FileNotFoundError(f"Not a directory: {rel}")
+    _require_directory(target, rel)
 
     entries: list[dict] = []
 

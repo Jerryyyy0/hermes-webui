@@ -44,8 +44,15 @@ def _sanitize_error(e: Exception) -> str:
     """Strip filesystem paths from exception messages before returning to client."""
     import re
     msg = str(e)
-    # Remove absolute paths (Unix and Windows)
-    msg = re.sub(r'(?:(?:/[a-zA-Z0-9_.-]+)+|(?:[A-Z]:\\[^\s]+))', '<path>', msg)
+    # Remove absolute paths only (Unix and Windows). Require that a Unix path
+    # is not preceded by a path-name character so workspace-relative messages
+    # like "Not a directory: notes/github-trending" keep their relative path
+    # instead of becoming "notes<path>".
+    msg = re.sub(
+        r'(?<![A-Za-z0-9_.-])(?:(?:/[a-zA-Z0-9_.-]+)+|(?:[A-Z]:\\[^\s]+))',
+        '<path>',
+        msg,
+    )
     return msg
 
 
