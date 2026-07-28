@@ -5,7 +5,9 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 
+from api.helpers import _redact_text
 from integration.project_logging import get_logger
+from integration.project_logging.formatting import one_line
 
 logger = get_logger(__name__)
 
@@ -340,6 +342,17 @@ def localize_approval_payload(approval: Mapping[str, object]) -> dict:
                     if key and not str(key).startswith("tirith:")
                 ]
                 payload["display_description_zh"] = "安全扫描：" + "；".join(parts + pattern_parts)
+                logger.info(
+                    "[approval-localization-trace] structured_rule_ids=%s "
+                    "english_pipe_in_display=%s display=%s",
+                    ",".join(
+                        str(item.get("rule_id") or "")
+                        for item in findings
+                        if isinstance(item, Mapping)
+                    ),
+                    "Pipe to interpreter" in payload["display_description_zh"],
+                    one_line(_redact_text(payload["display_description_zh"]), max_len=1200),
+                )
                 return payload
         payload["display_description_zh"] = _localize_tirith_description(description)
         pattern_parts = [
