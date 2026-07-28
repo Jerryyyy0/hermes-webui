@@ -100,6 +100,8 @@ let _slashModelCache=null;
 let _slashModelCachePromise=null;
 let _slashPersonalityCache=null;
 let _slashPersonalityCachePromise=null;
+let _slashSkillCache=null;
+let _slashSkillCachePromise=null;
 let _agentCommandCache=null;
 let _agentCommandCachePromise=null;
 let _skillCommandCache=[];
@@ -213,10 +215,43 @@ async function _loadSlashPersonalitySubArgs(force=false){
   return _slashPersonalityCachePromise;
 }
 
+async function _loadSlashSkillSubArgs(force=false){
+  if(_slashSkillCache&&!force) return _slashSkillCache;
+  if(_slashSkillCachePromise&&!force) return _slashSkillCachePromise;
+  _slashSkillCachePromise=(async()=>{
+    try{
+      const data=await api('/api/skills');
+      const values=[];
+      for(const skill of (data&&data.skills)||[]){
+        const name=_normalizeSlashSubArg(skill&&skill.name);
+        if(name) values.push(name);
+      }
+      const deduped=Array.from(new Set(values)).sort((a,b)=>a.localeCompare(b));
+      _slashSkillCache=deduped;
+      return deduped;
+    }catch(_){
+      _slashSkillCache=null;
+      return [];
+    }finally{
+      _slashSkillCachePromise=null;
+    }
+  })();
+  return _slashSkillCachePromise;
+}
+
+function invalidateSlashSkillCaches(){
+  _slashSkillCache=null;
+  _slashSkillCachePromise=null;
+  _skillCommandCache=[];
+  _skillCommandCacheReady=false;
+  _skillCommandLoadPromise=null;
+}
+
 function _getSlashSubArgOptions(spec){
   if(Array.isArray(spec)) return Promise.resolve(spec.slice());
   if(spec==='models') return _loadSlashModelSubArgs();
   if(spec==='personalities') return _loadSlashPersonalitySubArgs();
+  if(spec==='skills') return _loadSlashSkillSubArgs();
   return Promise.resolve([]);
 }
 

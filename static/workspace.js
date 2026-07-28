@@ -1039,11 +1039,23 @@ async function loadDir(path, opts={}){
       if(pending.length){
         const results=await Promise.all(pending.map(dirPath=>
           api(`/api/list?session_id=${encodeURIComponent(sessionId)}&path=${encodeURIComponent(dirPath)}`)
-            .then(dc=>({dirPath,entries:dc.entries||[]}))
-            .catch(()=>({dirPath,entries:[]}))
+            .then(dc=>({dirPath,entries:dc.entries||[],missing:false}))
+            .catch(error=>({dirPath,entries:[],missing:!!(error&&error.status===404)}))
         ));
         if(!S.session||S.session.session_id!==sessionId)return;
-        for(const {dirPath,entries} of results) S._dirCache[dirPath]=entries;
+        let prunedExpandedDirs=false;
+        for(const {dirPath,entries,missing} of results){
+          if(missing){
+            // Expanded directories are persisted by workspace, not session. A
+            // directory removed on disk must not make each future session in
+            // this workspace repeat its stale /api/list request.
+            expanded.delete(dirPath);
+            prunedExpandedDirs=true;
+            continue;
+          }
+          S._dirCache[dirPath]=entries;
+        }
+        if(prunedExpandedDirs)_saveExpandedDirs();
       }
       if(expanded.size>0)renderFileTree();
     }

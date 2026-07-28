@@ -2721,6 +2721,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     window._showBusyPlaceholderHint=!!s.show_busy_placeholder_hint;
     window._newChatOnWorkspaceSwitch=!!s.new_chat_on_workspace_switch;  // #5473 opt-in
     window._sessionEndlessScrollEnabled=!!s.session_endless_scroll;
+    window._autoScrollFollow=s.auto_scroll_follow!==false;
     window._botName=s.bot_name||'Hermes';
     if(s.default_model_provider) window._activeProvider=s.default_model_provider;
     if(s.default_model){

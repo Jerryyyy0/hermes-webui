@@ -104,6 +104,14 @@ if(_msgEl) _msgEl.addEventListener('blur', ()=>{ if('speechSynthesis' in window 
 
 let _selectedTextReplyBtn=null;
 let _selectedTextReplyText='';
+let _pendingSelections=[];  // [{id, name, text}] — named context blocks
+let _selectionIdCounter=0;
+// #4380: expose a pending-selection predicate so the composer's primary-action
+// content check (_composerHasContent in ui.js) treats selection-only replies as
+// sendable content even though they no longer live in the textarea.
+if(typeof window!=='undefined'){
+  window._hasPendingSelections=function(){return _pendingSelections.length>0;};
+}
 let _selectedTextReplyRaf=0;
 const _persistentStateToastSeen=new Set();
 const _thinkPairs=[
@@ -1092,6 +1100,8 @@ async function send(){
     if(typeof showToast==='function') showToast('Read-only imported sessions cannot be modified.',3000);
     return;
   }
+  let _slashDisplayTextOverride=null;
+  let _pendingMoaConfig=null;
   // Slash command intercept -- local commands handled without agent round-trip.
   // We push the user message BEFORE running the handler for echo-worthy
   // commands so chat order is correct: some handlers (e.g. cmdHelp) push
@@ -1483,6 +1493,52 @@ async function send(){
 }
 
 const LIVE_STREAMS={};
+const _STREAM_NOTIFICATION_BACKGROUND={};
+
+// #4416: track whether the tab was hidden at ANY point during a live stream, so
+// the response-complete notification fires for a backgrounded tab even when
+// Chromium throttles the background-tab SSE and delivers the `done` event LATE
+// (after the user returns, when document.hidden already reads false). Each entry
+// is STREAM-OWNED ({streamId, wasHidden}) so a stale entry left by a non-`done`
+// terminal path (apperror/cancel/stream-error/reconnect-no-active) can never be
+// mis-attributed to a later stream for the same session id — a reconnect only
+// keeps the prior state when the streamId matches. One idempotent
+// visibilitychange listener (never leaks) flips wasHidden on all active entries.
+const _STREAM_WAS_HIDDEN={};
+let _streamHiddenTrackerBound=false;
+function _bindStreamHiddenTracker(){
+  if(_streamHiddenTrackerBound||typeof document==='undefined'||typeof document.addEventListener!=='function') return;
+  _streamHiddenTrackerBound=true;
+  document.addEventListener('visibilitychange',()=>{
+    if(document.hidden){ for(const k in _STREAM_WAS_HIDDEN){ const e=_STREAM_WAS_HIDDEN[k]; if(e) e.wasHidden=true; } }
+  });
+}
+function _clearStreamHidden(sid, streamId){
+  // Clear only when we own the current stream's entry (or unconditionally when
+  // streamId is omitted). Prevents a terminal path for an old stream from wiping
+  // a newer stream's tracker.
+  if(!sid) return;
+  const e=_STREAM_WAS_HIDDEN[sid];
+  if(!e) return;
+  if(streamId&&e.streamId&&e.streamId!==streamId) return;
+  delete _STREAM_WAS_HIDDEN[sid];
+}
+function _clearStreamNotificationBackground(sid, streamId){
+  if(!sid) return;
+  const e=_STREAM_NOTIFICATION_BACKGROUND[sid];
+  if(!e) return;
+  if(streamId&&e.streamId&&e.streamId!==streamId) return;
+  delete _STREAM_NOTIFICATION_BACKGROUND[sid];
+}
+function _shouldForceCompletionNotification(sid, streamId){
+  const hiddenEntry=_STREAM_WAS_HIDDEN[sid];
+  const backgroundEntry=_STREAM_NOTIFICATION_BACKGROUND[sid];
+  const wasHidden=!!(hiddenEntry&&hiddenEntry.wasHidden);
+  const wasBackgrounded=!!(backgroundEntry&&backgroundEntry.wasBackgrounded);
+  _clearStreamHidden(sid, streamId);
+  _clearStreamNotificationBackground(sid, streamId);
+  return wasHidden||wasBackgrounded;
+}
 
 function closeLiveStream(sessionId, streamId, source){
   const live=LIVE_STREAMS[sessionId];
@@ -2024,6 +2080,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   let _reconnectAttempted=false;
   let _terminalStateReached=false;
   let _deferredStreamRecoveryBound=false;
+  let _pendingStreamEndRecovery=false;
+  let _streamEndRecoveryTimer=null;
+  let _streamEndRecoveryAttempts=0;
 
   function _pageHiddenForStreamError(){
     return (typeof document!=='undefined'&&document.visibilityState==='hidden')||
@@ -2108,6 +2167,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   const _STREAM_FADE_MAX_MS=900;
   const _STREAM_FADE_DONE_MAX_MS=1000;
   const _STREAM_FADE_DONE_DRAIN_MAX_MS=1400;
+  const _streamFadeEnabledForStream=window._fadeTextEffect===true;
   const _anchorApi=(typeof window!=='undefined'&&window.HermesAssistantTurnAnchors)
     ? window.HermesAssistantTurnAnchors
     : null;
@@ -5215,6 +5275,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
       _cancelThrottledSnapshotTimer();
       const _doneData=JSON.parse(e.data);
+      const _doneEvent=e;
       const _finishDone=()=>{
         // Bug A fix: cancel any pending rAF and mark stream finalized before
         // the DOM is settled by renderMessages, so no trailing token/reasoning rAF
@@ -5261,6 +5322,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         const shouldFollowOnDone=isActiveSession&&((typeof _shouldFollowMessagesOnDomReplace==='function')
           ? _shouldFollowMessagesOnDomReplace()
           : (typeof _isMessagePaneNearBottom==='function'&&_isMessagePaneNearBottom(1200)));
+        const _settledStreamId=isActiveSession?(S.activeStreamId||(d&&d.stream_id)||''):'';
         if(isActiveSession){
           S.activeStreamId=null;
         }

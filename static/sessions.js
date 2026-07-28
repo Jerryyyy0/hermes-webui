@@ -79,6 +79,26 @@ function _composerDraftPayloadSignature(text, files) {
   const normalizedFiles = _composerDraftFilesForPersist(files).map(_composerDraftFileSignature);
   return JSON.stringify({ text: normalizedText, files: normalizedFiles });
 }
+function _composerDraftHasPayload(text, files) {
+  return !!(String(text || '') || (Array.isArray(files) && files.filter(Boolean).length));
+}
+function _sessionComposerDraftHasPayload(session) {
+  const draft = session && session.composer_draft;
+  return !!(draft && _composerDraftHasPayload(draft.text, draft.files));
+}
+function _rememberComposerDraftPayloadState(sid, text, files) {
+  if (!sid) return;
+  const normalizedText = String(text || '');
+  const normalizedFiles = Array.isArray(files) ? files.filter(Boolean) : [];
+  if (_composerDraftHasPayload(normalizedText, normalizedFiles)) {
+    _composerDraftKnownPayloadSessions.add(sid);
+  } else {
+    _composerDraftKnownPayloadSessions.delete(sid);
+  }
+  if (S.session && S.session.session_id === sid) {
+    S.session.composer_draft = { text: normalizedText, files: normalizedFiles };
+  }
+}
 
 function _composerDraftPayloadSignatureForSid(sid) {
   if (typeof S === 'undefined' || !S.session || S.session.session_id !== sid) return null;
@@ -318,6 +338,9 @@ let _sessionListPointerActive = false;
 let _sessionListLastScrollAt = 0;
 let _pendingSessionListPayload = null;
 let _pendingSessionListApplyTimer = 0;
+let _sessionListLoadError = null;
+let _sessionListHasLoadedOnce = false;
+const _SESSION_LIST_BOOT_TIMEOUT_MS = 90000;
 const SESSION_LIST_INTERACTION_IDLE_MS = 700;
 const SESSION_SWIPE_DURATION_MS = 500;
 const SESSION_SWIPE_REFLOW_LEAD_MS = 220;
@@ -1437,6 +1460,7 @@ async function loadSession(sid){
   const forceReload = !!opts.force;
   const currentSid = S.session ? S.session.session_id : null;
   const sameSessionForceReload = forceReload && currentSid===sid;
+  const _keepStaleUntilLoaded = !!opts.keepStaleUntilLoaded && sameSessionForceReload;
   // Clicking the already-open session in the sidebar is a no-op. Reloading it
   // tears down active pane state and can reset the long-session scroll window
   // to the top even though the user did not navigate anywhere. Explicit
@@ -2512,6 +2536,118 @@ async function _generateHandoffSummary(sid, rounds) {
   // retry.
 }
 
+function _externalImportPayload(session) {
+  const payload = {session_id: session.session_id};
+  if (_showAllProfiles && session && typeof session.profile === 'string' && session.profile) {
+    payload.all_profiles = true;
+    payload.profile = session.profile;
+  }
+  return payload;
+}
+function _afterSessionFirstPaint(fn, delayMs=0){
+  return new Promise((resolve)=>{
+    const invoke=()=>{
+      try{ resolve(typeof fn==='function' ? fn() : undefined); }
+      catch(_){ resolve(undefined); }
+    };
+    const run=()=>{
+      if(typeof requestIdleCallback==='function'){
+        requestIdleCallback(invoke,{timeout:1500});
+      }else{
+        setTimeout(invoke, delayMs);
+      }
+    };
+    if(typeof requestAnimationFrame==='function'){
+      requestAnimationFrame(()=>requestAnimationFrame(run));
+    }else{
+      setTimeout(run, delayMs);
+    }
+  });
+}
+function _deferSessionSideEffect(sid, fn, delayMs=0){
+  if(!sid||typeof fn!=='function') return Promise.resolve();
+  return _afterSessionFirstPaint(()=>{
+    if(!S.session||S.session.session_id!==sid) return undefined;
+    return fn();
+  },delayMs);
+}
+function _deferWorkspaceRefreshForSession(sid, opts={}){
+  _deferSessionSideEffect(sid,()=>{
+    const load=loadDir('.', opts);
+    if(load&&typeof load.catch==='function') load.catch(()=>{});
+  },150);
+}
+function _buildSessionRenameStarter(session, displayEl, renderDisplay){
+  return ()=>{
+    if(_isReadOnlySession(session)){ if(typeof showToast==='function') showToast('Read-only imported sessions cannot be renamed.',3000); return; }
+    if(_loadingSessionId&&_loadingSessionId!==session.session_id) return;
+
+    closeSessionActionMenu();
+    _renamingSid=session.session_id;
+    const oldTitle=_sessionDisplayTitle(session)||'Untitled';
+    const inp=document.createElement('input');
+    inp.className='session-title-input';
+    inp.value=oldTitle;
+    ['click','mousedown','dblclick','pointerdown'].forEach(ev=>
+      inp.addEventListener(ev, e2=>e2.stopPropagation())
+    );
+    const applyLocalTitle=(target, nextTitle)=>{
+      if(!target) return;
+      target.title=nextTitle;
+      target.display_title=nextTitle;
+      target._state_db_title=nextTitle;
+    };
+    const applyTitle=(nextTitle, updateDom=true)=>{
+      applyLocalTitle(session, nextTitle);
+      const cached=_allSessions.find(item=>item&&item.session_id===session.session_id);
+      applyLocalTitle(cached, nextTitle);
+      if(S.session&&S.session.session_id===session.session_id){applyLocalTitle(S.session, nextTitle);syncTopbar();}
+      if(updateDom) renderDisplay(_sessionDisplayTitle(session), session);
+    };
+    let finishDone=false;
+    const finish=async(save)=>{
+      if(finishDone) return;
+      finishDone=true;
+      const releaseRename=()=>{
+        _renamingSid=null;
+        if(inp.isConnected) inp.replaceWith(displayEl);
+        setTimeout(()=>{ if(_renamingSid===null) renderSessionListFromCache(); },50);
+      };
+      if(!save){
+        applyTitle(oldTitle,false);
+        releaseRename();
+        return;
+      }
+      const newTitle=inp.value.trim()||'Untitled';
+      try{
+        if(newTitle!==oldTitle){
+          await api('/api/session/rename',{method:'POST',body:JSON.stringify({session_id:session.session_id,title:newTitle})});
+        }
+        applyTitle(newTitle);
+      }catch(err){
+        applyTitle(oldTitle,false);
+        const msg='Rename failed: '+(err&&err.message?err.message:String(err));
+        setStatus(msg);
+        if(typeof showToast==='function') showToast(msg,3000,'error');
+      }finally{
+        releaseRename();
+      }
+    };
+    inp.onkeydown=e2=>{
+      if(e2.key==='Enter'){
+        if(window._isImeEnter&&window._isImeEnter(e2)){return;}
+        e2.preventDefault();
+        e2.stopPropagation();
+        finish(true);
+      }
+      if(e2.key==='Escape'){e2.preventDefault();e2.stopPropagation();finish(false);}
+    };
+    inp.onblur=()=>{ if(_renamingSid===session.session_id) finish(true); };
+    displayEl.replaceWith(inp);
+    setTimeout(()=>{inp.focus();inp.select();},10);
+  };
+}
+
 function _resolveSessionModelForDisplaySoon(sid){
   if(!sid) return;
   setTimeout(async()=>{
@@ -2563,6 +2699,7 @@ let _messagesTruncated = false;
 // msg_limit (default 30): only fetch the last N messages for fast switching.
 // Older messages are loaded on-demand via _loadOlderMessages().
 const _INITIAL_MSG_LIMIT = 30;
+const _TURN_ALIGN_PARAM = '&turn_align=1';
 // ============================================================================
 // COUPLED CONSTANT — keep in sync with api/routes.py:_MAX_MSG_LIMIT.
 // ============================================================================
@@ -2691,6 +2828,9 @@ async function _ensureMessagesLoaded(sid, opts) {
   // The server now counts msg_limit by visible transcript rows by default; keep
   // the flag for compatibility with mixed-version deployments.
   const expandParam = boundedReloadLimit ? '&expand_renderable=1' : '';
+  // turn_align=1 keeps each cold-load page on whole user turns. expand_renderable
+  // is omitted here because the backend ignores it when turn_align is set.
+  const turnAlignParam = boundedReloadLimit ? _TURN_ALIGN_PARAM : '';
   let data;
   try {
     data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0${reloadLimitParam}${turnAlignParam}`);
@@ -3390,7 +3530,11 @@ async function _ensureAllMessagesLoaded() {
   }
 }
 
+const SESSION_ARCHIVED_PAGE_SIZE = 100;
+const SESSION_ARCHIVED_MAX_LOADED_LIMIT = 2000;
 let _allSessions = [];  // cached for search filter
+let _sidebarReferenceSessions = [];  // hidden archived ancestor rows used only for nesting/suppression
+let _allSessionsScope = null;  // {profile, allProfiles} the cache was loaded under (#4167)
 let _sessionAttentionSoundPrimed = false;
 const _sessionAttentionSoundState = new Map();
 let _renamingSid = null;  // session_id currently being renamed (blocks list re-renders)
@@ -3410,10 +3554,26 @@ const SHOW_ALL_PROFILES_STORAGE_KEY = 'hermes-show-all-profiles';
 let _showAllProfiles = false;  // false = filter to active profile only
 let _profileSwitchOpeningExistingSession = false;  // true while cross-profile sidebar click switches profile before loadSession()
 let _otherProfileCount = 0;       // count of sessions from other profiles (server-reported)
+let _archivedWebuiCount = 0;      // archived WebUI sessions not fetched until requested
+let _archivedCliCount = 0;        // archived non-WebUI sessions not fetched until requested
+let _archivedRowsLoadedLimit = SESSION_ARCHIVED_PAGE_SIZE;
+let _serverWebuiSessionCount = null;  // explicit server count for WebUI sessions
+let _serverCliSessionCount = null;    // explicit server count for CLI sessions
 const _PROFILE_PREVIEW_LIMIT = 15;
 const _PROFILE_LOAD_MORE_LIMIT = 20;
 let _profileSessionState = new Map(); // profile -> { sessions, totalCount, hasMore, regularOffset, loading }
 let _activeProfileListSessions = [];
+function _clearSessionSourceTabCounts() {
+  _serverWebuiSessionCount = null;
+  _serverCliSessionCount = null;
+}
+function _requestedSessionSidebarSource() {
+  return window._showCliSessions ? _sessionSourceFilter : 'webui';
+}
+function _sessionListExcludeHiddenEnabled() {
+  return _activeProject===null || _activeProject===NO_PROJECT_FILTER;
+}
+
 function _normalizeProfileLabel(profile){
   return (typeof profile==='string'&&profile.trim())?profile.trim():'default';
 }
@@ -5052,6 +5212,131 @@ async function _runRenderSessionListRefresh(opts, _gen){
   }
 }
 
+// Per-profile session-count cache (issue #4717 / #4662 Phase 1.5). Records how
+// many sessions each profile rendered last time, keyed by profile name, so a
+// profile switch can pick an honest loading skeleton BEFORE the new /api/sessions
+// fetch resolves: a profile we last saw with zero sessions shows an empty-state
+// placeholder instead of a content skeleton that implies data which never arrives.
+// A profile we've never recorded falls back to the normal content skeleton (safe
+// default — never hide a skeleton for a profile that may well have conversations).
+const SESSION_PROFILE_COUNTS_KEY = 'hermes-session-profile-counts';
+let _sessionProfileCounts = null;
+function _getSessionProfileCounts() {
+  if (_sessionProfileCounts !== null) return _sessionProfileCounts;
+  try {
+    const parsed = JSON.parse(localStorage.getItem(SESSION_PROFILE_COUNTS_KEY) || '{}');
+    _sessionProfileCounts = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch (_){
+    _sessionProfileCounts = {};
+  }
+  return _sessionProfileCounts;
+}
+function _recordSessionProfileCount(profile, count) {
+  const name = (profile || '').trim();
+  if (!name) return;
+  const n = Number(count);
+  if (!Number.isFinite(n) || n < 0) return;
+  const counts = _getSessionProfileCounts();
+  if (counts[name] === n) return;  // no-op write avoidance
+  counts[name] = n;
+  try {
+    localStorage.setItem(SESSION_PROFILE_COUNTS_KEY, JSON.stringify(counts));
+  } catch (_){
+    // Ignore localStorage write failures (private mode / quota).
+  }
+}
+function _knownSessionProfileCount(profile) {
+  const name = (profile || '').trim();
+  if (!name) return null;
+  const counts = _getSessionProfileCounts();
+  const v = counts[name];
+  return (typeof v === 'number' && Number.isFinite(v)) ? v : null;
+}
+
+// ── Loading skeletons (#4662 Phase 1) ───────────────────────────────────────
+let _sessionListSkeletonActive = false;
+
+const _SESSION_SKELETON_GROUPS = [
+  {rows: [{title: 70}]},
+  {rows: [{title: 84}, {title: 58}, {title: 76}]},
+  {rows: [{title: 64}, {title: 90}, {title: 52}, {title: 72}]},
+];
+
+function showSessionListSkeleton(targetProfile){
+  const list = $('sessionList');
+  if(!list) return;
+  // Tear down any active virtual-scroll state up front so a pending scroll-driven
+  // render can't repaint the previous profile's cached rows over the skeleton
+  // (#4662 Codex gate). Cancel the queued RAF and drop the data-session-virtual-*
+  // window markers; the real render rebuilds them from the new payload. Done once
+  // here so it applies to BOTH the content and empty-state skeleton branches.
+  if(typeof _sessionVirtualScrollRaf!=='undefined'&&_sessionVirtualScrollRaf){
+    cancelAnimationFrame(_sessionVirtualScrollRaf);
+    _sessionVirtualScrollRaf=0;
+  }
+  delete list.dataset.sessionVirtualTotal;
+  delete list.dataset.sessionVirtualStart;
+  delete list.dataset.sessionVirtualEnd;
+  delete list.dataset.sessionVirtualFilter;
+  delete list.dataset.sessionVirtualActiveAnchor;
+  // #4717: if we already know (from a prior render) the profile we're switching
+  // INTO has zero conversations, a full content skeleton (group labels + 8 rows)
+  // is misleading — it implies data that will never arrive, then resolves to an
+  // empty list. Render a quiet empty-state placeholder instead. Only when the
+  // count is KNOWN to be 0; an unknown profile (null) keeps the content skeleton
+  // (safe default — never hide a skeleton for a profile that may have sessions).
+  // Skip the empty branch while a project/source filter is active, since the
+  // per-profile count is an unfiltered total and could be non-zero overall yet
+  // empty under the filter (or vice-versa) — the content skeleton is the safe
+  // choice there. typeof guards keep this safe if the helper isn't in scope.
+  const knownCount = (typeof targetProfile === 'string' && targetProfile
+      && typeof _knownSessionProfileCount === 'function')
+    ? _knownSessionProfileCount(targetProfile) : null;
+  const filterActive = (typeof _activeProject !== 'undefined' && _activeProject)
+    || (typeof _sessionSourceFilter !== 'undefined' && _sessionSourceFilter === 'cli');
+  const wrap = document.createElement('div');
+  wrap.setAttribute('aria-hidden', 'true');
+  if(knownCount === 0 && !filterActive){
+    // A single faint placeholder bar rather than a "no conversations" text — the
+    // real empty-state note paints the instant the (fast, empty) fetch resolves,
+    // so we just hold a calm, content-free space in the meantime (no flash of a
+    // fake list, no premature wording).
+    wrap.className = 'skeleton-list skeleton-list-empty';
+    const bar = document.createElement('div');
+    bar.className = 'skeleton-empty-hint';
+    wrap.appendChild(bar);
+  } else {
+    wrap.className = 'skeleton-list';
+    let rowIndex = 0;
+    for(const group of _SESSION_SKELETON_GROUPS){
+      const label = document.createElement('div');
+      label.className = 'skeleton-group-label';
+      wrap.appendChild(label);
+      for(const spec of group.rows){
+        const row = document.createElement('div');
+        row.className = 'skeleton-row';
+        // Stagger the fade-in per row. Set inline (not via CSS :nth-child) because
+        // group-label siblings are interleaved with rows, so a :nth-child stagger
+        // would skip most rows. Cap so the longest list doesn't feel laggy.
+        row.style.animationDelay = Math.min(rowIndex * 0.025, 0.2) + 's';
+        rowIndex++;
+        const title = document.createElement('div');
+        title.className = 'skeleton-bar skeleton-title';
+        title.style.width = spec.title + '%';
+        const stamp = document.createElement('div');
+        stamp.className = 'skeleton-bar skeleton-stamp';
+        row.appendChild(title);
+        row.appendChild(stamp);
+        wrap.appendChild(row);
+      }
+    }
+  }
+  list.innerHTML = '';
+  list.appendChild(wrap);
+  list.scrollTop = 0;
+  _sessionListSkeletonActive = true;
+}
+
 async function _drainRenderSessionListQueue(initialRequest){
   let request=initialRequest;
   try{
@@ -5413,12 +5698,14 @@ function ensureSessionEventsSSE(){
     _sessionEventsSSE.addEventListener('sessions_changed', (ev) => {
       const activeProfile = S.activeProfile || 'default';
       let eventProfile = '';
+      let eventTargetsActiveSession = false;
       try {
         const payload = typeof ev?.data === 'string' ? JSON.parse(ev.data) : {};
         eventProfile = payload && typeof payload.profile === 'string' ? payload.profile : '';
         if (!_showAllProfiles && !_sessionEventProfilesMatch(eventProfile, activeProfile)) {
           return;
         }
+        eventTargetsActiveSession = _sessionEventTargetsActiveSession(payload);
       } catch (_err) {
         // Non-JSON payload (or transient malformed event). Keep legacy behavior:
         // refresh once event was seen.
@@ -5920,6 +6207,10 @@ function _sessionTimeBucketLabel(timestampMs, nowMs) {
 
 function _isChildSession(s){
   return !!(s&&s.parent_session_id&&s.relationship_type==='child_session');
+}
+
+function _isForkWithResolvableParent(s, sessionIdsInList){
+  return !!(s&&s.session_source==='fork'&&s.parent_session_id&&sessionIdsInList&&sessionIdsInList.has(s.parent_session_id));
 }
 
 function _sessionLineageKey(s, sessionIdsInList, sessionsById){
@@ -7000,11 +7291,12 @@ function renderSessionListFromCache(){
   function _renderOneSession(s, isPinnedGroup=false){
     const el=document.createElement('div');
     const isActive=_sessionLineageContainsSession(s,activeSidForSidebar);
-    const isStreaming=_isSessionEffectivelyStreaming(s);
-    _rememberRenderedStreamingState(s, isStreaming);
+    const ownStreaming=_isSessionEffectivelyStreaming(s);
+    const isStreaming=ownStreaming||!!s._child_session_streaming;
+    _rememberRenderedStreamingState(s, ownStreaming);
     _rememberRenderedSessionSnapshot(s);
-    const hasUnread=_hasUnreadForSession(s)&&!isActive;
-    const attention=_sessionAttentionState(s);
+    const hasUnread=(_hasUnreadForSession(s)||!!s._child_session_has_unread)&&!isActive;
+    const attention=_sessionAttentionState(s)||_sessionAttentionState({_child:true,attention:s._child_session_attention});
     const attentionClass=attention?(attention.kind==='approval'?' attention-approval':(attention.kind==='clarify'?' attention-clarify':' attention-attention')):'';
     const readOnly=_isReadOnlySession(s);
     el.className='session-item'+(isActive?' active':'')+(isActive&&S.session&&S.session._flash?' new-flash':'')+(s.archived?' archived':'')+(ownStreaming?' streaming':'')+(hasUnread?' unread':'')+(attention?' needs-attention':'')+attentionClass;
