@@ -441,6 +441,7 @@ _TIRITH_FINDING_DISPLAY_FIELDS = (
     "title",
     "description",
     "remediation",
+    "command_summary",
 )
 
 

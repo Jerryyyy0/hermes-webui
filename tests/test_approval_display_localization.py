@@ -43,6 +43,13 @@ def test_gateway_runs_event_adds_chinese_display_copy_without_changing_keys():
     assert event["pattern_keys"] == ["recursive delete"]
 
 
+def test_browser_notification_prefers_chinese_display_copy():
+    assert (
+        "sendBrowserNotification('Approval required',d.display_description_zh||d.description"
+        in MESSAGES_JS
+    )
+
+
 def test_gateway_runs_event_preserves_structured_tirith_findings():
     from api.gateway_chat import _gateway_runs_approval_event
 

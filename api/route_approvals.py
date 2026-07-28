@@ -461,7 +461,7 @@ def submit_gateway_pending_mirror(session_key: str, approval: dict) -> tuple[dic
                     and str(mirror.get(_GATEWAY_MIRROR_TOKEN) or "") == token
                     for mirror in mirror_entries
                 ):
-                    mirror_entry = dict(local_data)
+                    mirror_entry = localize_approval_payload(local_data)
                     mirror_entry["approval_id"] = entry_approval_id
                     mirror_entry[_GATEWAY_MIRROR_FLAG] = True
                     mirror_entry[_GATEWAY_MIRROR_TOKEN] = token
@@ -497,7 +497,7 @@ def submit_gateway_pending_mirror(session_key: str, approval: dict) -> tuple[dic
                 if not approval_id:
                     approval_id = f"gwrun:{run_id}:{uuid.uuid4().hex}"
                     approval["approval_id"] = approval_id
-                mirror_entry = dict(approval)
+                mirror_entry = localize_approval_payload(approval)
                 mirror_entry["run_id"] = run_id
                 mirror_entry["approval_id"] = approval_id
                 mirror_entry[_GATEWAY_MIRROR_FLAG] = True
@@ -521,7 +521,7 @@ def submit_gateway_pending_mirror(session_key: str, approval: dict) -> tuple[dic
             if no_run_mirror:
                 approval["approval_id"] = str(no_run_mirror.get("approval_id") or approval_id).strip()
             elif not _gateway_pending_mirror_locked(session_key, approval_id=approval_id):
-                mirror_entry = dict(approval)
+                mirror_entry = localize_approval_payload(approval)
                 mirror_entry["approval_id"] = approval_id
                 mirror_entry[_GATEWAY_MIRROR_FLAG] = True
                 _normalize_pending_queue_locked(session_key).append(mirror_entry)

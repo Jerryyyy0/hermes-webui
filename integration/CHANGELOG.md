@@ -6,6 +6,10 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ## [Unreleased]
 
+### Changed
+
+- **Approval security scan display copy is fully localized in Chinese** — `integration/approval_localization/` now renders structured Tirith findings (including `command_summary` and `remediation`), legacy `Security scan — …` prose, and non-Tirith `pattern_keys` into `display_description_zh` while leaving canonical English approval keys untouched. Gateway pending mirrors, SSE snapshots, and browser notifications use the same localized display field.
+
 ### Added
 
 - **`GET /api/session/status` `can_start_chat`** — 响应新增 `can_start_chat`（boolean），与 `POST /api/chat/start`「该会话已有正在进行的对话流」409 守卫同源。外部客户端在 `GET /api/chat/cancel` 后应轮询本字段至 `true` 再调用 `chat/start`，勿仅用 `stream/status.active` 判断。
