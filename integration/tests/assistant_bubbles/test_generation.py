@@ -135,6 +135,35 @@ def test_validate_emotion_requires_four_unique_short_texts():
     assert reason == "emotion_duplicate"
 
 
+def test_system_prompt_for_emotion_requires_json_array():
+    emotion_prompt = generation._system_prompt_for("emotion")
+    intro_prompt = generation._system_prompt_for("assistant_intro")
+    assert emotion_prompt != intro_prompt
+    assert "JSON 数组" in emotion_prompt
+    assert "不得输出 JSON" in intro_prompt
+
+
+def test_validate_emotion_accepts_json_code_fence():
+    content = '```json\n["我在这里。", "一起推进。💪", "保持专注。✨", "随时叫我。😄"]\n```'
+    result, reason = generation.validate_model_output("emotion", content)
+    assert result == ["我在这里。", "一起推进。💪", "保持专注。✨", "随时叫我。😄"]
+    assert reason == "ok"
+
+
+def test_validate_emotion_accepts_prefix_before_json_array():
+    content = '好的：["我在这里。", "一起推进。💪", "保持专注。✨", "随时叫我。😄"]'
+    result, reason = generation.validate_model_output("emotion", content)
+    assert result == ["我在这里。", "一起推进。💪", "保持专注。✨", "随时叫我。😄"]
+    assert reason == "ok"
+
+
+def test_validate_emotion_rejects_plain_text():
+    content = "今日也要加油打工哦💪！"
+    result, reason = generation.validate_model_output("emotion", content)
+    assert result is None
+    assert reason == "invalid_json"
+
+
 def test_validate_model_output_allows_text_over_50_chars():
     content = "这是一段超过五十字但格式合法的气泡文案，用于确认本地代码不再强制校验长度，只依赖提示词约束模型尽量控制长度。"
 

@@ -28,6 +28,16 @@ SYSTEM_PROMPT = """你是 Profile 助理气泡文案生成器。
 6. 返回内容必须能直接展示给用户。
 7. 若使用 emoji：emoji 放在语气标点之前（正确「哦📝~」「任务💪！」，错误「哦~📝」「任务！💪」）。"""
 
+EMOTION_SYSTEM_PROMPT = """你是 Profile 助理气泡文案生成器。
+你的任务是根据用户提供的 Profile 上下文，生成 4 条会显示在助理头像旁边的拟人化情绪短句。
+必须遵守：
+1. 只输出简体中文。
+2. 每条短句最多 50 个字符；4 条必须明显不同，不能重复或同义改写。
+3. 只基于输入上下文生成，不得编造上下文没有的信息。
+4. 不得承诺已经完成、正在执行或将自动执行任何动作。
+5. 只输出一个 JSON 数组字符串，数组长度必须为 4，每个元素必须是字符串；不得输出 Markdown、代码块、标题、编号、候选列表、解释或前后缀。
+6. 若使用 emoji：emoji 放在语气标点之前（正确「哦📝~」「任务💪！」，错误「哦~📝」「任务！💪」）。"""
+
 PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 GENERATION_ORDER = ("assistant_intro", "memory", "skill", "emotion")
 SUCCESS_REGEN_COOLDOWN_SECONDS = 300
@@ -346,6 +356,12 @@ def _write_failure(
     store.update_generation_only(profile_path, category, entry)
 
 
+def _system_prompt_for(category: str) -> str:
+    if category == "emotion":
+        return EMOTION_SYSTEM_PROMPT
+    return SYSTEM_PROMPT
+
+
 def _load_user_prompt(category: str, context: dict[str, Any]) -> str:
     template = (PROMPTS_DIR / f"{category}.txt").read_text(encoding="utf-8")
     raw_skills_block = collectors.skills_block(context.get("skills") or [])
@@ -368,7 +384,7 @@ def _generate_with_model(
 ) -> tuple[str | list[str] | None, str]:
     category = task.category
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": _system_prompt_for(category)},
         {"role": "user", "content": _load_user_prompt(category, context)},
     ]
     started = time.monotonic()
@@ -454,6 +470,21 @@ def _skill_mentions_ascii_slug(value: str, context: dict[str, Any] | None) -> bo
     return False
 
 
+def _parse_emotion_json(raw: str) -> Any:
+    text = raw.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text, count=1)
+        text = re.sub(r"\s*```$", "", text)
+        text = text.strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        match = re.search(r"\[.*\]", text, re.DOTALL)
+        if match:
+            return json.loads(match.group(0))
+        raise
+
+
 def validate_one_text(category: str, text: Any, context: dict[str, Any] | None = None) -> tuple[str | None, str]:
     if not isinstance(text, str):
         return None, "not_string"
@@ -482,7 +513,7 @@ def validate_model_output(
             return None, "not_string"
         raw = content.strip()
         try:
-            parsed = json.loads(raw)
+            parsed = _parse_emotion_json(raw)
         except json.JSONDecodeError:
             return None, "invalid_json"
         if not isinstance(parsed, list):

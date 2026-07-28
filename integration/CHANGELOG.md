@@ -8,6 +8,8 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Changed
 
+- **Assistant bubbles emotion generation** — `emotion` 类别改用专用 system prompt（明确要求输出长度为 4 的 JSON 字符串数组），修复与通用 system prompt「禁止 JSON」冲突导致的 `invalid_json` 失败；校验层增加 markdown 代码块与嵌入 JSON 数组提取容错。Prompt 版本 bump 至 `emotion.v5` 以触发重新生成。
+
 - **Approval security scan display copy is fully localized in Chinese** — `integration/approval_localization/` now renders structured Tirith findings (including `command_summary` and `remediation`), legacy `Security scan — …` prose, and non-Tirith `pattern_keys` into `display_description_zh` while leaving canonical English approval keys untouched. Gateway pending mirrors, SSE snapshots, and browser notifications use the same localized display field.
 
 ### Added

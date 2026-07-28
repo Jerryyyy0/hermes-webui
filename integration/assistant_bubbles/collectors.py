@@ -14,7 +14,7 @@ PROMPT_VERSIONS = {
     "assistant_intro": "assistant_intro.v2",
     "memory": "memory.v2",
     "skill": "skill.v5",
-    "emotion": "emotion.v4",
+    "emotion": "emotion.v5",
 }
 
 
