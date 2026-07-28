@@ -10169,9 +10169,6 @@ def handle_get(handler, parsed) -> bool:
 
     if parsed.path in ("/", "/index.html") or parsed.path.startswith("/session/"):
         try:
-            from urllib.parse import quote
-            from api.updates import WEBUI_VERSION
-            version_token = quote(WEBUI_VERSION, safe="")
             from api.extensions import inject_extension_tags
 
             csrf_token = ""
@@ -10205,10 +10202,11 @@ def handle_get(handler, parsed) -> bool:
                 _integration_cron_flag = "false"
                 _integration_workspace_files_flag = "false"
 
+            # Disk read + process-constant tokens are cached in
+            # _render_index_shell_base(); CSRF and fork integration flags vary
+            # per request and are applied here.
             html = (
-                _INDEX_HTML_PATH.read_text(encoding="utf-8")
-                .replace("__WEBUI_VERSION__", version_token)
-                .replace("__MAX_UPLOAD_BYTES__", str(MAX_UPLOAD_BYTES))
+                _render_index_shell_base()
                 .replace("__CSRF_TOKEN_JSON__", json.dumps(csrf_token))
                 .replace("__INTEGRATION_SKILLS__", _integration_skills_flag)
                 .replace("__SKILLHUB_ENABLED__", _skillhub_enabled_flag)
