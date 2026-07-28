@@ -71,6 +71,14 @@ Hermes WebUI 依赖并与 **Hermes Agent** 协同运行。当任务涉及 Agent 
   in both the `rsync` and `cp -a` paths — `/opt/hermes` may contain subdirectories
   with restricted permissions (e.g. `.playwright/`).
 
+### Git 提交信息
+
+本 Fork 的 `git commit` **须使用简体中文**（标题与正文），除非用户或维护者明确要求英文。
+
+- 标题一句说清「为什么 / 解决什么问题」，避免纯英文 subject 或与 diff 无关的套话。
+- 正文可补充影响范围与验证方式；一条 commit 对应一个逻辑变更。
+- AI 助手代用户提交时同样遵守；用户未要求 amend 或英文 message 时不得改用英文。
+
 ## Before you open a PR — the change guidelines
 
 Read [`docs/GUIDELINES.md`](docs/GUIDELINES.md) in full before non-trivial work. It is the

@@ -72,6 +72,10 @@ Large changes are welcome, but surprise rewrites are hard to review well.
 
 Keep each PR focused. A small related group of fixes is fine. A bug fix plus a CSS cleanup plus a refactor plus a docs rewrite is not.
 
+### Commit messages（本仓库）
+
+`git commit` 的标题与正文**使用简体中文**，说明变更目的与影响；一条 commit 一个逻辑变更。仅在 issue/维护者明确要求时使用英文 subject。
+
 ### 2. Local Verification
 
 Run the test suite locally through the repo runner. It creates/uses a supported
