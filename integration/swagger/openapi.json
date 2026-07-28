@@ -257,7 +257,27 @@
       "get": {
         "tags": ["Session"],
         "summary": "获取会话运行状态",
-        "responses": { "200": { "description": "状态信息" } }
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string" },
+            "description": "会话 ID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "状态信息",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/SessionStatusResponse" }
+              }
+            }
+          },
+          "400": { "description": "缺少 session_id" },
+          "404": { "description": "会话不存在" }
+        }
       }
     },
     "/api/session/usage": {
@@ -5284,6 +5304,32 @@
 
   "components": {
     "schemas": {
+      "SessionStatusResponse": {
+        "type": "object",
+        "required": ["session_id", "can_start_chat"],
+        "properties": {
+          "session_id": { "type": "string" },
+          "title": { "type": "string" },
+          "model": { "type": "string" },
+          "profile": { "type": "string" },
+          "hermes_home": { "type": "string" },
+          "workspace": { "type": "string" },
+          "personality": { "type": "string", "nullable": true },
+          "message_count": { "type": "integer" },
+          "created_at": { "type": "number" },
+          "updated_at": { "type": "number" },
+          "agent_running": { "type": "boolean", "description": "持久化 active_stream_id 是否非空（可能滞后）" },
+          "active_stream_id": { "type": "string", "nullable": true, "description": "仅当 stream 在 STREAMS 或 ACTIVE_RUNS 中存活时返回" },
+          "input_tokens": { "type": "integer" },
+          "output_tokens": { "type": "integer" },
+          "total_tokens": { "type": "integer" },
+          "estimated_cost": { "type": "number" },
+          "can_start_chat": {
+            "type": "boolean",
+            "description": "与 POST /api/chat/start 重复流 409 守卫同源；cancel 后轮询至 true 再开新轮"
+          }
+        }
+      },
       "SessionListRow": {
         "type": "object",
         "properties": {

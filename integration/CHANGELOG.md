@@ -8,6 +8,8 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Added
 
+- **`GET /api/session/status` `can_start_chat`** — 响应新增 `can_start_chat`（boolean），与 `POST /api/chat/start`「该会话已有正在进行的对话流」409 守卫同源。外部客户端在 `GET /api/chat/cancel` 后应轮询本字段至 `true` 再调用 `chat/start`，勿仅用 `stream/status.active` 判断。
+
 - **`BACKEND=local` webui_logout short-circuit** — `POST /api/integration/webui_logout` still clears WebUI `hermes_session` and the in-process Zhiling identity cache, but when `BACKEND=local` it returns `200` with `{"status":"ok","login_url":"/"}` without calling auth-proxy `/api/logout`. Empty or `remote` keeps the existing downstream proxy behavior.
 
 - **Zhiling password change proxy** — `POST /api/integration/auth/password/change` forwards the JSON body to Control Plane `/api/auth/password/change` (requires `HERMES_INTEGRATION=1` and `ZHILING_CONTROL_PLANE_URL`). Responses are passed through unchanged; on `200` with `reauth_required=true`, WebUI clears `hermes_session` and the Zhiling identity cache. Implementation in `integration/identity/`.

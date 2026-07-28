@@ -11092,8 +11092,11 @@ def handle_get(handler, parsed) -> bool:
             return bad(handler, "Missing session_id")
         try:
             from api.session_ops import session_status
-            _clear_stale_stream_state(get_session(sid, metadata_only=True))
-            return j(handler, session_status(sid))
+            session = get_session(sid, metadata_only=True)
+            _clear_stale_stream_state(session)
+            payload = session_status(sid)
+            payload["can_start_chat"] = _session_can_start_chat(get_session(sid))
+            return j(handler, payload)
         except KeyError:
             return bad(handler, "Session not found", 404)
 
@@ -18497,6 +18500,21 @@ def _active_run_stream_for_session(session_id: str | None) -> str | None:
     except Exception:
         return None
     return None
+
+
+def _session_can_start_chat(session) -> bool:
+    """Return whether chat/start would not hit the duplicate active-stream 409.
+
+    Mirrors the guards in ``_start_chat_stream_for_session`` before a new
+    stream is registered. Used by ``GET /api/session/status`` so external
+    clients can poll after cancel without racing ACTIVE_RUNS unwind (#3808).
+    """
+    stream_id = getattr(session, "active_stream_id", None)
+    if stream_id and _active_stream_blocks_chat_start(session, stream_id):
+        return False
+    if _active_run_stream_for_session(getattr(session, "session_id", None)):
+        return False
+    return True
 
 
 def _agent_runtime_barrier_response(
