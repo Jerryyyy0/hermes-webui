@@ -28,6 +28,7 @@ from integration.knowledge_base.constants import (
 _TIMEOUT = 30.0
 _SHOW_PDF_TIMEOUT = 180.0
 _UPLOAD_TIMEOUT = 180.0
+_LONG_BINARY_TIMEOUT_ROUTES = frozenset({"show_pdf", "download_doc"})
 
 
 class KnowledgeBaseUpstreamError(Exception):
@@ -92,7 +93,7 @@ def _is_json_upstream_response(resp: httpx.Response) -> bool:
 
 def post_binary_or_json(route_key: str, body: dict[str, Any]) -> KnowledgeBaseShowPdfResult:
     url = _downstream_url(route_key)
-    timeout = _SHOW_PDF_TIMEOUT if route_key == "show_pdf" else _TIMEOUT
+    timeout = _SHOW_PDF_TIMEOUT if route_key in _LONG_BINARY_TIMEOUT_ROUTES else _TIMEOUT
     try:
         with _client(timeout=timeout) as client:
             resp = client.post(url, json=body)

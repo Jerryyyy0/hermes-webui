@@ -8,6 +8,8 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Changed
 
+- **Knowledge base download_doc timeout** — `POST /api/integration/knowledge_base/download_doc` 下游 httpx 请求超时由 30 秒调整为 180 秒，与 `show_pdf` 一致，避免大文件下载在 BFF 侧过早断开。
+
 - **Assistant bubbles prompt polish** — 优化四类气泡 user prompt，并为 `assistant_intro` / `memory` / `skill` / `emotion` 增加正误 few-shot；通用与 emotion system prompt 明确要求句中逗号断句，并澄清「emoji 前勿普通标点」仅约束 emoji 位置。Prompt 版本 bump 至 `assistant_intro.v3` / `memory.v3` / `skill.v6` / `emotion.v6` 以触发重新生成。
 
 - **Assistant bubbles emotion generation** — `emotion` 类别改用专用 system prompt（明确要求输出长度为 4 的 JSON 字符串数组），修复与通用 system prompt「禁止 JSON」冲突导致的 `invalid_json` 失败；校验层增加 markdown 代码块与嵌入 JSON 数组提取容错。Prompt 版本 bump 至 `emotion.v5` 以触发重新生成。

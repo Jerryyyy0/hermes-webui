@@ -184,6 +184,29 @@ def test_post_show_pdf_json_error():
     mock_client_cls.assert_called_once_with(timeout=180.0, follow_redirects=True)
 
 
+def test_post_download_doc_uses_long_timeout():
+    resp = MagicMock(spec=httpx.Response)
+    resp.status_code = 200
+    resp.headers = {"content-type": "application/json"}
+    resp.content = b'{"code":500,"msg":"busy","data":null}'
+    resp.json.return_value = {"code": 500, "msg": "busy", "data": None}
+
+    with patch("integration.knowledge_base.client.knowledge_base_url", return_value="http://kb.test"):
+        with patch("httpx.Client") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client.__enter__.return_value = mock_client
+            mock_client.post.return_value = resp
+            mock_client_cls.return_value = mock_client
+            result = client.post_binary_or_json(
+                "download_doc",
+                {"knowledge_base_name": "kb1", "file_name": "doc.pdf"},
+            )
+
+    assert result.kind == "json"
+    assert result.status == 200
+    mock_client_cls.assert_called_once_with(timeout=180.0, follow_redirects=True)
+
+
 def test_post_show_pdf_binary_pdf():
     pdf_bytes = b"%PDF-1.4 fake pdf content"
     resp = MagicMock(spec=httpx.Response)
