@@ -5281,7 +5281,7 @@ class _ExternalSessionView:
         self.workspace = workspace
 
 
-def get_session_for_file_ops(sid: str):
+def get_session_for_file_ops(sid: str, *, profile_override: str | None = None):
     """Return a profile-authorized session-like object for file-manager handlers.
 
     Tries ``get_session`` first (preserves all existing behavior for WebUI
@@ -5290,6 +5290,9 @@ def get_session_for_file_ops(sid: str):
     session exists there, returns an ``_ExternalSessionView`` whose ``workspace``
     is the active WebUI workspace. If neither has the session, re-raises
     ``KeyError`` so callers continue to return their existing 404.
+
+    ``profile_override`` supplies an explicit profile when the request has no
+    ``hermes_profile`` cookie (same semantics as multipart ``profile`` on upload).
     """
     try:
         session = get_session(sid, metadata_only=True)
@@ -5301,7 +5304,7 @@ def get_session_for_file_ops(sid: str):
     from api.profiles import _profiles_match, get_active_profile_name
 
     session_profile = getattr(session, 'profile', None)
-    active_profile = get_active_profile_name()
+    active_profile = profile_override or get_active_profile_name()
     if not _profiles_match(session_profile, active_profile):
         logger.debug(
             "Rejected file-manager session for foreign profile: "
@@ -8535,6 +8538,87 @@ def _insert_state_message_chronologically(messages: list, msg: dict) -> bool:
         return True
     messages.append(msg)
     return True
+
+
+def chronological_merge_session_messages_for_display(
+    sidecar_messages: list,
+    cli_messages: list,
+) -> list:
+    """Chronologically interleave sidecar + CLI rows with visible-key dedupe.
+
+    Used when a messaging sidecar is shorter than the CLI/state transcript and
+    both sources must be stitched by timestamp (issue #2472). Unlike the
+    merge-key-only fallback, this also caps duplicates via
+    ``_matching_visible_duplicate`` so a state.db row with ``id`` /
+    ``_db_persisted`` does not survive next to the same turn's sidecar
+    ``_recovered`` row (legacy merge key, no id) — including bare vs
+    mid-text ``[Workspace::v1: ...]`` composites.
+    """
+    sidecar_messages = [m for m in (sidecar_messages or []) if isinstance(m, dict)]
+    cli_messages = [m for m in (cli_messages or []) if isinstance(m, dict)]
+
+    def _visible_counts(messages: list) -> dict:
+        counts: dict = {}
+        for msg in messages:
+            key = _session_message_visible_key(msg)
+            counts[key] = counts.get(key, 0) + 1
+        return counts
+
+    sidecar_counts = _visible_counts(sidecar_messages)
+    cli_counts = _visible_counts(cli_messages)
+    allowed = {
+        key: max(sidecar_counts.get(key, 0), cli_counts.get(key, 0))
+        for key in set(sidecar_counts) | set(cli_counts)
+    }
+
+    merged_messages = []
+    seen_message_keys = set()
+    kept_by_merge_key = {}
+    kept_by_visible_key = {}
+    kept_visible_keys: set = set()
+    kept_counts: dict = {}
+    visible_lookup = _build_visible_duplicate_lookup(kept_visible_keys)
+
+    for msg in sorted(
+        list(cli_messages) + list(sidecar_messages),
+        key=lambda m: (
+            float(m.get("timestamp") or 0),
+            str(m.get("role") or ""),
+            str(m.get("content") or ""),
+        ),
+    ):
+        merge_key = _session_message_merge_key(msg)
+        if merge_key in seen_message_keys:
+            _merge_session_display_metadata(kept_by_merge_key.get(merge_key), msg)
+            continue
+
+        visible_key = _session_message_visible_key(msg)
+        matched = _matching_visible_duplicate(
+            visible_key,
+            kept_visible_keys,
+            visible_lookup,
+        )
+        if matched is not None:
+            budget = max(allowed.get(matched, 0), 1)
+            if kept_counts.get(matched, 0) >= budget:
+                target = kept_by_visible_key.get(matched) or kept_by_merge_key.get(merge_key)
+                _merge_session_display_metadata(target, msg)
+                seen_message_keys.add(merge_key)
+                kept_by_merge_key.setdefault(merge_key, target)
+                continue
+
+        seen_message_keys.add(merge_key)
+        kept_by_merge_key[merge_key] = msg
+        kept_visible_keys.add(visible_key)
+        kept_by_visible_key[visible_key] = msg
+        count_key = matched if matched is not None else visible_key
+        kept_counts[count_key] = kept_counts.get(count_key, 0) + 1
+        if matched is not None and visible_key != matched:
+            kept_by_visible_key.setdefault(matched, msg)
+        visible_lookup = _build_visible_duplicate_lookup(kept_visible_keys)
+        merged_messages.append(msg)
+
+    return merged_messages
 
 
 def merge_session_messages_append_only(

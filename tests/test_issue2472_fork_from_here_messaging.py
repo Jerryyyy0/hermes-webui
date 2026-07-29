@@ -99,6 +99,104 @@ def test_messaging_merge_preserves_longer_sidecar_order_when_timestamps_collapse
     ]
 
 
+def test_messaging_weak_path_dedupes_recovered_vs_db_persisted_user():
+    """Short sidecar + longer CLI must not keep recovered and state.db copies.
+
+    Forces the chronological weak path (len(sidecar) < len(cli)). state.db rows
+    carry ``id`` / ``_db_persisted`` while the sidecar recovery row uses a legacy
+    merge key; merge-key-only dedupe previously left both visible.
+    """
+    bare = "我已上传 1 个文件: /home/hermeswebui/.hermes/webui/attachments/be83b6782a4d/image-1.png"
+    composite = (
+        f"{bare}\n\n[Workspace::v1: /workspace]\n{bare}"
+    )
+    session = SimpleNamespace(
+        messages=[
+            {
+                "role": "user",
+                "content": bare,
+                "timestamp": 1785317767,
+                "_recovered": True,
+            },
+            {
+                "role": "assistant",
+                "content": "**发生错误:** 模型服务返回错误，请稍后重试。",
+                "timestamp": 1785317775,
+                "_error": True,
+            },
+        ]
+    )
+    cli_messages = [
+        {
+            "role": "user",
+            "content": composite,
+            "_db_persisted": True,
+            "id": 1,
+        },
+        {
+            "role": "user",
+            "content": bare,
+            "_db_persisted": True,
+            "id": 1,
+        },
+        {
+            "role": "assistant",
+            "content": "**发生错误:** 模型服务返回错误，请稍后重试。",
+            "timestamp": 1785317775,
+            "_error": True,
+        },
+        {
+            "role": "user",
+            "content": "follow-up only in cli",
+            "timestamp": 1785317800,
+            "_db_persisted": True,
+            "id": 2,
+        },
+        {
+            "role": "assistant",
+            "content": "cli later reply",
+            "timestamp": 1785317801,
+        },
+    ]
+    assert len(session.messages) < len(cli_messages)
+
+    merged = routes._merged_session_messages_for_display(session, cli_messages)
+    user_contents = [m["content"] for m in merged if m.get("role") == "user"]
+
+    assert user_contents.count(bare) + user_contents.count(composite) == 1
+    assert "follow-up only in cli" in user_contents
+    assert [m["content"] for m in merged if m.get("role") == "assistant"] == [
+        "**发生错误:** 模型服务返回错误，请稍后重试。",
+        "cli later reply",
+    ]
+
+
+def test_messaging_weak_path_keeps_intentional_duplicate_user_turns():
+    """Identical user content twice must survive when both sources agree on count."""
+    session = SimpleNamespace(
+        messages=[
+            {"role": "user", "content": "ok", "timestamp": 10},
+            {"role": "assistant", "content": "first", "timestamp": 11},
+            {"role": "user", "content": "ok", "timestamp": 12},
+        ]
+    )
+    cli_messages = [
+        {"role": "user", "content": "ok", "timestamp": 10, "id": 1, "_db_persisted": True},
+        {"role": "assistant", "content": "first", "timestamp": 11},
+        {"role": "user", "content": "ok", "timestamp": 12, "id": 2, "_db_persisted": True},
+        {"role": "assistant", "content": "second", "timestamp": 13},
+        {"role": "user", "content": "cli only", "timestamp": 14, "id": 3, "_db_persisted": True},
+    ]
+    assert len(session.messages) < len(cli_messages)
+
+    merged = routes._merged_session_messages_for_display(session, cli_messages)
+    assert [m["content"] for m in merged if m.get("role") == "user"] == [
+        "ok",
+        "ok",
+        "cli only",
+    ]
+
+
 def test_branch_handler_uses_merged_messaging_messages_for_keep_count():
     branch_idx = ROUTES_PY.index('parsed.path == "/api/session/branch":')
     block = ROUTES_PY[branch_idx : branch_idx + 2600]

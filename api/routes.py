@@ -320,6 +320,7 @@ from api.profiles import (  # noqa: F401, E402  (re-export)
     get_active_profile_name as _get_active_profile_name,
     get_active_hermes_home,
     list_profiles_api,
+    profile_override_for_request,
     profile_scope_for_detached_worker,
 )
 
@@ -338,6 +339,12 @@ def _all_profiles_query_flag(parsed_url) -> bool:
 def _all_profiles_enabled(parsed_url) -> bool:
     """Enable aggregate profile reads only when the request asks and mode allows it."""
     return _all_profiles_query_flag(parsed_url) and not _is_isolated_profile_mode()
+
+
+def _query_profile_override(handler, qs) -> str | None:
+    """Return explicit profile override from query when no profile cookie is set."""
+    raw = (qs.get("profile") or [""])[0]
+    return profile_override_for_request(handler, raw)
 
 
 def _query_flag(parsed_url, name: str) -> bool:
@@ -7411,19 +7418,13 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
                     cli_messages,
                     truncation_watermark=getattr(session, "truncation_watermark", None),
                 )
-            merged_messages = []
-            seen_message_keys = set()
-            for msg in sorted(list(cli_messages) + list(sidecar_messages), key=lambda m: (
-                float(m.get("timestamp") or 0),
-                str(m.get("role") or ""),
-                str(m.get("content") or ""),
-            )):
-                key = _session_message_merge_key(msg)
-                if key in seen_message_keys:
-                    continue
-                seen_message_keys.add(key)
-                merged_messages.append(msg)
-            return merged_messages
+            # Sidecar shorter than CLI: chronologically stitch both slices
+            # (#2472) while visible-key-capping cross-source duplicates
+            # (recovered/no-id sidecar vs id/_db_persisted state.db rows).
+            return chronological_merge_session_messages_for_display(
+                sidecar_messages,
+                cli_messages,
+            )
         return sidecar_messages if len(sidecar_messages) > len(cli_messages) else cli_messages
     return sidecar_messages
 
@@ -8047,6 +8048,7 @@ from api.models import (
     get_state_db_session_message_keys_before_timestamp,
     get_state_db_session_summary,
     merge_session_messages_append_only,
+    chronological_merge_session_messages_for_display,
     _active_stream_ids,
     _session_message_merge_key,
     _session_message_visible_key,
@@ -16960,7 +16962,7 @@ def _try_serve_session_relative_media(handler, qs: dict, raw_path: str, sid: str
         bad(handler, "session_id is required for relative paths", 400)
         return True
     try:
-        s = get_session_for_file_ops(sid)
+        s = get_session_for_file_ops(sid, profile_override=_query_profile_override(handler, qs))
     except KeyError:
         bad(handler, "Session not found", 404)
         return True
@@ -17056,7 +17058,7 @@ def _handle_folder_download(handler, parsed):
     if not sid:
         return bad(handler, "session_id is required")
     try:
-        s = get_session_for_file_ops(sid)
+        s = get_session_for_file_ops(sid, profile_override=_query_profile_override(handler, qs))
     except KeyError:
         return bad(handler, "Session not found", 404)
 
@@ -17142,7 +17144,7 @@ def _handle_file_raw(handler, parsed):
     if not sid:
         return bad(handler, "session_id is required")
     try:
-        s = get_session_for_file_ops(sid)
+        s = get_session_for_file_ops(sid, profile_override=_query_profile_override(handler, qs))
     except KeyError:
         return bad(handler, "Session not found", 404)
     rel = qs.get("path", [""])[0]
@@ -17159,7 +17161,7 @@ def _handle_file_read(handler, parsed):
     if not sid:
         return bad(handler, "session_id is required")
     try:
-        s = get_session_for_file_ops(sid)
+        s = get_session_for_file_ops(sid, profile_override=_query_profile_override(handler, qs))
     except KeyError:
         return bad(handler, "Session not found", 404)
     rel = qs.get("path", [""])[0]

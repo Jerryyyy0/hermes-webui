@@ -11,6 +11,7 @@ import io
 import time
 from urllib.parse import urlparse
 
+import api.helpers as helpers
 import api.profiles as profiles
 import api.routes as routes
 import api.upload as upload
@@ -147,7 +148,7 @@ def test_file_read_foreign_profile_session_returns_404_before_file_ops(monkeypat
     foreign = _SimpleSession("foreign_file", profile="other", workspace="/workspace")
     monkeypatch.setattr(routes, "get_session", lambda sid, metadata_only=False: foreign)
     monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
-    monkeypatch.setattr(routes, "get_session_for_file_ops", lambda sid: (_ for _ in ()).throw(AssertionError("file ops should not run")))
+    monkeypatch.setattr(routes, "get_session_for_file_ops", lambda sid, **kwargs: (_ for _ in ()).throw(KeyError(sid)))
     cap = _capture(monkeypatch)
 
     routes.handle_get(handler, urlparse("/api/file?session_id=foreign_file&path=notes.txt"))
@@ -310,6 +311,108 @@ def test_workspace_upload_foreign_profile_session_returns_404_before_workspace_r
     upload.handle_workspace_upload(handler)
 
     assert cap == {"ok": {"error": "Session not found"}, "status": 404}
+
+
+def test_archive_upload_extract_uses_profile_field_when_profile_cookie_is_absent(monkeypatch):
+    handler = _FakeHandler()
+    target = _SimpleSession("extract_coder", profile="coder")
+    monkeypatch.setattr(
+        upload,
+        "parse_multipart",
+        lambda *_args: ({"session_id": "extract_coder", "profile": "coder"}, {"file": ("archive.zip", b"zip")}),
+    )
+    monkeypatch.setattr(upload, "get_session", lambda sid: target)
+    monkeypatch.setattr(upload, "get_profile_cookie", lambda _handler: None)
+    captured = {}
+
+    def _reject(_handler, session, profile_override=None):
+        captured["session"] = session
+        captured["profile_override"] = profile_override
+        return True
+
+    monkeypatch.setattr(upload, "_reject_invisible_session", _reject)
+
+    upload.handle_upload_extract(handler)
+
+    assert captured == {"session": target, "profile_override": "coder"}
+
+
+def test_workspace_upload_uses_profile_field_when_profile_cookie_is_absent(monkeypatch):
+    handler = _FakeHandler()
+    target = _SimpleSession("workspace_coder", profile="coder", workspace="/workspace/coder")
+    monkeypatch.setattr(
+        upload,
+        "parse_multipart",
+        lambda *_args: ({"session_id": "workspace_coder", "profile": "coder"}, {"file": ("note.txt", b"x")}),
+    )
+    monkeypatch.setattr(upload, "get_session", lambda sid: target)
+    monkeypatch.setattr(upload, "get_profile_cookie", lambda _handler: None)
+    captured = {}
+
+    def _reject(_handler, session, profile_override=None):
+        captured["session"] = session
+        captured["profile_override"] = profile_override
+        return True
+
+    monkeypatch.setattr(upload, "_reject_invisible_session", _reject)
+
+    upload.handle_workspace_upload(handler)
+
+    assert captured == {"session": target, "profile_override": "coder"}
+
+
+def test_media_relative_path_uses_query_profile_when_cookie_absent(monkeypatch, tmp_path):
+    handler = _FakeHandler()
+    sid = "media_coder"
+    session = _SimpleSession(sid, profile="coder", workspace=str(tmp_path))
+    captured = {}
+
+    def fake_get_session_for_file_ops(sid_arg, *, profile_override=None):
+        captured["profile_override"] = profile_override
+        if profile_override != "coder":
+            raise KeyError(sid_arg)
+        return session
+
+    monkeypatch.setattr(routes, "get_session_for_file_ops", fake_get_session_for_file_ops)
+    monkeypatch.setattr(helpers, "get_profile_cookie", lambda _handler: None)
+    monkeypatch.setattr(
+        routes,
+        "_file_raw_target",
+        lambda _session, _sid, rel: (tmp_path, tmp_path / rel),
+    )
+    monkeypatch.setattr(routes, "_serve_resolved_file_raw", lambda *_args, **_kwargs: True)
+
+    qs = {"path": ["note.png"], "session_id": [sid], "profile": ["coder"]}
+    handled = routes._try_serve_session_relative_media(handler, qs, "note.png", sid)
+
+    assert handled is True
+    assert captured["profile_override"] == "coder"
+
+
+def test_media_relative_path_prefers_profile_cookie_over_query_profile(monkeypatch, tmp_path):
+    handler = _FakeHandler()
+    sid = "media_default"
+    session = _SimpleSession(sid, profile="default", workspace=str(tmp_path))
+    captured = {}
+
+    def fake_get_session_for_file_ops(sid_arg, *, profile_override=None):
+        captured["profile_override"] = profile_override
+        return session
+
+    monkeypatch.setattr(routes, "get_session_for_file_ops", fake_get_session_for_file_ops)
+    monkeypatch.setattr(helpers, "get_profile_cookie", lambda _handler: "default")
+    monkeypatch.setattr(
+        routes,
+        "_file_raw_target",
+        lambda _session, _sid, rel: (tmp_path, tmp_path / rel),
+    )
+    monkeypatch.setattr(routes, "_serve_resolved_file_raw", lambda *_args, **_kwargs: True)
+
+    qs = {"path": ["note.png"], "session_id": [sid], "profile": ["coder"]}
+    handled = routes._try_serve_session_relative_media(handler, qs, "note.png", sid)
+
+    assert handled is True
+    assert captured["profile_override"] is None
 
 
 def test_chat_stream_status_blocks_foreign_active_stream(monkeypatch):

@@ -12,6 +12,7 @@ Covers:
 from __future__ import annotations
 
 import io
+import json
 import logging
 import re
 import sqlite3
@@ -175,6 +176,86 @@ def test_get_session_for_file_ops_rejects_foreign_profile(
     assert "foreign-webui-sid" in caplog.text
     assert "session_profile='research'" in caplog.text
     assert "active_profile='default'" in caplog.text
+
+
+def test_get_session_for_file_ops_accepts_profile_override(
+    models_module, monkeypatch, tmp_path
+):
+    """Explicit profile_override bypasses the process active profile for file ops."""
+    profiles_module = pytest.importorskip("api.profiles")
+    session = SimpleNamespace(profile="research", workspace=str(tmp_path))
+    called = {}
+
+    def fake_get_session(sid, metadata_only=False):
+        return session
+
+    def fake_profiles_match(session_profile, active_profile):
+        called["session_profile"] = session_profile
+        called["active_profile"] = active_profile
+        return session_profile == active_profile
+
+    monkeypatch.setattr(models_module, "get_session", fake_get_session)
+    monkeypatch.setattr(profiles_module, "_profiles_match", fake_profiles_match)
+    monkeypatch.setattr(profiles_module, "get_active_profile_name", lambda: "default")
+
+    result = models_module.get_session_for_file_ops(
+        "research-sid", profile_override="research"
+    )
+    assert result is session
+    assert called == {"session_profile": "research", "active_profile": "research"}
+
+
+def test_file_read_accepts_query_profile_when_cookie_absent(
+    models_module, monkeypatch, tmp_path
+):
+    """Named-profile sessions are readable via ?profile= when no profile cookie is set."""
+    profiles_module = pytest.importorskip("api.profiles")
+    routes_module = pytest.importorskip("api.routes")
+    workspace = tmp_path / "named-workspace"
+    workspace.mkdir()
+    (workspace / "marker.txt").write_text("foreign profile marker")
+    session = models_module.Session(
+        session_id="foreign-profile-file-read-query",
+        workspace=str(workspace),
+        profile="research",
+    )
+    models_module.SESSIONS[session.session_id] = session
+
+    class Handler:
+        command = "GET"
+        headers = {}
+
+        def __init__(self):
+            self.status = None
+            self.headers_sent = []
+            self.wfile = io.BytesIO()
+
+        def send_response(self, code):
+            self.status = code
+
+        def send_header(self, key, value):
+            self.headers_sent.append((key, value))
+
+        def end_headers(self):
+            pass
+
+    monkeypatch.setattr(profiles_module, "get_active_profile_name", lambda: "default")
+    helpers_module = pytest.importorskip("api.helpers")
+    monkeypatch.setattr(helpers_module, "get_profile_cookie", lambda _handler: None)
+    try:
+        handler = Handler()
+        routes_module._handle_file_read(
+            handler,
+            urlparse(
+                "/api/file?session_id=foreign-profile-file-read-query"
+                "&path=marker.txt&profile=research"
+            ),
+        )
+        assert handler.status == 200
+        payload = json.loads(handler.wfile.getvalue())
+        assert payload["content"] == "foreign profile marker"
+    finally:
+        models_module.SESSIONS.pop(session.session_id, None)
 
 
 def test_file_read_rejects_foreign_profile_session(

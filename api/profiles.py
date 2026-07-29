@@ -465,6 +465,29 @@ def _profiles_match(row_profile, active_profile) -> bool:
     return False
 
 
+def normalize_explicit_profile(raw) -> str | None:
+    """Return a validated explicit profile name, or None when absent/invalid."""
+    if not isinstance(raw, str):
+        return None
+    profile = raw.strip()
+    if not profile:
+        return None
+    return profile if profile == 'default' or _PROFILE_ID_RE.fullmatch(profile) else None
+
+
+def profile_override_for_request(handler, raw_explicit) -> str | None:
+    """Return an explicit profile override when the request has no profile cookie.
+
+    When ``hermes_profile`` is set on the request, the cookie is authoritative and
+    this returns ``None`` so callers fall back to the thread-local active profile.
+    """
+    from api.helpers import get_profile_cookie
+
+    if get_profile_cookie(handler):
+        return None
+    return normalize_explicit_profile(raw_explicit)
+
+
 def get_active_profile_name() -> str:
     """Return the currently active profile name.
 

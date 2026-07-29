@@ -11,7 +11,11 @@ from pathlib import Path
 from api.config import MAX_UPLOAD_BYTES, STATE_DIR
 from api.helpers import get_profile_cookie, j
 from api.models import get_session
-from api.profiles import _profiles_match, get_active_profile_name as _get_active_profile_name
+from api.profiles import (
+    _profiles_match,
+    get_active_profile_name as _get_active_profile_name,
+    normalize_explicit_profile,
+)
 from api.workspace import (
     safe_resolve_ws,
     resolve_trusted_workspace,
@@ -179,14 +183,7 @@ def _session_attachment_dir(session_id: str, *, root: Path | None = None) -> Pat
 
 def _upload_profile_from_fields(fields: dict) -> str | None:
     """Return a valid multipart profile override, if the caller supplied one."""
-    raw_profile = fields.get('profile')
-    if not isinstance(raw_profile, str):
-        return None
-    profile = raw_profile.strip()
-    if not profile:
-        return None
-    from api.profiles import _PROFILE_ID_RE
-    return profile if profile == 'default' or _PROFILE_ID_RE.fullmatch(profile) else None
+    return normalize_explicit_profile(fields.get('profile'))
 
 
 def _session_visible_to_active_profile(session, profile_override: str | None = None) -> bool:
@@ -444,6 +441,8 @@ def handle_upload_extract(handler):
             return j(handler, {'error': f'File too large (max {MAX_UPLOAD_BYTES//1024//1024}MB)'}, status=413)
         fields, files = parse_multipart(handler.rfile, content_type, content_length)
         session_id = fields.get('session_id', '')
+        cookie_profile = get_profile_cookie(handler)
+        profile_override = None if cookie_profile else _upload_profile_from_fields(fields)
         if 'file' not in files:
             return j(handler, {'error': 'No file field in request'}, status=400)
         filename, file_bytes = files['file']
@@ -453,7 +452,7 @@ def handle_upload_extract(handler):
             s = get_session(session_id)
         except KeyError:
             return j(handler, {'error': 'Session not found'}, status=404)
-        if _reject_invisible_session(handler, s):
+        if _reject_invisible_session(handler, s, profile_override):
             return True
         session_dir = _session_attachment_dir(session_id)
         session_dir.mkdir(parents=True, exist_ok=True)
@@ -665,6 +664,8 @@ def handle_workspace_upload(handler):
         fields, files = parse_multipart(handler.rfile, content_type, content_length)
         session_id = fields.get('session_id', '')
         subpath = fields.get('path', '')
+        cookie_profile = get_profile_cookie(handler)
+        profile_override = None if cookie_profile else _upload_profile_from_fields(fields)
 
         if not session_id:
             return j(handler, {'error': 'Missing session_id'}, status=400)
@@ -677,7 +678,7 @@ def handle_workspace_upload(handler):
             session = get_session(session_id)
         except KeyError:
             return j(handler, {'error': 'Session not found'}, status=404)
-        if _reject_invisible_session(handler, session):
+        if _reject_invisible_session(handler, session, profile_override):
             return True
 
         # Resolve workspace root from session
