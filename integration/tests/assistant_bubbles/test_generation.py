@@ -141,6 +141,17 @@ def test_system_prompt_for_emotion_requires_json_array():
     assert emotion_prompt != intro_prompt
     assert "JSON 数组" in emotion_prompt
     assert "不得输出 JSON" in intro_prompt
+    assert "句中必须使用逗号" in intro_prompt
+
+
+def test_assistant_intro_prompt_includes_punctuation_fewshot():
+    prompt = generation._load_user_prompt(
+        "assistant_intro",
+        {"display_name": "小极助理", "description": "通用岗位智能协助", "soul": ""},
+    )
+    assert "句中必须使用逗号断句" in prompt
+    assert "错误：哈喽我是小极助理擅长" in prompt
+    assert "正确：哈喽，我是小极助理，擅长" in prompt
 
 
 def test_validate_emotion_accepts_json_code_fence():

@@ -11,10 +11,10 @@ from typing import Any
 import yaml
 
 PROMPT_VERSIONS = {
-    "assistant_intro": "assistant_intro.v2",
-    "memory": "memory.v2",
-    "skill": "skill.v5",
-    "emotion": "emotion.v5",
+    "assistant_intro": "assistant_intro.v3",
+    "memory": "memory.v3",
+    "skill": "skill.v6",
+    "emotion": "emotion.v6",
 }
 
 
