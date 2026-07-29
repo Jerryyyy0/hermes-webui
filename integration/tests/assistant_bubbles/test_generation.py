@@ -144,6 +144,14 @@ def test_system_prompt_for_emotion_requires_json_array():
     assert "句中必须使用逗号" in intro_prompt
 
 
+def test_truncate_for_log_limits_user_prompt_display():
+    text = "x" * 1200
+    truncated = generation._truncate_for_log(text, generation.USER_PROMPT_LOG_MAX_CHARS)
+    assert truncated.startswith("x" * generation.USER_PROMPT_LOG_MAX_CHARS)
+    assert truncated.endswith("(truncated, total 1200 chars)")
+    assert generation._truncate_for_log("short", generation.USER_PROMPT_LOG_MAX_CHARS) == "short"
+
+
 def test_assistant_intro_prompt_includes_punctuation_fewshot():
     prompt = generation._load_user_prompt(
         "assistant_intro",
@@ -341,14 +349,21 @@ def test_generate_with_model_logs_call_success(tmp_path, capsys):
     assert result == "成功文案。"
     assert reason == "ok"
     err = capsys.readouterr().err
+    assert "[webui][assistant_bubbles][model_prompt]" in err
+    assert "----- system_prompt -----" in err
+    assert "----- user_prompt -----" in err
+    assert "----- end -----" in err
+    assert generation.SYSTEM_PROMPT.splitlines()[0] in err
+    assert "category=assistant_intro" in err
+    assert "[webui][assistant_bubbles][model_response]" in err
+    assert "----- model_response -----" in err
+    assert "成功文案。" in err
     assert "[webui][assistant_bubbles][model_call_succeeded]" in err
     assert "profile=alice" in err
-    assert "category=assistant_intro" in err
     assert "provider=test" in err
     assert "model=test-model" in err
     assert "elapsed_ms=" in err
     assert "output_chars=5" in err
-    assert "成功文案。" not in err
 
 
 def test_generate_with_model_logs_call_failure(tmp_path, capsys):
@@ -372,6 +387,9 @@ def test_generate_with_model_logs_call_failure(tmp_path, capsys):
     assert result is None
     assert reason == "model_call_failed"
     err = capsys.readouterr().err
+    assert "[webui][assistant_bubbles][model_prompt]" in err
+    assert "----- system_prompt -----" in err
+    assert "----- user_prompt -----" in err
     assert "[webui][assistant_bubbles][model_call_failed]" in err
     assert "profile=alice" in err
     assert "category=assistant_intro" in err
@@ -402,11 +420,12 @@ def test_generate_with_model_logs_output_rejection_without_content(tmp_path, cap
     assert result is None
     assert reason == "multiline"
     err = capsys.readouterr().err
+    assert "[webui][assistant_bubbles][model_response]" in err
+    assert "SECRET_SENSITIVE_OUTPUT_12345" in err
     assert "[webui][assistant_bubbles][model_output_rejected]" in err
     assert "reason=multiline" in err
     assert "elapsed_ms=" in err
     assert "output_chars=" in err
-    assert rejected_content not in err
 
 
 def test_run_task_skill_failure_writes_fallback_when_no_cached_text(tmp_path, capsys):

@@ -45,6 +45,7 @@ GENERATION_ORDER = ("assistant_intro", "memory", "skill", "emotion")
 SUCCESS_REGEN_COOLDOWN_SECONDS = 300
 FAILURE_RETRY_SECONDS = 3
 EMOTION_REFRESH_SECONDS = 5 * 60
+USER_PROMPT_LOG_MAX_CHARS = 1000
 
 
 def _log_line(event: str, fields: dict[str, Any] | None = None) -> str:
@@ -58,6 +59,39 @@ def _emit_info(event: str, fields: dict[str, Any] | None = None) -> None:
 
 def _emit_warning(event: str, fields: dict[str, Any] | None = None) -> None:
     console_warning(_log_line(event, fields))
+
+
+def _truncate_for_log(text: str, max_chars: int) -> str:
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+    return f"{text[:max_chars]}\n...(truncated, total {len(text)} chars)"
+
+
+def _emit_full_content_log(
+    event: str,
+    meta_fields: dict[str, Any] | None = None,
+    *,
+    content_fields: dict[str, str] | None = None,
+    level: str = "info",
+) -> None:
+    """Emit prompt/response logs as a readable multi-line block (no truncation)."""
+    meta = format_kv(meta_fields or {})
+    header = with_timestamp(
+        " ".join(part for part in (f"[webui][assistant_bubbles][{event}]", meta) if part)
+    )
+    sections: list[str] = [header]
+    for key, value in (content_fields or {}).items():
+        text = str(value or "").rstrip()
+        if not text:
+            continue
+        sections.append(f"----- {key} -----")
+        sections.append(text)
+    sections.append("----- end -----")
+    block = "\n".join(sections)
+    if level == "warning":
+        console_warning(block)
+    else:
+        console_info(block)
 
 
 @dataclass(frozen=True)
@@ -385,9 +419,25 @@ def _generate_with_model(
     context: dict[str, Any],
 ) -> tuple[str | list[str] | None, str]:
     category = task.category
+    system_prompt = _system_prompt_for(category)
+    user_prompt = _load_user_prompt(category, context)
+    prompt_meta = {
+        "profile": task.profile,
+        "category": category,
+        "provider": task.provider,
+        "model": task.model,
+    }
+    _emit_full_content_log(
+        "model_prompt",
+        prompt_meta,
+        content_fields={
+            "system_prompt": system_prompt,
+            "user_prompt": _truncate_for_log(user_prompt, USER_PROMPT_LOG_MAX_CHARS),
+        },
+    )
     messages = [
-        {"role": "system", "content": _system_prompt_for(category)},
-        {"role": "user", "content": _load_user_prompt(category, context)},
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
     ]
     started = time.monotonic()
     try:
@@ -422,29 +472,27 @@ def _generate_with_model(
         )
         return None, "model_call_failed"
     elapsed_ms = round((time.monotonic() - started) * 1000, 1)
-    _emit_info(
-        "model_call_succeeded",
-        {
-            "profile": task.profile,
-            "category": category,
-            "provider": task.provider,
-            "model": task.model,
-            "elapsed_ms": elapsed_ms,
-            **_content_metadata(content),
-        },
+    response_meta = {
+        "profile": task.profile,
+        "category": category,
+        "provider": task.provider,
+        "model": task.model,
+        "elapsed_ms": elapsed_ms,
+        **_content_metadata(content),
+    }
+    _emit_full_content_log(
+        "model_response",
+        response_meta,
+        content_fields={"model_response": str(content or "")},
     )
+    _emit_info("model_call_succeeded", response_meta)
     result, reason = validate_model_output(category, content, context)
     if result is None:
         _emit_warning(
             "model_output_rejected",
             {
-                "profile": task.profile,
-                "category": category,
-                "provider": task.provider,
-                "model": task.model,
+                **response_meta,
                 "reason": reason,
-                "elapsed_ms": elapsed_ms,
-                **_content_metadata(content),
             },
         )
     return result, reason
