@@ -16617,8 +16617,8 @@ def _handle_media(handler, parsed):
 
     Security:
     - Absolute ``path``: must resolve to an allowed root (hermes home, /tmp, etc.)
-    - Relative ``path`` + ``session_id``: same scope as ``/api/file/raw`` (session
-      workspace, then that session's attachment inbox)
+    - Relative ``path`` + ``session_id``: this session's attachment inbox only
+      (``HERMES_WEBUI_ATTACHMENT_DIR`` or default ``STATE_DIR/attachments``)
     - Auth-gated when auth is enabled
     - Only image MIME types are served inline by default; others need ``inline=1``
     - SVG always served as attachment (XSS risk)
@@ -16907,6 +16907,20 @@ def _handle_media(handler, parsed):
     return _serve_file_bytes(handler, target, mime, disposition, "private, max-age=3600", csp=csp)
 
 
+def _attachment_raw_target(sid: str, rel: str) -> tuple[Path, Path] | None:
+    """Resolve paths under this session's attachment inbox only."""
+    try:
+        from api.upload import _session_attachment_dir
+
+        attachment_root = _session_attachment_dir(sid)
+        attachment_target = safe_resolve(attachment_root, rel)
+    except Exception:
+        return None
+    if attachment_target.exists() and attachment_target.is_file():
+        return attachment_root, attachment_target
+    return None
+
+
 def _file_raw_target(session, sid: str, rel: str) -> tuple[Path, Path] | None:
     """Resolve /api/file/raw paths from the workspace or this session's uploads."""
     workspace_root = Path(session.workspace)
@@ -16920,16 +16934,7 @@ def _file_raw_target(session, sid: str, rel: str) -> tuple[Path, Path] | None:
     # Chat uploads now live in a per-session attachment inbox outside the
     # workspace. Keep the public URL stable while scoping fallback lookup to
     # the requesting session's own attachment directory.
-    try:
-        from api.upload import _session_attachment_dir
-
-        attachment_root = _session_attachment_dir(sid)
-        attachment_target = safe_resolve(attachment_root, rel)
-    except Exception:
-        return None
-    if attachment_target.exists() and attachment_target.is_file():
-        return attachment_root, attachment_target
-    return None
+    return _attachment_raw_target(sid, rel)
 
 
 def _is_absolute_serve_path(raw_path: str) -> bool:
@@ -16966,7 +16971,7 @@ def _try_serve_session_relative_media(handler, qs: dict, raw_path: str, sid: str
     except KeyError:
         bad(handler, "Session not found", 404)
         return True
-    resolved = _file_raw_target(s, sid, raw_path)
+    resolved = _attachment_raw_target(sid, raw_path)
     if resolved is None:
         j(handler, {"error": "not found"}, status=404)
         return True

@@ -130,6 +130,41 @@ def test_media_serves_session_attachment_inbox(cleanup_test_sessions):
     assert raw == payload
     assert "image/png" in headers.get("Content-Type", "")
 
+def test_media_relative_path_does_not_read_workspace(cleanup_test_sessions):
+    sid, workspace = make_session_tracked(cleanup_test_sessions)
+    filename = f"workspace-only-{uuid.uuid4().hex}.png"
+    (workspace / filename).write_bytes(b"workspace-bytes")
+    try:
+        get_raw(f"/api/media?session_id={sid}&path={urllib.parse.quote(filename)}")
+        assert False, "Expected 404"
+    except urllib.error.HTTPError as e:
+        assert e.code == 404
+
+def test_media_relative_path_reads_attachment_not_workspace(cleanup_test_sessions):
+    from api.upload import _session_attachment_dir
+
+    sid, workspace = make_session_tracked(cleanup_test_sessions)
+    filename = f"same-name-{uuid.uuid4().hex}.png"
+    (workspace / filename).write_bytes(b"workspace-bytes")
+    attachment_dir = _session_attachment_dir(sid)
+    attachment_dir.mkdir(parents=True, exist_ok=True)
+    (attachment_dir / filename).write_bytes(b"attachment-bytes")
+    raw, headers, status = get_raw(
+        f"/api/media?session_id={sid}&path={urllib.parse.quote(filename)}"
+    )
+    assert status == 200
+    assert raw == b"attachment-bytes"
+
+def test_file_raw_still_serves_workspace_before_attachment(cleanup_test_sessions):
+    sid, workspace = make_session_tracked(cleanup_test_sessions)
+    filename = f"workspace-first-{uuid.uuid4().hex}.png"
+    (workspace / filename).write_bytes(b"workspace-bytes")
+    raw, headers, status = get_raw(
+        f"/api/file/raw?session_id={sid}&path={urllib.parse.quote(filename)}"
+    )
+    assert status == 200
+    assert raw == b"workspace-bytes"
+
 # ── Cron create ──
 
 def test_cron_create_requires_prompt():
