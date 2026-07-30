@@ -79,6 +79,8 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Fixed
 
+- **Cron fallback prompt deduplication** — 当 cron output 先于 Agent `state.db` transcript 可用而生成 `cron_fallback` user 占位时，后续到达的同一首条真实 user（含 scheduler execution hint 或裸 prompt）会确认该占位而非再显示一次任务提示；不同 prompt、执行完成后的 WebUI 跟帖及独立 assistant 输出保持不变。
+
 - **stream_diag first visible includes reasoning** — `P4 S4.3` / `first_visible_token` 现在把 SSE `reasoning` 与 `token` 都算作首个可见文本；思考模型先输出思考时，日志在首个思考字出现时触发，而不再等到最终回答正文。
 
 - **Cron 会话手动续聊 Artifact** — 在已 materialize 的定时任务会话中通过 WebUI 继续对话时，成功 `write_file` 的 Artifact decision 现在会被明确验证后再标记 turn 完成；提取或 SQLite store 写入失败会记录可诊断事件，不再被静默误判为无成果或完成。

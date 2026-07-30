@@ -716,6 +716,162 @@ def test_reconcile_cron_transcript_uses_output_when_database_reply_missing(cron_
     assert [message["content"] for message in session.messages] == ["cron prompt", "cron answer"]
 
 
+@pytest.mark.parametrize(
+    "state_prompt",
+    [
+        "今日热点新闻简报",
+        (
+            "[IMPORTANT: You are running as a scheduled cron job. "
+            "DELIVERY: Your final response will be automatically delivered "
+            "to the user — do NOT use send_message or try to deliver "
+            "the output yourself. Just produce your report/output as your "
+            "final response and the system handles the rest. "
+            'SILENT: If there is genuinely nothing new to report, respond with exactly "[SILENT]" '
+            "(nothing else) to suppress delivery. Never combine [SILENT] with content — either "
+            "report your findings normally, or say [SILENT] and nothing more.]\n\n"
+            "今日热点新闻简报"
+        ),
+    ],
+)
+def test_reconcile_cron_transcript_consumes_real_user_matching_fallback(
+    cron_env, monkeypatch, state_prompt
+):
+    """A later Agent transcript confirms, rather than duplicates, the fallback prompt."""
+    from api.models import Session
+    from integration.crons.session_bridge import reconcile_cron_session_transcript
+
+    session = Session(
+        session_id="cron_job1_1700000750",
+        profile="default",
+        source_tag="cron",
+        cron_execution_profile=str(cron_env["home"]),
+        cron_execution_ended_at=200.0,
+        messages=[
+            {
+                "role": "user",
+                "content": "今日热点新闻简报",
+                "timestamp": 99.0,
+                "source": "cron_fallback",
+            },
+            {
+                "role": "assistant",
+                "content": "首次失败通知",
+                "timestamp": 100.0,
+                "source": "cron_fallback",
+            },
+        ],
+    )
+    state_messages = [
+        {"id": "real-user", "role": "user", "content": state_prompt, "timestamp": 101.0},
+        {"id": "real-answer", "role": "assistant", "content": "稍后重试通知", "timestamp": 102.0},
+    ]
+    monkeypatch.setattr(
+        "api.models.get_state_db_session_messages",
+        lambda *_args, **_kwargs: state_messages,
+    )
+
+    assert reconcile_cron_session_transcript(session) is True
+    assert [message["role"] for message in session.messages] == ["user", "assistant", "assistant"]
+    assert [message["content"] for message in session.messages] == [
+        "今日热点新闻简报",
+        "首次失败通知",
+        "稍后重试通知",
+    ]
+    assert session.messages[0]["source"] == "cron_fallback"
+    assert session.messages[2].get("source") is None
+    assert reconcile_cron_session_transcript(session) is False
+
+
+def test_reconcile_cron_transcript_keeps_nonmatching_state_user_and_followup(
+    cron_env, monkeypatch
+):
+    """Only the first matching execution prompt may consume a fallback placeholder."""
+    from api.models import Session
+    from integration.crons.session_bridge import reconcile_cron_session_transcript
+
+    session = Session(
+        session_id="cron_job1_1700000800",
+        profile="default",
+        source_tag="cron",
+        cron_execution_profile=str(cron_env["home"]),
+        cron_execution_ended_at=200.0,
+        messages=[
+            {
+                "role": "user",
+                "content": "cron prompt",
+                "timestamp": 99.0,
+                "source": "cron_fallback",
+            },
+            {
+                "role": "assistant",
+                "content": "fallback answer",
+                "timestamp": 100.0,
+                "source": "cron_fallback",
+            },
+            {"role": "user", "content": "cron prompt", "timestamp": 201.0},
+        ],
+    )
+    state_messages = [
+        {"id": "real-user", "role": "user", "content": "different cron prompt", "timestamp": 101.0},
+        {"id": "real-answer", "role": "assistant", "content": "real answer", "timestamp": 102.0},
+    ]
+    monkeypatch.setattr(
+        "api.models.get_state_db_session_messages",
+        lambda *_args, **_kwargs: state_messages,
+    )
+
+    assert reconcile_cron_session_transcript(session) is True
+    contents = [message["content"] for message in session.messages]
+    assert contents.count("cron prompt") == 2
+    assert "different cron prompt" in contents
+    assert "real answer" in contents
+    assert contents[-1] == "cron prompt"
+
+
+def test_reconcile_cron_transcript_keeps_matching_webui_followup(
+    cron_env, monkeypatch
+):
+    """A matching execution placeholder must not consume a later WebUI follow-up."""
+    from api.models import Session
+    from integration.crons.session_bridge import reconcile_cron_session_transcript
+
+    session = Session(
+        session_id="cron_job1_1700000850",
+        profile="default",
+        source_tag="cron",
+        cron_execution_profile=str(cron_env["home"]),
+        cron_execution_ended_at=200.0,
+        messages=[
+            {
+                "role": "user",
+                "content": "cron prompt",
+                "timestamp": 99.0,
+                "source": "cron_fallback",
+            },
+            {
+                "role": "assistant",
+                "content": "fallback answer",
+                "timestamp": 100.0,
+                "source": "cron_fallback",
+            },
+            {"role": "user", "content": "cron prompt", "timestamp": 201.0},
+        ],
+    )
+    state_messages = [
+        {"id": "real-user", "role": "user", "content": "cron prompt", "timestamp": 101.0},
+        {"id": "real-answer", "role": "assistant", "content": "real answer", "timestamp": 102.0},
+    ]
+    monkeypatch.setattr(
+        "api.models.get_state_db_session_messages",
+        lambda *_args, **_kwargs: state_messages,
+    )
+
+    assert reconcile_cron_session_transcript(session) is True
+    assert [message["role"] for message in session.messages].count("user") == 2
+    assert [message["content"] for message in session.messages].count("cron prompt") == 2
+    assert session.messages[-1]["content"] == "cron prompt"
+
+
 def _failed_cron_output(detail="Connection error."):
     return f"# Cron Job: Nightly (FAILED)\n\n## Error\n\n```\n{detail}\n```\n"
 

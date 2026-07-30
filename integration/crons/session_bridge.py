@@ -988,6 +988,74 @@ def cron_execution_prefix_and_suffix(session) -> tuple[list, list] | None:
     return prefix, suffix
 
 
+def _normalized_cron_fallback_user_content(message: dict) -> str | None:
+    """Return the display-equivalent content for one fallback user message."""
+    if (
+        not isinstance(message, dict)
+        or message.get("role") != "user"
+        or message.get("source") != "cron_fallback"
+    ):
+        return None
+    from api.streaming import _strip_cron_execution_hint
+
+    return " ".join(_strip_cron_execution_hint(message.get("content") or "").split())
+
+
+def _consume_matching_cron_fallback_state_user(
+    sidecar_messages: list[dict],
+    state_messages: list[dict],
+) -> list[dict]:
+    """Avoid replaying the first real user row over a synthetic cron fallback.
+
+    A cron output file can become visible before the Agent commits its transcript
+    to ``state.db``. In that gap the sidecar contains a ``cron_fallback`` user
+    with the bare job prompt. The Agent's first persisted user row commonly has
+    the scheduler execution hint prepended, which display rendering removes.
+    Treat that row as confirmation of the placeholder rather than a second
+    visible user turn. Only the first state.db user row is eligible: later,
+    identical user content may be a deliberate in-session retry and must remain.
+    """
+    fallback_users = [
+        message
+        for message in sidecar_messages
+        if _normalized_cron_fallback_user_content(message) is not None
+    ]
+    if not fallback_users:
+        return state_messages
+
+    first_state_user_index = next(
+        (
+            index
+            for index, message in enumerate(state_messages)
+            if isinstance(message, dict) and message.get("role") == "user"
+        ),
+        None,
+    )
+    if first_state_user_index is None:
+        return state_messages
+
+    state_user = state_messages[first_state_user_index]
+    from api.streaming import _strip_cron_execution_hint
+
+    normalized_state_content = " ".join(
+        _strip_cron_execution_hint(state_user.get("content") or "").split()
+    )
+    if not normalized_state_content:
+        return state_messages
+    if normalized_state_content not in {
+        normalized
+        for fallback_user in fallback_users
+        if (normalized := _normalized_cron_fallback_user_content(fallback_user)) is not None
+    }:
+        return state_messages
+
+    return [
+        message
+        for index, message in enumerate(state_messages)
+        if index != first_state_user_index
+    ]
+
+
 def reconcile_cron_session_transcript(
     session,
     *,
@@ -1029,6 +1097,10 @@ def reconcile_cron_session_transcript(
             or _cron_error_timestamp(message.get("timestamp")) <= execution_ended_at
         )
     ]
+    db_messages = _consume_matching_cron_fallback_state_user(
+        sidecar_prefix,
+        db_messages,
+    )
     merged_prefix = merge_session_messages_append_only(
         sidecar_prefix,
         db_messages,
