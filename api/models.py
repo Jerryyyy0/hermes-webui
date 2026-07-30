@@ -8255,6 +8255,56 @@ def _has_visible_duplicate(visible_key: tuple, visible_keys: set[tuple]) -> bool
     return _matching_visible_duplicate(visible_key, visible_keys) is not None
 
 
+def _legacy_user_aggregate_component_keys(msg: dict) -> list[tuple] | None:
+    """Return components for an attachment-free, agent-merged user row.
+
+    The agent historically merged adjacent user rows with blank lines. A
+    persisted row is considered synthetic only when every component is also
+    represented by an independent canonical row. This uses message identity,
+    not a localized upload prompt.
+    """
+    if (
+        not isinstance(msg, dict)
+        or str(msg.get("role") or "") != "user"
+        or msg.get("attachments")
+        or msg.get("_db_persisted") is not True
+    ):
+        return None
+    parts = str(msg.get("content") or "").split("\n\n")
+    if len(parts) < 2 or any(not part.strip() for part in parts):
+        return None
+    return [
+        _session_message_content_key({"role": "user", "content": part})
+        for part in parts
+    ]
+
+
+def _drop_covered_legacy_user_aggregates(messages: list) -> list:
+    """Hide synthetic user aggregates once canonical component rows exist."""
+    messages = list(messages or [])
+    canonical_counts = {}
+    for msg in messages:
+        if (
+            isinstance(msg, dict)
+            and _legacy_user_aggregate_component_keys(msg) is None
+        ):
+            key = _session_message_content_key(msg)
+            canonical_counts[key] = canonical_counts.get(key, 0) + 1
+    kept = []
+    for msg in messages:
+        component_keys = _legacy_user_aggregate_component_keys(msg)
+        if component_keys is None:
+            kept.append(msg)
+            continue
+        available = dict(canonical_counts)
+        for key in component_keys:
+            if available.get(key, 0) <= 0:
+                kept.append(msg)
+                break
+            available[key] -= 1
+    return kept
+
+
 def _sidecar_has_terminal_partial_error(sidecar_messages: list) -> bool:
     """Return True when WebUI already owns an interrupted live partial turn.
 
@@ -8554,8 +8604,14 @@ def chronological_merge_session_messages_for_display(
     ``_recovered`` row (legacy merge key, no id) — including bare vs
     mid-text ``[Workspace::v1: ...]`` composites.
     """
-    sidecar_messages = [m for m in (sidecar_messages or []) if isinstance(m, dict)]
-    cli_messages = [m for m in (cli_messages or []) if isinstance(m, dict)]
+    sidecar_messages = [
+        m for m in _drop_covered_legacy_user_aggregates(sidecar_messages)
+        if isinstance(m, dict)
+    ]
+    cli_messages = [
+        m for m in _drop_covered_legacy_user_aggregates(cli_messages)
+        if isinstance(m, dict)
+    ]
 
     def _visible_counts(messages: list) -> dict:
         counts: dict = {}
@@ -8636,8 +8692,8 @@ def merge_session_messages_append_only(
     so the empty-sidecar recovery can distinguish a legitimate prefix from a
     deleted suffix instead of guessing by dropping one turn pair.
     """
-    sidecar_messages = list(sidecar_messages or [])
-    state_messages = list(state_messages or [])
+    sidecar_messages = _drop_covered_legacy_user_aggregates(sidecar_messages)
+    state_messages = _drop_covered_legacy_user_aggregates(state_messages)
     # Per-invocation cache keyed by message identity. Sidecar/state message objects
     # are retained for this call, and this function does not mutate key-defining
     # fields before each helper call.

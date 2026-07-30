@@ -6176,22 +6176,24 @@ def _materialize_pending_user_turn_before_error(session) -> bool:
             or existing_source != pending_source
         ):
             return False
-        pending_turn_key = str(getattr(session, 'pending_turn_key', '') or '').strip()
-        existing_turn_key = str(existing.get('_turn_key') or '').strip()
-        if pending_turn_key and existing_turn_key and existing_turn_key != pending_turn_key:
-            return False
         try:
             existing_ts = int(existing.get('timestamp'))
         except (TypeError, ValueError):
             # The eager WebUI checkpoint can be persisted before state.db
             # assigns a timestamp. Attachment metadata is added only by
             # recovery, so an already-persisted optimistic row can legitimately
-            # have no `attachments` field. Its tail position plus text, source,
-            # and turn identity prove it is the current turn; appending a
-            # `_recovered` copy here creates two adjacent user rows.
+            # have no `attachments` field. Its tail position plus text and
+            # source prove it is the current turn. state.db may have rewritten
+            # its turn key since request state captured the original value, so
+            # that key cannot reject this narrow optimistic-checkpoint case.
+            # Appending a `_recovered` copy here creates two adjacent user rows.
             if existing.get('_db_persisted') is True and 'attachments' not in existing:
                 return True
             return list(existing.get('attachments') or []) == pending_attachments
+        pending_turn_key = str(getattr(session, 'pending_turn_key', '') or '').strip()
+        existing_turn_key = str(existing.get('_turn_key') or '').strip()
+        if pending_turn_key and existing_turn_key and existing_turn_key != pending_turn_key:
+            return False
         return (
             existing_ts == recovered_ts
             and list(existing.get('attachments') or []) == pending_attachments

@@ -317,6 +317,44 @@ def test_state_db_duplicate_backfills_turn_duration():
     assert merged[0]["_turnDuration"] == 42.5
 
 
+def test_reconciliation_drops_covered_legacy_upload_aggregate():
+    """Historical agent upload composites must not survive canonical rows."""
+    from api.models import merge_session_messages_append_only
+
+    first = "attachment reference: /tmp/first.doc"
+    second = "attachment reference: /tmp/second.png"
+    aggregate = f"[Workspace::v1: /workspace]\n{first}\n\n{second}"
+    sidecar = [
+        {"role": "user", "content": aggregate, "_db_persisted": True, "id": 3},
+        {
+            "role": "user",
+            "content": first,
+            "_db_persisted": True,
+            "id": 1,
+            "attachments": [{"name": "first.doc"}],
+        },
+        {
+            "role": "user",
+            "content": second,
+            "_db_persisted": True,
+            "id": 2,
+            "attachments": [{"name": "second.png"}],
+        },
+    ]
+    state = [
+        {"role": "user", "content": first, "_db_persisted": True, "id": 1},
+        {"role": "user", "content": second, "_db_persisted": True, "id": 2},
+    ]
+
+    merged = merge_session_messages_append_only(sidecar, state)
+
+    assert [msg["content"] for msg in merged] == [first, second]
+    assert [msg["attachments"] for msg in merged] == [
+        [{"name": "first.doc"}],
+        [{"name": "second.png"}],
+    ]
+
+
 def test_api_sessions_overlays_webui_state_db_summary_after_desktop_append(monkeypatch, tmp_path):
     import api.routes as routes
 
