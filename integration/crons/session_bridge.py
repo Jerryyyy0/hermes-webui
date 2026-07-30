@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import logging
 import math
+import re
 import shutil
 import sqlite3
 import time
@@ -44,6 +46,10 @@ _CRON_RUN_HISTORY_FIELDS = (
     "actual_cost_usd",
     "cost_status",
     "cost_source",
+)
+
+_CRON_OUTPUT_FILENAME_RE = re.compile(
+    r"^(?P<date>\d{4}-\d{2}-\d{2})_(?P<time>\d{2}-\d{2}-\d{2})\.md$"
 )
 
 
@@ -100,6 +106,128 @@ def list_cron_job_runs_from_state_db(
     except (OSError, sqlite3.Error) as exc:
         logger.debug("cron run history state.db read failed for %s: %s", job_id, exc)
         return []
+
+
+def _cron_backfill_session_id(job_id: str, filename: str) -> str | None:
+    """Derive a stable Agent-compatible cron session ID from an output filename."""
+    match = _CRON_OUTPUT_FILENAME_RE.fullmatch(str(filename or ""))
+    if not match:
+        return None
+    try:
+        run_at = dt.datetime.strptime(
+            f"{match.group('date')} {match.group('time')}",
+            "%Y-%m-%d %H-%M-%S",
+        )
+    except ValueError:
+        return None
+    return f"cron_{job_id}_{run_at.strftime('%Y%m%d_%H%M%S')}"
+
+
+def _cron_output_is_already_represented(
+    artifact: dict[str, Any],
+    database_runs: list[dict[str, Any]],
+) -> bool:
+    """Keep an output-only artifact from becoming a duplicate synthetic run."""
+    try:
+        artifact_time = float(artifact.get("modified"))
+    except (TypeError, ValueError):
+        return False
+    for run in database_runs:
+        if not isinstance(run, dict) or not run.get("session_id"):
+            continue
+        try:
+            run_time = float(run.get("ended_at") or run.get("started_at"))
+        except (TypeError, ValueError):
+            continue
+        if abs(run_time - artifact_time) <= CRON_ORPHAN_OUTPUT_MAX_DELTA_SECONDS:
+            return True
+    return False
+
+
+def backfill_cron_output_runs_to_state_db(
+    job: dict,
+    *,
+    execution_home: Path,
+    artifacts: list[dict[str, Any]],
+    database_runs: list[dict[str, Any]],
+) -> dict[str, int]:
+    """Import legacy output-only cron runs through Hermes Agent's public store.
+
+    A missing state.db record cannot be reconstructed with original tool events
+    or exact start timing. We preserve only the job prompt, final output, and
+    output-file completion time, and leave every unprovable field absent.
+    """
+    job_id = str((job or {}).get("id") or "").strip()
+    db_path = Path(execution_home) / "state.db"
+    # Script-only cron jobs deliberately bypass Agent/SessionDB. Their output is
+    # not an incomplete agent transcript and must stay artifact-only.
+    if not job_id or (job or {}).get("no_agent") or not db_path.is_file():
+        return {"imported": 0, "skipped": 0}
+
+    candidates: list[dict[str, Any]] = []
+    known_session_ids = {
+        str(run.get("session_id") or "")
+        for run in database_runs
+        if isinstance(run, dict) and run.get("session_id")
+    }
+    for artifact in artifacts:
+        if not isinstance(artifact, dict) or _cron_output_is_already_represented(
+            artifact, database_runs
+        ):
+            continue
+        session_id = _cron_backfill_session_id(job_id, str(artifact.get("filename") or ""))
+        if not session_id or session_id in known_session_ids:
+            continue
+        try:
+            ended_at = float(artifact.get("modified"))
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(ended_at):
+            continue
+        output = artifact.get("fallback_output")
+        if not isinstance(output, str):
+            continue
+        usage = artifact.get("usage")
+        model = usage.get("model") if isinstance(usage, dict) else None
+        candidates.append(
+            {
+                "id": session_id,
+                "source": "cron",
+                "title": str((job or {}).get("name") or f"Cron {job_id}"),
+                "model": str(model or "").strip() or None,
+                "started_at": max(0.0, ended_at - 1.0),
+                "ended_at": ended_at,
+                "end_reason": "cron_complete",
+                "messages": build_cron_fallback_messages(
+                    job,
+                    output,
+                    run_mtime=ended_at,
+                ),
+            }
+        )
+
+    if not candidates:
+        return {"imported": 0, "skipped": 0}
+
+    try:
+        from hermes_state import SessionDB
+
+        store = SessionDB(db_path=db_path)
+        try:
+            result = store.import_sessions(candidates)
+        finally:
+            store.close()
+    except Exception:
+        logger.debug("cron output state.db backfill failed for %s", job_id, exc_info=True)
+        return {"imported": 0, "skipped": len(candidates)}
+
+    if not isinstance(result, dict) or not result.get("ok"):
+        logger.debug("cron output state.db backfill rejected for %s: %r", job_id, result)
+        return {"imported": 0, "skipped": len(candidates)}
+    return {
+        "imported": int(result.get("imported") or 0),
+        "skipped": int(result.get("skipped") or 0),
+    }
 
 
 def cron_sessions_visible_in_sidebar(session: dict) -> bool:

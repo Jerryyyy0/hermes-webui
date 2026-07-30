@@ -17762,10 +17762,21 @@ def _handle_cron_history(handler, parsed):
     database_runs = []
     if job:
         try:
-            from integration.crons.session_bridge import list_cron_job_runs_from_state_db
+            from integration.crons.session_bridge import (
+                backfill_cron_output_runs_to_state_db,
+                list_cron_job_runs_from_state_db,
+            )
 
             execution_home = _execution_home_for_cron_session_lookup(job, profile)
             database_runs = list_cron_job_runs_from_state_db(execution_home, job_id)
+            backfill = backfill_cron_output_runs_to_state_db(
+                job,
+                execution_home=execution_home,
+                artifacts=artifacts,
+                database_runs=database_runs,
+            )
+            if backfill["imported"]:
+                database_runs = list_cron_job_runs_from_state_db(execution_home, job_id)
         except Exception:
             logger.debug("Failed to query cron state history %s", job_id, exc_info=True)
 
