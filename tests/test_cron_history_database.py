@@ -232,6 +232,58 @@ def test_history_backfills_output_only_run_as_cron_session(monkeypatch, tmp_path
     assert messages == [("user", "生成每日简报"), ("assistant", "今日简报已完成。")]
 
 
+def test_history_backfills_failed_output_with_cron_error(monkeypatch, tmp_path):
+    home = tmp_path / "abc"
+    job_id = "failed-output"
+    home.mkdir()
+    import cron.jobs
+    import api.routes
+
+    _make_current_state_db(home / "state.db")
+    output_dir = home / "cron" / "output" / job_id
+    output_dir.mkdir(parents=True)
+    output = output_dir / "2026-07-30_17-20-49.md"
+    output.write_text(
+        "# Cron Job: 异常任务 (FAILED)\n\n"
+        "## Prompt\n\n执行检查\n\n"
+        "## Error\n\n```\nProvider unavailable\n```\n",
+        encoding="utf-8",
+    )
+    completed_at = 1785403249.0
+    os.utime(output, (completed_at, completed_at))
+
+    monkeypatch.setattr(cron.jobs, "OUTPUT_DIR", home / "cron" / "output")
+    monkeypatch.setattr(
+        cron.jobs,
+        "get_job",
+        lambda value: {
+            "id": value,
+            "name": "异常任务",
+            "prompt": "执行检查",
+            "profile": None,
+        },
+    )
+    monkeypatch.setattr(api.routes, "_execution_home_for_cron_session_lookup", lambda job, owner: home)
+    monkeypatch.setattr("api.profiles.get_active_profile_name", lambda: "abc")
+    monkeypatch.setattr(
+        "integration.crons.session_bridge.materialize_cron_session_run",
+        lambda *_args, **_kwargs: None,
+    )
+    _install_json_capture(monkeypatch)
+
+    handler = _Handler()
+    api.routes._handle_cron_history(
+        handler,
+        SimpleNamespace(query=f"job_id={job_id}&profile=abc&limit=50"),
+    )
+
+    assert handler.payload["runs"][0]["end_reason"] == "cron_error"
+    with closing(sqlite3.connect(str(home / "state.db"))) as conn:
+        assert conn.execute(
+            "SELECT end_reason FROM sessions WHERE source = 'cron'"
+        ).fetchone() == ("cron_error",)
+
+
 def test_history_backfill_is_idempotent(monkeypatch, tmp_path):
     home = tmp_path / "abc"
     job_id = "backfill-repeat"
@@ -273,6 +325,47 @@ def test_history_backfill_is_idempotent(monkeypatch, tmp_path):
         message_count = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
     assert session_count == 1
     assert message_count == 2
+
+
+def test_history_keeps_no_agent_script_output_artifact_only(monkeypatch, tmp_path):
+    home = tmp_path / "abc"
+    job_id = "script-only"
+    home.mkdir()
+    import cron.jobs
+    import api.routes
+
+    _make_current_state_db(home / "state.db")
+    output_dir = home / "cron" / "output" / job_id
+    output_dir.mkdir(parents=True)
+    output = output_dir / "2026-07-30_17-20-49.md"
+    output.write_text("# Response\n\nscript output", encoding="utf-8")
+    os.utime(output, (1785403249.0, 1785403249.0))
+
+    monkeypatch.setattr(cron.jobs, "OUTPUT_DIR", home / "cron" / "output")
+    monkeypatch.setattr(
+        cron.jobs,
+        "get_job",
+        lambda value: {
+            "id": value,
+            "name": "Script",
+            "no_agent": True,
+            "script": "watchdog.sh",
+            "profile": None,
+        },
+    )
+    monkeypatch.setattr(api.routes, "_execution_home_for_cron_session_lookup", lambda job, owner: home)
+    monkeypatch.setattr("api.profiles.get_active_profile_name", lambda: "abc")
+    _install_json_capture(monkeypatch)
+
+    handler = _Handler()
+    api.routes._handle_cron_history(
+        handler,
+        SimpleNamespace(query=f"job_id={job_id}&profile=abc&limit=50"),
+    )
+
+    assert handler.payload["runs"][0]["session_id"] is None
+    with closing(sqlite3.connect(str(home / "state.db"))) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 0
 
 
 def test_history_paginates_merged_database_and_artifact_runs(monkeypatch, tmp_path):

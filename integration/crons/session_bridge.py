@@ -189,6 +189,11 @@ def backfill_cron_output_runs_to_state_db(
             continue
         usage = artifact.get("usage")
         model = usage.get("model") if isinstance(usage, dict) else None
+        end_reason = (
+            "cron_error"
+            if _cron_failure_detail(output, end_reason=None)
+            else "cron_complete"
+        )
         candidates.append(
             {
                 "id": session_id,
@@ -197,7 +202,7 @@ def backfill_cron_output_runs_to_state_db(
                 "model": str(model or "").strip() or None,
                 "started_at": max(0.0, ended_at - 1.0),
                 "ended_at": ended_at,
-                "end_reason": "cron_complete",
+                "end_reason": end_reason,
                 "messages": build_cron_fallback_messages(
                     job,
                     output,
