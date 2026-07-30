@@ -226,6 +226,117 @@ def test_prepare_cron_session_for_reply_stamps_prefix_before_followup(monkeypatc
     ] == ["turn:1", "turn:2"]
 
 
+def test_prepare_cron_session_for_reply_backfills_legacy_execution_boundary(monkeypatch):
+    import api.session_manifest_store as manifest_store
+    import api.streaming as streaming
+    import integration.crons.hooks as hooks
+
+    saved = []
+    session = SimpleNamespace(
+        session_id="cron_job_20260713_120099",
+        source_tag="cron",
+        profile="default",
+        cron_execution_profile="execution",
+        cron_execution_ended_at=None,
+        messages=_tool_trace(),
+        save=lambda **kwargs: saved.append(kwargs),
+    )
+    monkeypatch.setattr(hooks, "resolve_cron_execution_ended_at", lambda _session: 100.0)
+    monkeypatch.setattr(manifest_store, "load_manifest_decided_turn_keys", lambda _session: set())
+    monkeypatch.setattr(
+        streaming,
+        "_persist_turn_artifact_paths",
+        lambda _session, turn_key: {"status": "persisted", "turn_key": turn_key},
+    )
+
+    prepared = prepare_cron_session_for_reply(session)
+
+    assert prepared.ready is True
+    assert prepared.next_turn_key == "turn:2"
+    assert session.cron_execution_ended_at == 100.0
+    assert saved == [{"touch_updated_at": False}, {"touch_updated_at": False}]
+
+
+def test_prepare_cron_session_for_reply_remains_closed_without_authoritative_boundary(monkeypatch):
+    import integration.crons.hooks as hooks
+
+    session = SimpleNamespace(
+        session_id="cron_job_20260713_120099",
+        source_tag="cron",
+        profile="default",
+        cron_execution_profile="execution",
+        cron_execution_ended_at=None,
+        messages=_tool_trace(),
+    )
+    monkeypatch.setattr(hooks, "resolve_cron_execution_ended_at", lambda _session: None)
+
+    prepared = prepare_cron_session_for_reply(session)
+
+    assert prepared.ready is False
+    assert prepared.error_stage == "execution_prefix"
+
+
+def test_prepare_cron_session_for_reply_preserves_followup_suffix_after_backfill(monkeypatch):
+    import api.session_manifest_store as manifest_store
+    import api.streaming as streaming
+    import integration.crons.hooks as hooks
+
+    session = SimpleNamespace(
+        session_id="cron_job_20260713_120099",
+        source_tag="cron",
+        profile="default",
+        cron_execution_profile="execution",
+        cron_execution_ended_at=None,
+        messages=[
+            *_tool_trace(),
+            {"role": "user", "content": "follow up", "timestamp": 150.0, "_turn_key": "turn:2"},
+            {"role": "assistant", "content": "follow-up answer", "timestamp": 160.0},
+        ],
+        save=lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(hooks, "resolve_cron_execution_ended_at", lambda _session: 100.0)
+    monkeypatch.setattr(manifest_store, "load_manifest_decided_turn_keys", lambda _session: set())
+    monkeypatch.setattr(
+        streaming,
+        "_persist_turn_artifact_paths",
+        lambda _session, turn_key: {"status": "persisted", "turn_key": turn_key},
+    )
+
+    prepared = prepare_cron_session_for_reply(session)
+
+    assert prepared.ready is True
+    assert prepared.next_turn_key == "turn:3"
+    assert [message["content"] for message in session.messages[-2:]] == [
+        "follow up",
+        "follow-up answer",
+    ]
+    assert [
+        message.get("_turn_key")
+        for message in session.messages
+        if message.get("role") == "user"
+    ] == ["turn:1", "turn:2"]
+
+
+def test_prepare_cron_session_for_reply_fails_when_boundary_backfill_cannot_save(monkeypatch):
+    import integration.crons.hooks as hooks
+
+    session = SimpleNamespace(
+        session_id="cron_job_20260713_120099",
+        source_tag="cron",
+        profile="default",
+        cron_execution_profile="execution",
+        cron_execution_ended_at=None,
+        messages=_tool_trace(),
+        save=lambda **_kwargs: (_ for _ in ()).throw(OSError("disk full")),
+    )
+    monkeypatch.setattr(hooks, "resolve_cron_execution_ended_at", lambda _session: 100.0)
+
+    prepared = prepare_cron_session_for_reply(session)
+
+    assert prepared.ready is False
+    assert prepared.error_stage == "save"
+
+
 def test_persist_cron_turn_artifacts_stamps_one_real_turn_before_decision(monkeypatch):
     import api.models as models
     import api.streaming as streaming

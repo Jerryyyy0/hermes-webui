@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import shutil
 import sqlite3
 import time
@@ -822,6 +823,46 @@ def _cron_session_completion(conn, sid: str) -> tuple[str | None, float | None]:
     return str(values.get("end_reason") or "").strip() or None, ended_at
 
 
+def resolve_cron_execution_ended_at(session) -> float | None:
+    """Return a verified cron execution boundary for a materialized session.
+
+    A persisted sidecar boundary wins. Legacy sidecars may recover a missing
+    boundary only from the matching execution Profile's state.db session row;
+    message timestamps and output-file mtimes are not execution boundaries.
+    """
+    raw_ended_at = getattr(session, "cron_execution_ended_at", None)
+    if raw_ended_at not in (None, ""):
+        try:
+            ended_at = float(raw_ended_at)
+        except (TypeError, ValueError):
+            return None
+        return ended_at if math.isfinite(ended_at) else None
+
+    sid = str(getattr(session, "session_id", "") or "").strip()
+    profile = str(
+        getattr(session, "cron_execution_profile", None)
+        or getattr(session, "profile", None)
+        or ""
+    ).strip()
+    if not sid or not profile:
+        return None
+
+    try:
+        db_path = Path(_profile_home_for_name(profile)) / "state.db"
+    except Exception:
+        return None
+    if not db_path.is_file():
+        return None
+
+    try:
+        with closing(sqlite3.connect(str(db_path))) as conn:
+            _end_reason, ended_at = _cron_session_completion(conn, sid)
+    except sqlite3.Error as exc:
+        logger.debug("cron execution boundary state.db read failed for %s: %s", sid, exc)
+        return None
+    return ended_at if ended_at is not None and math.isfinite(ended_at) else None
+
+
 def _cron_output_body(text: str) -> str:
     """Return agent reply body from a cron output markdown file."""
     lines = str(text or "").split("\n")
@@ -963,6 +1004,8 @@ def cron_execution_prefix_and_suffix(session) -> tuple[list, list] | None:
     try:
         ended_at = float(getattr(session, "cron_execution_ended_at", None))
     except (TypeError, ValueError):
+        return None
+    if not math.isfinite(ended_at):
         return None
 
     messages = list(getattr(session, "messages", None) or [])

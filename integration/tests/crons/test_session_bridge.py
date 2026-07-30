@@ -6,6 +6,7 @@ import os
 import sqlite3
 from contextlib import closing
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -103,6 +104,61 @@ def test_hide_sidebar_cron_sessions_always_hidden(monkeypatch):
     assert _hide_from_default_sidebar({"session_id": "cron_x", "source_tag": "cron", "is_cli_session": True}) is True
 
 
+def test_resolve_cron_execution_ended_at_backfills_from_execution_profile(cron_env, monkeypatch):
+    from integration.crons import session_bridge
+
+    sid = "cron_job1_1700000000"
+    with closing(sqlite3.connect(str(cron_env["db"]))) as conn:
+        conn.execute("ALTER TABLE sessions ADD COLUMN ended_at REAL")
+        conn.execute("UPDATE sessions SET ended_at = ? WHERE id = ?", (1700000250.0, sid))
+        conn.commit()
+    monkeypatch.setattr(session_bridge, "_profile_home_for_name", lambda profile: cron_env["home"])
+
+    session = SimpleNamespace(
+        session_id=sid,
+        source_tag="cron",
+        profile="owner",
+        cron_execution_profile="execution",
+        cron_execution_ended_at=None,
+    )
+
+    assert session_bridge.resolve_cron_execution_ended_at(session) == 1700000250.0
+
+
+def test_resolve_cron_execution_ended_at_keeps_existing_sidecar_boundary(cron_env, monkeypatch):
+    from integration.crons import session_bridge
+
+    monkeypatch.setattr(
+        session_bridge,
+        "_profile_home_for_name",
+        lambda _profile: (_ for _ in ()).throw(AssertionError("state.db must not be read")),
+    )
+    session = SimpleNamespace(
+        session_id="cron_job1_1700000000",
+        source_tag="cron",
+        profile="owner",
+        cron_execution_profile="execution",
+        cron_execution_ended_at=1700000200.0,
+    )
+
+    assert session_bridge.resolve_cron_execution_ended_at(session) == 1700000200.0
+
+
+def test_resolve_cron_execution_ended_at_rejects_legacy_state_db_without_boundary(cron_env, monkeypatch):
+    from integration.crons import session_bridge
+
+    monkeypatch.setattr(session_bridge, "_profile_home_for_name", lambda profile: cron_env["home"])
+    session = SimpleNamespace(
+        session_id="cron_job1_1700000000",
+        source_tag="cron",
+        profile="owner",
+        cron_execution_profile="execution",
+        cron_execution_ended_at=None,
+    )
+
+    assert session_bridge.resolve_cron_execution_ended_at(session) is None
+
+
 def test_filter_cron_sessions_from_sidebar_rows(monkeypatch):
     monkeypatch.setenv("HERMES_INTEGRATION", "1")
     from integration.crons.session_bridge import filter_cron_sessions_from_sidebar_rows
@@ -150,6 +206,34 @@ def test_materialize_imports_session(cron_env, monkeypatch):
     assert meta.profile == owner or getattr(meta, "profile", None) in (owner, None)
     assert meta.is_cli_session is False
     assert meta.source_tag == "cron"
+
+
+def test_materialize_persists_execution_boundary_from_state_db(cron_env, monkeypatch):
+    pytest.importorskip("cron.jobs")
+    with closing(sqlite3.connect(str(cron_env["db"]))) as conn:
+        conn.execute("ALTER TABLE sessions ADD COLUMN ended_at REAL")
+        conn.execute(
+            "UPDATE sessions SET ended_at = ? WHERE id = ?",
+            (1700000250.0, "cron_job1_1700000000"),
+        )
+        conn.commit()
+
+    with patch("api.models.get_state_db_session_messages", return_value=[{"role": "user", "content": "hi"}]):
+        with patch(
+            "api.profiles.list_profiles_api",
+            return_value=[{"name": "default", "path": str(cron_env["home"])}],
+        ):
+            from integration.crons.session_bridge import materialize_cron_session
+
+            sid = materialize_cron_session(
+                {"id": "job1", "name": "Nightly", "profile": ""},
+                owner_profile="default",
+                execution_home=cron_env["home"],
+            )
+
+    from api.models import Session
+
+    assert Session.load(sid).cron_execution_ended_at == 1700000250.0
 
 
 def test_materialize_selects_session_for_run_mtime(cron_env, monkeypatch):

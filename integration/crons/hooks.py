@@ -6,6 +6,8 @@ import copy
 import logging
 from dataclasses import dataclass
 
+from integration.crons.session_bridge import resolve_cron_execution_ended_at
+
 logger = logging.getLogger(__name__)
 
 _installed = False
@@ -167,6 +169,24 @@ def prepare_cron_session_for_reply(session) -> CronReplyPreparation:
         cron_execution_prefix_and_suffix,
         reconcile_cron_session_transcript,
     )
+
+    execution_ended_at = resolve_cron_execution_ended_at(session)
+    if execution_ended_at is None:
+        return CronReplyPreparation(False, error_stage="execution_prefix")
+    if getattr(session, "cron_execution_ended_at", None) in (None, ""):
+        session.cron_execution_ended_at = execution_ended_at
+        try:
+            try:
+                session.save(touch_updated_at=False)
+            except TypeError:
+                session.save()
+        except Exception:
+            logger.debug(
+                "Failed to save cron execution boundary for session %s",
+                getattr(session, "session_id", "?"),
+                exc_info=True,
+            )
+            return CronReplyPreparation(False, error_stage="save")
 
     split = cron_execution_prefix_and_suffix(session)
     if split is None:
