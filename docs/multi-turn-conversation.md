@@ -146,7 +146,7 @@ POST /api/chat/start
 ### 3.3 取消对话流（`GET /api/chat/cancel`）
 
 ```
-GET /api/chat/cancel?stream_id=<stream_id>
+GET /api/chat/cancel?stream_id=<stream_id>[&profile=<profile>]
   │
   ├─ 1. 校验 stream_id
   ├─ 2. 调用 cancel_stream(stream_id)
@@ -166,6 +166,8 @@ GET /api/chat/cancel?stream_id=<stream_id>
 ```
 
 `cancelled=true` 只表示取消信号已发出；`settled=true` 才表示后台 worker 已完成清理。若 provider 或工具调用在 10 秒内无法退出，接口返回 `settled=false`，同一会话的新 `/api/chat/start` 仍由后端 409 并发保护兜底。
+
+`profile` 为可选恢复参数：仅当请求没有有效的 `hermes_profile` Cookie 时，服务端用它校验流所属会话的 Profile。若 Cookie 存在，Cookie 始终优先，query 参数不能覆盖它。
 
 ### 3.4 Agent 流式执行（`streaming.py` `_run_agent_streaming`）
 
@@ -832,7 +834,7 @@ const INFLIGHT_STATE_KEY = 'hermes-webui-inflight-state';
 | `/api/chat/start` | POST | 发送消息，启动 Agent | `{session_id, message, model, workspace, ...}` | `{stream_id, effective_model, ...}` |
 | `/api/chat/stream` | GET | SSE 流式连接 | `?stream_id=xxx` | SSE 事件流 |
 | `/api/chat/stream/status` | GET | 检查 stream 状态 | `?stream_id=xxx` | `{active, replay_available}` |
-| `/api/chat/cancel` | POST | 取消当前流 | `{stream_id}` | `{ok: true}` |
+| `/api/chat/cancel` | GET | 取消当前流 | `?stream_id=xxx&profile=xxx`（profile 可选） | `{ok, cancelled, settled, stream_id}` |
 | `/api/chat/steer` | POST | 注入指导文本（不中断） | `{session_id, text}` | `{accepted, fallback}` |
 | `/api/session/compress` | POST | 手动压缩上下文 | `{session_id, focus_topic?}` | `{ok, summary, ...}` |
 | `/api/session/manifest` | GET | 拉取会话 Manifest | `?session_id=xxx` | `{artifacts, references, todos}` |

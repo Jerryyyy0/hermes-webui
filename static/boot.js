@@ -17,6 +17,7 @@
 async function cancelStream(reason){
   const sid = S.session && S.session.session_id;
   const streamId = S.activeStreamId;
+  const profile = (S.session && S.session.profile) || S.activeProfile || '';
   if(!streamId) return false;
   const _reason = reason || 'explicit-cancel';
   if(typeof console !== 'undefined' && console.info){
@@ -25,7 +26,7 @@ async function cancelStream(reason){
   let respBody=null;
   let respOk=false;
   try{
-    const r=await fetch(new URL(`api/chat/cancel?stream_id=${encodeURIComponent(streamId)}`,document.baseURI||location.href).href,{credentials:'include'});
+    const r=await fetch(new URL(`api/chat/cancel?stream_id=${encodeURIComponent(streamId)}&profile=${encodeURIComponent(profile)}`,document.baseURI||location.href).href,{credentials:'include'});
     respOk=!!(r&&r.ok);
     try{respBody=await r.json();}catch(_){}
   }catch(e){
@@ -60,13 +61,14 @@ async function cancelStream(reason){
 async function cancelSessionStream(session){
   const streamId = session&&session.active_stream_id;
   const sid = session&&session.session_id;
+  const profile = (session&&session.profile) || S.activeProfile || '';
   if(!streamId||!sid) return false;
   if(typeof console !== 'undefined' && console.info){
     console.info('[stream] cancel requested', {reason:'sidebar-stop', streamId, sessionId:sid});
   }
   let respOk=false;
   try{
-    const r=await fetch(new URL(`api/chat/cancel?stream_id=${encodeURIComponent(streamId)}`,document.baseURI||location.href).href,{credentials:'include'});
+    const r=await fetch(new URL(`api/chat/cancel?stream_id=${encodeURIComponent(streamId)}&profile=${encodeURIComponent(profile)}`,document.baseURI||location.href).href,{credentials:'include'});
     respOk=!!(r&&r.ok);
   }catch(e){/* close local stream; keep UI state honest below */}
   if(!respOk) return false;

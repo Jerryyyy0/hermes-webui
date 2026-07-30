@@ -405,7 +405,13 @@ def _request_session_visibility_exempt(method: str, path: str | None) -> bool:
     }
 
 
-def _session_id_visible_to_request_profile(handler, sid, *, emit_error: bool = True) -> bool:
+def _session_id_visible_to_request_profile(
+    handler,
+    sid,
+    *,
+    emit_error: bool = True,
+    active_profile_override: str | None = None,
+) -> bool:
     """Return whether ``sid`` belongs to the active profile."""
     if not isinstance(sid, str) or not sid:
         return True
@@ -415,7 +421,8 @@ def _session_id_visible_to_request_profile(handler, sid, *, emit_error: bool = T
         session = get_session(sid, metadata_only=True)
     except KeyError:
         return True
-    if not _session_visible_to_active_profile(getattr(session, "profile", None), handler):
+    active_profile = active_profile_override or _get_active_profile_name()
+    if not _profiles_match(getattr(session, "profile", None), active_profile):
         if emit_error:
             bad(handler, "Session not found", 404)
         return False
@@ -459,12 +466,18 @@ def _stream_id_visible_to_request_profile(
     stream_id: str | None,
     *,
     emit_error: bool = True,
+    active_profile_override: str | None = None,
 ) -> bool:
     """Return whether the stream owner is visible to the request's profile."""
     owner_session_id = _stream_id_owner_session_id(stream_id)
     if not owner_session_id:
         return True
-    return _session_id_visible_to_request_profile(handler, owner_session_id, emit_error=emit_error)
+    return _session_id_visible_to_request_profile(
+        handler,
+        owner_session_id,
+        emit_error=emit_error,
+        active_profile_override=active_profile_override,
+    )
 
 
 def _guard_request_session_visibility(handler, parsed, body=None, method="GET") -> bool:
@@ -11506,9 +11519,15 @@ def handle_get(handler, parsed) -> bool:
         return j(handler, payload)
 
     if parsed.path == "/api/chat/cancel":
-        stream_id = parse_qs(parsed.query).get("stream_id", [""])[0]
+        qs = parse_qs(parsed.query)
+        stream_id = qs.get("stream_id", [""])[0]
         if not stream_id:
             return bad(handler, "stream_id required")
+        # A chat can be started with an explicit profile before the browser
+        # receives its profile cookie. Accept that same profile for cancellation
+        # only when no cookie is present; profile_override_for_request() keeps a
+        # valid cookie authoritative.
+        requested_profile = _query_profile_override(handler, qs)
         with ACTIVE_RUNS_LOCK:
             run = dict((ACTIVE_RUNS or {}).get(stream_id) or {})
         session_id = str(run.get("session_id") or "").strip()
@@ -11519,12 +11538,16 @@ def handle_get(handler, parsed) -> bool:
 
                 if not _profiles_match(
                     getattr(stream_session, "profile", None),
-                    get_active_profile_name(),
+                    requested_profile or get_active_profile_name(),
                 ):
                     return bad(handler, "Session not found", 404)
             except KeyError:
                 return bad(handler, "Session not found", 404)
-        if not _stream_id_visible_to_request_profile(handler, stream_id):
+        if not _stream_id_visible_to_request_profile(
+            handler,
+            stream_id,
+            active_profile_override=requested_profile,
+        ):
             return True
         gateway_stop_blocked = False
         try:

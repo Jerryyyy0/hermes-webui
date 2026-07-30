@@ -584,6 +584,97 @@ def test_chat_cancel_same_profile_stream_still_passes_through(monkeypatch):
     assert cap["ok"]["settle_timeout_ms"] == 10000
 
 
+def test_chat_cancel_accepts_profile_query_when_profile_cookie_is_absent(monkeypatch):
+    """A start-profile can cancel before the browser profile cookie is restored."""
+    from api import runtime_adapter
+    from api import config
+
+    handler = _FakeHandler()
+    owner = _SimpleSession("owner_session", profile="other")
+    calls = {"cancel": 0}
+    monkeypatch.setattr(
+        routes,
+        "get_session",
+        lambda sid, metadata_only=False: owner
+        if sid == "owner_session"
+        else (_ for _ in ()).throw(KeyError("Session not found")),
+    )
+    monkeypatch.setattr(runtime_adapter, "runtime_adapter_enabled", lambda: False)
+    monkeypatch.setattr(
+        routes,
+        "cancel_stream",
+        lambda _stream_id: calls.__setitem__("cancel", calls["cancel"] + 1) or True,
+    )
+    monkeypatch.setattr(routes, "_wait_for_stream_worker_settled", lambda _stream_id: True)
+
+    with config.ACTIVE_RUNS_LOCK:
+        previous = dict(config.ACTIVE_RUNS)
+        config.ACTIVE_RUNS.clear()
+        config.ACTIVE_RUNS["stream-owner"] = {
+            "session_id": "owner_session",
+            "started_at": time.time(),
+            "phase": "running",
+        }
+
+    cap = _capture(monkeypatch)
+    profiles.set_request_profile("default")
+    try:
+        routes.handle_get(
+            handler,
+            urlparse("/api/chat/cancel?stream_id=stream-owner&profile=other"),
+        )
+    finally:
+        profiles.clear_request_profile()
+        with config.ACTIVE_RUNS_LOCK:
+            config.ACTIVE_RUNS.clear()
+            config.ACTIVE_RUNS.update(previous)
+
+    assert calls["cancel"] == 1
+    assert cap["ok"]["cancelled"] is True
+
+
+def test_chat_cancel_profile_query_cannot_override_profile_cookie(monkeypatch):
+    from api import runtime_adapter
+    from api import config
+
+    handler = _FakeHandler()
+    owner = _SimpleSession("owner_session", profile="other")
+    calls = {"cancel": 0}
+    monkeypatch.setattr(routes, "get_session", lambda *_args, **_kwargs: owner)
+    monkeypatch.setattr(helpers, "get_profile_cookie", lambda _handler: "default")
+    monkeypatch.setattr(runtime_adapter, "runtime_adapter_enabled", lambda: False)
+    monkeypatch.setattr(
+        routes,
+        "cancel_stream",
+        lambda _stream_id: calls.__setitem__("cancel", calls["cancel"] + 1) or True,
+    )
+
+    with config.ACTIVE_RUNS_LOCK:
+        previous = dict(config.ACTIVE_RUNS)
+        config.ACTIVE_RUNS.clear()
+        config.ACTIVE_RUNS["stream-owner"] = {
+            "session_id": "owner_session",
+            "started_at": time.time(),
+            "phase": "running",
+        }
+
+    cap = _capture(monkeypatch)
+    profiles.set_request_profile("default")
+    try:
+        routes.handle_get(
+            handler,
+            urlparse("/api/chat/cancel?stream_id=stream-owner&profile=other"),
+        )
+    finally:
+        profiles.clear_request_profile()
+        with config.ACTIVE_RUNS_LOCK:
+            config.ACTIVE_RUNS.clear()
+            config.ACTIVE_RUNS.update(previous)
+
+    assert calls["cancel"] == 0
+    assert cap["bad"] == ("Session not found", 404)
+
+
 def test_chat_stream_blocks_foreign_owned_dead_stream_before_replay(monkeypatch):
     from api import runtime_adapter
     handler = _FakeHandler()
