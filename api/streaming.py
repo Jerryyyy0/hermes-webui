@@ -6164,25 +6164,53 @@ def _materialize_pending_user_turn_before_error(session) -> bool:
     pending_source = getattr(session, 'pending_user_source', None) or 'webui'
     pending_attachments = list(getattr(session, 'pending_attachments', None) or [])
 
-    def is_exact_checkpoint(messages):
+    def has_pending_checkpoint(messages):
         if not isinstance(messages, list) or not messages:
             return False
         existing = messages[-1]
         if not isinstance(existing, dict) or existing.get('role') != 'user':
             return False
         existing_source = existing.get('_source') or 'webui'
+        if (
+            _normalize_user_text(existing.get('content')) != _normalize_user_text(pending_text)
+            or existing_source != pending_source
+        ):
+            return False
+        pending_turn_key = str(getattr(session, 'pending_turn_key', '') or '').strip()
+        existing_turn_key = str(existing.get('_turn_key') or '').strip()
+        if pending_turn_key and existing_turn_key and existing_turn_key != pending_turn_key:
+            return False
         try:
             existing_ts = int(existing.get('timestamp'))
         except (TypeError, ValueError):
-            return False
+            # The eager WebUI checkpoint can be persisted before state.db
+            # assigns a timestamp. Attachment metadata is added only by
+            # recovery, so an already-persisted optimistic row can legitimately
+            # have no `attachments` field. Its tail position plus text, source,
+            # and turn identity prove it is the current turn; appending a
+            # `_recovered` copy here creates two adjacent user rows.
+            if existing.get('_db_persisted') is True and 'attachments' not in existing:
+                return True
+            return list(existing.get('attachments') or []) == pending_attachments
         return (
-            _normalize_user_text(existing.get('content')) == _normalize_user_text(pending_text)
-            and existing_ts == recovered_ts
-            and existing_source == pending_source
+            existing_ts == recovered_ts
             and list(existing.get('attachments') or []) == pending_attachments
         )
 
-    if is_exact_checkpoint(getattr(session, 'messages', None)):
+    display_messages = getattr(session, 'messages', None)
+    if has_pending_checkpoint(display_messages):
+        # A successful optimistic persistence can happen before attachment
+        # metadata is copied onto the visible row.  Preserve that metadata on
+        # the one canonical user turn instead of creating a recovered duplicate.
+        if pending_attachments and 'attachments' not in display_messages[-1]:
+            display_messages[-1]['attachments'] = list(pending_attachments)
+        context_messages = getattr(session, 'context_messages', None)
+        if (
+            pending_attachments
+            and has_pending_checkpoint(context_messages)
+            and 'attachments' not in context_messages[-1]
+        ):
+            context_messages[-1]['attachments'] = list(pending_attachments)
         return False
     recovered = {
         'role': 'user',
@@ -6204,7 +6232,7 @@ def _materialize_pending_user_turn_before_error(session) -> bool:
     # round-trip (#4283). state.db has no _recovered column, so without this
     # mirror the next turn's reconciled state-db messages cannot filter it.
     ctx = getattr(session, 'context_messages', None)
-    if isinstance(ctx, list) and ctx and not is_exact_checkpoint(ctx):
+    if isinstance(ctx, list) and ctx and not has_pending_checkpoint(ctx):
         ctx.append(dict(recovered))
     # Keep post-edit state-db reconciliation bounded by the recovered turn.
     if getattr(session, 'truncation_watermark', None):

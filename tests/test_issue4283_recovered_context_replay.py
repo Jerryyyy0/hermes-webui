@@ -314,6 +314,48 @@ def test_materialize_does_not_duplicate_context_messages():
     assert len(s.context_messages) == ctx_len_after_first
 
 
+def test_materialize_keeps_untimestamped_optimistic_attachment_checkpoint():
+    """A first-turn error must not duplicate the already-persisted user bubble.
+
+    The optimistic WebUI checkpoint has no timestamp when the provider fails
+    before the state-db write returns.  It is nevertheless the pending turn,
+    identified by its normalized text, source, and turn key.  The attachment
+    metadata is written only by recovery, so the optimistic sidecar row has no
+    ``attachments`` field yet.
+    """
+    attachment = {"name": "image.png", "path": "", "mime": ""}
+    s = _DummySession(
+        messages=[
+            {
+                "role": "user",
+                "content": "我已上传 1 个文件: image.png",
+                "_db_persisted": True,
+                "id": 1,
+                "_turn_key": "turn:1",
+            }
+        ],
+        context_messages=[],
+        pending_msg="我已上传 1 个文件: image.png",
+    )
+    s.pending_attachments = [attachment]
+    s.pending_user_source = "webui"
+    s.pending_turn_key = "turn:1"
+
+    appended = _materialize_pending_user_turn_before_error(s)
+
+    assert appended is False
+    assert s.messages == [
+        {
+            "role": "user",
+            "content": "我已上传 1 个文件: image.png",
+            "_db_persisted": True,
+            "id": 1,
+            "_turn_key": "turn:1",
+            "attachments": [attachment],
+        }
+    ]
+
+
 def test_materialize_skips_mirror_when_context_messages_empty():
     """When context_messages is empty/None (first-turn error), the mirror
     should be skipped — prefer_context falls back to session.messages.
