@@ -1349,10 +1349,12 @@ def _run_cron_tracked(job, profile_home=None, execution_profile_home=None, owner
         with cron_profile_context_for_home(home):
             return fn()
 
+    execution_result = None
     try:
-        success, output, final_response, error = _run_cron_job_in_profile_subprocess(
+        execution_result = _run_cron_job_in_profile_subprocess(
             job, execution_profile_home
         )
+        success, output, final_response, error = execution_result
 
         # Persist output, deliver the same content the scheduled cron path would
         # send, and write run metadata back to the job's owning cron store even
@@ -1410,6 +1412,7 @@ def _run_cron_tracked(job, profile_home=None, execution_profile_home=None, owner
                 job,
                 owner_profile=owner_profile,
                 execution_home=execution_profile_home or profile_home,
+                execution_result=execution_result,
             )
         except ImportError:
             pass
@@ -17765,10 +17768,27 @@ def _handle_cron_history(handler, parsed):
             from integration.crons.session_bridge import (
                 backfill_cron_output_runs_to_state_db,
                 list_cron_job_runs_from_state_db,
+                list_cron_job_execution_results,
+                match_cron_artifacts_to_execution_results,
+                match_cron_artifacts_to_job_last_run_result,
+                reconcile_no_agent_cron_output_records,
             )
 
             execution_home = _execution_home_for_cron_session_lookup(job, profile)
             database_runs = list_cron_job_runs_from_state_db(execution_home, job_id)
+            execution_results = list_cron_job_execution_results(
+                execution_home,
+                job_id,
+                limit=max(50, len(artifacts) + len(database_runs)),
+            )
+            match_cron_artifacts_to_execution_results(artifacts, execution_results)
+            match_cron_artifacts_to_job_last_run_result(artifacts, job)
+            reconcile_no_agent_cron_output_records(
+                execution_home,
+                job,
+                artifacts,
+                database_runs,
+            )
             backfill = backfill_cron_output_runs_to_state_db(
                 job,
                 execution_home=execution_home,
@@ -17802,17 +17822,85 @@ def _handle_cron_history(handler, parsed):
         if delta > 600:
             continue
         unmatched_artifacts.remove(artifact)
-        run.update({key: value for key, value in artifact.items() if key != "fallback_output"})
+        run.update({
+            key: value
+            for key, value in artifact.items()
+            if key not in {
+                "fallback_output",
+                "execution_status",
+                "execution_end_reason",
+                "execution_error_detail",
+                "execution_started_at",
+                "execution_ended_at",
+            }
+        })
+        execution_end_reason = artifact.get("execution_end_reason")
+        if execution_end_reason:
+            run["end_reason"] = execution_end_reason
+        execution_error_detail = artifact.get("execution_error_detail")
+        if execution_error_detail:
+            run["error"] = execution_error_detail
+        if artifact.get("execution_started_at") is not None:
+            run["started_at"] = artifact["execution_started_at"]
+        if artifact.get("execution_ended_at") is not None:
+            run["ended_at"] = artifact["execution_ended_at"]
         run["_fallback_output"] = artifact.get("fallback_output")
 
     merged_runs = list(database_runs)
+    artifact_session_ids = {}
+    if job:
+        try:
+            from integration.crons.session_bridge import materialize_cron_session
+
+            execution_home = _execution_home_for_cron_session_lookup(job, profile)
+            for artifact in unmatched_artifacts:
+                filename = str(artifact.get("filename") or "")
+                session_id = materialize_cron_session(
+                    job,
+                    owner_profile=profile,
+                    execution_home=execution_home,
+                    run_mtime=artifact.get("modified"),
+                    fallback_output=artifact.get("fallback_output"),
+                    fallback_filename=filename,
+                    execution_end_reason=artifact.get("execution_end_reason"),
+                    execution_error_detail=artifact.get("execution_error_detail"),
+                    execution_ended_at=artifact.get("execution_ended_at"),
+                )
+                if session_id:
+                    artifact_session_ids[filename] = session_id
+        except Exception:
+            logger.debug("Failed to materialize cron output artifacts %s", job_id, exc_info=True)
     for artifact in unmatched_artifacts:
+        output = str(artifact.get("fallback_output") or "")
+        is_script_error = bool(
+            artifact.get("execution_end_reason") == "cron_error"
+            or (
+                (job or {}).get("no_agent")
+                and "**Mode:** no_agent (script)" in output
+                and "**Status:** script failed" in output
+            )
+        )
+        error_detail = artifact.get("execution_error_detail")
         merged_runs.append({
-            **{key: value for key, value in artifact.items() if key != "fallback_output"},
-            "session_id": None,
-            "started_at": None,
-            "ended_at": artifact.get("modified"),
-            "end_reason": None,
+            **{
+                key: value
+                for key, value in artifact.items()
+                if key not in {
+                    "fallback_output",
+                    "execution_status",
+                    "execution_end_reason",
+                    "execution_error_detail",
+                    "execution_started_at",
+                    "execution_ended_at",
+                }
+            },
+            "session_id": artifact_session_ids.get(str(artifact.get("filename") or "")),
+            "started_at": artifact.get("execution_started_at"),
+            "ended_at": artifact.get("execution_ended_at") or artifact.get("modified"),
+            "end_reason": artifact.get("execution_end_reason") or (
+                "cron_error" if is_script_error else None
+            ),
+            "error": error_detail or None,
             "preview": "",
         })
     merged_runs.sort(

@@ -262,7 +262,9 @@ def test_materialize_hook_uses_owner_resolved_before_run(monkeypatch):
     monkeypatch.setattr(
         hooks,
         "materialize_after_cron_run",
-        lambda job, **kw: calls.append(("materialize", job["id"], kw.get("owner_profile"))),
+        lambda job, **kw: calls.append(
+            ("materialize", job["id"], kw.get("owner_profile"), kw.get("execution_result"))
+        ),
     )
 
     hooks._install_run_job_materialize_hook()
@@ -270,8 +272,75 @@ def test_materialize_hook_uses_owner_resolved_before_run(monkeypatch):
 
     assert calls == [
         ("run", "deleted-during-run"),
-        ("materialize", "deleted-during-run", "default"),
+        ("materialize", "deleted-during-run", "default", (True, "output", "done", None)),
     ]
+
+
+def test_materialize_after_no_agent_failure_passes_scheduler_error(monkeypatch, tmp_path):
+    import integration.crons.hooks as hooks
+    import integration.crons.listing as listing
+    import integration.crons.session_bridge as session_bridge
+
+    captured = {}
+    monkeypatch.setattr(listing, "resolve_owner_profile_for_job", lambda _job_id: "default")
+    monkeypatch.setattr(
+        session_bridge,
+        "read_cron_output_for_run",
+        lambda _job_id: ("script output", "2026-07-31_12-00-05.md"),
+    )
+    monkeypatch.setattr(
+        session_bridge,
+        "materialize_cron_session",
+        lambda _job, **kwargs: captured.update(kwargs) or None,
+    )
+
+    assert hooks.materialize_after_cron_run(
+        {"id": "script1", "name": "Watchdog", "no_agent": True},
+        execution_home=tmp_path,
+        execution_result=(False, "cron output", "delivery alert", "Script not found: /tmp/watchdog.sh"),
+    ) is None
+
+    assert captured["execution_end_reason"] == "cron_error"
+    assert captured["execution_error_detail"] == "Script not found: /tmp/watchdog.sh"
+
+
+def test_scheduled_no_agent_failure_gets_runtime_session_id(monkeypatch):
+    import api.profiles as profiles
+    import integration.crons.hooks as hooks
+    import integration.crons.listing as listing
+
+    class DummyContext:
+        def __init__(self, _home):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return None
+
+    scheduler = types.ModuleType("cron.scheduler")
+    scheduler.run_job = lambda _job: (False, "", "", "no_agent=True but no script is set for this job")
+    monkeypatch.setitem(sys.modules, "cron.scheduler", scheduler)
+    cron_parent = sys.modules.get("cron") or types.ModuleType("cron")
+    cron_parent.scheduler = scheduler
+    monkeypatch.setitem(sys.modules, "cron", cron_parent)
+    monkeypatch.setattr(profiles, "_home_for_scheduled_cron_job", lambda _job: "home")
+    monkeypatch.setattr(profiles, "_cron_profile_context_depth", lambda: 0)
+    monkeypatch.setattr(profiles, "cron_profile_context_for_home", DummyContext)
+    monkeypatch.setattr(listing, "resolve_owner_profile_for_job", lambda _job_id: "default")
+    captured = {}
+    monkeypatch.setattr(
+        hooks,
+        "materialize_after_cron_run",
+        lambda _job, **kwargs: captured.update(kwargs),
+    )
+
+    hooks._install_run_job_materialize_hook()
+    scheduler.run_job({"id": "script1", "no_agent": True})
+
+    assert captured["execution_result"][0] is False
+    assert captured["session_id"].startswith("cron_script1_")
 
 
 def test_install_hooks_materialize_unconditional_without_integration(monkeypatch):

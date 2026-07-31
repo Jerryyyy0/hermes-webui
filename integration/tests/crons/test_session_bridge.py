@@ -2,6 +2,7 @@
 
 import datetime as dt
 import json
+import logging
 import os
 import sqlite3
 from contextlib import closing
@@ -375,6 +376,545 @@ def test_materialize_uses_fallback_when_state_db_messages_empty(cron_env, monkey
     assert full.messages[0]["content"] == "run nightly"
     assert full.messages[1]["content"] == "Hello from cron"
     assert full.messages[0].get("source") == "cron_fallback"
+
+
+def test_materialize_no_agent_output_creates_stable_session(cron_env):
+    from integration.crons.session_bridge import materialize_cron_session
+
+    sid = materialize_cron_session(
+        {"id": "script1", "name": "Watchdog", "no_agent": True},
+        owner_profile="default",
+        execution_home=cron_env["home"],
+        fallback_output="## Response\n\nscript completed",
+        fallback_filename="2026-07-31_12-00-05.md",
+    )
+
+    assert sid == "cron_script1_20260731_120005"
+    from api.models import Session
+
+    session = Session.load(sid)
+    assert session is not None
+    assert [message["content"] for message in session.messages] == [
+        "定时脚本任务「Watchdog」的本次运行结果如下。",
+        "script completed",
+    ]
+
+
+def test_materialize_no_agent_failure_persists_cron_error(cron_env):
+    from integration.crons.session_bridge import (
+        list_cron_job_runs_from_state_db,
+        materialize_cron_session,
+    )
+
+    output = (
+        "# Cron Job: Watchdog\n\n"
+        "**Mode:** no_agent (script)\n"
+        "**Status:** script failed\n\n"
+        "Script not found: /tmp/watchdog.sh"
+    )
+    cron_env["db"].unlink()
+    from hermes_state import SessionDB
+
+    store = SessionDB(db_path=cron_env["db"])
+    store.close()
+    sid = materialize_cron_session(
+        {"id": "script1", "name": "Watchdog", "no_agent": True},
+        owner_profile="default",
+        execution_home=cron_env["home"],
+        run_mtime=1785480005.0,
+        fallback_output=output,
+        fallback_filename="2026-07-31_12-00-05.md",
+        execution_end_reason="cron_error",
+    )
+
+    assert sid == "cron_script1_20260731_120005"
+    runs = list_cron_job_runs_from_state_db(cron_env["home"], "script1")
+    assert [(run["session_id"], run["end_reason"]) for run in runs] == [
+        (sid, "cron_error")
+    ]
+    from api.models import Session
+
+    session = Session.load(sid)
+    assert session.last_error_at is not None
+    error_messages = [message for message in session.messages if message.get("_error")]
+    assert len(error_messages) == 1
+    assert error_messages[0]["_error_type"] == "cron_script_error"
+    assert error_messages[0]["content"].startswith("**脚本执行失败:")
+    assert error_messages[0]["provider_details"] == "Script not found: /tmp/watchdog.sh"
+    assert error_messages[0]["provider_details_label"] == "脚本错误详情"
+
+
+def test_materialize_no_agent_failure_replaces_legacy_provider_error(cron_env):
+    from integration.crons.session_bridge import materialize_cron_session
+
+    output = (
+        "# Cron Job: Watchdog\n\n"
+        "**Mode:** no_agent (script)\n"
+        "**Status:** script failed\n\n"
+        "Script not found: /tmp/watchdog.sh"
+    )
+    sid = materialize_cron_session(
+        {"id": "script1", "name": "Watchdog", "no_agent": True},
+        owner_profile="default",
+        execution_home=cron_env["home"],
+        run_mtime=1785480005.0,
+        fallback_output=output,
+        fallback_filename="2026-07-31_12-00-05.md",
+        execution_end_reason="cron_error",
+    )
+
+    from api.models import Session
+
+    session = Session.load(sid)
+    session.messages.append(
+        {
+            "role": "assistant",
+            "content": "**未找到模型:** 当前 Provider 找不到所选模型。",
+            "timestamp": 1785480005.0,
+            "_error": True,
+            "_error_type": "model_not_found",
+            "provider_details": output,
+            "provider_details_label": "技术详情",
+        }
+    )
+    session.save()
+
+    assert materialize_cron_session(
+        {"id": "script1", "name": "Watchdog", "no_agent": True},
+        owner_profile="default",
+        execution_home=cron_env["home"],
+        run_mtime=1785480005.0,
+        fallback_output=output,
+        fallback_filename="2026-07-31_12-00-05.md",
+        execution_end_reason="cron_error",
+    ) == sid
+
+    repaired = Session.load(sid)
+    error_messages = [message for message in repaired.messages if message.get("_error")]
+    assert len(error_messages) == 1
+    assert error_messages[0]["_error_type"] == "cron_script_error"
+    assert error_messages[0]["provider_details"] == "Script not found: /tmp/watchdog.sh"
+
+
+def test_agent_cron_failure_keeps_provider_error_classification():
+    from integration.crons.session_bridge import _build_cron_error_message
+
+    message = _build_cron_error_message(
+        {"id": "agent1", "name": "Agent task"},
+        "## Error\n\nmodel not found (FAILED)",
+        end_reason="cron_error",
+        timestamp=1785480005.0,
+    )
+
+    assert message["_error_type"] == "model_not_found"
+    assert message["provider_details_label"] == "技术详情"
+
+
+def test_materialize_no_agent_output_uses_sidecar_when_state_db_is_unavailable(cron_env):
+    cron_env["db"].unlink()
+    from integration.crons.session_bridge import materialize_cron_session
+
+    sid = materialize_cron_session(
+        {"id": "script1", "name": "Watchdog", "no_agent": True},
+        owner_profile="default",
+        execution_home=cron_env["home"],
+        fallback_output="## Response\n\nscript completed",
+        fallback_filename="2026-07-31_12-00-05.md",
+    )
+
+    assert sid == "cron_script1_20260731_120005"
+    from api.models import Session
+
+    session = Session.load(sid)
+    assert session is not None
+    assert session.cron_execution_ended_at is None
+
+
+def test_materialize_no_agent_output_uses_sidecar_when_state_db_read_fails(cron_env):
+    from integration.crons.session_bridge import materialize_cron_session
+
+    with patch(
+        "integration.crons.session_bridge.sqlite3.connect",
+        side_effect=sqlite3.OperationalError("database is locked"),
+    ):
+        sid = materialize_cron_session(
+            {"id": "script1", "name": "Watchdog", "no_agent": True},
+            owner_profile="default",
+            execution_home=cron_env["home"],
+            fallback_output="## Response\n\nscript completed",
+            fallback_filename="2026-07-31_12-00-05.md",
+        )
+
+    assert sid == "cron_script1_20260731_120005"
+
+
+def test_backfill_no_agent_output_persists_history_record(cron_env, caplog):
+    from integration.crons.session_bridge import (
+        backfill_cron_output_runs_to_state_db,
+        list_cron_job_runs_from_state_db,
+    )
+
+    cron_env["db"].unlink()
+    from hermes_state import SessionDB
+
+    store = SessionDB(db_path=cron_env["db"])
+    store.close()
+    caplog.set_level(logging.INFO)
+    result = backfill_cron_output_runs_to_state_db(
+        {"id": "script1", "name": "Watchdog", "no_agent": True},
+        execution_home=cron_env["home"],
+        artifacts=[
+            {
+                "filename": "2026-07-31_12-00-05.md",
+                "modified": 1785480005.0,
+                "fallback_output": "## Response\n\nscript completed",
+            },
+            {
+                "filename": "2026-07-31_12-01-05.md",
+                "modified": 1785480065.0,
+                "fallback_output": "## Response\n\nscript completed again",
+            }
+        ],
+        database_runs=[],
+    )
+
+    assert result == {"imported": 2, "skipped": 0}
+    assert [run["session_id"] for run in list_cron_job_runs_from_state_db(cron_env["home"], "script1")] == [
+        "cron_script1_20260731_120105",
+        "cron_script1_20260731_120005"
+    ]
+    with closing(sqlite3.connect(str(cron_env["db"]))) as conn:
+        titles = [row[0] for row in conn.execute("SELECT title FROM sessions ORDER BY id")]
+    assert titles == [
+        "Watchdog · 2026-07-31 12:00:05",
+        "Watchdog · 2026-07-31 12:01:05",
+    ]
+    assert "cron output backfilled job_id=script1" in caplog.text
+    assert "script completed" not in caplog.text
+
+
+def test_execution_results_match_empty_no_agent_artifact_as_failure(cron_env):
+    from integration.crons.session_bridge import match_cron_artifacts_to_execution_results
+
+    artifacts = [
+        {
+            "filename": "2026-07-31_11-09-18.md",
+            "modified": 1785467358.2,
+            "size": 0,
+            "fallback_output": "",
+        }
+    ]
+    match_cron_artifacts_to_execution_results(
+        artifacts,
+        [
+            {
+                "execution_id": "failed-run",
+                "status": "failed",
+                "started_at": 1785467357.0,
+                "ended_at": 1785467358.0,
+                "claimed_at": 1785467356.0,
+                "end_reason": "cron_error",
+                "error_detail": "no_agent=True but no script is set for this job",
+            }
+        ],
+    )
+
+    assert artifacts[0]["execution_end_reason"] == "cron_error"
+    assert artifacts[0]["execution_error_detail"] == "no_agent=True but no script is set for this job"
+
+
+def test_execution_results_are_one_to_one_for_neighboring_artifacts(cron_env):
+    from integration.crons.session_bridge import match_cron_artifacts_to_execution_results
+
+    artifacts = [
+        {"filename": "first.md", "modified": 100.0},
+        {"filename": "second.md", "modified": 106.0},
+    ]
+    executions = [
+        {
+            "execution_id": "first",
+            "status": "completed",
+            "ended_at": 101.0,
+            "started_at": 100.0,
+            "claimed_at": 99.0,
+            "end_reason": "cron_complete",
+            "error_detail": None,
+        },
+        {
+            "execution_id": "second",
+            "status": "failed",
+            "ended_at": 105.0,
+            "started_at": 104.0,
+            "claimed_at": 103.0,
+            "end_reason": "cron_error",
+            "error_detail": "script exited 1",
+        },
+    ]
+
+    match_cron_artifacts_to_execution_results(artifacts, executions)
+
+    assert [artifact["execution_end_reason"] for artifact in artifacts] == [
+        "cron_complete",
+        "cron_error",
+    ]
+
+
+def test_list_cron_execution_results_reads_terminal_statuses(cron_env):
+    from integration.crons.session_bridge import list_cron_job_execution_results
+
+    execution_db = cron_env["home"] / "cron" / "executions.db"
+    execution_db.parent.mkdir(parents=True)
+    with closing(sqlite3.connect(str(execution_db))) as conn:
+        conn.execute(
+            """
+            CREATE TABLE executions (
+                id TEXT PRIMARY KEY, job_id TEXT, status TEXT, claimed_at TEXT,
+                started_at TEXT, finished_at TEXT, error TEXT
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO executions VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                "failed-run",
+                "script1",
+                "failed",
+                "2026-07-31T11:09:17+08:00",
+                "2026-07-31T11:09:17+08:00",
+                "2026-07-31T11:09:18+08:00",
+                "no_agent=True but no script is set for this job",
+            ),
+        )
+        conn.commit()
+
+    assert list_cron_job_execution_results(cron_env["home"], "script1") == [
+        {
+            "execution_id": "failed-run",
+            "status": "failed",
+            "started_at": 1785467357.0,
+            "ended_at": 1785467358.0,
+            "claimed_at": 1785467357.0,
+            "end_reason": "cron_error",
+            "error_detail": "no_agent=True but no script is set for this job",
+        }
+    ]
+
+
+def test_empty_no_agent_artifact_without_execution_is_backfilled_as_unknown(cron_env):
+    from integration.crons.session_bridge import (
+        backfill_cron_output_runs_to_state_db,
+        list_cron_job_runs_from_state_db,
+    )
+
+    cron_env["db"].unlink()
+    from hermes_state import SessionDB
+
+    store = SessionDB(db_path=cron_env["db"])
+    store.close()
+    result = backfill_cron_output_runs_to_state_db(
+        {"id": "script1", "name": "Watchdog", "no_agent": True},
+        execution_home=cron_env["home"],
+        artifacts=[
+            {
+                "filename": "2026-07-31_11-09-18.md",
+                "modified": 1785476958.0,
+                "size": 0,
+                "fallback_output": "",
+            }
+        ],
+        database_runs=[],
+    )
+
+    assert result == {"imported": 1, "skipped": 0}
+    runs = list_cron_job_runs_from_state_db(cron_env["home"], "script1")
+    assert [(run["session_id"], run["end_reason"]) for run in runs] == [
+        ("cron_script1_20260731_110918", None)
+    ]
+
+
+def test_job_last_run_error_matches_only_its_empty_no_agent_artifact(cron_env):
+    from integration.crons.session_bridge import match_cron_artifacts_to_job_last_run_result
+
+    artifacts = [
+        {
+            "filename": "2026-07-31_12-18-09.md",
+            "modified": 1785471489.6611462,
+            "size": 0,
+            "fallback_output": "",
+        },
+        {
+            "filename": "2026-07-31_12-21-10.md",
+            "modified": 1785471670.0335526,
+            "size": 0,
+            "fallback_output": "",
+        },
+    ]
+
+    match_cron_artifacts_to_job_last_run_result(
+        artifacts,
+        {
+            "id": "script1",
+            "no_agent": True,
+            "last_run_at": "2026-07-31T12:21:10.070677+08:00",
+            "last_status": "error",
+            "last_error": "no_agent=True but no script is set for this job",
+        },
+    )
+
+    assert "execution_end_reason" not in artifacts[0]
+    assert artifacts[1]["execution_status"] == "failed"
+    assert artifacts[1]["execution_end_reason"] == "cron_error"
+    assert artifacts[1]["execution_error_detail"] == "no_agent=True but no script is set for this job"
+
+
+def test_empty_no_agent_failure_is_backfilled_with_execution_error(cron_env):
+    from integration.crons.session_bridge import (
+        backfill_cron_output_runs_to_state_db,
+        list_cron_job_runs_from_state_db,
+    )
+
+    cron_env["db"].unlink()
+    from hermes_state import SessionDB
+
+    store = SessionDB(db_path=cron_env["db"])
+    store.close()
+    error = "no_agent=True but no script is set for this job"
+    result = backfill_cron_output_runs_to_state_db(
+        {"id": "script1", "name": "Watchdog", "no_agent": True},
+        execution_home=cron_env["home"],
+        artifacts=[
+            {
+                "filename": "2026-07-31_11-09-18.md",
+                "modified": 1785476958.0,
+                "size": 0,
+                "fallback_output": "",
+                "execution_end_reason": "cron_error",
+                "execution_error_detail": error,
+            }
+        ],
+        database_runs=[],
+    )
+
+    assert result == {"imported": 1, "skipped": 0}
+    runs = list_cron_job_runs_from_state_db(cron_env["home"], "script1")
+    assert [(run["session_id"], run["end_reason"]) for run in runs] == [
+        ("cron_script1_20260731_110918", "cron_error")
+    ]
+
+
+def test_empty_no_agent_failure_materializes_script_error_sidecar(cron_env):
+    from integration.crons.session_bridge import materialize_cron_session
+
+    error = "no_agent=True but no script is set for this job"
+    sid = materialize_cron_session(
+        {"id": "script1", "name": "Watchdog", "no_agent": True},
+        owner_profile="default",
+        execution_home=cron_env["home"],
+        run_mtime=1785476958.0,
+        fallback_output="",
+        fallback_filename="2026-07-31_11-09-18.md",
+        execution_end_reason="cron_error",
+        execution_error_detail=error,
+        execution_ended_at=1785476958.0,
+    )
+
+    from api.models import Session
+
+    session = Session.load(sid)
+    assert session is not None
+    assert session.cron_execution_ended_at == 1785476958.0
+    assert "脚本执行失败" in session.messages[1]["content"]
+    assert session.messages[-1]["_error_type"] == "cron_script_error"
+    assert session.messages[-1]["provider_details"] == error
+
+
+def test_empty_no_agent_unknown_materializes_sidecar(cron_env):
+    from integration.crons.session_bridge import materialize_cron_session
+
+    cron_env["db"].unlink()
+    sid = materialize_cron_session(
+        {"id": "script1", "name": "Watchdog", "no_agent": True},
+        owner_profile="default",
+        execution_home=cron_env["home"],
+        run_mtime=1785476958.0,
+        fallback_output="",
+        fallback_filename="2026-07-31_11-09-18.md",
+    )
+
+    from api.models import Session
+
+    session = Session.load(sid)
+    assert sid == "cron_script1_20260731_110918"
+    assert session is not None
+    assert session.last_error_at is None
+    assert session.messages[1]["content"] == "脚本任务未产生输出；本次运行状态尚未验证。"
+
+
+def test_no_agent_runtime_failure_materializes_without_output_artifact(cron_env):
+    from integration.crons.session_bridge import materialize_cron_session
+
+    sid = materialize_cron_session(
+        {"id": "script1", "name": "Watchdog", "no_agent": True},
+        owner_profile="default",
+        execution_home=cron_env["home"],
+        session_id="cron_script1_20260731_120105",
+        execution_end_reason="cron_error",
+        execution_error_detail="no_agent=True but no script is set for this job",
+    )
+
+    from api.models import Session
+
+    session = Session.load(sid)
+    assert sid == "cron_script1_20260731_120105"
+    assert session is not None
+    assert session.messages[-1]["_error_type"] == "cron_script_error"
+
+
+def test_failed_execution_corrects_existing_no_agent_synthetic_record(cron_env, caplog):
+    from integration.crons.session_bridge import (
+        backfill_cron_output_runs_to_state_db,
+        reconcile_no_agent_cron_output_records,
+    )
+
+    cron_env["db"].unlink()
+    from hermes_state import SessionDB
+
+    store = SessionDB(db_path=cron_env["db"])
+    store.close()
+    job = {"id": "script1", "name": "Watchdog", "no_agent": True}
+    artifact = {
+        "filename": "2026-07-31_11-09-18.md",
+        "modified": 1785476958.0,
+        "fallback_output": "script completed",
+    }
+    assert backfill_cron_output_runs_to_state_db(
+        job,
+        execution_home=cron_env["home"],
+        artifacts=[artifact],
+        database_runs=[],
+    )["imported"] == 1
+
+    corrected_artifact = {
+        **artifact,
+        "execution_end_reason": "cron_error",
+        "execution_error_detail": "no_agent=True but no script is set for this job",
+    }
+    database_runs = [{"session_id": "cron_script1_20260731_110918", "end_reason": "cron_complete"}]
+    caplog.set_level(logging.INFO)
+    reconcile_no_agent_cron_output_records(
+        cron_env["home"],
+        job,
+        [corrected_artifact],
+        database_runs,
+    )
+
+    assert database_runs[0]["end_reason"] == "cron_error"
+    assert "cron output failure reconciled job_id=script1" in caplog.text
+    with closing(sqlite3.connect(str(cron_env["db"]))) as conn:
+        assert conn.execute(
+            "SELECT end_reason FROM sessions WHERE id = ?",
+            ("cron_script1_20260731_110918",),
+        ).fetchone()[0] == "cron_error"
 
 
 def test_materialize_does_not_overwrite_existing_messages(cron_env, monkeypatch):

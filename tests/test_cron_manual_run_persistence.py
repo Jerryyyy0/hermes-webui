@@ -133,3 +133,27 @@ def test_manual_cron_run_delivers_failure_notice(monkeypatch):
     assert "boom" in calls[1][2]
     assert calls[2] == ("mark", "job-failed", False, "boom", None)
     assert routes._is_cron_running("job-failed") == (False, 0.0)
+
+
+def test_manual_cron_failure_forwards_result_to_materializer(monkeypatch):
+    import api.routes as routes
+    import integration.crons.hooks as hooks
+
+    calls = []
+    _install_cron_fakes(monkeypatch, calls)
+    result = (False, "", "", "no_agent=True but no script is set for this job")
+    monkeypatch.setattr(
+        routes,
+        "_run_cron_job_in_profile_subprocess",
+        lambda job, execution_profile_home: result,
+    )
+    monkeypatch.setattr(
+        hooks,
+        "materialize_after_cron_run",
+        lambda job, **kwargs: calls.append(("materialize", kwargs.get("execution_result"))),
+    )
+
+    routes._mark_cron_running("job-missing-script")
+    routes._run_cron_tracked({"id": "job-missing-script", "no_agent": True})
+
+    assert ("materialize", result) in calls

@@ -8,6 +8,9 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Changed
 
+- **Cron manual no_agent empty-output backfill** — WebUI manual script runs now forward their scheduler result into session materialization. Scheduled and manual script runs reserve a stable session before output persistence, so output-save failures still retain the completed or failed run. When an older manual run lacks an `executions.db` row, history applies `jobs.json`'s failure or success only to the single artifact whose timestamp matches `last_run_at`; every other valid artifact still receives a stable minimal session with an unverified outcome rather than no session.
+- **Cron no_agent history failure reconciliation** — `GET /api/crons/history` now matches each script output artifact to the owning Profile's terminal execution record. Empty artifacts from missing scripts, timeouts, and non-zero exits persist as `cron_error` with the scheduler error detail instead of being inferred as successful; prior synthetic records are corrected only when a failed execution matches. Unmatched or `unknown` zero-byte artifacts also persist with an empty `end_reason`, and failed history rows expose optional `error`.
+
 - **Knowledge base download_doc timeout** — `POST /api/integration/knowledge_base/download_doc` 下游 httpx 请求超时由 30 秒调整为 180 秒，与 `show_pdf` 一致，避免大文件下载在 BFF 侧过早断开。
 
 - **Assistant bubbles prompt polish** — 优化四类气泡 user prompt，并为 `assistant_intro` / `memory` / `skill` / `emotion` 增加正误 few-shot；通用与 emotion system prompt 明确要求句中逗号断句，并澄清「emoji 前勿普通标点」仅约束 emoji 位置。Prompt 版本 bump 至 `assistant_intro.v3` / `memory.v3` / `skill.v6` / `emotion.v6` 以触发重新生成。
@@ -78,6 +81,10 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 - **Chat apperror `content_filtered` type** — Provider 内容审核拦截（如 `data_inspection_failed`、`content_filter`、`content_policy_violation`、`moderation`）不再落到通用 `error` 兜底文案，新增 `content_filtered` 分类，中文文案「内容被审核拦截 / 输入内容被模型服务的内容审核策略拦截」，`details_label` 为「审核详情」。分类与文案集中在 `integration/chat_provider_errors/`（`classify.py`、`messages.py`），`api/streaming.py` 接缝不动。分类顺序：`content_filtered` / `compression_exhausted` 等 provider 专有 code 优先于 `404`/`401`/`429` 弱状态码匹配，避免 chatcmpl ID 子串误判（见下条 Fixed）。
 
 ### Fixed
+
+- **No-agent cron error classification** — 脚本任务失败现在持久化为 `cron_script_error`，展示「脚本执行失败」及「脚本错误详情」，不再因 `Script not found` 等文本被错误标注为 `model_not_found`。重新 materialize 时会替换可由同一脚本输出严格确认的旧 Provider 错误记录。
+
+- **No-agent cron sessions** — `no_agent` 脚本任务的成功、失败与超时运行只要生成合法 Markdown 输出，现在都会以稳定的 `cron_*` ID 写入最小 `source=cron` 记录并 materialize 为可继续对话的 WebUI 会话；`state.db` 暂不可用时仍会创建同 ID 的 sidecar。失败运行记录 `end_reason=cron_error` 并显示结构化错误信息。脚本执行本身仍不启动 Agent 或消耗模型调用。
 
 - **Cron fallback prompt deduplication** — 当 cron output 先于 Agent `state.db` transcript 可用而生成 `cron_fallback` user 占位时，后续到达的同一首条真实 user（含 scheduler execution hint 或裸 prompt）会确认该占位而非再显示一次任务提示；不同 prompt、执行完成后的 WebUI 跟帖及独立 assistant 输出保持不变。
 

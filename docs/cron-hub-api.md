@@ -151,7 +151,7 @@ integration 开启后，Profile 条目可能包含 `info` 扩展字段。`/api/p
 
 ### 4.3 GET `/api/crons/history`
 
-读取某个任务的运行历史元数据，不返回 Markdown 正文。执行记录以任务执行 Profile 的 `state.db.sessions` 中 `source=cron` 且 session ID 属于该 `job_id` 的行作为主数据源；输出 Markdown 仅作为可选 artifact 附加。旧任务的 `profile` 字段为空时，以请求中的任务所属 `profile` 定位 `state.db`。没有数据库会话的 script/no-agent/旧输出仍以 `session_id: null` 的 artifact-only 记录返回。
+读取某个任务的运行历史元数据，不返回 Markdown 正文。执行记录以任务执行 Profile 的 `state.db.sessions` 中 `source=cron` 且 session ID 属于该 `job_id` 的行作为主数据源；输出 Markdown 仅作为可选 artifact 附加。旧任务的 `profile` 字段为空时，以请求中的任务所属 `profile` 定位 `state.db`。history 会把每个输出文件与该 Profile 的 `cron/executions.db` 终态记录一对一匹配，失败 execution 覆盖任何旧的成功推断，返回 `end_reason: "cron_error"` 与可选 `error`。有合法 Markdown 输出但缺少数据库记录的 Agent 与 `no_agent` 脚本运行都会按输出文件名补齐稳定 `cron_*` 会话；脚本成功、失败、超时和 0 字节输出均适用。`no_agent` 在运行结束即保留其 `cron_*` ID 并持久化最小记录，即使随后保存输出失败。WebUI 手动脚本运行没有 execution 流水时，仅当 artifact 与 `jobs.json.last_run_at` 严格匹配才使用这一次 `last_status` / `last_error` 回补，绝不把最新状态套用到更早输出。其余未匹配或 `unknown` 的运行仍会获得 `session_id` 并写入最小记录，但 `end_reason` 保持空且会话明确提示结果尚未验证，不会伪造成功。`no_agent` 的失败会话使用 `_error_type: "cron_script_error"`、中文脚本执行失败文案和 `脚本错误详情`，不会被归类为模型或 Provider 错误。`state.db` 暂不可用时仍会创建同 ID 的 WebUI sidecar，以便继续对话；未知任务或文件名非法保持 artifact-only。
 
 请求参数：
 

@@ -827,7 +827,7 @@
       "get": {
         "tags": ["Crons"],
         "summary": "获取定时任务执行历史（数据库优先）",
-        "description": "以任务执行 Profile 的 `state.db.sessions` cron 会话为主记录，返回执行时间、状态、模型、计数和 token/cost 聚合字段；若存在 `cron/output/{job_id}` Markdown，则附加 filename、size、modified、usage。仅有输出文件的旧运行仍作为 artifact-only 记录返回。",
+        "description": "以任务执行 Profile 的 `state.db.sessions` cron 会话为主记录，返回执行时间、状态、模型、计数和 token/cost 聚合字段；每个合法 Markdown artifact 都回补稳定 cron 会话。artifact 与同 Profile 的 terminal execution 一对一匹配，失败运行返回 cron_error 和 error；无法验证终态时保留空 end_reason，不推断为成功。",
         "parameters": [
           { "name": "job_id", "in": "query", "required": true, "schema": { "type": "string" } },
           { "name": "offset", "in": "query", "required": false, "schema": { "type": "integer", "default": 0, "minimum": 0 } },
@@ -5652,11 +5652,12 @@
       "CronHistoryRunItem": {
         "type": "object",
         "properties": {
-          "session_id": { "type": "string", "nullable": true, "description": "state.db cron 会话 ID；可用于打开完整执行步骤。artifact-only 记录为 null" },
+          "session_id": { "type": "string", "nullable": true, "description": "state.db cron 会话 ID；每个合法输出 artifact 均可用于打开完整执行步骤，只有未知任务或非法文件名为 null" },
           "title": { "type": "string", "nullable": true },
           "started_at": { "type": "number", "nullable": true, "description": "执行开始 Unix 时间戳（秒）" },
           "ended_at": { "type": "number", "nullable": true, "description": "执行结束 Unix 时间戳（秒）" },
           "end_reason": { "type": "string", "nullable": true },
+          "error": { "type": "string", "nullable": true, "description": "匹配到失败 execution 时的错误详情" },
           "model": { "type": "string", "nullable": true },
           "preview": { "type": "string", "description": "首条用户消息预览" },
           "last_active": { "type": "number", "nullable": true },

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import time
 from dataclasses import dataclass
 
 from integration.crons.session_bridge import resolve_cron_execution_ended_at
@@ -259,6 +260,7 @@ def materialize_after_cron_run(
     owner_profile: str | None = None,
     execution_home=None,
     session_id: str | None = None,
+    execution_result=None,
 ) -> str | None:
     from integration.crons.listing import resolve_owner_profile_for_job
     from integration.crons.session_bridge import (
@@ -280,6 +282,15 @@ def materialize_after_cron_run(
         execution_home = _profile_home_for_cron_job(job)
 
     fallback_output, fallback_filename = read_cron_output_for_run(job_id)
+    execution_end_reason = None
+    execution_error_detail = None
+    if isinstance(execution_result, tuple) and execution_result:
+        if execution_result[0] is True:
+            execution_end_reason = "cron_complete"
+        elif execution_result[0] is False:
+            execution_end_reason = "cron_error"
+            if len(execution_result) > 3 and isinstance(execution_result[3], str):
+                execution_error_detail = execution_result[3].strip() or None
     sid = materialize_cron_session(
         job,
         owner_profile=owner,
@@ -287,6 +298,8 @@ def materialize_after_cron_run(
         fallback_output=fallback_output,
         fallback_filename=fallback_filename,
         session_id=session_id or str((job or {}).get("_cron_session_id") or "").strip() or None,
+        execution_end_reason=execution_end_reason,
+        execution_error_detail=execution_error_detail,
     )
     if sid:
         from api.models import Session
@@ -475,6 +488,10 @@ def _install_run_job_materialize_hook() -> None:
     base = getattr(original, "_webui_original_run_job", original)
 
     def _run_job_with_materialize(job, *args, **kwargs):
+        if isinstance(job, dict) and not str(job.get("_cron_session_id") or "").strip():
+            job_id = str(job.get("id") or "").strip()
+            if job_id:
+                job["_cron_session_id"] = f"cron_{job_id}_{time.strftime('%Y%m%d_%H%M%S')}"
         execution_home = _home_for_scheduled_cron_job(job)
         try:
             from integration.crons.listing import resolve_owner_profile_for_job
@@ -485,27 +502,24 @@ def _install_run_job_materialize_hook() -> None:
         except Exception:
             owner_profile = None
         result = None
-        if _cron_profile_context_depth() > 0:
-            try:
-                result = base(job, *args, **kwargs)
-                return result
-            finally:
-                materialize_after_cron_run(
-                    job,
-                    owner_profile=owner_profile,
-                    execution_home=execution_home,
-                    session_id=str((job or {}).get("_cron_session_id") or "").strip() or None,
-                )
         try:
-            with cron_profile_context_for_home(execution_home):
+            if _cron_profile_context_depth() > 0:
                 result = base(job, *args, **kwargs)
-                return result
+            else:
+                with cron_profile_context_for_home(execution_home):
+                    result = base(job, *args, **kwargs)
+        except BaseException as exc:
+            result = (False, "", "", str(exc))
+            raise
+        else:
+            return result
         finally:
             materialize_after_cron_run(
                 job,
                 owner_profile=owner_profile,
                 execution_home=execution_home,
                 session_id=str((job or {}).get("_cron_session_id") or "").strip() or None,
+                execution_result=result,
             )
 
     _run_job_with_materialize._webui_cron_materialize_wrapped = True

@@ -26,6 +26,7 @@ logger = get_logger(__name__)
 # When state.db no longer has the target cron session row, fall back to matching
 # owner output .md by the timestamp embedded in cron_<job>_YYYYMMDD_HHMMSS.
 CRON_ORPHAN_OUTPUT_MAX_DELTA_SECONDS = 600.0
+CRON_EXECUTION_ARTIFACT_MAX_DELTA_SECONDS = 600.0
 
 _CRON_RUN_HISTORY_FIELDS = (
     "id",
@@ -51,6 +52,274 @@ _CRON_RUN_HISTORY_FIELDS = (
 _CRON_OUTPUT_FILENAME_RE = re.compile(
     r"^(?P<date>\d{4}-\d{2}-\d{2})_(?P<time>\d{2}-\d{2}-\d{2})\.md$"
 )
+
+
+def _parse_cron_execution_timestamp(value: Any) -> float | None:
+    """Parse Hermes execution timestamps without treating malformed data as now."""
+    if isinstance(value, (int, float)):
+        result = float(value)
+        return result if math.isfinite(result) else None
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+    result = parsed.timestamp()
+    return result if math.isfinite(result) else None
+
+
+def list_cron_job_execution_results(
+    execution_home: Path,
+    job_id: str,
+    *,
+    limit: int = 500,
+) -> list[dict[str, Any]]:
+    """Read the Agent-owned terminal execution history for one cron job.
+
+    ``cron.executions`` resolves its database from process-global ``HERMES_HOME``.
+    History requests may target a different profile, so use the same SQLite file
+    through a read-only query instead of importing it under the wrong home.
+    """
+    job_id = str(job_id or "").strip()
+    db_path = Path(execution_home) / "cron" / "executions.db"
+    if not job_id or not db_path.is_file():
+        return []
+    try:
+        max_rows = max(1, min(int(limit), 500))
+    except (TypeError, ValueError):
+        max_rows = 500
+    try:
+        with closing(sqlite3.connect(str(db_path))) as conn:
+            conn.row_factory = sqlite3.Row
+            columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(executions)")}
+            required = {"id", "job_id", "status", "claimed_at", "started_at", "finished_at", "error"}
+            if not required.issubset(columns):
+                return []
+            rows = conn.execute(
+                """
+                SELECT id, status, claimed_at, started_at, finished_at, error
+                FROM executions
+                WHERE job_id = ? AND status IN ('completed', 'failed', 'unknown')
+                ORDER BY claimed_at DESC, id DESC
+                LIMIT ?
+                """,
+                (job_id, max_rows),
+            ).fetchall()
+    except (OSError, sqlite3.Error) as exc:
+        logger.debug("cron execution history read failed for %s: %s", job_id, exc)
+        return []
+
+    results: list[dict[str, Any]] = []
+    for row in rows:
+        execution = dict(row)
+        status = str(execution.get("status") or "").strip().lower()
+        ended_at = _parse_cron_execution_timestamp(execution.get("finished_at"))
+        started_at = _parse_cron_execution_timestamp(execution.get("started_at"))
+        claimed_at = _parse_cron_execution_timestamp(execution.get("claimed_at"))
+        if status == "completed":
+            end_reason = "cron_complete"
+        elif status == "failed":
+            end_reason = "cron_error"
+        else:
+            end_reason = None
+        results.append(
+            {
+                "execution_id": str(execution.get("id") or ""),
+                "status": status,
+                "started_at": started_at,
+                "ended_at": ended_at,
+                "claimed_at": claimed_at,
+                "end_reason": end_reason,
+                "error_detail": str(execution.get("error") or "").strip() or None,
+            }
+        )
+    return results
+
+
+def _cron_execution_match_time(execution: dict[str, Any]) -> float | None:
+    for key in ("ended_at", "started_at", "claimed_at"):
+        try:
+            value = float(execution.get(key))
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(value):
+            return value
+    return None
+
+
+def match_cron_artifacts_to_execution_results(
+    artifacts: list[dict[str, Any]],
+    executions: list[dict[str, Any]],
+) -> None:
+    """Annotate artifacts with one authoritative, terminal execution result.
+
+    Matching every possible pair first, then accepting the smallest deltas,
+    prevents two neighboring output files from consuming the same execution.
+    An unmatched artifact deliberately has no inferred completion state.
+    """
+    pairs: list[tuple[float, int, int, str]] = []
+    for artifact_index, artifact in enumerate(artifacts):
+        if not isinstance(artifact, dict):
+            continue
+        try:
+            artifact_time = float(artifact.get("modified"))
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(artifact_time):
+            continue
+        for execution_index, execution in enumerate(executions):
+            if not isinstance(execution, dict):
+                continue
+            execution_time = _cron_execution_match_time(execution)
+            if execution_time is None:
+                continue
+            delta = abs(artifact_time - execution_time)
+            if delta <= CRON_EXECUTION_ARTIFACT_MAX_DELTA_SECONDS:
+                pairs.append(
+                    (
+                        delta,
+                        artifact_index,
+                        execution_index,
+                        str(execution.get("execution_id") or ""),
+                    )
+                )
+
+    matched_artifacts: set[int] = set()
+    matched_executions: set[int] = set()
+    for _delta, artifact_index, execution_index, _execution_id in sorted(pairs):
+        if artifact_index in matched_artifacts or execution_index in matched_executions:
+            continue
+        artifact = artifacts[artifact_index]
+        execution = executions[execution_index]
+        matched_artifacts.add(artifact_index)
+        matched_executions.add(execution_index)
+        artifact["execution_status"] = execution.get("status")
+        artifact["execution_end_reason"] = execution.get("end_reason")
+        artifact["execution_error_detail"] = execution.get("error_detail")
+        artifact["execution_started_at"] = execution.get("started_at")
+        artifact["execution_ended_at"] = execution.get("ended_at")
+
+
+def match_cron_artifacts_to_job_last_run_result(
+    artifacts: list[dict[str, Any]],
+    job: dict,
+) -> None:
+    """Use the job summary only for its exactly matching latest script run.
+
+    WebUI manual runs execute ``run_job`` in a child process and therefore do
+    not create an Agent ``executions.db`` row. ``jobs.json`` retains only the
+    most recent terminal result, so it is safe evidence for at most one output
+    artifact: the one whose modification time matches ``last_run_at``. Older
+    output files remain unverified rather than inheriting a newer failure.
+    """
+    if not isinstance(job, dict) or not job.get("no_agent"):
+        return
+    status = str(job.get("last_status") or "").strip().lower()
+    if status == "ok":
+        execution_status = "completed"
+        end_reason = "cron_complete"
+        error_detail = None
+    elif status == "error":
+        execution_status = "failed"
+        end_reason = "cron_error"
+        error_detail = str(job.get("last_error") or "").strip() or None
+    else:
+        return
+    last_run_at = _parse_cron_execution_timestamp(job.get("last_run_at"))
+    if last_run_at is None:
+        return
+
+    candidates: list[tuple[float, dict[str, Any]]] = []
+    for artifact in artifacts:
+        if not isinstance(artifact, dict) or artifact.get("execution_status"):
+            continue
+        try:
+            modified_at = float(artifact.get("modified"))
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(modified_at):
+            continue
+        delta = abs(modified_at - last_run_at)
+        if delta <= CRON_EXECUTION_ARTIFACT_MAX_DELTA_SECONDS:
+            candidates.append((delta, artifact))
+    if not candidates:
+        return
+
+    _, artifact = min(candidates, key=lambda item: item[0])
+    artifact["execution_status"] = execution_status
+    artifact["execution_end_reason"] = end_reason
+    artifact["execution_error_detail"] = error_detail
+    artifact["execution_started_at"] = None
+    artifact["execution_ended_at"] = last_run_at
+
+
+def reconcile_no_agent_cron_output_records(
+    execution_home: Path,
+    job: dict,
+    artifacts: list[dict[str, Any]],
+    database_runs: list[dict[str, Any]],
+) -> None:
+    """Correct prior synthetic no-agent records only when a failure is verified."""
+    if not (job or {}).get("no_agent"):
+        return
+    db_path = Path(execution_home) / "state.db"
+    if not db_path.is_file():
+        return
+    job_id = str((job or {}).get("id") or "").strip()
+    if not job_id:
+        return
+    failures = {
+        _cron_backfill_session_id(job_id, str(artifact.get("filename") or ""))
+        for artifact in artifacts
+        if isinstance(artifact, dict) and artifact.get("execution_end_reason") == "cron_error"
+    }
+    failures.discard(None)
+    if not failures:
+        return
+    corrected = 0
+    try:
+        with closing(sqlite3.connect(str(db_path))) as conn:
+            columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(sessions)")}
+            if not {"id", "source", "end_reason"}.issubset(columns):
+                return
+            for session_id in failures:
+                cursor = conn.execute(
+                    "UPDATE sessions SET end_reason = 'cron_error' "
+                    "WHERE id = ? AND source = 'cron' "
+                    "AND (end_reason IS NULL OR end_reason != 'cron_error')",
+                    (session_id,),
+                )
+                corrected += cursor.rowcount
+            conn.commit()
+    except (OSError, sqlite3.Error) as exc:
+        logger.warning(
+            "cron output failure reconciliation failed job_id=%s db_path=%s",
+            job_id,
+            db_path,
+            exc_info=True,
+        )
+        return
+
+    if corrected:
+        session_ids = sorted(str(session_id) for session_id in failures)
+        logged_session_ids = session_ids[:10]
+        if len(session_ids) > len(logged_session_ids):
+            logged_session_ids.append(f"... ({len(session_ids) - len(logged_session_ids)} more)")
+        logger.info(
+            "cron output failure reconciled job_id=%s db_path=%s corrected=%d session_ids=%s",
+            job_id,
+            db_path,
+            corrected,
+            logged_session_ids,
+        )
+
+    for run in database_runs:
+        if str(run.get("session_id") or "") in failures:
+            run["end_reason"] = "cron_error"
 
 
 def list_cron_job_runs_from_state_db(
@@ -144,6 +413,161 @@ def _cron_output_is_already_represented(
     return False
 
 
+def _build_cron_output_run_record(
+    job: dict,
+    *,
+    filename: str,
+    output: str,
+    ended_at: float | int,
+    end_reason: str | None = None,
+    execution_error_detail: str | None = None,
+    started_at: float | int | None = None,
+) -> dict[str, Any] | None:
+    """Build the minimal durable record for one cron output artifact."""
+    job_id = str((job or {}).get("id") or "").strip()
+    session_id = _cron_backfill_session_id(job_id, filename)
+    try:
+        completed_at = float(ended_at)
+    except (TypeError, ValueError):
+        return None
+    if not job_id or not session_id or not math.isfinite(completed_at) or not isinstance(output, str):
+        return None
+    try:
+        verified_started_at = float(started_at) if started_at is not None else None
+    except (TypeError, ValueError):
+        verified_started_at = None
+    if verified_started_at is not None and not math.isfinite(verified_started_at):
+        verified_started_at = None
+
+    resolved_end_reason = str(end_reason or "").strip() or None
+    if resolved_end_reason is None:
+        if _cron_failure_detail(output, end_reason=None):
+            resolved_end_reason = "cron_error"
+        elif not ((job or {}).get("no_agent") and not output.strip()):
+            resolved_end_reason = "cron_complete"
+    job_name = str((job or {}).get("name") or f"Cron {job_id}").strip()
+    filename_match = _CRON_OUTPUT_FILENAME_RE.fullmatch(filename)
+    try:
+        run_label = dt.datetime.strptime(
+            f"{filename_match.group('date')} {filename_match.group('time')}",
+            "%Y-%m-%d %H-%M-%S",
+        ).strftime("%Y-%m-%d %H:%M:%S")
+    except (AttributeError, ValueError):
+        run_label = dt.datetime.fromtimestamp(completed_at).strftime("%Y-%m-%d %H:%M:%S")
+    return {
+        "id": session_id,
+        "source": "cron",
+        # Hermes Agent enforces a global unique index on non-null titles. Keep
+        # the synthesized Agent record unique while the WebUI sidecar retains
+        # the user-facing task name.
+        "title": f"{job_name} · {run_label}",
+        "started_at": verified_started_at if verified_started_at is not None else max(0.0, completed_at - 1.0),
+        "ended_at": completed_at,
+        "end_reason": resolved_end_reason,
+        "messages": build_cron_fallback_messages(
+            job,
+            output,
+            run_mtime=completed_at,
+            execution_error_detail=execution_error_detail,
+            end_reason=resolved_end_reason,
+        ),
+    }
+
+
+def _build_cron_runtime_result_record(
+    job: dict,
+    *,
+    session_id: str,
+    ended_at: float | int,
+    end_reason: str | None,
+    execution_error_detail: str | None,
+) -> dict[str, Any] | None:
+    """Build a no-agent record when execution finishes before output persists."""
+    job_id = str((job or {}).get("id") or "").strip()
+    session_id = str(session_id or "").strip()
+    if not job_id or not session_id.startswith(f"cron_{job_id}_"):
+        return None
+    try:
+        completed_at = float(ended_at)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(completed_at):
+        return None
+    job_name = str((job or {}).get("name") or f"Cron {job_id}").strip()
+    run_label = dt.datetime.fromtimestamp(completed_at).strftime("%Y-%m-%d %H:%M:%S")
+    return {
+        "id": session_id,
+        "source": "cron",
+        "title": f"{job_name} · {run_label}",
+        "started_at": max(0.0, completed_at - 1.0),
+        "ended_at": completed_at,
+        "end_reason": str(end_reason or "").strip() or None,
+        "messages": build_cron_fallback_messages(
+            job,
+            "",
+            run_mtime=completed_at,
+            execution_error_detail=execution_error_detail,
+            end_reason=end_reason,
+        ),
+    }
+
+
+def _import_cron_output_run_records(
+    db_path: Path,
+    candidates: list[dict[str, Any]],
+    *,
+    job_id: str,
+) -> dict[str, int]:
+    """Persist synthesized cron records through Hermes Agent's public store."""
+    if not candidates:
+        return {"imported": 0, "skipped": 0}
+    session_ids = [str(candidate.get("id") or "") for candidate in candidates]
+    logged_session_ids = session_ids[:10]
+    if len(session_ids) > len(logged_session_ids):
+        logged_session_ids.append(f"... ({len(session_ids) - len(logged_session_ids)} more)")
+    try:
+        from hermes_state import SessionDB
+
+        store = SessionDB(db_path=db_path)
+        try:
+            result = store.import_sessions(candidates)
+        finally:
+            store.close()
+    except Exception:
+        logger.warning(
+            "cron output backfill failed job_id=%s db_path=%s session_ids=%s",
+            job_id,
+            db_path,
+            logged_session_ids,
+            exc_info=True,
+        )
+        return {"imported": 0, "skipped": len(candidates)}
+
+    if not isinstance(result, dict) or not result.get("ok"):
+        logger.warning(
+            "cron output backfill rejected job_id=%s db_path=%s session_ids=%s result=%r",
+            job_id,
+            db_path,
+            logged_session_ids,
+            result,
+        )
+        return {"imported": 0, "skipped": len(candidates)}
+    outcome = {
+        "imported": int(result.get("imported") or 0),
+        "skipped": int(result.get("skipped") or 0),
+    }
+    if outcome["imported"]:
+        logger.info(
+            "cron output backfilled job_id=%s db_path=%s imported=%d skipped=%d session_ids=%s",
+            job_id,
+            db_path,
+            outcome["imported"],
+            outcome["skipped"],
+            logged_session_ids,
+        )
+    return outcome
+
+
 def backfill_cron_output_runs_to_state_db(
     job: dict,
     *,
@@ -159,9 +583,7 @@ def backfill_cron_output_runs_to_state_db(
     """
     job_id = str((job or {}).get("id") or "").strip()
     db_path = Path(execution_home) / "state.db"
-    # Script-only cron jobs deliberately bypass Agent/SessionDB. Their output is
-    # not an incomplete agent transcript and must stay artifact-only.
-    if not job_id or (job or {}).get("no_agent") or not db_path.is_file():
+    if not job_id or not db_path.is_file():
         return {"imported": 0, "skipped": 0}
 
     candidates: list[dict[str, Any]] = []
@@ -178,61 +600,30 @@ def backfill_cron_output_runs_to_state_db(
         session_id = _cron_backfill_session_id(job_id, str(artifact.get("filename") or ""))
         if not session_id or session_id in known_session_ids:
             continue
-        try:
-            ended_at = float(artifact.get("modified"))
-        except (TypeError, ValueError):
-            continue
-        if not math.isfinite(ended_at):
-            continue
         output = artifact.get("fallback_output")
         if not isinstance(output, str):
             continue
+        execution_end_reason = str(artifact.get("execution_end_reason") or "").strip() or None
         usage = artifact.get("usage")
         model = usage.get("model") if isinstance(usage, dict) else None
-        end_reason = (
-            "cron_error"
-            if _cron_failure_detail(output, end_reason=None)
-            else "cron_complete"
+        record = _build_cron_output_run_record(
+            job,
+            filename=str(artifact.get("filename") or ""),
+            output=output,
+            ended_at=artifact.get("execution_ended_at") or artifact.get("modified"),
+            end_reason=execution_end_reason,
+            execution_error_detail=artifact.get("execution_error_detail"),
+            started_at=artifact.get("execution_started_at"),
         )
-        candidates.append(
-            {
-                "id": session_id,
-                "source": "cron",
-                "title": str((job or {}).get("name") or f"Cron {job_id}"),
-                "model": str(model or "").strip() or None,
-                "started_at": max(0.0, ended_at - 1.0),
-                "ended_at": ended_at,
-                "end_reason": end_reason,
-                "messages": build_cron_fallback_messages(
-                    job,
-                    output,
-                    run_mtime=ended_at,
-                ),
-            }
-        )
+        if record is None:
+            continue
+        record["model"] = str(model or "").strip() or None
+        candidates.append(record)
 
     if not candidates:
         return {"imported": 0, "skipped": 0}
 
-    try:
-        from hermes_state import SessionDB
-
-        store = SessionDB(db_path=db_path)
-        try:
-            result = store.import_sessions(candidates)
-        finally:
-            store.close()
-    except Exception:
-        logger.debug("cron output state.db backfill failed for %s", job_id, exc_info=True)
-        return {"imported": 0, "skipped": len(candidates)}
-
-    if not isinstance(result, dict) or not result.get("ok"):
-        logger.debug("cron output state.db backfill rejected for %s: %r", job_id, result)
-        return {"imported": 0, "skipped": len(candidates)}
-    return {
-        "imported": int(result.get("imported") or 0),
-        "skipped": int(result.get("skipped") or 0),
-    }
+    return _import_cron_output_run_records(db_path, candidates, job_id=job_id)
 
 
 def cron_sessions_visible_in_sidebar(session: dict) -> bool:
@@ -1014,12 +1405,24 @@ def build_cron_fallback_messages(
     output_content: str,
     *,
     run_mtime: float | None = None,
+    execution_error_detail: str | None = None,
+    end_reason: str | None = None,
 ) -> list[dict[str, Any]]:
     """Synthetic user/assistant pair when state.db has no cron run messages."""
-    prompt = str((job or {}).get("prompt") or "")
+    if (job or {}).get("no_agent"):
+        job_name = str((job or {}).get("name") or (job or {}).get("id") or "定时脚本任务")
+        prompt = f"定时脚本任务「{job_name}」的本次运行结果如下。"
+    else:
+        prompt = str((job or {}).get("prompt") or "")
     body = _cron_output_body(output_content)
     if not body:
-        body = "(Cron completed without output)"
+        detail = str(execution_error_detail or "").strip()
+        if detail and (job or {}).get("no_agent"):
+            body = f"脚本执行失败。\n\n{detail}"
+        elif (job or {}).get("no_agent") and not str(end_reason or "").strip():
+            body = "脚本任务未产生输出；本次运行状态尚未验证。"
+        else:
+            body = "(Cron completed without output)"
     ts = float(run_mtime) if run_mtime is not None else time.time()
     return [
         {
@@ -1053,6 +1456,8 @@ def _cron_failure_detail(output_content: str | None, end_reason: str | None) -> 
     reason = str(end_reason or "").strip().lower()
     if "(FAILED)" in output and "## Error" in output:
         return output.split("## Error", 1)[1].strip() or reason
+    if "**Mode:** no_agent (script)" in output and "**Status:** script failed" in output:
+        return output
     if reason in _CRON_FAILURE_END_REASONS:
         return output.strip() or reason
     return ""
@@ -1083,23 +1488,111 @@ def _build_cron_provider_error_message(
     )
 
 
+def _cron_script_failure_detail(output_content: str | None, end_reason: str | None) -> str:
+    """Return the script's failure body without cron Markdown framing."""
+    detail = _cron_failure_detail(output_content, end_reason)
+    marker = "**Status:** script failed"
+    if marker in detail:
+        return detail.split(marker, 1)[1].strip() or detail
+    return detail
+
+
+def _build_cron_script_error_message(
+    output_content: str | None,
+    *,
+    end_reason: str | None,
+    timestamp: float | int | None,
+    execution_error_detail: str | None = None,
+) -> dict | None:
+    """Build a durable error turn for a script-only cron run.
+
+    Script output is not a model/provider failure. In particular, phrases such
+    as ``Script not found`` must never be classified as ``model_not_found``.
+    """
+    detail = str(execution_error_detail or "").strip() or _cron_script_failure_detail(
+        output_content,
+        end_reason,
+    )
+    if not detail:
+        return None
+    return {
+        "role": "assistant",
+        "content": "**脚本执行失败:** 本次定时脚本未能成功完成。\n\n*请查看脚本错误详情*",
+        "timestamp": _cron_error_timestamp(timestamp),
+        "_error": True,
+        "_error_type": "cron_script_error",
+        "provider_details": detail,
+        "provider_details_label": "脚本错误详情",
+    }
+
+
+def _build_cron_error_message(
+    job: dict,
+    output_content: str | None,
+    *,
+    end_reason: str | None,
+    timestamp: float | int | None,
+    execution_error_detail: str | None = None,
+) -> dict | None:
+    if (job or {}).get("no_agent"):
+        return _build_cron_script_error_message(
+            output_content,
+            end_reason=end_reason,
+            timestamp=timestamp,
+            execution_error_detail=execution_error_detail,
+        )
+    return _build_cron_provider_error_message(
+        output_content,
+        end_reason=end_reason,
+        timestamp=timestamp,
+    )
+
+
 def _has_matching_cron_error(messages: list[dict] | None, error_message: dict) -> bool:
     """Avoid adding the same durable cron failure during repeated materialization."""
     detail = error_message.get("provider_details")
+    error_type = error_message.get("_error_type")
     for message in messages or []:
         if not isinstance(message, dict) or not message.get("_error"):
             continue
-        if detail and message.get("provider_details") == detail:
+        if (
+            detail
+            and message.get("_error_type") == error_type
+            and message.get("provider_details") == detail
+        ):
             return True
     return False
 
 
-def _append_missing_cron_error(
+def _reconcile_cron_error(
     messages: list[dict],
     error_message: dict | None,
+    *,
+    legacy_no_agent_detail: str | None = None,
 ) -> bool:
-    if error_message is None or _has_matching_cron_error(messages, error_message):
+    """Append a missing cron error or replace a provably misclassified legacy one."""
+    if error_message is None:
         return False
+
+    removed_legacy = False
+    if error_message.get("_error_type") == "cron_script_error" and legacy_no_agent_detail:
+        retained_messages = []
+        for message in messages:
+            if not isinstance(message, dict) or not message.get("_error"):
+                retained_messages.append(message)
+                continue
+            if (
+                message.get("_error_type") != "cron_script_error"
+                and message.get("provider_details") == legacy_no_agent_detail
+            ):
+                removed_legacy = True
+                continue
+            retained_messages.append(message)
+        if removed_legacy:
+            messages[:] = retained_messages
+
+    if _has_matching_cron_error(messages, error_message):
+        return removed_legacy
     messages.append(error_message)
     return True
 
@@ -1365,14 +1858,22 @@ def _materialize_cron_session_found(
     run_mtime: float | None = None,
     end_reason: str | None = None,
     execution_ended_at: float | None = None,
+    execution_error_detail: str | None = None,
 ) -> str:
     sid, cli_title, started_at, model = found
     model = str(model or "").strip()
     error_timestamp = run_mtime or started_at
-    cron_error_message = _build_cron_provider_error_message(
+    cron_error_message = _build_cron_error_message(
+        job,
         fallback_output,
         end_reason=end_reason,
         timestamp=error_timestamp,
+        execution_error_detail=execution_error_detail,
+    )
+    legacy_no_agent_detail = (
+        _cron_failure_detail(fallback_output, end_reason)
+        if (job or {}).get("no_agent")
+        else None
     )
 
     from api.models import Session, ensure_cron_project, import_cli_session
@@ -1436,9 +1937,14 @@ def _materialize_cron_session_found(
                     job,
                     fallback_output,
                     run_mtime=run_mtime,
+                    end_reason=end_reason,
                 )
                 changed = True
-            if _append_missing_cron_error(full.messages, cron_error_message):
+            if _reconcile_cron_error(
+                full.messages,
+                cron_error_message,
+                legacy_no_agent_detail=legacy_no_agent_detail,
+            ):
                 full.last_error_at = _cron_error_timestamp(error_timestamp)
                 changed = True
             if needs_model_update:
@@ -1453,13 +1959,19 @@ def _materialize_cron_session_found(
     msgs = get_state_db_session_messages(sid, profile=execution_profile or target_profile)
     if not msgs:
         msgs = get_state_db_session_messages(sid, profile=target_profile)
-    if not msgs and fallback_output:
+    if not msgs and fallback_output is not None:
         msgs = build_cron_fallback_messages(
             job,
             fallback_output,
             run_mtime=run_mtime,
+            execution_error_detail=execution_error_detail,
+            end_reason=end_reason,
         )
-    _append_missing_cron_error(msgs, cron_error_message)
+    _reconcile_cron_error(
+        msgs,
+        cron_error_message,
+        legacy_no_agent_detail=legacy_no_agent_detail,
+    )
 
     title = (job or {}).get("name") or cli_title or f"Cron {str((job or {}).get('id') or '').strip()}"
     s = import_cli_session(
@@ -1492,6 +2004,9 @@ def materialize_cron_session(
     session_id: str | None = None,
     fallback_output: str | None = None,
     fallback_filename: str | None = None,
+    execution_end_reason: str | None = None,
+    execution_error_detail: str | None = None,
+    execution_ended_at: float | None = None,
 ) -> str | None:
     """Import the latest cron session from execution state.db into target_profile."""
     job_id = str((job or {}).get("id") or "").strip()
@@ -1509,9 +2024,48 @@ def materialize_cron_session(
     target_profile = _target_profile_for_job(job, owner)
     execution_profile = _execution_profile_name(job)
 
+    fallback_record = None
+    if fallback_output is not None and fallback_filename:
+        fallback_record = _build_cron_output_run_record(
+            job,
+            filename=fallback_filename,
+            output=fallback_output,
+            ended_at=run_mtime if run_mtime is not None else time.time(),
+            end_reason=execution_end_reason,
+            execution_error_detail=execution_error_detail,
+        )
+    elif (job or {}).get("no_agent") and session_id and execution_end_reason:
+        fallback_record = _build_cron_runtime_result_record(
+            job,
+            session_id=session_id,
+            ended_at=execution_ended_at if execution_ended_at is not None else time.time(),
+            end_reason=execution_end_reason,
+            execution_error_detail=execution_error_detail,
+        )
+
+    def materialize_output_fallback() -> str | None:
+        if fallback_record is None:
+            return None
+        return _materialize_cron_session_found(
+            job,
+            (
+                str(session_id or fallback_record["id"]),
+                str(fallback_record["title"]),
+                fallback_record["started_at"],
+                str(fallback_record.get("model") or ""),
+            ),
+            target_profile=target_profile,
+            execution_profile=execution_profile,
+            fallback_output=fallback_output,
+            run_mtime=fallback_record["ended_at"],
+            end_reason=fallback_record.get("end_reason"),
+            execution_ended_at=execution_ended_at,
+            execution_error_detail=execution_error_detail,
+        )
+
     db_path = Path(execution_home) / "state.db"
     if not db_path.is_file():
-        return None
+        return materialize_output_fallback()
 
     try:
         with closing(sqlite3.connect(str(db_path))) as conn:
@@ -1524,10 +2078,26 @@ def materialize_cron_session(
             end_reason, ended_at = _cron_session_completion(conn, found[0]) if found else (None, None)
     except sqlite3.Error as exc:
         logger.debug("materialize_cron_session: state.db read failed: %s", exc)
-        return None
+        return materialize_output_fallback()
+
+    if not found and (job or {}).get("no_agent") and fallback_record is not None:
+        _import_cron_output_run_records(db_path, [fallback_record], job_id=job_id)
+        try:
+            with closing(sqlite3.connect(str(db_path))) as conn:
+                found = _select_cron_session_for_run(
+                    conn,
+                    job_id,
+                    run_mtime=run_mtime,
+                    session_id=fallback_record["id"],
+                )
+                end_reason, ended_at = (
+                    _cron_session_completion(conn, found[0]) if found else (None, None)
+                )
+        except sqlite3.Error as exc:
+            logger.debug("materialize_cron_session: synthesized state.db read failed: %s", exc)
 
     if not found:
-        return None
+        return materialize_output_fallback()
 
     return _materialize_cron_session_found(
         job,
@@ -1538,6 +2108,7 @@ def materialize_cron_session(
         run_mtime=run_mtime,
         end_reason=end_reason,
         execution_ended_at=ended_at,
+        execution_error_detail=execution_error_detail,
     )
 
 
@@ -1568,6 +2139,7 @@ def materialize_cron_session_run(
         run_mtime=(run or {}).get("ended_at") or (run or {}).get("started_at"),
         end_reason=(run or {}).get("end_reason"),
         execution_ended_at=(run or {}).get("ended_at"),
+        execution_error_detail=(run or {}).get("execution_error_detail") or (run or {}).get("error"),
     )
 
 
