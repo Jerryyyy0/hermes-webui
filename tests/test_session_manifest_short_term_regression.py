@@ -191,3 +191,72 @@ def test_terminal_md2word_positional_output_requires_real_file(tmp_path):
     assert _terminal_output_paths(command, workspace) == ['deliveries/report.docx']
     output.unlink()
     assert _terminal_output_paths(command, workspace) == []
+
+
+def test_terminal_cp_collects_only_static_workspace_destination(tmp_path):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    (workspace / 'recolor.py').write_text('print("ok")', encoding='utf-8')
+    (workspace / 'report.html').write_text('<html></html>', encoding='utf-8')
+
+    assert _terminal_output_paths('cp recolor.py report.html', workspace) == ['report.html']
+    assert _terminal_output_paths('cp -- recolor.py report.html', workspace) == ['report.html']
+
+    output_dir = workspace / 'out'
+    output_dir.mkdir()
+    (output_dir / 'report.pdf').write_bytes(b'%PDF')
+    assert _terminal_output_paths(
+        'cd out && cp ../recolor.py report.pdf', workspace
+    ) == ['out/report.pdf']
+
+
+def test_terminal_cp_rejects_ambiguous_or_unsafe_destinations(tmp_path):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    (workspace / 'report.html').write_text('<html></html>', encoding='utf-8')
+
+    assert _terminal_output_paths('cp a b report.html', workspace) == []
+    assert _terminal_output_paths('cp -R source report.html', workspace) == []
+    assert _terminal_output_paths('cp source ../report.html', workspace) == []
+
+
+def test_completed_terminal_cp_is_bound_to_canonical_manifest_turn(monkeypatch, tmp_path):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    (workspace / 'recolor.py').write_text('print("ok")', encoding='utf-8')
+    (workspace / 'report.html').write_text('<html></html>', encoding='utf-8')
+    session = Session(
+        session_id='terminal_cp_manifest01',
+        workspace=str(workspace),
+        messages=[
+            {'role': 'user', 'content': '配色淡一点', '_turn_key': 'turn:6'},
+            {'role': 'assistant', 'tool_calls': [{
+                'id': 'terminal-cp',
+                'function': {
+                    'name': 'terminal',
+                    'arguments': json.dumps({'command': 'cp recolor.py report.html'}),
+                },
+            }]},
+            {
+                'role': 'tool',
+                'tool_call_id': 'terminal-cp',
+                'name': 'terminal',
+                'content': json.dumps({'success': True, 'returncode': 0}),
+            },
+            {'role': 'assistant', 'content': 'done'},
+        ],
+        tool_calls=[],
+    )
+    _manifest_without_store(monkeypatch, session)
+
+    manifest = build_session_manifest(session)
+
+    assert manifest['turns'] == [{
+        'turn_key': 'turn:6',
+        'artifacts': [{
+            'path': 'report.html',
+            'preview': MANIFEST_PREVIEW_FILE,
+            'source_tool': 'terminal',
+        }],
+        'references': [],
+    }]

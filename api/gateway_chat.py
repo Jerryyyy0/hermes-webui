@@ -1372,6 +1372,7 @@ def _run_gateway_chat_streaming(
                     s.context_messages,
                     str(msg_text or ""),
                     source=pending_source,
+                    canonical_turn_key=manifest_turn_key,
                 )
             except Exception:
                 logger.debug("Failed to merge gateway display transcript", exc_info=True)
@@ -1416,27 +1417,23 @@ def _run_gateway_chat_streaming(
                 _restore_cancelled_success_writeback()
                 return
             s.save()
-            from api.streaming import _cron_followup_turn_key_matches, _persist_turn_artifact_paths
+            from api.streaming import _persist_turn_artifact_paths
 
-            if _cron_followup_turn_key_matches(s, msg_text, manifest_turn_key):
-                artifact_decision = _persist_turn_artifact_paths(
-                    s,
-                    manifest_turn_key,
-                    stream_id=stream_id,
-                    terminal_reason='completed',
-                )
-            else:
-                artifact_decision = {
-                    "status": "failed",
-                    "stage": "turn_key",
-                    "turn_key": manifest_turn_key,
-                }
+            artifact_decision = _persist_turn_artifact_paths(
+                s,
+                manifest_turn_key,
+                stream_id=stream_id,
+                terminal_reason='completed',
+                expected_user_text=msg_text,
+            )
         if artifact_decision.get("status") != "persisted":
             put_gateway_event("apperror", {
                 "label": "Artifact persistence failed",
                 "type": "artifact_persistence_failed",
                 "message": "本轮成果保存失败，请稍后重试。",
                 "turn_key": artifact_decision.get("turn_key") or manifest_turn_key,
+                "actual_turn_key": artifact_decision.get("actual_turn_key") or "",
+                "stage": artifact_decision.get("stage") or "unknown",
             })
         # Artifact persistence and the durable transcript are one completion boundary.
         # A Stop that arrives after this point may terminate delivery, but cannot roll back

@@ -339,8 +339,8 @@ def test_materialize_keeps_untimestamped_optimistic_attachment_checkpoint():
     )
     s.pending_attachments = [attachment]
     s.pending_user_source = "webui"
-    # state.db can assign a new turn key after request state captured the
-    # original value; the optimistic tail is still the pending user turn.
+    # The pending key is the active turn authority. A state.db copy may carry
+    # stale metadata, but recovery must not preserve that conflicting key.
     s.pending_turn_key = "turn:4"
 
     appended = _materialize_pending_user_turn_before_error(s)
@@ -352,7 +352,7 @@ def test_materialize_keeps_untimestamped_optimistic_attachment_checkpoint():
             "content": "我已上传 1 个文件: image.png",
             "_db_persisted": True,
             "id": 1,
-            "_turn_key": "turn:5",
+            "_turn_key": "turn:4",
             "attachments": [attachment],
         }
     ]

@@ -5799,6 +5799,8 @@ def _enrich_sidebar_lineage_metadata(sessions: list[dict]) -> None:
                 '_state_db_raw_source',
                 '_state_db_session_source',
                 '_state_db_source_label',
+                '_state_db_message_count',
+                '_state_db_last_message_at',
             ):
                 entry.pop(key, None)
             session.update(entry)
@@ -8095,10 +8097,28 @@ def _message_display_metadata_value_present(value) -> bool:
     return True
 
 
+def _merge_turn_binding_metadata(target: dict | None, source: dict | None) -> None:
+    """Carry a stable turn binding only after callers prove rows are duplicates."""
+    if not isinstance(target, dict) or not isinstance(source, dict):
+        return
+    target_key = str(target.get('_turn_key') or '').strip()
+    source_key = str(source.get('_turn_key') or '').strip()
+    if not target_key and source_key:
+        target['_turn_key'] = source_key
+        return
+    if target_key and source_key and target_key != source_key:
+        logger.warning(
+            "Conflicting turn keys on duplicate transcript rows: kept=%s incoming=%s",
+            target_key,
+            source_key,
+        )
+
+
 def _merge_session_display_metadata(target: dict | None, source: dict | None) -> None:
     """Preserve display-only turn metadata when duplicate transcript rows merge."""
     if not isinstance(target, dict) or not isinstance(source, dict):
         return
+    _merge_turn_binding_metadata(target, source)
     for key in _SESSION_MESSAGE_DISPLAY_METADATA_KEYS:
         if _message_display_metadata_value_present(target.get(key)):
             continue

@@ -1,5 +1,6 @@
 """Tests for session manifest extraction (todos, artifacts, references)."""
 
+import copy
 import json
 import urllib.request
 from pathlib import Path
@@ -1147,11 +1148,8 @@ def test_build_session_manifest_dedupes_legacy_stripped_skill_store_path(tmp_pat
         'profile': 'test-profile',
     }]
     assert all(row.get('status') != 'expired' for row in manifest['artifacts'])
-    assert {
-        artifact['path']
-        for turn in manifest['turns']
-        for artifact in turn['artifacts']
-    } == {skill_rel}
+    assert all(not turn['artifacts'] for turn in manifest['turns'])
+    assert manifest['diagnostics']['orphan_turn_keys'] == ['turn:2']
 
 
 def test_skill_manage_delete_is_not_artifact(tmp_path, monkeypatch):
@@ -1929,6 +1927,43 @@ def test_build_session_manifest_partial_store_decision_skips_whole_session_recon
     }
     assert turn_artifacts['turn:0'] == ['stored.docx']
     assert turn_artifacts['turn:2'] == []
+
+
+def test_build_session_manifest_keeps_orphan_artifact_out_of_turns(tmp_path, monkeypatch):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    (workspace / 'recolor.py').write_text('print("ok")', encoding='utf-8')
+    session = Session(
+        session_id='manifestorphan01',
+        workspace=str(workspace),
+        profile='ops',
+        messages=[
+            {'role': 'user', 'content': '配色淡一点', '_turn_key': 'turn:7'},
+            {'role': 'assistant', 'content': '完成'},
+        ],
+        tool_calls=[],
+    )
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr(
+        'api.session_manifest_store.load_manifest_records',
+        lambda *args, **kwargs: [{
+            'path': 'recolor.py',
+            'source_tool': 'write_file',
+            'preview': 'file',
+            'profile': 'ops',
+            'turn_key': 'turn:6',
+        }],
+    )
+    monkeypatch.setattr(
+        'api.session_manifest_store.load_manifest_decided_turn_keys',
+        lambda *args, **kwargs: {'turn:6'},
+    )
+
+    manifest = build_session_manifest(session)
+
+    assert [row['path'] for row in manifest['artifacts']] == ['recolor.py']
+    assert [turn['turn_key'] for turn in manifest['turns']] == ['turn:7']
+    assert manifest['diagnostics']['orphan_turn_keys'] == ['turn:6']
 
 
 def test_collect_media_artifact_events_from_assistant_only(tmp_path):
@@ -3323,8 +3358,8 @@ def test_message_turns_falls_back_to_index():
     assert turns[1]['turn_key'] == 'turn:2'
 
 
-def test_ensure_turn_keys_stamps_missing():
-    """_ensure_turn_keys() 给缺失 _turn_key 的用户消息打戳"""
+def test_ensure_turn_keys_does_not_invent_active_turn_numbers():
+    """Manifest GET must not turn a mixed transcript into a new valid turn."""
     messages = [
         {'role': 'user', 'content': 'q1', '_turn_key': 'turn:5'},
         {'role': 'assistant', 'content': 'a1'},
@@ -3332,11 +3367,11 @@ def test_ensure_turn_keys_stamps_missing():
         {'role': 'user', 'content': 'q3', '_turn_key': 'turn:7'},
         {'role': 'user', 'content': 'q4'},  # 缺失
     ]
-    _ensure_turn_keys(messages)
-    assert messages[0]['_turn_key'] == 'turn:5'  # 已有，不变
-    assert messages[2]['_turn_key'] == 'turn:8'  # max(5,7)+1=8
-    assert messages[3]['_turn_key'] == 'turn:7'  # 已有，不变
-    assert messages[4]['_turn_key'] == 'turn:9'  # 下一个
+    original = [dict(row) for row in messages]
+    result = _ensure_turn_keys(messages)
+    assert messages == original
+    assert result[2].get('_turn_key') is None
+    assert result[4].get('_turn_key') is None
 
 
 def test_ensure_turn_keys_all_missing():
@@ -3349,6 +3384,63 @@ def test_ensure_turn_keys_all_missing():
     _ensure_turn_keys(messages)
     assert messages[0].get('_turn_key') is None
     assert messages[2].get('_turn_key') is None
+
+
+def test_build_session_manifest_does_not_invent_turn_for_unkeyed_mixed_segment(tmp_path, monkeypatch):
+    """A mixed transcript exposes an unbound segment only through diagnostics."""
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    (workspace / 'unbound.txt').write_text('unbound', encoding='utf-8')
+    messages = [
+        {'role': 'user', 'content': 'q1', '_turn_key': 'turn:6'},
+        {'role': 'assistant', 'content': 'a1'},
+        {'role': 'user', 'content': 'q2'},
+        {
+            'role': 'assistant',
+            'tool_calls': [{
+                'id': 'unbound-write',
+                'function': {
+                    'name': 'write_file',
+                    'arguments': json.dumps({'path': 'unbound.txt'}),
+                },
+            }],
+        },
+        {'role': 'tool', 'tool_call_id': 'unbound-write', 'content': 'ok'},
+        {'role': 'user', 'content': 'q3', '_turn_key': 'turn:8'},
+        {'role': 'assistant', 'content': 'a3'},
+    ]
+    session = Session(
+        session_id='manifest_mixed_unbound01',
+        workspace=str(workspace),
+        messages=messages,
+        tool_calls=[],
+    )
+    original = copy.deepcopy(messages)
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('api.session_manifest_store.repair_empty_manifest_turns', lambda s: {})
+    monkeypatch.setattr(
+        'api.session_manifest_store.load_manifest_records',
+        lambda s, include_lineage=True: [],
+    )
+    monkeypatch.setattr(
+        'api.session_manifest_store.load_manifest_decided_turn_keys',
+        lambda s, include_lineage=True: set(),
+    )
+    monkeypatch.setattr(
+        'api.session_manifest_store.backfill_missing_manifest_records',
+        lambda s: {'source': 'derived'},
+    )
+
+    manifest = build_session_manifest(session)
+
+    assert [turn['turn_key'] for turn in manifest['turns']] == ['turn:6', 'turn:8']
+    assert manifest['diagnostics']['missing_turn_key_message_indices'] == [2]
+    assert all(
+        artifact['path'] != 'unbound.txt'
+        for turn in manifest['turns']
+        for artifact in turn['artifacts']
+    )
+    assert session.messages == original
 
 
 def test_build_session_manifest_compression_turn_keys(tmp_path, monkeypatch):
@@ -3581,7 +3673,7 @@ def test_persist_turn_artifact_paths_filters_missing_files(tmp_path, monkeypatch
 
     monkeypatch.setattr('api.session_manifest_store.STATE_DIR', tmp_path / 'state')
 
-    _persist_turn_artifact_paths(session)
+    _persist_turn_artifact_paths(session, 'turn:2')
 
     from api.session_manifest_store import load_manifest_records
 
@@ -3628,7 +3720,7 @@ def test_persist_turn_artifact_paths_scopes_session_tool_calls(tmp_path, monkeyp
 
     monkeypatch.setattr('api.session_manifest_store.STATE_DIR', tmp_path / 'state')
 
-    _persist_turn_artifact_paths(session)
+    _persist_turn_artifact_paths(session, 'turn:2')
 
     from api.session_manifest_store import load_manifest_records
 

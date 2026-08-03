@@ -16,6 +16,9 @@ from pathlib import Path
 from typing import Any
 
 from api.config import SESSION_DIR, STATE_DIR
+from api.session_manifest_repair import (
+    rebind_manifest_turn_records as rebind_manifest_turn_records,
+)
 
 logger = logging.getLogger(__name__)
 

@@ -744,17 +744,19 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
         }};
         S = {{
           session: {{ session_id: 's2', tool_calls: [{{ tid: 'toolu_1', snippet: 'persisted result' }}] }},
-          messages: [{{ role: 'user', content: 'run' }}, historical, toolResult],
+          messages: [{{ role: 'user', content: 'run', _turn_key: 'turn:6' }}, historical, toolResult],
           toolCalls: [{{ tid: 'toolu_1', assistant_msg_idx: 1, name: 'terminal', snippet: 'session fallback' }}],
           busy: false,
         }};
         renderMessages();
+        const historicalTurn = elements.msgInner.querySelector('.assistant-turn');
         const historicalSummary = {{
           anchorGroups: elements.msgInner.querySelectorAll('[data-anchor-settled-scene-owner]').length,
           legacyGroups: elements.msgInner.querySelectorAll('[data-legacy-fallback-owner]').length,
           legacyRows: elements.msgInner.querySelectorAll('.tool-card-row').length,
           legacyCards,
           sToolCalls: S.toolCalls.length,
+          assistantTurnKey: historicalTurn ? String(historicalTurn.dataset.turnKey || '') : '',
         }};
 
         elements.msgInner = new FakeElement('div');
@@ -857,6 +859,7 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
     assert result["historicalSummary"]["legacyGroups"] == 1
     assert result["historicalSummary"]["legacyRows"] >= 1
     assert result["historicalSummary"]["sToolCalls"] >= 1
+    assert result["historicalSummary"]["assistantTurnKey"] == "turn:6"
     assert [card["tid"] for card in result["historicalSummary"]["legacyCards"]] == [
         "toolu_1"
     ]

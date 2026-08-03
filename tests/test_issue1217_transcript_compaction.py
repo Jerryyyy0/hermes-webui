@@ -820,7 +820,7 @@ def test_handle_chat_sync_writeback_dedupes_full_context_replay(tmp_path, monkey
         {"role": "assistant", "content": "cron banner"},
         {"role": "user", "content": "[Session Arc Summary (d1, node 39)]\n" + "old context\n" * 400},
         {"role": "assistant", "content": "previous answer"},
-        {"role": "user", "content": "simple follow-up"},
+        {"role": "user", "content": "simple follow-up", "_turn_key": "turn:1"},
         {"role": "assistant", "content": "", "tool_calls": [{"id": "vision-1"}]},
         {
             "role": "tool",
@@ -839,6 +839,13 @@ def test_handle_chat_sync_writeback_dedupes_full_context_replay(tmp_path, monkey
     assert any(row.get("tool_call_id") == "vision-1" for row in reloaded.context_messages)
     assert any(row.get("tool_call_id") == "vision-1" for row in reloaded.messages)
     assert _no_id(reloaded.context_messages).count(expected[0]) == 1
+    current_users = [
+        row
+        for row in reloaded.messages
+        if row.get("role") == "user" and row.get("content") == "simple follow-up"
+    ]
+    assert len(current_users) == 1
+    assert current_users[0]["_turn_key"] == "turn:1"
     # The new turn's rows carry unique stable ids. (This session preloads
     # id-less legacy rows, which stay id-less until they age out of context;
     # brand-new sessions get full id coverage since previous_context is empty.)

@@ -60,6 +60,11 @@ def test_workspace_js_renders_turn_artifacts_by_stable_turn_key():
     assert 'data-turn-key' in src or 'dataset.turnKey' in src
 
 
+def test_ui_stamps_assistant_turn_with_owning_user_turn_key():
+    src = (REPO / 'static' / 'ui.js').read_text(encoding='utf-8')
+    assert "currentAssistantTurn.dataset.turnKey=currentTurnKey" in src
+
+
 def test_session_manifest_module_has_extractors():
     src = (REPO / 'api' / 'session_manifest.py').read_text(encoding='utf-8')
     assert 'ARTIFACT_MUTATION_TOOLS' in src
@@ -92,6 +97,7 @@ def test_session_manifest_store_module_contract():
     assert 'def backfill_missing_manifest_records' in src
     assert 'def delete_session_manifest_records' in src
     assert 'def delete_session_manifest_turns' in src
+    assert 'rebind_manifest_turn_records' in src
     assert 'ASSISTANT_PROSE_SOURCE_TOOL = "assistant_prose"' in src
 
 
@@ -106,6 +112,7 @@ def test_chat_start_binds_persisted_turn_key_to_stream_worker():
 def test_streaming_manifest_turn_key_uses_bound_key_without_transcript_guessing():
     src = (REPO / 'api' / 'streaming.py').read_text(encoding='utf-8')
     assert "_manifest_turn_key = str(stream_turn_key or getattr(s, 'pending_turn_key', '') or '').strip()" in src
+    assert '_next_turn_key as _ntk' not in src
     persist_block = src.split('def _persist_turn_artifact_paths', 1)[1].split('\ndef ', 1)[0]
     assert '_stream_artifact_evidence' in persist_block
     assert "'stage': 'stale_worker'" in persist_block
@@ -114,17 +121,27 @@ def test_streaming_manifest_turn_key_uses_bound_key_without_transcript_guessing(
     assert "'status': 'persisted'" in persist_block
     assert 'turn_artifacts' not in persist_block
 
+    routes = (REPO / 'api' / 'routes.py').read_text(encoding='utf-8')
+    assert 'stream_turn_key = _turn_key_for_pending_user_message(s, msg)' not in routes
 
-def test_completed_transcript_is_saved_before_manifest_decision_and_journal():
+
+def test_gateway_uses_canonical_turn_for_merge_and_settlement():
+    src = (REPO / 'api' / 'gateway_chat.py').read_text(encoding='utf-8')
+    assert 'canonical_turn_key=manifest_turn_key' in src
+    assert 'expected_user_text=msg_text' in src
+
+
+def test_completed_transcript_is_saved_before_manifest_decision_and_settlement_owns_journal():
     src = (REPO / 'api' / 'streaming.py').read_text(encoding='utf-8')
     block = src.split('Make the completed transcript durable before publishing', 1)[1]
     save_index = block.index('s.save()')
     manifest_index = block.index('_artifact_decision = _persist_turn_artifact_paths(')
-    failure_index = block.index('"event": "artifact_persistence_failed"')
     completed_index = block.index('"event": "completed"')
-    assert save_index < manifest_index < failure_index < completed_index
-    assert "stream_id=stream_id" in block[manifest_index:failure_index]
-    assert "terminal_reason='completed'" in block[manifest_index:failure_index]
+    settlement_block = src.split('def _finalize_artifact_settlement(', 1)[1].split('\ndef ', 1)[0]
+    assert save_index < manifest_index < completed_index
+    assert "stream_id=stream_id" in block[manifest_index:completed_index]
+    assert "terminal_reason='completed'" in block[manifest_index:completed_index]
+    assert "'event': 'artifact_persistence_failed'" in settlement_block
     assert "_artifact_decision.get('status') == 'persisted'" in block
 
 

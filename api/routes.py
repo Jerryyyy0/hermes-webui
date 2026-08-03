@@ -18890,9 +18890,10 @@ def _start_chat_stream_for_session(
                 )
                 stream_turn_key = str(getattr(s, "pending_turn_key", "") or "").strip()
                 if not stream_turn_key:
-                    stream_turn_key = _turn_key_for_pending_user_message(s, msg)
-                    s.pending_turn_key = stream_turn_key
-                    s.save()
+                    return {
+                        "error": "当前对话轮次未正确绑定，暂时无法启动对话",
+                        "_status": 500,
+                    }
                 if prepared_turn_key and stream_turn_key != prepared_turn_key:
                     return {
                         "error": "定时任务会话轮次校验失败，暂时无法继续对话",
@@ -20031,10 +20032,15 @@ def _handle_chat_sync(handler, body):
         return bad(handler, str(e))
     with _get_session_agent_lock(s.session_id):
         s.workspace = workspace
+        from api.session_manifest import _next_turn_key
+        sync_turn_key = _next_turn_key(getattr(s, "messages", None) or [])
         _sync_requested_provider = (
             body.get("model_provider") if "model_provider" in body else getattr(s, "model_provider", None)
         )
-        _pp_provider, _pp_default = _read_profile_model_config(s, _sync_requested_provider)
+        _pp_provider, _pp_default, _pp_cfg = _read_profile_model_config(
+            s,
+            _sync_requested_provider,
+        )
         model, model_provider = _resolve_compatible_session_model_state(
             body.get("model") or s.model,
             _sync_requested_provider,
@@ -20172,6 +20178,8 @@ def _handle_chat_sync(handler, body):
         _next_context_messages = _dedupe_replayed_context_messages(
             _previous_context_messages,
             _next_context_messages,
+            msg,
+            canonical_turn_key=sync_turn_key,
         )
         s.context_messages = _next_context_messages
         s.messages = _merge_display_messages_after_agent_result(
@@ -20179,6 +20187,7 @@ def _handle_chat_sync(handler, body):
             _previous_context_messages,
             _restore_display_reasoning_metadata(_previous_messages, _result_messages),
             msg,
+            canonical_turn_key=sync_turn_key,
         )
         _compact_session_image_parts_for_persistence(s)
         # Only auto-generate title when still default; preserves user renames

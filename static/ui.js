@@ -15922,17 +15922,25 @@ function renderMessages(options){
   }
   let _prevSepKey=null;
   let currentAssistantTurn=null;
+  let currentTurnKey='';
   // Only build question→assistant mapping for the visible window, not the
   // full visWithIdx.  The jump-to-question button is only rendered for
   // assistant messages that appear in the current render window anyway.
   const questionRawIdxByAssistantRawIdx=new Map();
+  const turnKeyByAssistantRawIdx=new Map();
   let lastQuestionRawIdx=-1;
+  let lastQuestionTurnKey='';
   const renderedRawIdxs=new Set(renderVisWithIdx.map(e=>e.rawIdx));
   const renderableRawIdxs=new Set(visWithIdx.map(e=>e.rawIdx));
   for(const entry of visWithIdx){
     const role=entry&&entry.m&&entry.m.role;
-    if(role==='user') lastQuestionRawIdx=entry.rawIdx;
-    else if(role==='assistant'&&renderedRawIdxs.has(entry.rawIdx)) questionRawIdxByAssistantRawIdx.set(entry.rawIdx,lastQuestionRawIdx);
+    if(role==='user'){
+      lastQuestionRawIdx=entry.rawIdx;
+      lastQuestionTurnKey=String(entry.m._turn_key||'');
+    }else if(role==='assistant'&&renderedRawIdxs.has(entry.rawIdx)){
+      questionRawIdxByAssistantRawIdx.set(entry.rawIdx,lastQuestionRawIdx);
+      turnKeyByAssistantRawIdx.set(entry.rawIdx,lastQuestionTurnKey);
+    }
   }
   const assistantRawIdxByQuestionRawIdx=new Map();
   for(const [aIdx,qIdx] of questionRawIdxByAssistantRawIdx){
@@ -16175,6 +16183,7 @@ function renderMessages(options){
 
     if(isProcessWakeup){
       currentAssistantTurn=null;
+      currentTurnKey=String(m._turn_key||'');
       let row=_msgNodeRecycleEnabled?_recycleStash.get(rawIdx):null;
       if(row&&(!row.classList.contains('msg-row')||row.classList.contains('assistant-turn'))) row=null;
       const processText=String(rowDisplayContent||'').trim();
@@ -16240,6 +16249,7 @@ function renderMessages(options){
 
     if(isUser){
       currentAssistantTurn=null;
+      currentTurnKey=String(m._turn_key||'');
       let row=_msgNodeRecycleEnabled?_recycleStash.get(rawIdx):null;
       if(row&&(!row.classList.contains('msg-row')||row.classList.contains('assistant-turn'))) row=null;
       const newRawText=String(displayContent).trim();
@@ -16280,6 +16290,7 @@ function renderMessages(options){
       continue;
     }
 
+    currentTurnKey=turnKeyByAssistantRawIdx.get(rawIdx)||'';
     if(!currentAssistantTurn){
       let recycled=_msgNodeRecycleEnabled?_recycleStash.get(rawIdx):null;
       if(recycled&&!recycled.classList.contains('assistant-turn')) recycled=null;
@@ -16295,6 +16306,8 @@ function renderMessages(options){
       }
       currentAssistantTurn.dataset.role='assistant';
       if(S.session) currentAssistantTurn.dataset.sessionId=S.session.session_id;
+      if(currentTurnKey) currentAssistantTurn.dataset.turnKey=currentTurnKey;
+      else delete currentAssistantTurn.dataset.turnKey;
       currentAssistantTurn.dataset.recycleKey=rawIdx;
       inner.appendChild(currentAssistantTurn);
     }

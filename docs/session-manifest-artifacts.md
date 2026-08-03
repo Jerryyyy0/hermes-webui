@@ -177,10 +177,12 @@ User 消息中的 MEDIA:、工具结果 JSON 的相似字段和普通 URL 都不
 -o PATH
 --output PATH
 --output=PATH
+cp SOURCE DEST
+cp -- SOURCE DEST
 python .../md2word.py INPUT OUTPUT [options]
 ```
 
-最后一种位置参数规则只适用于脚本 basename 精确为 `md2word.py` 的 Python 调用；不会推广为未知 CLI 的通用“最后一个参数即输出”规则。
+`cp` 只接受单 source、单 destination，且只登记 destination；recursive、选项、多 source、变量、glob 和 workspace 外 destination 均拒绝。最后一种位置参数规则只适用于脚本 basename 精确为 `md2word.py` 的 Python 调用；不会推广为未知 CLI 的通用“最后一个参数即输出”规则。
 
 支持受控 `cd DIR && ...` 的命令本地目录。拒绝：
 
@@ -191,6 +193,14 @@ python .../md2word.py INPUT OUTPUT [options]
 - 不存在、目录、cruft 或不可预览文件。
 
 不会扫描 stdout、`ls` 列表、`cat` 输入、Python `open()` 源码或 workspace 快照。
+
+### 4.7 Turn 绑定与 orphan
+
+当前 worker 结算前校验最新真实 user 的 `_turn_key` 与 `stream_turn_key`。缺 key、key 冲突或 user 内容边界冲突时，不写 store record，也不创建 empty decision。normal、gateway、error 与 cancel 路径共用同一个结算入口；任何非 `persisted` 结果都会在 turn journal 记录 expected/actual key、stage 与 terminal reason。
+
+历史 store record 若找不到同 key 的 user anchor，仍保留在顶层 `artifacts`，并把 key 暴露在 `diagnostics.orphan_turn_keys`；它不会进入正常 `turns[]`，因此不会产生错误的 per-turn chip。历史归属修复必须使用显式 old key → new key 映射，不能按编号相邻或文本相似度自动迁移。
+
+`scripts/rebind_manifest_turn.py` 默认只报告命中的 lineage/profile/path 证据。确认映射后再增加 `--apply`；工具在单个 SQLite 事务中 upsert 新 key 并删除旧 key，重复路径由 store 唯一键合并。
 
 ## 5. 路径规范化与安全
 
@@ -317,4 +327,3 @@ Expired 行：
 - Empty decision 原子修复、profile/lineage 隔离和幂等；
 - Expired provenance；
 - Transcript save 早于 manifest decision。
-

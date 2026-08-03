@@ -10,6 +10,61 @@ import pytest
 pytestmark = pytest.mark.requires_agent_modules
 
 
+def test_confirmed_duplicate_propagates_sidecar_turn_key():
+    from api.models import merge_session_messages_append_only
+
+    sidecar = [{
+        "role": "user",
+        "content": "配色淡一点",
+        "timestamp": 1000.0,
+        "_turn_key": "turn:6",
+    }]
+    state = [{
+        "role": "user",
+        "content": "配色淡一点",
+        "timestamp": 1000.0,
+        "id": 103,
+    }]
+
+    merged = merge_session_messages_append_only(sidecar, state)
+
+    assert len(merged) == 1
+    assert merged[0]["_turn_key"] == "turn:6"
+
+
+def test_confirmed_duplicate_propagates_turn_key_when_keyed_row_arrives_second():
+    from api.models import merge_session_messages_append_only
+
+    state = [{
+        "role": "user",
+        "content": "配色淡一点",
+        "timestamp": 1000.0,
+        "id": 103,
+    }]
+    sidecar = [{
+        "role": "user",
+        "content": "配色淡一点",
+        "timestamp": 1000.0,
+        "_turn_key": "turn:6",
+    }]
+
+    merged = merge_session_messages_append_only(state, sidecar)
+
+    assert len(merged) == 1
+    assert merged[0]["_turn_key"] == "turn:6"
+
+
+def test_confirmed_duplicate_does_not_overwrite_conflicting_turn_keys():
+    from api.models import _merge_session_display_metadata
+
+    kept = {"role": "user", "content": "配色淡一点", "_turn_key": "turn:6"}
+    incoming = {"role": "user", "content": "配色淡一点", "_turn_key": "turn:7"}
+
+    _merge_session_display_metadata(kept, incoming)
+
+    assert kept["_turn_key"] == "turn:6"
+
+
 class _GetHandler:
     def __init__(self, path):
         self.path = path
@@ -43,7 +98,10 @@ class _GetHandler:
 def _make_state_db(path: Path, sid: str, rows):
     conn = sqlite3.connect(path)
     conn.execute(
-        "CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, title TEXT, model TEXT, started_at REAL, message_count INTEGER)"
+        "CREATE TABLE sessions ("
+        "id TEXT PRIMARY KEY, source TEXT, title TEXT, model TEXT, started_at REAL, "
+        "message_count INTEGER, parent_session_id TEXT, ended_at REAL, end_reason TEXT"
+        ")"
     )
     conn.execute(
         "CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, role TEXT, content TEXT, timestamp REAL, tool_call_id TEXT, tool_calls TEXT, tool_name TEXT)"
@@ -394,6 +452,8 @@ def test_api_sessions_overlays_webui_state_db_summary_after_desktop_append(monke
     assert row["message_count"] == 4
     assert row["last_message_at"] == 1003.0
     assert row["updated_at"] == 1003.0
+    assert "_state_db_message_count" not in row
+    assert "_state_db_last_message_at" not in row
 
 
 def test_api_session_full_load_does_not_duplicate_state_db_prefix(monkeypatch, tmp_path):

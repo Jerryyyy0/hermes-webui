@@ -1146,12 +1146,16 @@ def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[st
         if not row:
             continue
 
+        entry = metadata.setdefault(sid, {})
+        entry['_state_db_message_count'] = int(
+            row.get('actual_message_count') or row.get('message_count') or 0
+        )
+        entry['_state_db_last_message_at'] = row.get('last_message_at')
         state_title = str(row.get('title') or '').strip()
         if state_title:
-            metadata.setdefault(sid, {})['_state_db_title'] = state_title
+            entry['_state_db_title'] = state_title
         state_source = str(row.get('source') or '').strip().lower()
         if state_source:
-            entry = metadata.setdefault(sid, {})
             entry['_state_db_source'] = state_source
             source_meta = normalize_agent_session_source(state_source)
             entry['_state_db_source_tag'] = state_source

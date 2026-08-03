@@ -1528,19 +1528,28 @@ def _finalize_cancelled_turn(session, *, ephemeral: bool = False, message: str =
         logger.debug("Failed to persist cancelled turn", exc_info=True)
 
 
-def _cron_followup_turn_key_matches(session, msg_text: str, turn_key: str) -> bool:
-    """Verify a cron follow-up user row owns the stream's stable key."""
-    if str(getattr(session, 'source_tag', '') or '') != 'cron':
-        return True
+def _latest_user_turn_binding(session, msg_text: str, turn_key: str) -> dict[str, str]:
+    """Validate the latest real user row without mutating transcript identity."""
     expected = str(turn_key or '').strip()
-    text = ' '.join(str(msg_text or '').split())
+    expected_text = _normalize_user_text(msg_text)
     for message in reversed(getattr(session, 'messages', None) or []):
         if not isinstance(message, dict) or message.get('role') != 'user':
             continue
-        if ' '.join(str(message.get('content') or '').split()) != text:
+        if _is_context_compression_marker(message):
             continue
-        return str(message.get('_turn_key') or '').strip() == expected
-    return False
+        actual = str(message.get('_turn_key') or '').strip()
+        if not actual:
+            return {'status': 'failed', 'stage': 'missing_key', 'actual_turn_key': ''}
+        if actual != expected:
+            return {'status': 'failed', 'stage': 'turn_key_conflict', 'actual_turn_key': actual}
+        if expected_text and _normalize_user_text(message.get('content')) != expected_text:
+            return {
+                'status': 'failed',
+                'stage': 'content_boundary_conflict',
+                'actual_turn_key': actual,
+            }
+        return {'status': 'valid', 'stage': 'validated', 'actual_turn_key': actual}
+    return {'status': 'failed', 'stage': 'missing_user', 'actual_turn_key': ''}
 
 
 def _stream_artifact_evidence(stream_id: str, turn_key: str) -> list[dict] | None:
@@ -1571,29 +1580,83 @@ def _stream_artifact_evidence(stream_id: str, turn_key: str) -> list[dict] | Non
     return list(deduped.values())
 
 
+def _finalize_artifact_settlement(
+    s,
+    stream_id: str,
+    expected_turn_key: str,
+    terminal_reason: str,
+    result: dict[str, object],
+) -> dict[str, object]:
+    """Persist one diagnostic for every non-successful settlement outcome."""
+    if result.get('status') == 'persisted':
+        return result
+    session_id = str(getattr(s, 'session_id', '') or '').strip()
+    stream = str(stream_id or '').strip()
+    if not session_id or not stream:
+        return result
+    try:
+        append_turn_journal_event_for_stream(
+            session_id,
+            stream,
+            {
+                'event': 'artifact_persistence_failed',
+                'created_at': time.time(),
+                'turn_key': result.get('turn_key') or expected_turn_key,
+                'expected_turn_key': expected_turn_key,
+                'actual_turn_key': result.get('actual_turn_key') or '',
+                'stage': result.get('stage') or 'unknown',
+                'terminal_reason': str(terminal_reason or 'completed'),
+            },
+        )
+    except Exception:
+        logger.debug("Failed to append artifact persistence failure journal event", exc_info=True)
+    return result
+
+
 def _persist_turn_artifact_paths(
     s,
     turn_key: str = '',
     *,
     stream_id: str = '',
     terminal_reason: str = 'completed',
+    expected_user_text: str | None = None,
 ) -> dict[str, object]:
     """Settle one bound turn without inferring its owner from shared transcript state."""
     session_id = str(getattr(s, 'session_id', '') or '').strip()
     _turn_key = str(turn_key or '').strip()
+    stream = str(stream_id or '').strip()
+
+    def finish(result: dict[str, object]) -> dict[str, object]:
+        return _finalize_artifact_settlement(
+            s,
+            stream,
+            _turn_key,
+            terminal_reason,
+            result,
+        )
+
     if not _turn_key:
         logger.warning("Manifest artifact decision skipped: session=%s reason=no_turn_key", session_id)
-        return {'status': 'failed', 'stage': 'validate', 'turn_key': '', 'artifact_count': 0}
-    stream = str(stream_id or '').strip()
+        return finish({'status': 'failed', 'stage': 'validate', 'turn_key': '', 'artifact_count': 0})
     if stream and str(getattr(s, 'active_stream_id', '') or '').strip() not in ('', stream):
-        return {'status': 'pending', 'stage': 'stale_worker', 'turn_key': _turn_key, 'artifact_count': 0}
+        return finish({'status': 'pending', 'stage': 'stale_worker', 'turn_key': _turn_key, 'artifact_count': 0})
+    if expected_user_text is not None:
+        binding = _latest_user_turn_binding(s, expected_user_text, _turn_key)
+        if binding.get('status') != 'valid':
+            return finish({
+                'status': 'failed',
+                'stage': binding.get('stage') or 'turn_key_conflict',
+                'turn_key': _turn_key,
+                'actual_turn_key': binding.get('actual_turn_key') or '',
+                'artifact_count': 0,
+            })
 
     evidence_entries = _stream_artifact_evidence(stream, _turn_key) if stream else None
     _entries = list(evidence_entries or [])
     needs_transcript_reconcile = evidence_entries is None or str(terminal_reason or '').strip() == 'completed'
     if needs_transcript_reconcile:
         if not getattr(s, 'messages', None):
-            return {'status': 'pending', 'stage': 'transcript_unavailable', 'turn_key': _turn_key, 'artifact_count': 0}
+            return finish({'status': 'pending', 'stage': 'transcript_unavailable', 'turn_key': _turn_key, 'artifact_count': 0})
         try:
             from api.session_manifest import extract_turn_artifact_entries_for_manifest
             transcript_entries = extract_turn_artifact_entries_for_manifest(s, _turn_key)
@@ -1604,7 +1667,7 @@ def _persist_turn_artifact_paths(
                 _turn_key,
                 exc_info=True,
             )
-            return {'status': 'failed', 'stage': 'extract', 'turn_key': _turn_key, 'artifact_count': 0}
+            return finish({'status': 'failed', 'stage': 'extract', 'turn_key': _turn_key, 'artifact_count': 0})
         # A final assistant reply is durable same-turn evidence. Keep stream-owned
         # provenance for duplicates while adding any real files it explicitly names.
         known_paths = {
@@ -1628,7 +1691,7 @@ def _persist_turn_artifact_paths(
     ]
     artifact_count = len(_store_entries)
     if not _store_entries and str(terminal_reason or '').strip() != 'completed':
-        return {'status': 'pending', 'stage': 'evidence_unsettled', 'turn_key': _turn_key, 'artifact_count': 0}
+        return finish({'status': 'pending', 'stage': 'evidence_unsettled', 'turn_key': _turn_key, 'artifact_count': 0})
     if not _store_entries:
         _store_entries = [{'path': '', 'source_tool': 'assistant_prose', 'preview': 'file'}]
     try:
@@ -1642,15 +1705,15 @@ def _persist_turn_artifact_paths(
             artifact_count,
             exc_info=True,
         )
-        return {'status': 'failed', 'stage': 'store', 'turn_key': _turn_key, 'artifact_count': artifact_count}
+        return finish({'status': 'failed', 'stage': 'store', 'turn_key': _turn_key, 'artifact_count': artifact_count})
     if len(persisted) != len(_store_entries):
-        return {'status': 'failed', 'stage': 'store', 'turn_key': _turn_key, 'artifact_count': artifact_count}
-    return {
+        return finish({'status': 'failed', 'stage': 'store', 'turn_key': _turn_key, 'artifact_count': artifact_count})
+    return finish({
         'status': 'persisted',
         'decision': 'artifacts' if artifact_count else 'empty',
         'turn_key': _turn_key,
         'artifact_count': artifact_count,
-    }
+    })
 
 
 def _aiagent_import_error_detail() -> str:
@@ -4957,10 +5020,32 @@ def _strip_replayed_context_items(existing_messages, candidates):
     return cleaned
 
 
-def _dedupe_replayed_context_messages(previous_context, result_messages, msg_text=None):
+def _bind_current_user_turn_key(messages, msg_text, canonical_turn_key):
+    """Bind the proven current user row without renumbering historical rows."""
+    key = str(canonical_turn_key or '').strip()
+    if not key:
+        return False
+    current_user_idx = _find_current_user_turn(messages, msg_text)
+    if current_user_idx is None:
+        return False
+    current_user = messages[current_user_idx]
+    if not isinstance(current_user, dict) or current_user.get('role') != 'user':
+        return False
+    current_user['_turn_key'] = key
+    return True
+
+
+def _dedupe_replayed_context_messages(
+    previous_context,
+    result_messages,
+    msg_text=None,
+    *,
+    canonical_turn_key='',
+):
     """Keep model context append-only without replayed blocks/summaries."""
     previous_context = list(previous_context or [])
     result_messages = list(result_messages or [])
+    _bind_current_user_turn_key(result_messages, msg_text, canonical_turn_key)
     if not previous_context or not result_messages:
         return result_messages
     previous_user_tail = _stale_user_tail_candidate(_last_user_row(previous_context))
@@ -5498,6 +5583,7 @@ def _merge_display_messages_after_agent_result(
     msg_text,
     *,
     source: str = 'webui',
+    canonical_turn_key: str = '',
 ):
     """Keep UI transcript durable while allowing model context to compact.
 
@@ -5657,6 +5743,8 @@ def _merge_display_messages_after_agent_result(
         turn_candidates = result_messages[current_user_idx:] if current_user_idx is not None else []
         candidates = marker_candidates + turn_candidates
 
+    canonical_turn_key = str(canonical_turn_key or '').strip()
+    _bind_current_user_turn_key(candidates, msg_text, canonical_turn_key)
     merged = previous_display[:]
     seen = {_message_identity(m) for m in merged}
     current_user_key = _message_identity({'role': 'user', 'content': msg_text})
@@ -5664,8 +5752,19 @@ def _merge_display_messages_after_agent_result(
         _message_identity(m) == current_user_key or _looks_like_current_user_turn(m, msg_text)
         for m in candidates
     )
-    current_user_already_checkpointed = bool(
-        merged
+    canonical_user_idx = next(
+        (
+            idx for idx in range(len(merged) - 1, -1, -1)
+            if isinstance(merged[idx], dict)
+            and merged[idx].get('role') == 'user'
+            and canonical_turn_key
+            and str(merged[idx].get('_turn_key') or '').strip() == canonical_turn_key
+        ),
+        None,
+    )
+    current_user_already_checkpointed = canonical_user_idx is not None or bool(
+        not canonical_turn_key
+        and merged
         and (
             _message_identity(merged[-1]) == current_user_key
             or _looks_like_current_user_turn(merged[-1], msg_text)
@@ -5687,6 +5786,8 @@ def _merge_display_messages_after_agent_result(
         # exchange and then clear the pending prompt. Materialize the current
         # turn at the transcript boundary before the assistant/tool response.
         current_user_msg = {'role': 'user', 'content': msg_text}
+        if canonical_turn_key:
+            current_user_msg['_turn_key'] = canonical_turn_key
         stamp_message_source(current_user_msg, source)
         insert_at = 0
         while insert_at < len(candidates) and _is_context_compression_marker(candidates[insert_at]):
@@ -5701,13 +5802,16 @@ def _merge_display_messages_after_agent_result(
             continue
         key = _message_identity(msg)
         is_current_user_turn = _looks_like_current_user_turn(msg, msg_text)
-        if (
-            ((key is not None and key == current_user_key) or is_current_user_turn)
-            and merged
-            and (
+        current_user_anchor_idx = canonical_user_idx
+        if current_user_anchor_idx is None and not canonical_turn_key and merged:
+            if (
                 _message_identity(merged[-1]) == current_user_key
                 or _looks_like_current_user_turn(merged[-1], msg_text)
-            )
+            ):
+                current_user_anchor_idx = len(merged) - 1
+        if (
+            ((key is not None and key == current_user_key) or is_current_user_turn)
+            and current_user_anchor_idx is not None
         ):
             # Eager session-save mode can checkpoint the current user turn
             # before the agent runs. When the agent returns that same user turn
@@ -5721,10 +5825,10 @@ def _merge_display_messages_after_agent_result(
             if (
                 isinstance(msg, dict)
                 and msg.get('id') is not None
-                and isinstance(merged[-1], dict)
-                and merged[-1].get('id') is None
+                and isinstance(merged[current_user_anchor_idx], dict)
+                and merged[current_user_anchor_idx].get('id') is None
             ):
-                merged[-1]['id'] = msg['id']
+                merged[current_user_anchor_idx]['id'] = msg['id']
             continue
         if (
             key is not None
@@ -5748,8 +5852,17 @@ def _merge_display_messages_after_agent_result(
         ):
             display_msg = copy.deepcopy(msg)
             display_msg['content'] = msg_text
+            if canonical_turn_key:
+                display_msg['_turn_key'] = canonical_turn_key
             stamp_message_source(display_msg, source)
         merged.append(copy.deepcopy(display_msg))
+        if (
+            canonical_turn_key
+            and isinstance(display_msg, dict)
+            and display_msg.get('role') == 'user'
+            and str(display_msg.get('_turn_key') or '').strip() == canonical_turn_key
+        ):
+            canonical_user_idx = len(merged) - 1
         if key is not None:
             seen.add(key)
     return merged
@@ -5862,6 +5975,7 @@ def _merged_transcript_lacks_final_assistant_answer(
     msg_text,
     source: str = "webui",
     drop_replayed_assistant: bool = False,
+    canonical_turn_key: str = '',
 ) -> bool:
     """Return whether the merged transcript lacks a final assistant answer."""
     previous_display = list(previous_display or [])
@@ -5871,6 +5985,7 @@ def _merged_transcript_lacks_final_assistant_answer(
         _restore_reasoning_metadata(previous_display, result_messages),
         msg_text,
         source=source,
+        canonical_turn_key=canonical_turn_key,
     )
     return _turn_transcript_lacks_final_assistant_answer(
         merged_messages,
@@ -6206,13 +6321,15 @@ def _materialize_pending_user_turn_before_error(session) -> bool:
         # the one canonical user turn instead of creating a recovered duplicate.
         if pending_attachments and 'attachments' not in display_messages[-1]:
             display_messages[-1]['attachments'] = list(pending_attachments)
+        pending_turn_key = str(getattr(session, 'pending_turn_key', '') or '').strip()
+        if pending_turn_key:
+            display_messages[-1]['_turn_key'] = pending_turn_key
         context_messages = getattr(session, 'context_messages', None)
-        if (
-            pending_attachments
-            and has_pending_checkpoint(context_messages)
-            and 'attachments' not in context_messages[-1]
-        ):
-            context_messages[-1]['attachments'] = list(pending_attachments)
+        if has_pending_checkpoint(context_messages):
+            if pending_attachments and 'attachments' not in context_messages[-1]:
+                context_messages[-1]['attachments'] = list(pending_attachments)
+            if pending_turn_key:
+                context_messages[-1]['_turn_key'] = pending_turn_key
         return False
     recovered = {
         'role': 'user',
@@ -6227,8 +6344,10 @@ def _materialize_pending_user_turn_before_error(session) -> bool:
     if pending_turn_key:
         recovered['_turn_key'] = pending_turn_key
     else:
-        from api.session_manifest import _next_turn_key
-        recovered['_turn_key'] = _next_turn_key(session.messages)
+        logger.warning(
+            "Recovered pending user without a bound turn key: session=%s",
+            getattr(session, 'session_id', ''),
+        )
     session.messages.append(recovered)
     # Mirror to context_messages so the _recovered flag survives the state.db
     # round-trip (#4283). state.db has no _recovered column, so without this
@@ -9127,6 +9246,7 @@ def _run_agent_streaming(
                         _previous_context_messages,
                         _next_context_messages,
                         msg_text,
+                        canonical_turn_key=_manifest_turn_key,
                     )
                     s.context_messages = _deduplicate_context_messages(_next_context_messages)
                     s.messages = _merge_display_messages_after_agent_result(
@@ -9135,15 +9255,10 @@ def _run_agent_streaming(
                         _restore_display_reasoning_metadata(_previous_messages, _result_messages),
                         msg_text,
                         source=getattr(s, 'pending_user_source', None) or 'webui',
+                        canonical_turn_key=_manifest_turn_key,
                     )
                     _compact_session_image_parts_for_persistence(s)
                     _advance_truncation_watermark_after_commit(s)  # #3831
-                    # Stamp _turn_key on user messages missing it (deferred save mode).
-                    from api.session_manifest import _next_turn_key as _ntk
-                    for _m in s.messages:
-                        if isinstance(_m, dict) and _m.get('role') == 'user' and not _m.get('_turn_key'):
-                            if not _is_context_compression_marker(_m):
-                                _m['_turn_key'] = _ntk(s.messages)
                 # Strip XML tool-call blocks from assistant message content.
                 # DeepSeek and some other providers emit <function_calls>...</function_calls>
                 # in the raw response text; this must be removed before the content is
@@ -9326,6 +9441,7 @@ def _run_agent_streaming(
                     msg_text,
                     source=getattr(s, 'pending_user_source', None) or 'webui',
                     drop_replayed_assistant=_drop_replayed_assistant,
+                    canonical_turn_key=_manifest_turn_key,
                 )
                 _is_agent_result_terminal = _agent_result_terminal_failure(result)
                 _terminal_failure = (
@@ -9463,6 +9579,7 @@ def _run_agent_streaming(
                                     _previous_context_messages,
                                     _next_context_messages,
                                     msg_text,
+                                    canonical_turn_key=_manifest_turn_key,
                                 )
                                 s.context_messages = _deduplicate_context_messages(_next_context_messages)
                                 s.messages = _merge_display_messages_after_agent_result(
@@ -9471,13 +9588,10 @@ def _run_agent_streaming(
                                     _restore_reasoning_metadata(_previous_messages, _result_messages),
                                     msg_text,
                                     source=getattr(s, 'pending_user_source', None) or 'webui',
+                                    canonical_turn_key=_manifest_turn_key,
                                 )
                                 _compact_session_image_parts_for_persistence(s)
                                 _advance_truncation_watermark_after_commit(s)  # #3831
-                                from api.session_manifest import _next_turn_key as _ntk2
-                                for _m in s.messages:
-                                    if isinstance(_m, dict) and _m.get('role') == 'user' and not _m.get('_turn_key'):
-                                        _m['_turn_key'] = _ntk2(s.messages)
                                 # Skip the error block — jump directly to the
                                 # normal post-result persistence path by
                                 # leaving _assistant_added truthy (set below).
@@ -9531,6 +9645,14 @@ def _run_agent_streaming(
                             s.save()
                         except Exception:
                             pass
+                        if not ephemeral:
+                            _persist_turn_artifact_paths(
+                                s,
+                                _manifest_turn_key,
+                                stream_id=stream_id,
+                                terminal_reason='error',
+                                expected_user_text=msg_text,
+                            )
                         _error_payload['session'] = redact_session_data(
                             _session_payload_with_full_messages(s, tool_calls=s.tool_calls)
                         )
@@ -9951,34 +10073,13 @@ def _run_agent_streaming(
                 _final_save_started = _stream_diag_monotonic_ms()
                 s.save()
                 _final_save_ms = _stream_diag_elapsed_ms(_final_save_started)
-                if _cron_followup_turn_key_matches(s, msg_text, _manifest_turn_key):
-                    _artifact_decision = _persist_turn_artifact_paths(
-                        s,
-                        _manifest_turn_key,
-                        stream_id=stream_id,
-                        terminal_reason='completed',
-                    )
-                else:
-                    _artifact_decision = {
-                        'status': 'failed',
-                        'stage': 'turn_key',
-                        'turn_key': _manifest_turn_key,
-                        'artifact_count': 0,
-                    }
-                if _artifact_decision.get('status') != 'persisted':
-                    try:
-                        append_turn_journal_event_for_stream(
-                            s.session_id,
-                            stream_id,
-                            {
-                                "event": "artifact_persistence_failed",
-                                "created_at": time.time(),
-                                "turn_key": _artifact_decision.get('turn_key') or _manifest_turn_key,
-                                "stage": _artifact_decision.get('stage') or 'unknown',
-                            },
-                        )
-                    except Exception:
-                        logger.debug("Failed to append artifact persistence failure journal event", exc_info=True)
+                _artifact_decision = _persist_turn_artifact_paths(
+                    s,
+                    _manifest_turn_key,
+                    stream_id=stream_id,
+                    terminal_reason='completed',
+                    expected_user_text=msg_text,
+                )
                 if cancel_event.is_set():
                     _finalize_cancelled_turn(s, ephemeral=False)
                     try:
@@ -10362,6 +10463,13 @@ def _run_agent_streaming(
             with _stream_writeback_stage(_writeback_timings, "done_payload"):
                 raw_session = _session_payload_with_full_messages(s, tool_calls=tool_calls)
                 _done_payload = {'session': redact_session_data(raw_session), 'usage': usage}
+                if _artifact_decision.get('status') != 'persisted':
+                    _done_payload['artifact_settlement'] = {
+                        'status': _artifact_decision.get('status') or 'failed',
+                        'stage': _artifact_decision.get('stage') or 'unknown',
+                        'turn_key': _artifact_decision.get('turn_key') or _manifest_turn_key,
+                        'actual_turn_key': _artifact_decision.get('actual_turn_key') or '',
+                    }
                 if _tool_limit_reached:
                     _done_payload['terminal_state'] = 'tool_limit_reached'
                     _done_payload['terminal_reason'] = 'max_iterations'
@@ -10573,6 +10681,7 @@ def _run_agent_streaming(
                                 _previous_context_messages,
                                 _next_context_messages,
                                 msg_text,
+                                canonical_turn_key=_manifest_turn_key,
                             )
                             _assign_stable_message_ids(
                                 _result_messages, _previous_messages, _previous_context_messages
@@ -10584,13 +10693,10 @@ def _run_agent_streaming(
                                 _restore_reasoning_metadata(_previous_messages, _result_messages),
                                 msg_text,
                                 source=getattr(s, 'pending_user_source', None) or 'webui',
+                                canonical_turn_key=_manifest_turn_key,
                             )
                             _compact_session_image_parts_for_persistence(s)
                             _advance_truncation_watermark_after_commit(s)
-                            from api.session_manifest import _next_turn_key as _ntk3
-                            for _m in s.messages:
-                                if isinstance(_m, dict) and _m.get('role') == 'user' and not _m.get('_turn_key'):
-                                    _m['_turn_key'] = _ntk3(s.messages)
                             s.save()
                     logger.info('[webui] self-heal (except path): retry succeeded')
                     return  # skip error emission
@@ -10686,6 +10792,14 @@ def _run_agent_streaming(
                     s.save()
                 except Exception:
                     pass
+                if not ephemeral:
+                    _persist_turn_artifact_paths(
+                        s,
+                        _manifest_turn_key,
+                        stream_id=stream_id,
+                        terminal_reason='error',
+                        expected_user_text=msg_text,
+                    )
                 if not ephemeral:
                     try:
                         append_turn_journal_event_for_stream(
@@ -11148,6 +11262,7 @@ def cancel_stream(stream_id: str) -> bool:
                 # Wrapped in its own try/except so an unexpected _cs.messages shape (e.g.
                 # in unit tests using Mock sessions) cannot escape and skip the rest of
                 # the cleanup.
+                _pending_user = None
                 try:
                     _pending_user = getattr(_cs, 'pending_user_message', None)
                     _pending_atts_raw = getattr(_cs, 'pending_attachments', None)
@@ -11301,6 +11416,7 @@ def cancel_stream(stream_id: str) -> bool:
                         _cancel_turn_key,
                         stream_id=stream_id,
                         terminal_reason='cancelled',
+                        expected_user_text=str(_pending_user or ''),
                     )
                 _cs.pending_turn_key = None
                 _cs.save()

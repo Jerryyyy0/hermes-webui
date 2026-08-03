@@ -175,6 +175,99 @@ def test_merge_display_messages_preserves_current_user_turn():
     assert any(m.get("content") == "next question" for m in user_msgs)
 
 
+def test_merge_display_non_adjacent_eager_and_agent_user_share_canonical_turn():
+    """The Agent echo must fold into the eager row even after partial output."""
+    from api.streaming import _merge_display_messages_after_agent_result
+
+    previous_display = [
+        {"role": "user", "content": "配色淡一点", "_turn_key": "turn:6"},
+        {"role": "assistant", "content": "处理中", "_partial": True},
+    ]
+    result_messages = [
+        {"role": "user", "content": "配色淡一点", "id": 103},
+        {"role": "assistant", "content": "完成"},
+    ]
+
+    merged = _merge_display_messages_after_agent_result(
+        previous_display,
+        [],
+        result_messages,
+        "配色淡一点",
+        canonical_turn_key="turn:6",
+    )
+
+    current_users = [
+        row for row in merged
+        if row.get("role") == "user" and row.get("content") == "配色淡一点"
+    ]
+    assert current_users == [{
+        "role": "user",
+        "content": "配色淡一点",
+        "_turn_key": "turn:6",
+        "id": 103,
+    }]
+
+
+def test_merge_display_deferred_user_gets_canonical_turn_at_construction():
+    from api.streaming import _merge_display_messages_after_agent_result
+
+    merged = _merge_display_messages_after_agent_result(
+        [],
+        [],
+        [{"role": "assistant", "content": "完成"}],
+        "配色淡一点",
+        canonical_turn_key="turn:6",
+    )
+
+    assert merged[0]["role"] == "user"
+    assert merged[0]["_turn_key"] == "turn:6"
+
+
+def test_context_current_user_gets_canonical_turn_before_dedupe():
+    from api.streaming import _dedupe_replayed_context_messages
+
+    result_messages = [
+        {"role": "user", "content": "配色淡一点", "id": 103},
+        {"role": "assistant", "content": "完成"},
+    ]
+
+    merged = _dedupe_replayed_context_messages(
+        [],
+        result_messages,
+        "配色淡一点",
+        canonical_turn_key="turn:6",
+    )
+
+    assert merged[0]["_turn_key"] == "turn:6"
+
+
+def test_canonical_merge_preserves_same_text_from_an_earlier_turn():
+    from api.streaming import _merge_display_messages_after_agent_result
+
+    previous_display = [
+        {"role": "user", "content": "继续", "_turn_key": "turn:5"},
+        {"role": "assistant", "content": "上一轮完成"},
+        {"role": "user", "content": "继续", "_turn_key": "turn:6"},
+        {"role": "assistant", "content": "处理中", "_partial": True},
+    ]
+    result_messages = [
+        {"role": "user", "content": "继续", "id": 103},
+        {"role": "assistant", "content": "本轮完成"},
+    ]
+
+    merged = _merge_display_messages_after_agent_result(
+        previous_display,
+        [],
+        result_messages,
+        "继续",
+        canonical_turn_key="turn:6",
+    )
+
+    users = [row for row in merged if row.get("role") == "user"]
+    assert [row["_turn_key"] for row in users] == ["turn:5", "turn:6"]
+    assert users[-1]["id"] == 103
+
+
 def test_merge_display_backfill_preserves_visible_head_ordering():
     """Display head must stay before hidden context-only middle turns.
 

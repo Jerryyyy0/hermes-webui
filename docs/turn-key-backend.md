@@ -62,31 +62,21 @@ s.messages.append(user_msg)
 }
 ```
 
-### 2.3 在流式结束后补标
+### 2.3 当前轮在 merge 时绑定
 
-**文件**: `api/streaming.py` 第 6373–6377 行（以及 healing 路径 6658–6661、7610–7613）
+`/api/chat/start` 在 session lock 内生成一次 `pending_turn_key`，worker 将它作为 `stream_turn_key` 使用。Agent 返回的当前 user 副本和 deferred 模式合成的 user 都在进入 display/context 去重前直接绑定该 key。若 WebUI 已 eager checkpoint，同 key 的 user 即使被 partial、tool 或 marker 隔开，也会折叠到 checkpoint，而不是在流结束时重新编号。
 
-某些异步路径（deferred save 模式、自我修复）可能在写入消息时来不及打戳，因此在每轮 agent 执行完成后，对缺失 `_turn_key` 的 user message 补标：
-
-```python
-from api.session_manifest import _next_turn_key as _ntk
-for _m in s.messages:
-    if isinstance(_m, dict) and _m.get('role') == 'user' and not _m.get('_turn_key'):
-        _m['_turn_key'] = _ntk(s.messages)
-```
+流式正常、内部 retry 和 exception retry 均不得扫描历史无 key user 并调用 `_next_turn_key()`；active turn 的归属只能来自 `stream_turn_key`。
 
 ### 2.4 存量会话兼容
 
 **文件**: `api/session_manifest.py` 第 921–951 行 `_ensure_turn_keys()`
 
-当 `/api/session/manifest` 构建时调用 `_ensure_turn_keys()`。如果messages中没有任何user消息携带 `_turn_key`（旧会话），保持不变；如果至少有一条带 `_turn_key`，就给所有缺失的 user 消息补全。
+当 `/api/session/manifest` 构建时调用 `_ensure_turn_keys()`，它只返回 Manifest 自有的消息副本，不修改 session，也不为混合 keyed/unkeyed transcript 猜号。完全没有 `_turn_key` 的旧会话仍由 `_message_turns()` 降级使用消息数组索引；混合会话的缺 key 行记录在 `diagnostics.missing_turn_key_message_indices`。
 
 ```python
 def _ensure_turn_keys(messages: list) -> list:
-    if not any(isinstance(m, dict) and m.get('role') == 'user' and m.get('_turn_key', '')
-               for m in (messages or [])):
-        return messages  # 存量会话没有任何 _turn_key → 降级到索引 key
-    ...
+    return copy.deepcopy(list(messages or []))
 ```
 
 ---
@@ -141,12 +131,10 @@ worker_kwargs = {"model_provider": model_provider, "stream_turn_key": stream_tur
 **文件**: `api/streaming.py` 第 5268–5270 行
 
 ```python
-_manifest_turn_key = str(stream_turn_key or '').strip()
-if not _manifest_turn_key:
-    _manifest_turn_key = f"turn:{len(getattr(s, 'messages', []) or [])}"
+_manifest_turn_key = str(stream_turn_key or s.pending_turn_key or '').strip()
 ```
 
-如果外部传入的 `stream_turn_key` 为空，则以当前消息数组长度作为 fallback。
+worker 不从 transcript 长度推导当前轮。key 缺失时允许 transcript/error 状态落盘，但成果结算保持失败，不创建 guessed turn decision。
 
 ### 3.5 消息分页：`turn_align` 与 `msg_limit`
 
@@ -209,7 +197,7 @@ return j(handler, {"manifest": manifest})
 ```python
 def build_session_manifest(session) -> dict[str, Any]:
     messages = _load_display_messages(session)   # 加载完整消息列表（含 lineage 合并）
-    messages = _ensure_turn_keys(messages)        # 补全 _turn_key
+    messages = _ensure_turn_keys(messages)        # 深拷贝，不补 active turn key
     tool_calls = list(getattr(session, 'tool_calls', None) or [])
     events = _collect_tool_events(messages, tool_calls)
     events.extend(_collect_media_artifact_events(messages, workspace))
@@ -225,6 +213,7 @@ def build_session_manifest(session) -> dict[str, Any]:
         'artifacts': ...,
         'references': ...,
         'turns': [_turn_to_wire(turn, ...) for turn in turns],
+        'diagnostics': {...},
     }
 ```
 
@@ -464,12 +453,12 @@ api/streaming.py: _manifest_turn_key = stream_turn_key
     ├─▶ _emit_turn_complete_reconcile_delta(turn_key=_manifest_turn_key)
     │      SSE → 前端 workspace.js: applySessionManifestDelta()
     │
-    └─▶ 每轮结束后 stamp _turn_key 到 user messages
-           s.messages[]._turn_key 持久化到 JSON
+    └─▶ merge 时将 stream_turn_key 绑定到当前 user
+           keyed eager/Agent duplicate 折叠为一行并持久化
     │
     ▼
 api/session_manifest.py: build_session_manifest()
-    │  ← _ensure_turn_keys() 确保所有 user msg 有 _turn_key
+    │  ← _ensure_turn_keys() 复制消息，不猜 active turn 编号
     │  ← _message_turns() 按 user msg 切分 turn，优先使用 _turn_key
     │  ← _turn_key_for_event() 将 tool events 归入对应 turn
     │  ← 输出 turns[] 到 manifest 响应
@@ -500,6 +489,8 @@ GET /api/session/manifest?session_id=...
 3. **双向关联** — turn_key 同时在消息层（`message._turn_key`）和 manifest 层（`manifest.turns[].turn_key`）存在。消息层提供 origin（谁是第 N 轮的用户消息），manifest 层提供 per-turn 聚合产物。
 
 4. **SSE 一致性** — 流式过程中所有 `manifest_delta` 携带同一个 `_manifest_turn_key`，前端据此将实时增量归入正确的轮次，并与最终的持久化 manifest 对齐。
+
+5. **结算失败关闭** — 当前轮持久化前必须满足最新真实 user 的 `_turn_key == stream_turn_key`。冲突时不写 artifact decision；store 中没有 user anchor 的旧记录只进入顶层 artifacts 与 `diagnostics.orphan_turn_keys`，不伪装成正常 `turns[]`。
 
 ---
 
@@ -553,7 +544,7 @@ s.tool_calls = []
 - Middle 中被摘要掉的 user 消息：**整条消失**，`_turn_key` 永久丢失 ✗
 - 压缩后 `build_session_manifest()` 只能为**仍留在 transcript 中的 user 消息**重建 `turns[]`
 - 被压缩轮次的 tool 链若已从 transcript 移除，对应 `turns[].artifacts` 通常也为空（workspace 内真实文件仍在，只是 manifest 索引丢失）
-- 若摘要消息被分配为 `role=user` 且经 `_ensure_turn_keys()` 补戳，可能产生**伪 turn**（无真实用户交互）；UI 渲染时会跳过 `[Context compaction]` 类标记，但 manifest 的 `turns[]` 可能多一条
+- 摘要消息即使采用 `role=user` 也不会由 `_ensure_turn_keys()` 补戳；Manifest 切轮会继续跳过 context compression marker
 
 **示例**（10 轮对话，重度主动压缩）：
 
@@ -571,11 +562,8 @@ s.tool_calls = []
 s.context_messages = ...   # 模型视角，可为压缩后的较短历史
 s.messages = _merge_display_messages_after_agent_result(
     _previous_messages, _previous_context_messages, _result_messages, msg_text,
+    canonical_turn_key=_manifest_turn_key,
 )
-# 补标缺失的 _turn_key
-for _m in s.messages:
-    if _m.get('role') == 'user' and not _m.get('_turn_key'):
-        _m['_turn_key'] = _ntk(s.messages)
 ```
 
 `_merge_display_messages_after_agent_result()`（第 3684 行起）在检测到 context 被压缩（`result_messages` 不再是 `previous_context` 的前缀）时：
@@ -617,9 +605,12 @@ Head 始终受 `protect_first_n`（默认 3，外加 system prompt）保护，�
 | --- | --- | --- |
 | `ui.js` `dataset.turnKey` | 仍从 user 消息的 `_turn_key` 读取；被删轮次的 DOM 不再存在 | 全部轮次仍可对齐 ✓ |
 | `getTurnArtifacts(turnKey)` | 仅存活 turn 有 manifest 行；丢失 turn 返回 `[]` | 全部 turn 可匹配 ✓ |
-| 新 turn 编号 | `_next_turn_key()` 扫描剩余 user 消息取 max+1，编号连续 ✓ | 同左 ✓ |
+| 新 turn 编号 | chat-start 生成一次 max+1 并绑定 worker；历史删除可产生缺号 | 同左 |
 
-测试覆盖：`tests/test_session_manifest.py::test_build_session_manifest_compression_turn_keys` — 中间插入压缩标记后，`turn:1` / `turn:2` 稳定，且 `turn:1` 的 artifacts 仍正确归属。
+测试覆盖：
+
+- `tests/test_session_manifest.py::test_build_session_manifest_compression_turn_keys` — 中间插入压缩标记后，`turn:1` / `turn:2` 稳定，且 `turn:1` 的 artifacts 仍正确归属。
+- `tests/test_artifact_turn_isolation.py::test_passive_compression_rotation_keeps_canonical_turn_artifact_alignment` — 同一 active turn 内发生被动压缩并旋转到 continuation 后，Agent user 回显仍折叠到 canonical key；父段与当前轮 artifacts 均可由 continuation Manifest 按原 turn 读取，且不产生 orphan。
 
 ### 8.7 压缩场景总结
 
@@ -632,7 +623,7 @@ Head 始终受 `protect_first_n`（默认 3，外加 system prompt）保护，�
 └───────────────────┴───────────────┴───────────────┴───────────────┘
 ```
 
-**一句话**：被动压缩对 turn_key **基本无害**；主动压缩会永久删除 middle 轮次的 user 消息及其 `_turn_key`，仅 head/tail 存活轮次仍能与 manifest / 聊天区 chip 对齐。新 turn 的编号在两种压缩后均由 `_next_turn_key()` 正确递增。
+**一句话**：被动压缩对 turn_key **基本无害**；主动压缩会永久删除 middle 轮次的 user 消息及其 `_turn_key`，仅 head/tail 存活轮次仍能与 manifest / 聊天区 chip 对齐。新 turn 只在 chat-start 分配一次，编号允许有缺号。
 
 ### 8.8 压缩延续（session_id 旋转）
 

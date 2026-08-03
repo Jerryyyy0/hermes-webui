@@ -719,6 +719,13 @@ def _terminal_output_paths(command: str, workspace: Path) -> list[str]:
             except (OSError, ValueError):
                 cwd = workspace
             return
+        if values[0] == 'cp':
+            operands = values[1:]
+            if operands[:1] == ['--']:
+                operands = operands[1:]
+            if len(operands) == 2 and not any(value.startswith('-') for value in operands):
+                add_output(operands[1], cwd)
+            return
         for index, token in enumerate(values):
             raw = ''
             if token in ('-o', '--output') and index + 1 < len(values):
@@ -1402,62 +1409,42 @@ def _next_turn_key(messages: list) -> str:
 
 
 def _ensure_turn_keys(messages: list) -> list:
-    """确保所有用户消息都有 _turn_key（给缺失的重新打戳）。
-
-    仅当已有用户消息带 _turn_key 时才补全；存量会话没有任何 _turn_key
-    时原样返回，保持索引 key 兼容。"""
-    # 存量会话没有任何 _turn_key → 不做修改，保持降级到索引 key
-    if not any(
-        isinstance(m, dict) and m.get('role') == 'user' and m.get('_turn_key', '')
-        for m in (messages or [])
-    ):
-        return messages
-
-    max_num = 0
-    for msg in messages or []:
-        if not isinstance(msg, dict) or msg.get('role') != 'user':
-            continue
-        key = msg.get('_turn_key', '')
-        if key and key.startswith('turn:'):
-            try:
-                num = int(key.split(':', 1)[1])
-                max_num = max(max_num, num)
-            except (TypeError, ValueError):
-                pass
-    from api.compression_anchor import is_context_compression_marker
-
-    next_num = max_num + 1
-    for msg in messages or []:
-        if not isinstance(msg, dict) or msg.get('role') != 'user':
-            continue
-        if is_context_compression_marker(msg):
-            continue
-        if not msg.get('_turn_key'):
-            msg['_turn_key'] = f'turn:{next_num}'
-            next_num += 1
-    return messages
+    """Return a manifest-owned copy without inventing active turn bindings."""
+    return copy.deepcopy(list(messages or []))
 
 
 def _message_turns(messages: list) -> list[dict[str, Any]]:
     from api.compression_anchor import is_context_compression_marker
 
+    message_rows = list(messages or [])
+    user_rows = [
+        (idx, message)
+        for idx, message in enumerate(message_rows)
+        if isinstance(message, dict)
+        and message.get('role') == 'user'
+        and not is_context_compression_marker(message)
+    ]
+    has_stable_turn_keys = any(
+        str(message.get('_turn_key') or '').strip()
+        for _idx, message in user_rows
+    )
     turns: list[dict[str, Any]] = []
-    for idx, message in enumerate(messages or []):
-        if not isinstance(message, dict) or message.get('role') != 'user':
-            continue
-        if is_context_compression_marker(message):
-            continue
-        if turns:
-            turns[-1]['end_msg_idx'] = idx - 1
-        # 优先使用稳定的 _turn_key；没有时降级为索引 key
-        turn_key = str(message.get('_turn_key', '') or '')
+    for row_idx, (idx, message) in enumerate(user_rows):
+        turn_key = str(message.get('_turn_key') or '').strip()
         if not turn_key:
+            if has_stable_turn_keys:
+                continue
             turn_key = f'turn:{idx}'
+        end_msg_idx = (
+            user_rows[row_idx + 1][0] - 1
+            if row_idx + 1 < len(user_rows)
+            else len(message_rows) - 1
+        )
         turns.append({
             'turn_key': turn_key,
             'user_msg_idx': idx,
             'start_msg_idx': idx,
-            'end_msg_idx': len(messages or []) - 1,
+            'end_msg_idx': end_msg_idx,
             'artifacts': [],
             'references': [],
         })
@@ -2792,10 +2779,26 @@ def _load_display_messages(session) -> list:
 
 def build_session_manifest(session, source_info: dict[str, str] | None = None) -> dict[str, Any]:
     """Build structured todos, artifacts, and references for one session."""
+    from api.compression_anchor import is_context_compression_marker
+
     if source_info is not None:
         source_info['manifest_source'] = 'derived'
     messages = _load_display_messages(session)
     messages = _ensure_turn_keys(messages)
+    has_stable_turn_keys = any(
+        isinstance(message, dict)
+        and message.get('role') == 'user'
+        and str(message.get('_turn_key') or '').strip()
+        for message in messages
+    )
+    missing_turn_key_message_indices = [
+        idx for idx, message in enumerate(messages)
+        if has_stable_turn_keys
+        and isinstance(message, dict)
+        and message.get('role') == 'user'
+        and not is_context_compression_marker(message)
+        and not str(message.get('_turn_key') or '').strip()
+    ]
     tool_calls = list(getattr(session, 'tool_calls', None) or [])
     workspace = Path(str(session.workspace)).expanduser().resolve()
     skills_dir = _skills_dir_for_session(session)
@@ -2882,6 +2885,7 @@ def build_session_manifest(session, source_info: dict[str, str] | None = None) -
     profiled_artifact_records: dict[str, dict[str, Any]] = {
         _artifact_identity(row, default_profile): row for row in artifact_records.values()
     }
+    orphan_turn_keys: set[str] = set()
     for store_row in store_rows:
         record = _store_artifact_record(store_row)
         if record is None:
@@ -2898,9 +2902,8 @@ def build_session_manifest(session, source_info: dict[str, str] | None = None) -
             continue
         turn = turn_rows_by_key.get(tk)
         if turn is None:
-            turn = {'turn_key': tk, 'artifacts': [], 'references': []}
-            turn_rows_by_key[tk] = turn
-            turns.append(turn)
+            orphan_turn_keys.add(tk)
+            continue
         turn_records = {
             _artifact_identity(row, default_profile): row
             for row in list(turn.get('artifacts') or [])
@@ -2931,4 +2934,8 @@ def build_session_manifest(session, source_info: dict[str, str] | None = None) -
             _turn_to_wire(turn, workspace, skills_dir, default_profile=default_profile)
             for turn in turns
         ],
+        'diagnostics': {
+            'missing_turn_key_message_indices': missing_turn_key_message_indices,
+            'orphan_turn_keys': sorted(orphan_turn_keys),
+        },
     }
