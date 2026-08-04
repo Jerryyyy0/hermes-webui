@@ -777,6 +777,22 @@ def main() -> None:
         daemon=True,
     ).start()
 
+    def _start_common_tasks_safe() -> None:
+        try:
+            from integration.config import integration_enabled
+            from integration.common_tasks.generation import start_pregeneration as _common_tasks_pregenerate
+
+            if integration_enabled():
+                _common_tasks_pregenerate()
+        except Exception as e:
+            log_warning(f'[!!] WARNING: Common tasks pregeneration failed: {e}')
+
+    threading.Thread(
+        target=_start_common_tasks_safe,
+        name="common-tasks-pregeneration-start",
+        daemon=True,
+    ).start()
+
     try:
         from api.gateway_watcher import start_watcher
 
