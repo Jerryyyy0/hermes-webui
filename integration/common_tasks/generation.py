@@ -48,6 +48,7 @@ FAILURE_RETRY_SECONDS = 3
 MIN_QUESTIONS_FOR_MINING = 5
 TOP_N = 3
 USER_PROMPT_LOG_MAX_CHARS = 2000
+MAX_QUESTION_CHARS = 80
 
 
 def _log_line(event: str, fields: dict[str, Any] | None = None) -> str:
@@ -295,6 +296,7 @@ def _run_seed(task: CommonTaskJob, profile_path: Path) -> None:
         user_prompt=user_prompt,
         max_tokens=600,
         temperature=0.3,
+        extra_body={"thinking": {"type": "disabled"}},
     )
     if content is None:
         _write_seed_failure(task, profile_path, context, reason=str(error))
@@ -375,7 +377,13 @@ def _run_mine(task: CommonTaskJob, profile_path: Path) -> None:
         return
     if len({q["text"] for q in questions}) < MIN_QUESTIONS_FOR_MINING:
         return
-    user_prompt = collectors.render_cluster_user_prompt(questions)
+    truncated: list[dict[str, Any]] = []
+    for q in questions:
+        text = str(q.get("text") or "")
+        if len(text) > MAX_QUESTION_CHARS:
+            text = text[:MAX_QUESTION_CHARS] + "…"
+        truncated.append({**q, "text": text})
+    user_prompt = collectors.render_cluster_user_prompt(truncated)
     system_prompt = CLUSTER_SYSTEM_PROMPT
     _emit_full_content_log(
         "mine_model_prompt",
@@ -394,8 +402,9 @@ def _run_mine(task: CommonTaskJob, profile_path: Path) -> None:
         task=task,
         system_prompt=system_prompt,
         user_prompt=user_prompt,
-        max_tokens=1200,
+        max_tokens=4000,
         temperature=0.2,
+        extra_body={"thinking": {"type": "disabled"}},
     )
     if content is None:
         store.replace_mined_tasks(
@@ -422,7 +431,7 @@ def _run_mine(task: CommonTaskJob, profile_path: Path) -> None:
         },
         content_fields={"model_response": str(content or "")},
     )
-    original_texts = {q["text"] for q in questions}
+    original_texts = {q["text"] for q in truncated}
     tasks, reason = validate_cluster_response(content, original_texts)
     if tasks is None:
         store.replace_mined_tasks(
@@ -460,6 +469,7 @@ def _call_llm(
     *,
     max_tokens: int,
     temperature: float,
+    extra_body: dict[str, Any] | None = None,
 ) -> tuple[str | None, str]:
     started = time.monotonic()
     try:
@@ -480,6 +490,7 @@ def _call_llm(
                 temperature=temperature,
                 max_tokens=max_tokens,
                 timeout=60,
+                extra_body=extra_body,
             )
         content = resp.choices[0].message.content
     except Exception as exc:
