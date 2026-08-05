@@ -56,7 +56,10 @@ from api.todo_state import attach_todo_state, emit_todo_state
 from api.turn_journal import append_turn_journal_event_for_stream
 from api.usage import prompt_cache_hit_percent
 from api.models import (
+    _apply_pending_checkpoint_metadata,
+    _find_pending_user_checkpoint,
     _is_empty_partial_activity_message,
+    _recovered_model_context_projection,
     _evict_sessions_over_cap,
     clear_process_wakeup_pause,
     get_state_db_session_messages,
@@ -87,6 +90,9 @@ from integration.approval_localization import (
 from integration.clarify_localization.policy import (
     clarify_language_rule as _clarify_language_rule,
 )
+from integration.agent_message_semantics.audit import log_control_message
+from integration.agent_message_semantics.classifier import is_non_anchor_control_message
+from integration.agent_message_semantics.projection import drop_non_display_messages
 from integration.session_titles.policy import (
     should_validate_source_language_match as _should_validate_title_source_language_match,
     title_language_rule as _title_language_rule,
@@ -1295,12 +1301,12 @@ _MAX_ITERATION_SUMMARY_REQUEST = (
 
 
 def _is_synthetic_max_iteration_summary_request(message) -> bool:
-    """Return True for Hermes Agent's internal max-iteration summary prompt."""
-    if not isinstance(message, dict) or message.get('role') != 'user':
-        return False
-    text = " ".join(_message_text(message.get('content', '')).split())
-    expected = " ".join(_MAX_ITERATION_SUMMARY_REQUEST.split())
-    return text == expected
+    """Use provenance only; ordinary user text is never an internal marker."""
+    return bool(
+        is_non_anchor_control_message(message)
+        and isinstance(message, dict)
+        and message.get('_hermes_scaffold_kind') == 'max_iteration_summary_request'
+    )
 
 
 def _drop_synthetic_max_iteration_summary_requests(messages, *, enabled: bool = True):
@@ -1314,28 +1320,9 @@ def _drop_synthetic_max_iteration_summary_requests(messages, *, enabled: bool = 
     ]
 
 
-# Structured markers the Hermes Agent stamps on synthetic scaffolding turns that
-# drive its internal verify-before-finish loop. The agent appends BOTH a
-# synthetic assistant "premature done" answer AND a synthetic ``user`` nudge
-# (e.g. "[System: You edited code in this turn, but the workspace does not have
-# fresh passing verification evidence yet...]") to preserve role alternation for
-# the next API turn, and flags each with one of these keys. They exist only to
-# run the loop; they must never surface as visible user/assistant turns in the
-# WebUI transcript. This mirrors ``run_agent._EPHEMERAL_SCAFFOLDING_FLAGS`` on
-# the agent side (which keeps them out of the durable session store); WebUI
-# honors the same markers when building the visible transcript. Keep roughly in
-# sync with the agent set. (#5334; same class as #3320/#3821/#4373/#4875)
-_SYNTHETIC_CONTROL_MESSAGE_FLAGS = (
-    "_verification_stop_synthetic",
-    "_pre_verify_synthetic",
-)
-
-
 def _is_synthetic_control_message(message) -> bool:
-    """Return True for an Agent-internal synthetic scaffolding turn flagged by marker."""
-    return isinstance(message, dict) and any(
-        message.get(flag) for flag in _SYNTHETIC_CONTROL_MESSAGE_FLAGS
-    )
+    """Return whether Agent provenance says this row is not a visible turn."""
+    return is_non_anchor_control_message(message)
 
 
 def _drop_synthetic_control_messages(messages):
@@ -1344,11 +1331,7 @@ def _drop_synthetic_control_messages(messages):
     Honors the structured ``_verification_stop_synthetic`` / ``_pre_verify_synthetic``
     markers the agent already sets, rather than string-matching the nudge copy.
     """
-    return [
-        msg
-        for msg in list(messages or [])
-        if not _is_synthetic_control_message(msg)
-    ]
+    return drop_non_display_messages(messages)
 
 
 def _agent_result_tool_limit_reached(result) -> bool:
@@ -1538,6 +1521,7 @@ def _latest_user_turn_binding(session, msg_text: str, turn_key: str) -> dict[str
         if _is_context_compression_marker(message):
             continue
         if _is_synthetic_control_message(message):
+            log_control_message("turn_binding_skip", message)
             continue
         actual = str(message.get('_turn_key') or '').strip()
         if not actual:
@@ -1653,6 +1637,21 @@ def _persist_turn_artifact_paths(
                 'artifact_count': 0,
             })
 
+    try:
+        from api.session_manifest import (
+            _skills_dir_for_session,
+            extract_turn_artifact_entries_for_manifest,
+            filter_existing_turn_artifact_entries,
+        )
+    except Exception:
+        logger.warning(
+            "Manifest artifact helpers unavailable: session=%s turn=%s",
+            session_id,
+            _turn_key,
+            exc_info=True,
+        )
+        return finish({'status': 'failed', 'stage': 'extract', 'turn_key': _turn_key, 'artifact_count': 0})
+
     evidence_entries = _stream_artifact_evidence(stream, _turn_key) if stream else None
     _entries = list(evidence_entries or [])
     needs_transcript_reconcile = evidence_entries is None or str(terminal_reason or '').strip() == 'completed'
@@ -1660,7 +1659,6 @@ def _persist_turn_artifact_paths(
         if not getattr(s, 'messages', None):
             return finish({'status': 'pending', 'stage': 'transcript_unavailable', 'turn_key': _turn_key, 'artifact_count': 0})
         try:
-            from api.session_manifest import extract_turn_artifact_entries_for_manifest
             transcript_entries = extract_turn_artifact_entries_for_manifest(s, _turn_key)
         except Exception:
             logger.warning(
@@ -1681,6 +1679,22 @@ def _persist_turn_artifact_paths(
             entry for entry in transcript_entries
             if isinstance(entry, dict) and str(entry.get('path') or '').strip() not in known_paths
         )
+
+    try:
+        workspace = Path(str(getattr(s, 'workspace', '') or '')).expanduser().resolve()
+        _entries = filter_existing_turn_artifact_entries(
+            workspace,
+            _skills_dir_for_session(s),
+            _entries,
+        )
+    except Exception:
+        logger.warning(
+            "Manifest artifact preview validation failed: session=%s turn=%s",
+            session_id,
+            _turn_key,
+            exc_info=True,
+        )
+        return finish({'status': 'failed', 'stage': 'validate', 'turn_key': _turn_key, 'artifact_count': 0})
 
     _store_entries = [
         {
@@ -5798,6 +5812,7 @@ def _merge_display_messages_after_agent_result(
 
     for msg in candidates:
         if _is_synthetic_control_message(msg):
+            log_control_message("display_candidate_skip", msg)
             continue
         if (
             _is_context_compression_marker(msg)
@@ -6280,60 +6295,18 @@ def _materialize_pending_user_turn_before_error(session) -> bool:
     pending_started_at = getattr(session, 'pending_started_at', None)
     if isinstance(pending_started_at, (int, float)) and pending_started_at > 0:
         recovered_ts = int(pending_started_at)
-    pending_source = getattr(session, 'pending_user_source', None) or 'webui'
-    pending_attachments = list(getattr(session, 'pending_attachments', None) or [])
-
-    def has_pending_checkpoint(messages):
-        if not isinstance(messages, list) or not messages:
-            return False
-        existing = messages[-1]
-        if not isinstance(existing, dict) or existing.get('role') != 'user':
-            return False
-        existing_source = existing.get('_source') or 'webui'
-        if (
-            _normalize_user_text(existing.get('content')) != _normalize_user_text(pending_text)
-            or existing_source != pending_source
-        ):
-            return False
-        try:
-            existing_ts = int(existing.get('timestamp'))
-        except (TypeError, ValueError):
-            # The eager WebUI checkpoint can be persisted before state.db
-            # assigns a timestamp. Attachment metadata is added only by
-            # recovery, so an already-persisted optimistic row can legitimately
-            # have no `attachments` field. Its tail position plus text and
-            # source prove it is the current turn. state.db may have rewritten
-            # its turn key since request state captured the original value, so
-            # that key cannot reject this narrow optimistic-checkpoint case.
-            # Appending a `_recovered` copy here creates two adjacent user rows.
-            if existing.get('_db_persisted') is True and 'attachments' not in existing:
-                return True
-            return list(existing.get('attachments') or []) == pending_attachments
-        pending_turn_key = str(getattr(session, 'pending_turn_key', '') or '').strip()
-        existing_turn_key = str(existing.get('_turn_key') or '').strip()
-        if pending_turn_key and existing_turn_key and existing_turn_key != pending_turn_key:
-            return False
-        return (
-            existing_ts == recovered_ts
-            and list(existing.get('attachments') or []) == pending_attachments
-        )
-
     display_messages = getattr(session, 'messages', None)
-    if has_pending_checkpoint(display_messages):
-        # A successful optimistic persistence can happen before attachment
-        # metadata is copied onto the visible row.  Preserve that metadata on
-        # the one canonical user turn instead of creating a recovered duplicate.
-        if pending_attachments and 'attachments' not in display_messages[-1]:
-            display_messages[-1]['attachments'] = list(pending_attachments)
-        pending_turn_key = str(getattr(session, 'pending_turn_key', '') or '').strip()
-        if pending_turn_key:
-            display_messages[-1]['_turn_key'] = pending_turn_key
+    display_checkpoint = _find_pending_user_checkpoint(session, display_messages)
+    if display_checkpoint is not None:
+        _apply_pending_checkpoint_metadata(session, display_checkpoint)
         context_messages = getattr(session, 'context_messages', None)
-        if has_pending_checkpoint(context_messages):
-            if pending_attachments and 'attachments' not in context_messages[-1]:
-                context_messages[-1]['attachments'] = list(pending_attachments)
-            if pending_turn_key:
-                context_messages[-1]['_turn_key'] = pending_turn_key
+        context_checkpoint = _find_pending_user_checkpoint(session, context_messages)
+        if context_checkpoint is not None:
+            _apply_pending_checkpoint_metadata(session, context_checkpoint)
+        elif isinstance(context_messages, list) and context_messages:
+            projected = _recovered_model_context_projection(display_checkpoint)
+            if projected is not None:
+                context_messages.append(projected)
         return False
     recovered = {
         'role': 'user',
@@ -6341,7 +6314,9 @@ def _materialize_pending_user_turn_before_error(session) -> bool:
         'timestamp': recovered_ts,
         '_recovered': True,
     }
+    pending_source = getattr(session, 'pending_user_source', None) or 'webui'
     stamp_message_source(recovered, pending_source)
+    pending_attachments = list(getattr(session, 'pending_attachments', None) or [])
     if pending_attachments:
         recovered['attachments'] = pending_attachments
     pending_turn_key = str(getattr(session, 'pending_turn_key', '') or '').strip()
@@ -6357,7 +6332,7 @@ def _materialize_pending_user_turn_before_error(session) -> bool:
     # round-trip (#4283). state.db has no _recovered column, so without this
     # mirror the next turn's reconciled state-db messages cannot filter it.
     ctx = getattr(session, 'context_messages', None)
-    if isinstance(ctx, list) and ctx and not has_pending_checkpoint(ctx):
+    if isinstance(ctx, list) and ctx and _find_pending_user_checkpoint(session, ctx) is None:
         ctx.append(dict(recovered))
     # Keep post-edit state-db reconciliation bounded by the recovered turn.
     if getattr(session, 'truncation_watermark', None):

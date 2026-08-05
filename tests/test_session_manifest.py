@@ -3319,17 +3319,19 @@ def test_next_turn_key_ignores_non_user():
     assert _next_turn_key(messages) == 'turn:1'
 
 
-def test_next_turn_key_ignores_synthetic_user():
+def test_next_turn_key_reserves_synthetic_user_key():
     messages = [
         {'role': 'user', 'content': 'real', '_turn_key': 'turn:8'},
         {
             'role': 'user',
             'content': '[System: run verification]',
-            '_turn_key': 'turn:99',
+            '_turn_key': 'turn:9',
             '_verification_stop_synthetic': True,
         },
     ]
-    assert _next_turn_key(messages) == 'turn:9'
+    # Synthetic rows are not visible turn anchors, but their allocated key is
+    # still reserved. Reusing turn:9 would corrupt artifact ownership.
+    assert _next_turn_key(messages) == 'turn:10'
 
 
 def test_next_turn_key_handles_invalid_key():

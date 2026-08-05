@@ -61,6 +61,41 @@ def test_normal_user_message_is_not_classified_as_control():
     assert streaming._is_synthetic_control_message("not a dict") is False
 
 
+def test_new_semantic_internal_scaffold_is_classified_as_control():
+    assert streaming._is_synthetic_control_message({
+        "role": "user",
+        "content": "[System: continue]",
+        "_hermes_message_class": "internal_scaffold",
+        "_hermes_scaffold_kind": "length_continuation",
+    }) is True
+
+
+def test_new_semantic_scaffold_is_removed_but_real_assistants_are_retained():
+    merged = streaming._merge_display_messages_after_agent_result(
+        [{"role": "user", "content": "Fix it.", "_turn_key": "turn:8"}],
+        [{"role": "user", "content": "Fix it.", "_turn_key": "turn:8"}],
+        [
+            {"role": "user", "content": "Fix it.", "_turn_key": "turn:8"},
+            {"role": "assistant", "content": "I will verify this."},
+            {
+                "role": "user",
+                "content": "[System: continue]",
+                "_hermes_message_class": "internal_scaffold",
+                "_hermes_scaffold_kind": "length_continuation",
+            },
+            {"role": "assistant", "content": "Verified. MEDIA: result.png"},
+        ],
+        "Fix it.",
+        canonical_turn_key="turn:8",
+    )
+
+    assert [message["content"] for message in merged] == [
+        "Fix it.",
+        "I will verify this.",
+        "Verified. MEDIA: result.png",
+    ]
+
+
 def test_drop_synthetic_control_messages_filters_only_flagged_rows():
     messages = [
         {"role": "user", "content": "Fix the bug."},

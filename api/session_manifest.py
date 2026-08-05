@@ -10,22 +10,14 @@ import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from integration.agent_message_semantics.audit import log_control_message
+from integration.agent_message_semantics.classifier import is_non_anchor_control_message
 
 logger = logging.getLogger(__name__)
 
-# Keep aligned with api.streaming._SYNTHETIC_CONTROL_MESSAGE_FLAGS. Importing
-# streaming here would create a cycle because streaming consumes this module.
-_SYNTHETIC_CONTROL_MESSAGE_FLAGS = (
-    '_verification_stop_synthetic',
-    '_pre_verify_synthetic',
-)
-
-
 def _is_synthetic_control_message(message) -> bool:
-    """Return True for an Agent-internal verification continuation nudge."""
-    return isinstance(message, dict) and any(
-        message.get(flag) for flag in _SYNTHETIC_CONTROL_MESSAGE_FLAGS
-    )
+    """Return whether Agent provenance says this row is not a user anchor."""
+    return is_non_anchor_control_message(message)
 
 ARTIFACT_IGNORE_RE = re.compile(
     r'(^|/)(?:\.git|\.hg|\.svn|node_modules|\.venv|venv|__pycache__|dist|build|\.next|\.cache)(?:/|$)'
@@ -1412,8 +1404,6 @@ def _next_turn_key(messages: list) -> str:
     for msg in messages or []:
         if not isinstance(msg, dict) or msg.get('role') != 'user':
             continue
-        if _is_synthetic_control_message(msg):
-            continue
         key = msg.get('_turn_key', '')
         if key and key.startswith('turn:'):
             try:
@@ -1433,14 +1423,16 @@ def _message_turns(messages: list) -> list[dict[str, Any]]:
     from api.compression_anchor import is_context_compression_marker
 
     message_rows = list(messages or [])
-    user_rows = [
-        (idx, message)
-        for idx, message in enumerate(message_rows)
-        if isinstance(message, dict)
-        and message.get('role') == 'user'
-        and not is_context_compression_marker(message)
-        and not _is_synthetic_control_message(message)
-    ]
+    user_rows = []
+    for idx, message in enumerate(message_rows):
+        if not isinstance(message, dict) or message.get('role') != 'user':
+            continue
+        if is_context_compression_marker(message):
+            continue
+        if _is_synthetic_control_message(message):
+            log_control_message("manifest_turn_skip", message)
+            continue
+        user_rows.append((idx, message))
     has_stable_turn_keys = any(
         str(message.get('_turn_key') or '').strip()
         for _idx, message in user_rows

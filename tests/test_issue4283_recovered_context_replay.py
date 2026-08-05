@@ -314,6 +314,91 @@ def test_materialize_does_not_duplicate_context_messages():
     assert len(s.context_messages) == ctx_len_after_first
 
 
+def test_materialize_does_not_duplicate_checkpointed_turn_before_tool_activity():
+    """The pending user anchor can precede assistant/tool rows on an error."""
+    attachment = {"name": "route.md", "path": "/tmp/route.md"}
+    s = _DummySession(
+        messages=[
+            {"role": "user", "content": "plan the route", "_turn_key": "turn:1"},
+            {"role": "assistant", "content": "Checking options"},
+            {"role": "tool", "content": "partial tool output"},
+        ],
+        context_messages=[
+            {
+                "role": "user",
+                "content": "[Workspace::v1: /tmp/workspace]\nplan the route",
+                "_turn_key": "turn:1",
+            },
+            {"role": "assistant", "content": "Checking options"},
+            {"role": "tool", "content": "partial tool output"},
+        ],
+        pending_msg="plan the route",
+    )
+    s.pending_turn_key = "turn:1"
+    s.pending_attachments = [attachment]
+    s.pending_user_source = "webui"
+
+    appended = _materialize_pending_user_turn_before_error(s)
+
+    assert appended is False
+    display_users = [m for m in s.messages if m.get("role") == "user"]
+    context_users = [m for m in s.context_messages if m.get("role") == "user"]
+    assert len(display_users) == 1
+    assert len(context_users) == 1
+    assert display_users[0]["attachments"] == [attachment]
+    assert context_users[0]["attachments"] == [attachment]
+
+
+def test_materialize_projects_checkpointed_turn_to_missing_context_anchor():
+    """A display checkpoint must not leave the next model call without its user turn."""
+    s = _DummySession(
+        messages=[
+            {"role": "user", "content": "plan the route", "_turn_key": "turn:2"},
+            {"role": "assistant", "content": "Checking options"},
+            {"role": "tool", "content": "partial tool output"},
+        ],
+        context_messages=[
+            {"role": "user", "content": "previous request", "_turn_key": "turn:1"},
+            {"role": "assistant", "content": "previous answer"},
+        ],
+        pending_msg="plan the route",
+    )
+    s.pending_turn_key = "turn:2"
+
+    appended = _materialize_pending_user_turn_before_error(s)
+
+    assert appended is False
+    assert [m["content"] for m in s.messages if m.get("role") == "user"] == ["plan the route"]
+    context_users = [m for m in s.context_messages if m.get("role") == "user"]
+    assert [m["content"] for m in context_users] == ["previous request", "plan the route"]
+    assert context_users[-1]["_turn_key"] == "turn:2"
+
+
+def test_materialize_does_not_fold_same_text_from_a_different_turn():
+    """Stable turn keys prevent a repeated short prompt from being deduplicated."""
+    s = _DummySession(
+        messages=[
+            {"role": "user", "content": "continue", "_turn_key": "turn:1"},
+            {"role": "assistant", "content": "first response"},
+            {"role": "tool", "content": "first tool output"},
+        ],
+        context_messages=[
+            {"role": "user", "content": "continue", "_turn_key": "turn:1"},
+            {"role": "assistant", "content": "first response"},
+        ],
+        pending_msg="continue",
+    )
+    s.pending_turn_key = "turn:2"
+
+    appended = _materialize_pending_user_turn_before_error(s)
+
+    assert appended is True
+    display_users = [m for m in s.messages if m.get("role") == "user"]
+    context_users = [m for m in s.context_messages if m.get("role") == "user"]
+    assert [m["_turn_key"] for m in display_users] == ["turn:1", "turn:2"]
+    assert [m["_turn_key"] for m in context_users] == ["turn:1", "turn:2"]
+
+
 def test_materialize_keeps_untimestamped_optimistic_attachment_checkpoint():
     """A first-turn error must not duplicate the already-persisted user bubble.
 

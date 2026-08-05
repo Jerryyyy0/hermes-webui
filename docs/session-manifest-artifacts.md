@@ -196,7 +196,7 @@ python .../md2word.py INPUT OUTPUT [options]
 
 ### 4.7 Turn 绑定与 orphan
 
-当前 worker 结算前校验最新真实 user 的 `_turn_key` 与 `stream_turn_key`。带 `_verification_stop_synthetic` 或 `_pre_verify_synthetic` 的 Agent 内部 user nudge 不是真实 user，必须跳过；未标记的 interim assistant 仍是正常可见内容。缺 key、key 冲突或 user 内容边界冲突时，不写 store record，也不创建 empty decision。normal、gateway、error 与 cancel 路径共用同一个结算入口；任何非 `persisted` 结果都会在 turn journal 记录 expected/actual key、stage 与 terminal reason。
+当前 worker 结算前校验最新真实 user 的 `_turn_key` 与 `stream_turn_key`。带 `_hermes_message_class: internal_scaffold` 或 `context_anchor` 的 Agent 内部 user/assistant 行不是真实 turn 边界，必须跳过；最终未标记 assistant 仍归属前一个真实 user。缺 key、key 冲突或 user 内容边界冲突时，不写 store record，也不创建 empty decision。normal、gateway、error 与 cancel 路径共用同一个结算入口；任何非 `persisted` 结果都会在 turn journal 记录 expected/actual key、stage 与 terminal reason。
 
 历史 store record 若找不到同 key 的 user anchor，仍保留在顶层 `artifacts`，并把 key 暴露在 `diagnostics.orphan_turn_keys`；它不会进入正常 `turns[]`，因此不会产生错误的 per-turn chip。历史归属修复必须使用显式 old key → new key 映射，不能按编号相邻或文本相似度自动迁移。
 
@@ -239,6 +239,8 @@ final assistant 已进入 s.messages
 
 先保存 transcript，确保 artifact/empty decision 不会先于其证据 durable。无成果时写 empty decision；提取或 store 写入失败会作为可观测的持久化失败处理，不能被伪装为 empty decision 或已完成 turn。
 
+首次结算会将合并后的 stream 和 transcript 证据统一通过存在性与预览 gate 后再写入 store。因此同一轮内已经删除、改名或变得不可预览的候选不会形成 artifact record；若无其它候选，该 turn 写 empty decision，避免后续 read-repair 从已失效证据回填。该 gate 不解析或推断重命名目标，例如 `mv old.jpg new.png` 不会自动把 `new.png` 登记为成果。
+
 Store row 最小字段：
 
 ```text
@@ -263,6 +265,8 @@ Expired 行：
 
 - file artifact 有 per-turn/store provenance 但文件已缺失；
 - skill reference/artifact 有明确 provenance 但 skill 已缺失。
+
+Expired 只描述已成功写入 store 后才丢失的历史成果；结算前已失效的候选不会进入该状态。
 
 缺失但没有持久化/per-turn provenance 的候选不输出。Expired 行不可点击预览。
 

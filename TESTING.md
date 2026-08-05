@@ -134,6 +134,24 @@ matrix expands to additional behavior rows. The maintainer's private QA harness
 remains broader; later public slices will add session switching, reconnect/replay,
 cancellation, compression, and recovery.
 
+## Manual Real-Model Turn/Artifact Alignment Campaign
+
+`scripts/real_model_campaign.py` is an explicit, paid, real-model E2E campaign.
+It is outside `tests/`, is not run by CI or `./scripts/test.sh`, and does not
+start a server. Start WebUI normally, verify `/health` has no active streams,
+then run it manually:
+
+```bash
+python scripts/real_model_campaign.py --sessions 10 --turns 15
+```
+
+The campaign runs one session and one stream at a time, keeps one `session_id`
+for all rounds, and uses the configured default model. It preserves sessions,
+workspaces, files, and JSON evidence below
+`HERMES_WEBUI_STATE_DIR/e2e_campaigns/<timestamp>/`. Playwright Chromium is
+required because it validates settled DOM artifact chips alongside transcript,
+Manifest, and disk ownership.
+
 
 `tests/test_static_js_runtime_lint.py` runs this automatically when eslint is present
 and **skips gracefully** (clear message) when it isn't — so environments without the

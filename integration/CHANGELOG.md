@@ -8,6 +8,8 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Changed
 
+- **Hermes Agent message semantics** — Agent-generated `internal_scaffold` rows no longer leak into WebUI display transcripts, manifest turn anchors, or artifact settlement. Durable `context_anchor` rows retain their original model-facing content plus explicit semantic fields while remaining hidden from transcript/turn rendering; legacy verification/pre-verify flags remain recognized.
+
 - **Cron manual no_agent empty-output backfill** — WebUI manual script runs now forward their scheduler result into session materialization. Scheduled and manual script runs reserve a stable session before output persistence, so output-save failures still retain the completed or failed run. When an older manual run lacks an `executions.db` row, history applies `jobs.json`'s failure or success only to the single artifact whose timestamp matches `last_run_at`; every other valid artifact still receives a stable minimal session with an unverified outcome rather than no session.
 - **Cron no_agent history failure reconciliation** — `GET /api/crons/history` now matches each script output artifact to the owning Profile's terminal execution record. Empty artifacts from missing scripts, timeouts, and non-zero exits persist as `cron_error` with the scheduler error detail instead of being inferred as successful; prior synthetic records are corrected only when a failed execution matches. Unmatched or `unknown` zero-byte artifacts also persist with an empty `end_reason`, and failed history rows expose optional `error`.
 

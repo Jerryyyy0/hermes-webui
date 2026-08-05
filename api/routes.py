@@ -43,6 +43,7 @@ from api.agent_sessions import (
     read_session_lineage_report,
 )
 from integration.project_logging import get_logger
+from integration.agent_message_semantics.projection import drop_non_display_messages
 from api.compression_anchor import visible_messages_for_anchor
 from api.compression_recovery import (
     COMPRESSION_RECOVERY_ACTION_START_FOCUSED,
@@ -3818,7 +3819,7 @@ def _share_snapshot_messages_for_session(session, *, cli_meta: dict | None = Non
     sid = str(getattr(session, "session_id", "") or "").strip()
     current_messages = list(getattr(session, "messages", None) or [])
     if not sid:
-        return current_messages
+        return drop_non_display_messages(current_messages, action="share_projection_drop")
     profile = getattr(session, "profile", None)
     is_messaging = (
         _is_messaging_session_record(session)
@@ -3829,8 +3830,8 @@ def _share_snapshot_messages_for_session(session, *, cli_meta: dict | None = Non
         if cli_messages:
             if is_messaging:
                 return _merged_session_messages_for_display(session, cli_messages)
-            return list(cli_messages)
-    return current_messages
+            return drop_non_display_messages(cli_messages, action="share_projection_drop")
+    return drop_non_display_messages(current_messages, action="share_projection_drop")
 
 
 def _build_share_metadata_sidecar(
@@ -7429,20 +7430,23 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
     if cli_messages:
         if sidecar_messages and sidecar_messages != cli_messages:
             if len(sidecar_messages) >= len(cli_messages):
-                return merge_session_messages_append_only(
+                messages = merge_session_messages_append_only(
                     sidecar_messages,
                     cli_messages,
                     truncation_watermark=getattr(session, "truncation_watermark", None),
                 )
+                return drop_non_display_messages(messages, action="get_projection_drop")
             # Sidecar shorter than CLI: chronologically stitch both slices
             # (#2472) while visible-key-capping cross-source duplicates
             # (recovered/no-id sidecar vs id/_db_persisted state.db rows).
-            return chronological_merge_session_messages_for_display(
+            messages = chronological_merge_session_messages_for_display(
                 sidecar_messages,
                 cli_messages,
             )
-        return sidecar_messages if len(sidecar_messages) > len(cli_messages) else cli_messages
-    return sidecar_messages
+            return drop_non_display_messages(messages, action="get_projection_drop")
+        messages = sidecar_messages if len(sidecar_messages) > len(cli_messages) else cli_messages
+        return drop_non_display_messages(messages, action="get_projection_drop")
+    return drop_non_display_messages(sidecar_messages, action="get_projection_drop")
 
 
 
@@ -10837,6 +10841,9 @@ def handle_get(handler, parsed) -> bool:
                         state_db_messages,
                         truncation_watermark=getattr(s, "truncation_watermark", None),
                     )
+                _all_msgs = drop_non_display_messages(
+                    _all_msgs, action="get_projection_drop",
+                )
             else:
                 if is_messaging_session and cli_messages:
                     _all_msgs = _merged_session_messages_for_display(s, cli_messages)
@@ -11076,7 +11083,13 @@ def handle_get(handler, parsed) -> bool:
                                 if reconcile_cron_session_transcript(s):
                                     s.save(touch_updated_at=False)
                             raw = s.compact()
-                            raw["messages"] = list(getattr(s, "messages", []) or []) if load_messages else []
+                            raw["messages"] = (
+                                drop_non_display_messages(
+                                    getattr(s, "messages", []) or [],
+                                    action="get_projection_drop",
+                                )
+                                if load_messages else []
+                            )
                             raw["message_count"] = len(raw["messages"])
                             raw["tool_calls"] = getattr(s, "tool_calls", []) if load_messages else []
                             return j(handler, {"session": redact_session_data(raw)})
@@ -11125,7 +11138,13 @@ def handle_get(handler, parsed) -> bool:
             # Build the legacy dict response from the synthesized Session so
             # the wire shape stays byte-equivalent to the previous inline
             # synthesis (the frontend has been reading these exact keys).
-            msgs = list(synth.messages or [])
+            msgs = (
+                drop_non_display_messages(
+                    list(synth.messages or []),
+                    action="get_projection_drop",
+                )
+                if load_messages else []
+            )
             sess = {
                 "session_id": synth.session_id,
                 "title": synth.title,
@@ -14987,7 +15006,11 @@ def _handle_session_export(handler, parsed):
         s = get_session(sid)
     except KeyError:
         return bad(handler, "Session not found", 404)
-    safe = redact_session_data(s.__dict__)
+    export_payload = dict(s.__dict__)
+    export_payload["messages"] = drop_non_display_messages(
+        export_payload.get("messages"), action="export_projection_drop",
+    )
+    safe = redact_session_data(export_payload)
     payload = json.dumps(safe, ensure_ascii=False, indent=2)
     handler.send_response(200)
     handler.send_header("Content-Type", "application/json; charset=utf-8")
@@ -15107,7 +15130,10 @@ def _handle_sessions_search(handler, parsed):
                 sess = get_session_for_scan(s["session_id"])
                 if sess is None:
                     continue
-                msgs = sess.messages[:depth] if depth else sess.messages
+                visible_messages = drop_non_display_messages(
+                    sess.messages, action="search_projection_drop",
+                )
+                msgs = visible_messages[:depth] if depth else visible_messages
                 for m in msgs:
                     c = _session_search_message_text(m)
                     if q in str(c).lower():
@@ -23313,12 +23339,16 @@ def _handle_session_import_cli(handler, body):
                 "session_import_cli",
                 profile=getattr(existing, "profile", None),
             )
+        visible_messages = drop_non_display_messages(
+            existing.messages, action="import_projection_drop",
+        )
         return j(
             handler,
             {
                 "session": existing.compact()
                 | {
-                    "messages": existing.messages,
+                    "messages": visible_messages,
+                    "message_count": len(visible_messages),
                     "is_cli_session": True,
                     "read_only": bool((cli_meta or {}).get("read_only")),
                 },
@@ -23330,6 +23360,7 @@ def _handle_session_import_cli(handler, body):
     msgs = get_cli_session_messages(sid)
     if not msgs:
         return bad(handler, "Session not found in CLI store", 404)
+    visible_msgs = drop_non_display_messages(msgs, action="import_projection_drop")
 
     # Get profile, model, timestamps, and title from CLI session metadata
     profile = None
@@ -23371,7 +23402,7 @@ def _handle_session_import_cli(handler, body):
             break
 
     # Use the CLI session title if available (e.g., cron job name), otherwise derive from messages
-    title = cli_title or title_from(msgs, "CLI Session")
+    title = cli_title or title_from(visible_msgs, "CLI Session")
 
     # Auto-assign cron sessions to the dedicated "Cron Jobs" project (#1079)
     cron_project_id = None
@@ -23384,7 +23415,7 @@ def _handle_session_import_cli(handler, body):
             "title": title,
             "workspace": str(get_last_workspace()),
             "model": model,
-            "message_count": len(msgs),
+            "message_count": len(visible_msgs),
             "created_at": created_at,
             "updated_at": updated_at,
             "last_message_at": updated_at or created_at,
@@ -23399,7 +23430,7 @@ def _handle_session_import_cli(handler, body):
             "source_label": cli_source_label,
             "parent_session_id": cli_parent_session_id,
             "read_only": True,
-            "messages": msgs,
+            "messages": visible_msgs,
             "tool_calls": [],
         }
         return j(handler, {"session": session_payload, "imported": False})
@@ -23438,7 +23469,8 @@ def _handle_session_import_cli(handler, body):
         {
             "session": s.compact()
             | {
-                "messages": msgs,
+                "messages": visible_msgs,
+                "message_count": len(visible_msgs),
                 "is_cli_session": True,
             },
             "imported": True,

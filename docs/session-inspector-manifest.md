@@ -11,7 +11,7 @@ Session Inspector Manifest 是从会话活动派生出的轻量索引，用于�
 | Tasks | 当前轮 `todo` 工具产生的最新任务快照 | 历史流水、助手正文中的列表 |
 | Artifacts | 当前会话通过明确成果证据创建、修改或交付的文件/技能 | 搜索命中、目录列表、输入文件、跨字段推断 |
 | References | 明确成功 `skill_view` 的 canonical 技能 | 文件读取、搜索、列目录、助手普通提及 |
-| Turns | 按 user 消息划分的 per-turn artifacts/skill references 视图 | transcript 或完整执行历史 |
+| Turns | 按真实 user 消息划分的 per-turn artifacts/skill references 视图 | transcript 或完整执行历史、Agent internal scaffold、model-only context anchor |
 
 同一资源在一个 manifest 结果中只保留一个主归类，优先级为 `artifacts > references`。缺失字段保持为空或跳过，不从相似字段推断、复制或补全。
 
@@ -49,3 +49,4 @@ Artifacts 可来自成功写入工具的结构化参数/diff、成功 terminal �
 6. Store 中已有非空 artifact decision 的 turn 不重扫、不覆盖；empty decision 只允许严格同轮修复。
 7. 重放同一稳定 `tool_call_id` 不得产生第二次执行或跨 turn artifact 归属。
 8. 正常 `turns[]` 必须有 user anchor；聊天区 assistant 容器使用该 user 的 `_turn_key` 作为 `data-turn-key`。混合 transcript 的无 key user 只进入 diagnostics，不由 Manifest GET 猜号。
+9. 带 `_hermes_message_class: internal_scaffold` 的 Agent 控制消息，以及保留原始正文并带语义字段的 `context_anchor` 不产生 turn；其间的 assistant/tool/MEDIA 仍归属前一个真实 user turn。

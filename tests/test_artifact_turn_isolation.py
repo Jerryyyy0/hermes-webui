@@ -59,6 +59,98 @@ def test_stream_owned_tool_evidence_settles_bound_turn_before_transcript_merge(t
     ]
 
 
+def test_completed_settlement_drops_stream_artifact_removed_before_turn_end(tmp_path, monkeypatch):
+    from api import streaming
+    from api.session_manifest import build_session_manifest
+    from api.session_manifest_store import (
+        load_manifest_decided_turn_keys,
+        load_manifest_records,
+    )
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    old_preview = workspace / "preview-cover.jpg"
+    old_preview.write_bytes(b"jpg")
+    old_preview.rename(workspace / "preview-cover.png")
+    session = Session(
+        session_id="artifact-removed-before-complete",
+        workspace=str(workspace),
+        profile="ops",
+        active_stream_id="stream-complete",
+        messages=[
+            {"role": "user", "content": "生成预览", "_turn_key": "turn:1"},
+            {"role": "assistant", "content": "完成"},
+        ],
+    )
+    monkeypatch.setattr("api.session_manifest_store.STATE_DIR", tmp_path / "state")
+    streaming.STREAM_LIVE_MANIFEST["stream-complete"] = {
+        "artifacts": [{
+            "turn_key": "turn:1",
+            "path": "preview-cover.jpg",
+            "source_tool": "terminal",
+            "preview": "file",
+        }],
+        "turns": [],
+    }
+
+    result = streaming._persist_turn_artifact_paths(
+        session,
+        "turn:1",
+        stream_id="stream-complete",
+        terminal_reason="completed",
+    )
+
+    assert result == {
+        "status": "persisted",
+        "decision": "empty",
+        "turn_key": "turn:1",
+        "artifact_count": 0,
+    }
+    assert load_manifest_records(session) == []
+    assert load_manifest_decided_turn_keys(session) == {"turn:1"}
+    manifest = build_session_manifest(session)
+    assert manifest["artifacts"] == []
+    assert manifest["turns"][0]["artifacts"] == []
+
+
+def test_cancelled_settlement_does_not_persist_removed_stream_artifact(tmp_path, monkeypatch):
+    from api import streaming
+    from api.session_manifest_store import (
+        load_manifest_decided_turn_keys,
+        load_manifest_records,
+    )
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    session = _session(workspace)
+    monkeypatch.setattr("api.session_manifest_store.STATE_DIR", tmp_path / "state")
+    streaming.STREAM_LIVE_MANIFEST["stream-old"] = {
+        "artifacts": [{
+            "turn_key": "turn:7",
+            "path": "preview-cover.jpg",
+            "source_tool": "terminal",
+            "preview": "file",
+        }],
+        "turns": [],
+    }
+
+    result = streaming._persist_turn_artifact_paths(
+        session,
+        "turn:7",
+        stream_id="stream-old",
+        terminal_reason="cancelled",
+    )
+
+    assert result == {
+        "status": "pending",
+        "stage": "evidence_unsettled",
+        "turn_key": "turn:7",
+        "artifact_count": 0,
+    }
+    assert load_manifest_records(session) == []
+    assert load_manifest_decided_turn_keys(session) == set()
+
+
 def test_synthetic_verification_nudge_does_not_block_bound_artifact_settlement(tmp_path, monkeypatch):
     from api import streaming
     from api.session_manifest_store import load_manifest_records
@@ -108,6 +200,56 @@ def test_synthetic_verification_nudge_does_not_block_bound_artifact_settlement(t
         "turn_key": "turn:8",
         "artifact_count": 1,
     }
+    assert [(row["turn_key"], row["path"]) for row in load_manifest_records(session)] == [
+        ("turn:8", "result.png"),
+    ]
+
+
+def test_new_semantic_scaffold_does_not_block_bound_artifact_settlement(tmp_path, monkeypatch):
+    from api import streaming
+    from api.session_manifest_store import load_manifest_records
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    artifact = workspace / "result.png"
+    artifact.write_bytes(b"png")
+    session = Session(
+        session_id="artifact-semantic-scaffold",
+        workspace=str(workspace),
+        profile="ops",
+        active_stream_id="stream-semantic",
+        messages=[
+            {"role": "user", "content": "生成图片", "_turn_key": "turn:8"},
+            {"role": "assistant", "content": "I will verify this."},
+            {
+                "role": "user",
+                "content": "[System: continue]",
+                "_hermes_message_class": "internal_scaffold",
+                "_hermes_scaffold_kind": "length_continuation",
+            },
+            {"role": "assistant", "content": "MEDIA: result.png"},
+        ],
+    )
+    monkeypatch.setattr("api.session_manifest_store.STATE_DIR", tmp_path / "state")
+    streaming.STREAM_LIVE_MANIFEST["stream-semantic"] = {
+        "artifacts": [{
+            "turn_key": "turn:8",
+            "path": "result.png",
+            "source_tool": "write_file",
+            "preview": "file",
+        }],
+        "turns": [],
+    }
+
+    result = streaming._persist_turn_artifact_paths(
+        session,
+        "turn:8",
+        stream_id="stream-semantic",
+        terminal_reason="completed",
+        expected_user_text="生成图片",
+    )
+
+    assert result["status"] == "persisted"
     assert [(row["turn_key"], row["path"]) for row in load_manifest_records(session)] == [
         ("turn:8", "result.png"),
     ]

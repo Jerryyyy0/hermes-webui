@@ -489,6 +489,62 @@ def test_api_session_full_load_does_not_duplicate_state_db_prefix(monkeypatch, t
     assert handler.response_json["session"]["message_count"] == 6
 
 
+def test_api_session_hides_semantic_control_rows_before_turn_aligned_window(monkeypatch, tmp_path):
+    """The visible paging coordinate space excludes Agent-only rows first."""
+    import api.routes as routes
+
+    sid = "webui_semantics_projection_window"
+    sidecar_messages = [
+        {"role": "user", "content": "修复问题", "timestamp": 1000.0, "_turn_key": "turn:8"},
+        {
+            "role": "assistant",
+            "content": "premature done",
+            "timestamp": 1001.0,
+            "_hermes_message_class": "internal_scaffold",
+            "_hermes_scaffold_kind": "verification_stop",
+        },
+        {
+            "role": "user",
+            "content": "[System: verify]",
+            "timestamp": 1002.0,
+            "_hermes_message_class": "internal_scaffold",
+            "_hermes_scaffold_kind": "verification_stop",
+        },
+    ]
+    _install_test_session(monkeypatch, tmp_path, sid, sidecar_messages)
+    _make_state_db(
+        tmp_path / "state.db",
+        sid,
+        [
+            {"role": "user", "content": "修复问题", "timestamp": 1000.0},
+            {"role": "user", "content": "[Todo: run focused tests]", "timestamp": 1002.5},
+            {"role": "assistant", "content": "已验证并修复", "timestamp": 1003.0},
+        ],
+    )
+    with sqlite3.connect(tmp_path / "state.db") as conn:
+        conn.execute("ALTER TABLE messages ADD COLUMN hermes_message_class TEXT")
+        conn.execute("ALTER TABLE messages ADD COLUMN hermes_scaffold_kind TEXT")
+        conn.execute(
+            "UPDATE messages SET hermes_message_class = ?, hermes_scaffold_kind = ? "
+            "WHERE content = ?",
+            ("context_anchor", "todo_snapshot", "[Todo: run focused tests]"),
+        )
+
+    handler = _GetHandler(
+        f"/api/session?session_id={sid}&messages=1&resolve_model=0&msg_limit=2&turn_align=1"
+    )
+    routes.handle_get(handler, urlparse(handler.path))
+
+    assert handler.status == 200
+    session = handler.response_json["session"]
+    assert [message["content"] for message in session["messages"]] == [
+        "修复问题",
+        "已验证并修复",
+    ]
+    assert session["message_count"] == 2
+    assert session["_messages_offset"] == 0
+
+
 def test_api_session_includes_state_db_messages_newer_than_webui_sidecar(monkeypatch, tmp_path):
     import api.routes as routes
 
