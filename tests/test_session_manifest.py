@@ -3319,6 +3319,19 @@ def test_next_turn_key_ignores_non_user():
     assert _next_turn_key(messages) == 'turn:1'
 
 
+def test_next_turn_key_ignores_synthetic_user():
+    messages = [
+        {'role': 'user', 'content': 'real', '_turn_key': 'turn:8'},
+        {
+            'role': 'user',
+            'content': '[System: run verification]',
+            '_turn_key': 'turn:99',
+            '_verification_stop_synthetic': True,
+        },
+    ]
+    assert _next_turn_key(messages) == 'turn:9'
+
+
 def test_next_turn_key_handles_invalid_key():
     """跳过无效的 _turn_key 值"""
     messages = [
@@ -3356,6 +3369,59 @@ def test_message_turns_falls_back_to_index():
     assert len(turns) == 2
     assert turns[0]['turn_key'] == 'turn:0'
     assert turns[1]['turn_key'] == 'turn:2'
+
+
+@pytest.mark.parametrize('marker', [
+    '_verification_stop_synthetic',
+    '_pre_verify_synthetic',
+])
+def test_message_turns_ignore_synthetic_nudge_and_preserve_interim_assistant(marker):
+    messages = [
+        {'role': 'user', 'content': '生成图片', '_turn_key': 'turn:8'},
+        {'role': 'assistant', 'content': 'premature done'},
+        {'role': 'user', 'content': '[System: run verification]', marker: True},
+        {'role': 'assistant', 'content': '已验证并修复'},
+        {'role': 'assistant', 'content': 'MEDIA: result.png'},
+    ]
+
+    turns = _message_turns(messages)
+
+    assert len(turns) == 1
+    assert turns[0]['turn_key'] == 'turn:8'
+    assert turns[0]['start_msg_idx'] == 0
+    assert turns[0]['end_msg_idx'] == 4
+    assert [message['content'] for message in _turn_message_slice(messages, 'turn:8')] == [
+        '生成图片',
+        'premature done',
+        '[System: run verification]',
+        '已验证并修复',
+        'MEDIA: result.png',
+    ]
+
+
+def test_manifest_diagnostics_ignore_synthetic_user_without_turn_key(tmp_path, monkeypatch):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    session = Session(
+        session_id='manifest-synthetic-nudge',
+        workspace=str(workspace),
+        messages=[
+            {'role': 'user', 'content': '生成图片', '_turn_key': 'turn:8'},
+            {'role': 'assistant', 'content': 'premature done'},
+            {
+                'role': 'user',
+                'content': '[System: run verification]',
+                '_verification_stop_synthetic': True,
+            },
+            {'role': 'assistant', 'content': '已验证并修复'},
+        ],
+    )
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+
+    manifest = build_session_manifest(session)
+
+    assert [turn['turn_key'] for turn in manifest['turns']] == ['turn:8']
+    assert manifest['diagnostics']['missing_turn_key_message_indices'] == []
 
 
 def test_ensure_turn_keys_does_not_invent_active_turn_numbers():

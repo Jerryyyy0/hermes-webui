@@ -1537,6 +1537,8 @@ def _latest_user_turn_binding(session, msg_text: str, turn_key: str) -> dict[str
             continue
         if _is_context_compression_marker(message):
             continue
+        if _is_synthetic_control_message(message):
+            continue
         actual = str(message.get('_turn_key') or '').strip()
         if not actual:
             return {'status': 'failed', 'stage': 'missing_key', 'actual_turn_key': ''}
@@ -5597,13 +5599,11 @@ def _merge_display_messages_after_agent_result(
         if not _is_context_compression_marker(m)
         and not _is_compressed_context_tool_result_summary_message(m)
     ]
-    # Drop Hermes Agent internal verify-loop scaffolding (synthetic "premature
-    # done" answer + the "[System: ...verification evidence...]" nudge) before
-    # it can become a visible user/assistant turn. The agent flags these with
-    # structured markers (_verification_stop_synthetic / _pre_verify_synthetic)
-    # and already keeps them out of its own durable store; honor the same
-    # markers here so they never leak into the WebUI transcript. Filter all
-    # three inputs consistently so prefix/delta detection below stays aligned.
+    # Drop Hermes Agent's synthetic verification nudge before it can become a
+    # visible user turn. The attempted assistant answer before that nudge is
+    # real interim content and intentionally has no marker, so it remains in
+    # the transcript. Filter all three inputs consistently so prefix/delta
+    # detection below stays aligned.
     # (#5334; same internal-control-message class as #3320/#3821/#4373/#4875)
     previous_display = _drop_synthetic_control_messages(previous_display)
     # Deduplicate stale _partial messages that accumulated in previous_display.
@@ -5632,6 +5632,8 @@ def _merge_display_messages_after_agent_result(
     previous_display = _deduped
     previous_context = list(previous_context or [])
     result_messages = list(result_messages or [])
+    previous_context = _drop_synthetic_control_messages(previous_context)
+    result_messages = _drop_synthetic_control_messages(result_messages)
     if not result_messages:
         return previous_display
 
@@ -5795,6 +5797,8 @@ def _merge_display_messages_after_agent_result(
         candidates = candidates[:insert_at] + [current_user_msg] + candidates[insert_at:]
 
     for msg in candidates:
+        if _is_synthetic_control_message(msg):
+            continue
         if (
             _is_context_compression_marker(msg)
             or _is_compressed_context_tool_result_summary_message(msg)

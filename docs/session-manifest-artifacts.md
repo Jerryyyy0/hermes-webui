@@ -196,7 +196,7 @@ python .../md2word.py INPUT OUTPUT [options]
 
 ### 4.7 Turn 绑定与 orphan
 
-当前 worker 结算前校验最新真实 user 的 `_turn_key` 与 `stream_turn_key`。缺 key、key 冲突或 user 内容边界冲突时，不写 store record，也不创建 empty decision。normal、gateway、error 与 cancel 路径共用同一个结算入口；任何非 `persisted` 结果都会在 turn journal 记录 expected/actual key、stage 与 terminal reason。
+当前 worker 结算前校验最新真实 user 的 `_turn_key` 与 `stream_turn_key`。带 `_verification_stop_synthetic` 或 `_pre_verify_synthetic` 的 Agent 内部 user nudge 不是真实 user，必须跳过；未标记的 interim assistant 仍是正常可见内容。缺 key、key 冲突或 user 内容边界冲突时，不写 store record，也不创建 empty decision。normal、gateway、error 与 cancel 路径共用同一个结算入口；任何非 `persisted` 结果都会在 turn journal 记录 expected/actual key、stage 与 terminal reason。
 
 历史 store record 若找不到同 key 的 user anchor，仍保留在顶层 `artifacts`，并把 key 暴露在 `diagnostics.orphan_turn_keys`；它不会进入正常 `turns[]`，因此不会产生错误的 per-turn chip。历史归属修复必须使用显式 old key → new key 映射，不能按编号相邻或文本相似度自动迁移。
 

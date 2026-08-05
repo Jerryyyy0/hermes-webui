@@ -1,18 +1,16 @@
 """Regression tests for issue #5334.
 
 The Hermes Agent runs an internal verify-before-finish loop. When it fires, it
-appends a synthetic assistant "premature done" answer plus a synthetic ``user``
-nudge whose text looks like::
+preserves the attempted assistant answer as real interim content, then appends
+a synthetic ``user`` nudge whose text looks like::
 
     [System: You edited code in this turn, but the workspace does not have fresh
      passing verification evidence yet...]
 
-Those turns exist only to drive the loop for one more API round-trip. The agent
-flags each with a structured marker (``_verification_stop_synthetic`` for the
-verify-on-stop path, ``_pre_verify_synthetic`` for the plugin ``pre_verify``
-path) and keeps them out of its own durable store. WebUI never honored those
-markers, so the nudge leaked into the visible transcript — the same class of
-internal-control-message leak as #3320/#3821/#4373/#4875.
+The nudge alone carries a structured marker
+(``_verification_stop_synthetic`` for verify-on-stop,
+``_pre_verify_synthetic`` for plugin ``pre_verify``) and must not reach the
+visible transcript. The unmarked interim assistant answer must remain visible.
 
 These tests pin the contract that a marker-flagged synthetic turn is dropped
 from the merged display transcript while a normal user message is preserved.
@@ -66,13 +64,13 @@ def test_normal_user_message_is_not_classified_as_control():
 def test_drop_synthetic_control_messages_filters_only_flagged_rows():
     messages = [
         {"role": "user", "content": "Fix the bug."},
-        {"role": "assistant", "content": "premature done", "_verification_stop_synthetic": True},
+        {"role": "assistant", "content": "premature done"},
         {"role": "user", "content": VERIFICATION_STOP_NUDGE, "_verification_stop_synthetic": True},
         {"role": "assistant", "content": "Fixed and verified."},
     ]
     cleaned = streaming._drop_synthetic_control_messages(messages)
     contents = [m.get("content") for m in cleaned]
-    assert contents == ["Fix the bug.", "Fixed and verified."]
+    assert contents == ["Fix the bug.", "premature done", "Fixed and verified."]
     assert all(
         not m.get("_verification_stop_synthetic") and not m.get("_pre_verify_synthetic")
         for m in cleaned
@@ -88,7 +86,7 @@ def test_verification_stop_nudge_never_appears_in_rendered_transcript():
     previous_context = [{"role": "user", "content": "Fix the bug."}]
     result_messages = [
         {"role": "user", "content": "Fix the bug."},
-        {"role": "assistant", "content": "premature done", "_verification_stop_synthetic": True},
+        {"role": "assistant", "content": "premature done"},
         {"role": "user", "content": VERIFICATION_STOP_NUDGE, "_verification_stop_synthetic": True},
         {"role": "assistant", "content": "Ran tests; all green. Fixed."},
     ]
@@ -106,7 +104,11 @@ def test_verification_stop_nudge_never_appears_in_rendered_transcript():
     assert all(not streaming._is_synthetic_control_message(m) for m in merged)
     # The real turn is preserved end to end.
     contents = [m.get("content") for m in merged]
-    assert contents == ["Fix the bug.", "Ran tests; all green. Fixed."]
+    assert contents == [
+        "Fix the bug.",
+        "premature done",
+        "Ran tests; all green. Fixed.",
+    ]
 
 
 def test_pre_verify_nudge_never_appears_in_rendered_transcript():
@@ -114,7 +116,7 @@ def test_pre_verify_nudge_never_appears_in_rendered_transcript():
     previous_context = [{"role": "user", "content": "Ship the feature."}]
     result_messages = [
         {"role": "user", "content": "Ship the feature."},
-        {"role": "assistant", "content": "premature done", "_pre_verify_synthetic": True},
+        {"role": "assistant", "content": "premature done"},
         {"role": "user", "content": "[System: run tests]", "_pre_verify_synthetic": True},
         {"role": "assistant", "content": "Verified and clean."},
     ]
@@ -128,7 +130,42 @@ def test_pre_verify_nudge_never_appears_in_rendered_transcript():
 
     assert all(not streaming._is_synthetic_control_message(m) for m in merged)
     contents = [m.get("content") for m in merged]
-    assert contents == ["Ship the feature.", "Verified and clean."]
+    assert contents == ["Ship the feature.", "premature done", "Verified and clean."]
+
+
+def test_synthetic_nudge_in_previous_context_is_not_backfilled():
+    previous_display = [
+        {"role": "user", "content": "Fix the bug.", "_turn_key": "turn:8"},
+        {"role": "assistant", "content": "premature done"},
+    ]
+    previous_context = [
+        {"role": "user", "content": "Fix the bug.", "_turn_key": "turn:8"},
+        {"role": "assistant", "content": "premature done"},
+        {
+            "role": "user",
+            "content": VERIFICATION_STOP_NUDGE,
+            "_verification_stop_synthetic": True,
+        },
+    ]
+    result_messages = [
+        {"role": "user", "content": "Fix the bug.", "_turn_key": "turn:8"},
+        {"role": "assistant", "content": "premature done"},
+        {"role": "assistant", "content": "Ran tests; all green. Fixed."},
+    ]
+
+    merged = streaming._merge_display_messages_after_agent_result(
+        previous_display,
+        previous_context,
+        result_messages,
+        "Fix the bug.",
+        canonical_turn_key="turn:8",
+    )
+
+    assert [message.get("content") for message in merged] == [
+        "Fix the bug.",
+        "premature done",
+        "Ran tests; all green. Fixed.",
+    ]
 
 
 def test_normal_user_message_is_not_excluded_from_transcript():

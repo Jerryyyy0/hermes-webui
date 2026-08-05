@@ -59,6 +59,60 @@ def test_stream_owned_tool_evidence_settles_bound_turn_before_transcript_merge(t
     ]
 
 
+def test_synthetic_verification_nudge_does_not_block_bound_artifact_settlement(tmp_path, monkeypatch):
+    from api import streaming
+    from api.session_manifest_store import load_manifest_records
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    artifact = workspace / "result.png"
+    artifact.write_bytes(b"png")
+    session = Session(
+        session_id="artifact-synthetic-nudge",
+        workspace=str(workspace),
+        profile="ops",
+        active_stream_id="stream-synthetic",
+        messages=[
+            {"role": "user", "content": "生成图片", "_turn_key": "turn:8"},
+            {"role": "assistant", "content": "premature done"},
+            {
+                "role": "user",
+                "content": "[System: run verification]",
+                "_verification_stop_synthetic": True,
+            },
+            {"role": "assistant", "content": "MEDIA: result.png"},
+        ],
+    )
+    monkeypatch.setattr("api.session_manifest_store.STATE_DIR", tmp_path / "state")
+    streaming.STREAM_LIVE_MANIFEST["stream-synthetic"] = {
+        "artifacts": [{
+            "turn_key": "turn:8",
+            "path": "result.png",
+            "source_tool": "write_file",
+            "preview": "file",
+        }],
+        "turns": [],
+    }
+
+    result = streaming._persist_turn_artifact_paths(
+        session,
+        "turn:8",
+        stream_id="stream-synthetic",
+        terminal_reason="completed",
+        expected_user_text="生成图片",
+    )
+
+    assert result == {
+        "status": "persisted",
+        "decision": "artifacts",
+        "turn_key": "turn:8",
+        "artifact_count": 1,
+    }
+    assert [(row["turn_key"], row["path"]) for row in load_manifest_records(session)] == [
+        ("turn:8", "result.png"),
+    ]
+
+
 def test_final_assistant_existing_file_augments_live_stream_evidence(tmp_path, monkeypatch):
     from api import streaming
     from api.session_manifest_store import load_manifest_records
