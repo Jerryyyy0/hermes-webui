@@ -693,6 +693,29 @@ def test_run_mine_truncates_long_questions_before_prompting(tmp_path):
     assert ("x" * generation.MAX_QUESTION_CHARS + "…") in user_prompt
 
 
+def test_validate_cluster_response_truncates_members_to_max():
+    questions = {f"q{i}" for i in range(8)}
+    payload = json.dumps(
+        [
+            {
+                "title": "簇A",
+                "description": "d",
+                "trigger_language": "tA",
+                "members": [f"q{i}" for i in range(8)],
+                "count": 8,
+            },
+        ],
+        ensure_ascii=False,
+    )
+
+    tasks, reason = generation.validate_cluster_response(payload, questions)
+    assert reason == "ok"
+    assert len(tasks) == 1
+    members = json.loads(tasks[0]["members_json"])
+    assert len(members) == generation.MAX_MEMBERS_PER_CLUSTER
+    assert tasks[0]["query_count"] == generation.MAX_MEMBERS_PER_CLUSTER
+
+
 def test_run_mine_failure_records_error(tmp_path, capsys):
     questions = [{"text": f"q{i}"} for i in range(10)]
     fp = collectors.fingerprint_for_cluster(questions)

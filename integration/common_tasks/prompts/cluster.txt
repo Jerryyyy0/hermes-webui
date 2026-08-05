@@ -4,12 +4,12 @@
 {numbered_questions}
 
 要求:
-- 每个簇需要: title(≤15字)、description(≤50字,概括该簇意图)、trigger_language(≤30字,该簇最典型的发起话术)、members(归入该簇的原始问题文本列表)、count(成员数)。
+- 每个簇需要: title(≤15字)、description(≤50字,概括该簇意图)、trigger_language(≤30字,该簇最典型的发起话术)、members(归入该簇的原始问题文本列表,最多保留 5 个最具代表性的成员)、count(members 数组的长度)。
 - 同一问题只能归入一个簇;语义相近的应合并(如「写周报」「生成周报」「本周报」归一类)。
 - 单条独成簇的也要输出(count=1)。
 - title/description/trigger_language 用简体中文;不得编造问题中没有的能力。
 - 只输出 JSON 数组,无解释、无 Markdown、无代码块。
 
 Few-shot:
-输入:["帮我写周报","生成周报","整理会议纪要","本周报怎么写","整理今天的会"]
-正确:[{{"title":"生成周报","description":"汇总本周工作生成周报","trigger_language":"帮我写周报","members":["帮我写周报","生成周报","本周报怎么写"],"count":3}},{{"title":"整理会议纪要","description":"从会议记录提取要点","trigger_language":"整理会议纪要","members":["整理会议纪要","整理今天的会"],"count":2}}]
+输入:["帮我写周报","生成周报","整理会议纪要","本周报怎么写","整理今天的会","周报模板","本周工作总结","帮我写一份周报","周报范文","写个周报"]
+正确:[{{"title":"生成周报","description":"汇总本周工作生成周报","trigger_language":"帮我写周报","members":["帮我写周报","生成周报","本周报怎么写","帮我写一份周报","写个周报"],"count":5}},{{"title":"整理会议纪要","description":"从会议记录提取要点","trigger_language":"整理会议纪要","members":["整理会议纪要","整理今天的会"],"count":2}}]

@@ -38,7 +38,7 @@ CLUSTER_SYSTEM_PROMPT = """你是用户问题聚类器。
 必须遵守:
 1. 只输出简体中文(title/description/trigger_language)。
 2. 只输出一个 JSON 数组,每个元素含 title/description/trigger_language/members/count 字段。
-3. title ≤ 15 字;description ≤ 50 字;trigger_language ≤ 30 字;members 是归入该簇的原始问题文本列表;count 是成员数。
+3. title ≤ 15 字;description ≤ 50 字;trigger_language ≤ 30 字;members 是归入该簇的原始问题文本列表,最多保留 5 个最具代表性的成员(若簇内成员多于 5 个,挑选最典型的 5 条);count 是 members 数组的长度。
 4. 同一问题只能归入一个簇;语义相近的应合并(如「写周报」「生成周报」「本周报」归一类)。
 5. 单条独成簇的也要输出(count=1);不得编造问题中没有的能力。
 6. 不得输出 Markdown、代码块、标题、编号、解释或前后缀。"""
@@ -48,7 +48,8 @@ FAILURE_RETRY_SECONDS = 3
 MIN_QUESTIONS_FOR_MINING = 5
 TOP_N = 3
 USER_PROMPT_LOG_MAX_CHARS = 2000
-MAX_QUESTION_CHARS = 80
+MAX_QUESTION_CHARS = 50
+MAX_MEMBERS_PER_CLUSTER = 5
 
 
 def _log_line(event: str, fields: dict[str, Any] | None = None) -> str:
@@ -713,6 +714,8 @@ def validate_cluster_response(
         if not all(isinstance(m, str) for m in members):
             continue
         valid_members = [m for m in members if m in original_questions]
+        if len(valid_members) > MAX_MEMBERS_PER_CLUSTER:
+            valid_members = valid_members[:MAX_MEMBERS_PER_CLUSTER]
         count = len(valid_members)
         if count < 3:
             continue
