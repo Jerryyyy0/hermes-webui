@@ -5,7 +5,6 @@ GET /api/integration/common_tasks?profile=xxx
 
 from __future__ import annotations
 
-from pathlib import Path
 from urllib.parse import parse_qs
 
 from api.helpers import bad, j
@@ -27,8 +26,8 @@ def try_handle_get(handler, parsed) -> bool:
     if not row:
         bad(handler, "Profile 不存在", 404)
         return True
-    profile_path = Path(row["path"])
-    tasks, _state = store.read_all(profile_path)
+    profile_path = row["path"]
+    tasks, _state = store.read_all(profile)
     generation.enqueue_missing_or_stale(profile, profile_path)
     items = store.pick_top3(tasks)
     if any(t["source"] == "mined" for t in items):

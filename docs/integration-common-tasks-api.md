@@ -2,7 +2,7 @@
 
 Base URL：`http://127.0.0.1:8787`（按实际端口调整）
 
-**范围**：HTTP 接口仅服务岗位助理欢迎页「常办任务」卡片的读取。数据从该 profile 的 WebUI 会话日志中聚类挖掘而来,首次进入或挖掘失败时由 LLM 结合人设/技能生成 seed 兜底。本地存储为 `<profile_home>/common_tasks.db`。
+**范围**：HTTP 接口仅服务岗位助理欢迎页「常办任务」卡片的读取。数据从该 profile 的 WebUI 会话日志中聚类挖掘而来,首次进入或挖掘失败时由 LLM 结合人设/技能生成 seed 兜底。本地存储在全局 `STATE_DIR/session_manifest.db`（与 session manifest 同库,通过 `profile` 列区分助理）,不再为每个 profile 单独创建 `common_tasks.db`。
 
 **启用条件**：`HERMES_INTEGRATION=1`。后端单线程 worker 串行处理 seed/cluster 任务,冷却 10min,失败重试 3s。
 

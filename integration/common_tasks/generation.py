@@ -164,27 +164,30 @@ def enqueue(profile: str, profile_path: Path, kind: str, fingerprint: str = "") 
 def enqueue_missing_or_stale(profile: str, profile_path: Path) -> None:
     """Decide whether to enqueue a seed or mine job for this profile.
 
-    Mirrors ``assistant_bubbles.generation.should_generate`` gating: a
-    ``retry_after`` in the future blocks both seed and mine enqueues, so a
-    failing LLM is not hammered on every API call. Seed is re-enqueued as
-    long as ``seed_generated_at`` is unset (i.e. real seed never succeeded,
-    even if fallback placeholder rows are present).
+    Priority: mine real conversations when enough user questions exist
+    (better signal than LLM-generated seed from persona). Falls back to seed
+    generation only when conversation logs are insufficient. This runs on
+    server startup via ``start_pregeneration`` and on each API call, so a
+    profile with existing conversation logs will be mined directly on first
+    boot instead of waiting for seed generation.
+
+    ``retry_after`` in the future blocks both enqueues so a failing LLM is
+    not hammered on every call.
     """
-    _tasks, state = store.read_all(profile_path)
+    _tasks, state = store.read_all(profile)
     now = time.time()
     retry_after = _float(state.get("retry_after"))
     if retry_after and retry_after > now:
         return
-    if not state.get("seed_generated_at"):
-        enqueue(profile, profile_path, "seed")
-        return
     questions = collectors.collect_recent_user_questions(profile)
     dedup_count = len({q["text"] for q in questions})
-    if dedup_count < MIN_QUESTIONS_FOR_MINING:
+    if dedup_count >= MIN_QUESTIONS_FOR_MINING:
+        fp = collectors.fingerprint_for_cluster(questions)
+        if _should_mine(fp, state):
+            enqueue(profile, profile_path, "mine", fp)
         return
-    fp = collectors.fingerprint_for_cluster(questions)
-    if _should_mine(fp, state):
-        enqueue(profile, profile_path, "mine", fp)
+    if not state.get("seed_generated_at"):
+        enqueue(profile, profile_path, "seed")
 
 
 def start_pregeneration() -> None:
@@ -270,7 +273,7 @@ def _run_task(task: CommonTaskJob) -> None:
 def _run_seed(task: CommonTaskJob, profile_path: Path) -> None:
     context = collectors.collect_seed_context(task.profile, profile_path)
     if not task.model:
-        store.write_seed_tasks(profile_path, _fallback_seed_tasks(context))
+        store.write_seed_tasks(task.profile, _fallback_seed_tasks(context))
         _emit_info(
             "seed_succeeded",
             {
@@ -311,7 +314,7 @@ def _run_seed(task: CommonTaskJob, profile_path: Path) -> None:
     if tasks is None:
         _write_seed_failure(task, profile_path, context, reason=f"seed_{reason}")
         return
-    store.write_seed_tasks(profile_path, tasks)
+    store.write_seed_tasks(task.profile, tasks)
     _emit_info(
         "seed_succeeded",
         {
@@ -341,7 +344,7 @@ def _write_seed_failure(
     retry_after = now + FAILURE_RETRY_SECONDS
     fallback = _fallback_seed_tasks(context)
     store.write_seed_placeholder(
-        profile_path,
+        task.profile,
         fallback,
         retry_after=retry_after,
         last_error=str(reason),
@@ -369,7 +372,7 @@ def _run_mine(task: CommonTaskJob, profile_path: Path) -> None:
         return
     if not task.model:
         store.replace_mined_tasks(
-            profile_path, [], current_fp, success=False, last_error="missing_model"
+            task.profile, [], current_fp, success=False, last_error="missing_model"
         )
         _emit_warning(
             "mine_skipped",
@@ -409,7 +412,7 @@ def _run_mine(task: CommonTaskJob, profile_path: Path) -> None:
     )
     if content is None:
         store.replace_mined_tasks(
-            profile_path, [], current_fp, success=False, last_error=str(error)[:200]
+            task.profile, [], current_fp, success=False, last_error=str(error)[:200]
         )
         _emit_warning(
             "mine_failed",
@@ -436,7 +439,7 @@ def _run_mine(task: CommonTaskJob, profile_path: Path) -> None:
     tasks, reason = validate_cluster_response(content, original_texts)
     if tasks is None:
         store.replace_mined_tasks(
-            profile_path, [], current_fp, success=False, last_error=f"cluster_{reason}"[:200]
+            task.profile, [], current_fp, success=False, last_error=f"cluster_{reason}"[:200]
         )
         _emit_warning(
             "mine_rejected",
@@ -449,7 +452,7 @@ def _run_mine(task: CommonTaskJob, profile_path: Path) -> None:
             },
         )
         return
-    store.replace_mined_tasks(profile_path, tasks, current_fp, success=True)
+    store.replace_mined_tasks(task.profile, tasks, current_fp, success=True)
     _emit_info(
         "mine_succeeded",
         {

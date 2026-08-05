@@ -2,7 +2,20 @@ import json
 import time
 from unittest.mock import patch
 
+import pytest
+
 from integration.common_tasks import collectors, generation, store
+
+
+@pytest.fixture(autouse=True)
+def _isolated_state_dir(monkeypatch, tmp_path):
+    """Route common_tasks store reads/writes at tmp_path/session_manifest.db.
+
+    generation._run_seed/_run_mine call store.write_* with task.profile and no
+    db_path override, so they resolve to STATE_DIR/session_manifest.db. Pin
+    that to the test's tmp_path to keep tests hermetic.
+    """
+    monkeypatch.setattr("integration.common_tasks.store.STATE_DIR", tmp_path)
 
 
 def _make_job(profile_path, *, kind="seed", fingerprint="", provider="test", model="test-model"):
@@ -442,7 +455,7 @@ def test_fallback_seed_tasks_defaults_display_name_to_hermes():
 
 def test_enqueue_missing_or_stale_blocks_when_retry_after_in_future(tmp_path):
     store.write_seed_placeholder(
-        tmp_path,
+        "alice",
         [{"title": "占位", "trigger_language": "t"}],
         retry_after=time.time() + 60,
         last_error="boom",
@@ -466,8 +479,25 @@ def test_enqueue_missing_or_stale_enqueues_seed_when_no_seed_generated_at(tmp_pa
     assert enqueued[0][2] == "seed"
 
 
+def test_enqueue_missing_or_stale_mines_conversation_logs_on_startup_without_seed(tmp_path):
+    """Server startup: if conversation logs exist, mine directly even without seed."""
+    questions = [{"text": f"q{i}"} for i in range(10)]
+    enqueued = []
+
+    with patch(
+        "integration.common_tasks.collectors.collect_recent_user_questions",
+        return_value=questions,
+    ), patch("integration.common_tasks.generation.enqueue", lambda *args: enqueued.append(args)):
+        generation.enqueue_missing_or_stale("alice", tmp_path)
+
+    assert len(enqueued) == 1
+    assert enqueued[0][0] == "alice"
+    assert enqueued[0][2] == "mine"
+    assert enqueued[0][3] == collectors.fingerprint_for_cluster(questions)
+
+
 def test_enqueue_missing_or_stale_skips_when_too_few_unique_questions(tmp_path):
-    store.write_seed_tasks(tmp_path, [{"title": "种子", "trigger_language": "t"}])
+    store.write_seed_tasks("alice", [{"title": "种子", "trigger_language": "t"}])
     enqueued = []
 
     with patch(
@@ -480,10 +510,10 @@ def test_enqueue_missing_or_stale_skips_when_too_few_unique_questions(tmp_path):
 
 
 def test_enqueue_missing_or_stale_enqueues_mine_when_questions_sufficient_and_stale(tmp_path):
-    store.write_seed_tasks(tmp_path, [{"title": "种子", "trigger_language": "t"}])
+    store.write_seed_tasks("alice", [{"title": "种子", "trigger_language": "t"}])
     # write_seed_tasks stamps last_attempt_at = now; back-date it past FAILURE_RETRY_SECONDS
     # so _should_mine does not treat this as a recent failed attempt on a new fingerprint.
-    store.update_state(tmp_path, "last_attempt_at", str(time.time() - 60))
+    store.update_state("alice", "last_attempt_at", str(time.time() - 60))
     questions = [{"text": f"q{i}"} for i in range(10)]
     enqueued = []
 
@@ -500,9 +530,9 @@ def test_enqueue_missing_or_stale_enqueues_mine_when_questions_sufficient_and_st
 
 def test_enqueue_missing_or_stale_skips_mine_when_within_success_cooldown(tmp_path):
     fp = collectors.fingerprint_for_cluster([{"text": f"q{i}"} for i in range(10)])
-    store.write_seed_tasks(tmp_path, [{"title": "种子", "trigger_language": "t"}])
+    store.write_seed_tasks("alice", [{"title": "种子", "trigger_language": "t"}])
     store.replace_mined_tasks(
-        tmp_path,
+        "alice",
         [{"title": "挖掘", "trigger_language": "t", "members_json": "[]"}],
         fp,
         success=True,
@@ -531,7 +561,7 @@ def test_run_seed_writes_fallback_when_no_model(tmp_path, capsys):
         generation._run_seed(job, tmp_path)
 
     call_llm.assert_not_called()
-    rows, state = store.read_all(tmp_path)
+    rows, state = store.read_all("alice")
     assert len(rows) == 3
     assert state.get("seed_generated_at")
     err = capsys.readouterr().err
@@ -563,7 +593,7 @@ def test_run_seed_success_writes_seed_tasks(tmp_path, capsys):
         generation._run_seed(job, tmp_path)
 
     assert call_llm.call_args.kwargs["extra_body"] == {"thinking": {"type": "disabled"}}
-    rows, state = store.read_all(tmp_path)
+    rows, state = store.read_all("alice")
     assert len(rows) == 3
     assert {r["title"] for r in rows} == {"甲", "乙", "丙"}
     assert state.get("seed_generated_at")
@@ -585,7 +615,7 @@ def test_run_seed_failure_writes_placeholder_with_retry_after(tmp_path, capsys):
     ):
         generation._run_seed(job, tmp_path)
 
-    rows, state = store.read_all(tmp_path)
+    rows, state = store.read_all("alice")
     assert len(rows) == 3  # fallback placeholder rows
     assert state.get("seed_generated_at", "") == ""
     assert float(state["retry_after"]) >= time.time()
@@ -608,7 +638,7 @@ def test_run_seed_rejected_response_writes_placeholder(tmp_path, capsys):
     ):
         generation._run_seed(job, tmp_path)
 
-    _, state = store.read_all(tmp_path)
+    _, state = store.read_all("alice")
     assert state.get("seed_generated_at", "") == ""
     assert state["last_error"].startswith("seed_")
     err = capsys.readouterr().err
@@ -646,7 +676,7 @@ def test_run_mine_missing_model_records_failure(tmp_path, capsys):
     ):
         generation._run_mine(job, tmp_path)
 
-    rows, state = store.read_all(tmp_path)
+    rows, state = store.read_all("alice")
     assert rows == []
     assert state.get("last_attempt_at")
     assert float(state["retry_after"]) >= time.time()
@@ -668,7 +698,7 @@ def test_run_mine_too_few_unique_questions_skips_without_writing(tmp_path):
         generation._run_mine(job, tmp_path)
 
     call_llm.assert_not_called()
-    rows, state = store.read_all(tmp_path)
+    rows, state = store.read_all("alice")
     assert rows == []
     assert state == {}
 
@@ -730,7 +760,7 @@ def test_run_mine_failure_records_error(tmp_path, capsys):
     ):
         generation._run_mine(job, tmp_path)
 
-    rows, state = store.read_all(tmp_path)
+    rows, state = store.read_all("alice")
     assert rows == []
     assert state["last_error"] == "model_call_failed"
     assert float(state["retry_after"]) >= time.time()
@@ -752,7 +782,7 @@ def test_run_mine_rejected_response_records_cluster_reason(tmp_path, capsys):
     ):
         generation._run_mine(job, tmp_path)
 
-    _, state = store.read_all(tmp_path)
+    _, state = store.read_all("alice")
     assert state["last_error"].startswith("cluster_")
     err = capsys.readouterr().err
     assert "[webui][common_tasks][mine_rejected]" in err
@@ -800,7 +830,7 @@ def test_run_mine_success_replaces_mined_tasks(tmp_path, capsys):
 
     assert call_llm.call_args.kwargs["extra_body"] == {"thinking": {"type": "disabled"}}
     assert call_llm.call_args.kwargs["max_tokens"] == 4000
-    rows, state = store.read_all(tmp_path)
+    rows, state = store.read_all("alice")
     mined = [r for r in rows if r["source"] == "mined"]
     assert len(mined) == 3
     assert state["last_fingerprint"] == fp

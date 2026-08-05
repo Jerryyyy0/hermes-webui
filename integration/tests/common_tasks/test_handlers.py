@@ -55,6 +55,7 @@ def test_handler_profile_not_found_returns_404(monkeypatch, tmp_path):
 
 def test_handler_cache_status_empty_when_no_tasks(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_INTEGRATION", "1")
+    monkeypatch.setattr("integration.common_tasks.store.STATE_DIR", tmp_path)
     generation.disable_worker_for_tests(True)
     profile = tmp_path / "profile"
     profile.mkdir()
@@ -76,11 +77,12 @@ def test_handler_cache_status_empty_when_no_tasks(monkeypatch, tmp_path):
 
 def test_handler_cache_status_seed_when_only_seed_present(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_INTEGRATION", "1")
+    monkeypatch.setattr("integration.common_tasks.store.STATE_DIR", tmp_path)
     generation.disable_worker_for_tests(True)
     profile = tmp_path / "profile"
     profile.mkdir()
     store.write_seed_tasks(
-        profile,
+        "alice",
         [
             {"title": "种子1", "trigger_language": "t1"},
             {"title": "种子2", "trigger_language": "t2"},
@@ -104,15 +106,16 @@ def test_handler_cache_status_seed_when_only_seed_present(monkeypatch, tmp_path)
 
 def test_handler_cache_status_hit_when_mined_present(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_INTEGRATION", "1")
+    monkeypatch.setattr("integration.common_tasks.store.STATE_DIR", tmp_path)
     generation.disable_worker_for_tests(True)
     profile = tmp_path / "profile"
     profile.mkdir()
     store.write_seed_tasks(
-        profile,
+        "alice",
         [{"title": "种子1", "trigger_language": "t1"}],
     )
     store.replace_mined_tasks(
-        profile,
+        "alice",
         [
             {
                 "title": "挖掘1",
@@ -143,6 +146,7 @@ def test_handler_cache_status_hit_when_mined_present(monkeypatch, tmp_path):
 
 def test_handler_calls_enqueue_missing_or_stale(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_INTEGRATION", "1")
+    monkeypatch.setattr("integration.common_tasks.store.STATE_DIR", tmp_path)
     generation.disable_worker_for_tests(True)
     profile = tmp_path / "profile"
     profile.mkdir()
@@ -165,11 +169,12 @@ def test_handler_calls_enqueue_missing_or_stale(monkeypatch, tmp_path):
 
 def test_handler_payload_items_have_required_fields(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_INTEGRATION", "1")
+    monkeypatch.setattr("integration.common_tasks.store.STATE_DIR", tmp_path)
     generation.disable_worker_for_tests(True)
     profile = tmp_path / "profile"
     profile.mkdir()
     store.write_seed_tasks(
-        profile,
+        "alice",
         [{"title": "种子1", "trigger_language": "t1"}],
     )
     payloads = []

@@ -1,31 +1,42 @@
-"""Per-profile SQLite store for common tasks.
+"""Profile-aware common tasks store backed by the global session_manifest.db.
 
-Lives at ``<profile_home>/common_tasks.db`` alongside ``assistant_bubbles.json``.
-Holds two tables: ``tasks`` (seed + mined rows) and ``mining_state`` (KV).
+Tables live alongside ``session_manifest_records`` in
+``STATE_DIR / session_manifest.db`` and are keyed by ``profile`` so multiple
+profiles share one DB file. Two tables:
+
+  - ``common_tasks(profile, title, description, trigger_language, query_count,
+                   source, members_json, fingerprint, created_at, updated_at)``
+  - ``common_tasks_mining_state(profile, key, value)``
+
+Mirrors the schema of the previous per-profile ``common_tasks.db`` minus the
+file-per-profile layout.
 """
 
 from __future__ import annotations
 
-import json
 import sqlite3
 import time
 from contextlib import closing
 from pathlib import Path
 from typing import Any
 
+from api.config import STATE_DIR
+
 SCHEMA_VERSION = 1
-DB_FILENAME = "common_tasks.db"
+DB_FILENAME = "session_manifest.db"
 
 _SOURCE_SEED = "seed"
 _SOURCE_MINED = "mined"
 
 
-def db_path(profile_path: Path | str) -> Path:
-    return Path(profile_path) / DB_FILENAME
+def _db_path(db_path: Path | str | None = None) -> Path:
+    if db_path is not None:
+        return Path(db_path).expanduser().resolve()
+    return (STATE_DIR / DB_FILENAME).expanduser().resolve()
 
 
-def _connect(profile_path: Path | str) -> sqlite3.Connection:
-    path = db_path(profile_path)
+def _connect(db_path: Path | str | None = None) -> sqlite3.Connection:
+    path = _db_path(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path), timeout=5.0)
     conn.row_factory = sqlite3.Row
@@ -41,8 +52,9 @@ def _connect(profile_path: Path | str) -> sqlite3.Connection:
 def _ensure_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         """
-        CREATE TABLE IF NOT EXISTS tasks (
+        CREATE TABLE IF NOT EXISTS common_tasks (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
+          profile TEXT NOT NULL,
           title TEXT NOT NULL,
           description TEXT NOT NULL DEFAULT '',
           trigger_language TEXT NOT NULL DEFAULT '',
@@ -55,13 +67,21 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         )
         """
     )
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_source ON tasks(source)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_rank ON tasks(source, query_count DESC)")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_common_tasks_profile_source "
+        "ON common_tasks(profile, source)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_common_tasks_profile_rank "
+        "ON common_tasks(profile, source, query_count DESC)"
+    )
     conn.execute(
         """
-        CREATE TABLE IF NOT EXISTS mining_state (
-          key TEXT PRIMARY KEY,
-          value TEXT NOT NULL
+        CREATE TABLE IF NOT EXISTS common_tasks_mining_state (
+          profile TEXT NOT NULL,
+          key TEXT NOT NULL,
+          value TEXT NOT NULL,
+          PRIMARY KEY (profile, key)
         )
         """
     )
@@ -71,6 +91,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
 def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     return {
         "id": row["id"],
+        "profile": row["profile"],
         "title": row["title"],
         "description": row["description"],
         "trigger_language": row["trigger_language"],
@@ -83,19 +104,33 @@ def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
-def read_all(profile_path: Path | str) -> tuple[list[dict[str, Any]], dict[str, str]]:
+def _normalize_profile(profile: str) -> str:
+    return str(profile or "").strip()
+
+
+def read_all(
+    profile: str,
+    *,
+    db_path: Path | str | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, str]]:
     """Return (tasks, state). Empty tuple-shaped result if DB missing or broken."""
-    path = db_path(profile_path)
+    profile_norm = _normalize_profile(profile)
+    if not profile_norm:
+        return [], {}
+    path = _db_path(db_path)
     if not path.exists():
         return [], {}
     try:
-        with closing(_connect(profile_path)) as conn:
+        with closing(_connect(db_path)) as conn:
             rows = conn.execute(
-                "SELECT * FROM tasks ORDER BY source ASC, query_count DESC, id ASC"
+                "SELECT * FROM common_tasks WHERE profile = ? "
+                "ORDER BY source ASC, query_count DESC, id ASC",
+                (profile_norm,),
             ).fetchall()
             tasks = [_row_to_dict(row) for row in rows]
             state_rows = conn.execute(
-                "SELECT key, value FROM mining_state"
+                "SELECT key, value FROM common_tasks_mining_state WHERE profile = ?",
+                (profile_norm,),
             ).fetchall()
             state = {row["key"]: row["value"] for row in state_rows}
         return tasks, state
@@ -104,26 +139,33 @@ def read_all(profile_path: Path | str) -> tuple[list[dict[str, Any]], dict[str, 
 
 
 def write_seed_tasks(
-    profile_path: Path | str,
+    profile: str,
     tasks: list[dict[str, Any]],
+    *,
+    db_path: Path | str | None = None,
 ) -> None:
     """Replace all seed rows with ``tasks`` and stamp ``seed_generated_at``."""
+    profile_norm = _normalize_profile(profile)
+    if not profile_norm:
+        return
     now = time.time()
-    path = db_path(profile_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with closing(_connect(profile_path)) as conn:
+    with closing(_connect(db_path)) as conn:
         with conn:
-            conn.execute("DELETE FROM tasks WHERE source = ?", (_SOURCE_SEED,))
+            conn.execute(
+                "DELETE FROM common_tasks WHERE profile = ? AND source = ?",
+                (profile_norm, _SOURCE_SEED),
+            )
             for task in tasks:
                 conn.execute(
                     """
-                    INSERT INTO tasks (
-                        title, description, trigger_language,
+                    INSERT INTO common_tasks (
+                        profile, title, description, trigger_language,
                         query_count, source, members_json,
                         fingerprint, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
                     """,
                     (
+                        profile_norm,
                         str(task.get("title") or "")[:15],
                         str(task.get("description") or "")[:50],
                         str(task.get("trigger_language") or "")[:30],
@@ -134,25 +176,19 @@ def write_seed_tasks(
                         now,
                     ),
                 )
-            conn.execute(
-                """
-                INSERT INTO mining_state(key, value) VALUES ('seed_generated_at', ?)
-                ON CONFLICT(key) DO UPDATE SET value = excluded.value
-                """,
-                (str(now),),
-            )
-            # Clear retry_after / last_error on success
-            _set_state(conn, "retry_after", "")
-            _set_state(conn, "last_error", "")
-            _set_state(conn, "last_attempt_at", str(now))
+            _set_state(conn, profile_norm, "seed_generated_at", str(now))
+            _set_state(conn, profile_norm, "last_attempt_at", str(now))
+            _set_state(conn, profile_norm, "retry_after", "")
+            _set_state(conn, profile_norm, "last_error", "")
 
 
 def write_seed_placeholder(
-    profile_path: Path | str,
+    profile: str,
     tasks: list[dict[str, Any]],
     *,
     retry_after: float,
     last_error: str = "",
+    db_path: Path | str | None = None,
 ) -> None:
     """Write fallback seed rows as placeholder on LLM failure.
 
@@ -161,22 +197,27 @@ def write_seed_placeholder(
     ``retry_after`` expires will retry seed generation. Sets ``retry_after``
     and ``last_error`` so the API cooldowns and surfaces the failure reason.
     """
+    profile_norm = _normalize_profile(profile)
+    if not profile_norm:
+        return
     now = time.time()
-    path = db_path(profile_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with closing(_connect(profile_path)) as conn:
+    with closing(_connect(db_path)) as conn:
         with conn:
-            conn.execute("DELETE FROM tasks WHERE source = ?", (_SOURCE_SEED,))
+            conn.execute(
+                "DELETE FROM common_tasks WHERE profile = ? AND source = ?",
+                (profile_norm, _SOURCE_SEED),
+            )
             for task in tasks:
                 conn.execute(
                     """
-                    INSERT INTO tasks (
-                        title, description, trigger_language,
+                    INSERT INTO common_tasks (
+                        profile, title, description, trigger_language,
                         query_count, source, members_json,
                         fingerprint, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
                     """,
                     (
+                        profile_norm,
                         str(task.get("title") or "")[:15],
                         str(task.get("description") or "")[:50],
                         str(task.get("trigger_language") or "")[:30],
@@ -187,20 +228,21 @@ def write_seed_placeholder(
                         now,
                     ),
                 )
-            _set_state(conn, "last_attempt_at", str(now))
-            _set_state(conn, "retry_after", str(retry_after))
-            _set_state(conn, "last_error", last_error[:200])
+            _set_state(conn, profile_norm, "last_attempt_at", str(now))
+            _set_state(conn, profile_norm, "retry_after", str(retry_after))
+            _set_state(conn, profile_norm, "last_error", last_error[:200])
             # Explicitly clear seed_generated_at so retry logic fires
-            _set_state(conn, "seed_generated_at", "")
+            _set_state(conn, profile_norm, "seed_generated_at", "")
 
 
 def replace_mined_tasks(
-    profile_path: Path | str,
+    profile: str,
     tasks: list[dict[str, Any]],
     fingerprint: str,
     *,
     success: bool = True,
     last_error: str | None = None,
+    db_path: Path | str | None = None,
 ) -> None:
     """Atomically replace mined rows and update mining_state.
 
@@ -209,23 +251,28 @@ def replace_mined_tasks(
     On failure (success=False, tasks ignored): keep old mined rows, set
     retry_after and last_error, update last_attempt_at.
     """
+    profile_norm = _normalize_profile(profile)
+    if not profile_norm:
+        return
     now = time.time()
-    path = db_path(profile_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with closing(_connect(profile_path)) as conn:
+    with closing(_connect(db_path)) as conn:
         with conn:
             if success:
-                conn.execute("DELETE FROM tasks WHERE source = ?", (_SOURCE_MINED,))
+                conn.execute(
+                    "DELETE FROM common_tasks WHERE profile = ? AND source = ?",
+                    (profile_norm, _SOURCE_MINED),
+                )
                 for task in tasks:
                     conn.execute(
                         """
-                        INSERT INTO tasks (
-                            title, description, trigger_language,
+                        INSERT INTO common_tasks (
+                            profile, title, description, trigger_language,
                             query_count, source, members_json,
                             fingerprint, created_at, updated_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
+                            profile_norm,
                             str(task.get("title") or "")[:15],
                             str(task.get("description") or "")[:50],
                             str(task.get("trigger_language") or "")[:30],
@@ -237,40 +284,45 @@ def replace_mined_tasks(
                             now,
                         ),
                     )
-                _set_state(conn, "last_fingerprint", fingerprint)
-                _set_state(conn, "last_success_at", str(now))
-                _set_state(conn, "last_attempt_at", str(now))
-                _set_state(conn, "retry_after", "")
-                _set_state(conn, "last_error", "")
+                _set_state(conn, profile_norm, "last_fingerprint", fingerprint)
+                _set_state(conn, profile_norm, "last_success_at", str(now))
+                _set_state(conn, profile_norm, "last_attempt_at", str(now))
+                _set_state(conn, profile_norm, "retry_after", "")
+                _set_state(conn, profile_norm, "last_error", "")
             else:
-                _set_state(conn, "last_attempt_at", str(now))
-                _set_state(conn, "retry_after", str(now + 3))
+                _set_state(conn, profile_norm, "last_attempt_at", str(now))
+                _set_state(conn, profile_norm, "retry_after", str(now + 3))
                 if last_error:
-                    _set_state(conn, "last_error", last_error[:200])
+                    _set_state(conn, profile_norm, "last_error", last_error[:200])
 
 
 def update_state(
-    profile_path: Path | str,
+    profile: str,
     key: str,
     value: str | float | None,
+    *,
+    db_path: Path | str | None = None,
 ) -> None:
     """Upsert a single mining_state key. Empty/None value clears it."""
-    path = db_path(profile_path)
+    profile_norm = _normalize_profile(profile)
+    if not profile_norm:
+        return
+    path = _db_path(db_path)
     if not path.exists():
         return
-    with closing(_connect(profile_path)) as conn:
+    with closing(_connect(db_path)) as conn:
         with conn:
-            _set_state(conn, key, value)
+            _set_state(conn, profile_norm, key, value)
 
 
-def _set_state(conn: sqlite3.Connection, key: str, value: str | float | None) -> None:
+def _set_state(conn: sqlite3.Connection, profile: str, key: str, value: str | float | None) -> None:
     text = "" if value is None else str(value)
     conn.execute(
         """
-        INSERT INTO mining_state(key, value) VALUES (?, ?)
-        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        INSERT INTO common_tasks_mining_state(profile, key, value) VALUES (?, ?, ?)
+        ON CONFLICT(profile, key) DO UPDATE SET value = excluded.value
         """,
-        (key, text),
+        (profile, key, text),
     )
 
 
