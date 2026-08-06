@@ -9462,22 +9462,7 @@ def _delete_cli_session_locked(sid, hermes_home) -> bool:
     stale_cleanup_complete = _process_stale_cleanup_manifests(hermes_home)
 
     db_path = hermes_home / 'state.db'
-    return _delete_state_db_session_rows(db_path, sid)
-
-
-def _delete_state_db_session_rows(db_path: Path, sid: str) -> bool:
-    """Delete one Hermes session from a specific state.db (messages + session row)."""
-    try:
-        import sqlite3
-    except ImportError:
-        return False
-
-    db_path = Path(db_path)
     if not db_path.exists():
-        return False
-
-    sid = str(sid or "").strip()
-    if not sid:
         return False
 
     try:
@@ -9851,6 +9836,43 @@ def _delete_state_db_session_rows(db_path: Path, sid: str) -> bool:
     except Exception:
         logger.warning("Failed to delete CLI session %s from state.db", sid, exc_info=True)
         return False
+
+
+def _delete_state_db_session_rows(db_path: Path, sid: str) -> bool:
+    """Fork bridge: delete one session by ``state.db`` path.
+
+    Integration/cron callers may target a non-active profile home. Resolve
+    ``HERMES_HOME`` as the parent of ``state.db``, take the same cleanup locks
+    as ``delete_cli_session``, then reuse upstream ``_delete_cli_session_locked``.
+    """
+    db_path = Path(db_path)
+    sid = str(sid or "").strip()
+    if not sid:
+        return False
+    try:
+        hermes_home = db_path.resolve().parent
+        expected = (hermes_home / "state.db").resolve()
+        if db_path.resolve() != expected:
+            logger.warning(
+                "Rejecting state.db delete helper for non-canonical path %s",
+                db_path,
+            )
+            return False
+    except OSError:
+        logger.warning("Failed to resolve state.db path for session delete", exc_info=True)
+        return False
+    try:
+        with _cleanup_manifest_thread_lock(hermes_home):
+            with _cleanup_manifest_process_lock(hermes_home):
+                return _delete_cli_session_locked(sid, hermes_home)
+    except Exception:
+        logger.warning(
+            "Failed to delete CLI session %s via state.db helper",
+            sid,
+            exc_info=True,
+        )
+        return False
+
 
 # ---------------------------------------------------------------------------
 # ``delete_cli_session`` nests each profile's cross-process file lock inside

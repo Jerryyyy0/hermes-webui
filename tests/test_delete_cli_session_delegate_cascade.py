@@ -73,6 +73,47 @@ def _assert_all_artifacts_exist(sessions_dir, session_ids):
 
 
 @pytest.mark.requires_agent_modules
+def test_delete_state_db_session_rows_bridges_to_locked_cleanup(tmp_path):
+    """Integration bridge: db_path-only callers reuse locked upstream cleanup."""
+    hermes_state = pytest.importorskip("hermes_state")
+    SessionDB = hermes_state.SessionDB
+
+    state_db = tmp_path / "state.db"
+    db = SessionDB(db_path=state_db)
+    db.close()
+
+    conn = sqlite3.connect(state_db)
+    try:
+        _seed_session(conn, "solo-webui")
+        conn.commit()
+    finally:
+        conn.close()
+
+    sessions_dir = _seed_transcript_artifacts(tmp_path, {"solo-webui"})
+    from api.models import _delete_state_db_session_rows
+
+    assert _delete_state_db_session_rows(state_db, "solo-webui") is True
+
+    conn = sqlite3.connect(state_db)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM sessions WHERE id = ?", ("solo-webui",)).fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM messages WHERE session_id = ?", ("solo-webui",)).fetchone()[0] == 0
+    finally:
+        conn.close()
+    assert "solo-webui" not in _remaining_artifact_session_ids(sessions_dir)
+    assert not list(sessions_dir.glob(".cleanup_manifest_*.json"))
+
+
+def test_delete_state_db_session_rows_rejects_non_canonical_db_path(tmp_path):
+    """Bridge fails closed when path is not <hermes_home>/state.db."""
+    from api.models import _delete_state_db_session_rows
+
+    weird = tmp_path / "not-state.db"
+    weird.write_bytes(b"")
+    assert _delete_state_db_session_rows(weird, "solo-webui") is False
+
+
+@pytest.mark.requires_agent_modules
 def test_delete_cli_session_cascades_delegates_but_preserves_branch(tmp_path, monkeypatch):
     """Current Hermes removes delegates while preserving all other child kinds."""
     hermes_state = pytest.importorskip("hermes_state")
