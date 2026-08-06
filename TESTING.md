@@ -166,8 +166,9 @@ excluded).
   prompts open a fresh replay session with prefix + files
 
 Each campaign session enables YOLO (`POST /api/session/yolo`) and drains pending
-approval/clarify prompts during the stream so dangerous-tool cards do not block
-unattended runs.
+approval/clarify prompts only when the SSE stream emits `approval`/`clarify`
+(plus one final drain after the stream ends) so dangerous-tool cards do not
+block unattended runs.
 
 It preserves sessions, workspaces, files, and JSON evidence below
 `HERMES_WEBUI_STATE_DIR/e2e_campaigns/<timestamp>/`. Alignment checks are

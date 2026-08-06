@@ -767,13 +767,12 @@ def _run_round(
         row["cancel_dispatch_delay_ms"] = round((time.monotonic() - chat_start_received_at) * 1000, 1)
         t0 = time.monotonic(); row["cancel"] = api.request("GET", "/api/chat/cancel?stream_id=" + urllib.parse.quote(row["stream_id"])); row["cancel_response_ms"] = round((time.monotonic() - t0) * 1000, 1); cancelled = True
         if row["cancel_dispatch_delay_ms"] > 250: row["alignment_failures"].append({"code": "IMMEDIATE_CANCEL_SLOW", "actual_ms": row["cancel_dispatch_delay_ms"]})
-    event_count = 0
     try:
         for event, payload in api.events(row["stream_id"]):
             row["events"].append({"event": event, "payload": payload})
-            event_count += 1
-            # Drain approval/clarify blockers that YOLO did not preempt.
-            if event in {"approval", "clarify", "tool", "tool_complete", "manifest_delta"} or event_count % 8 == 0:
+            # Drain only when the stream signals a blocking prompt; avoid
+            # polling /api/approval|clarify/pending on every tool/meter tick.
+            if event in {"approval", "clarify"}:
                 drained = drain_blocking_prompts(api, session_id)
                 if drained["approvals"] or drained["clarifies"]:
                     row["auto_approve"]["drains"].append({"event": event, **drained})
