@@ -60,6 +60,8 @@ docs/*
 !docs/fix/**
 !docs/architecture/
 !docs/architecture/**
+!docs/plans/
+!docs/plans/**
 
 # Local-only AI assistant context — never committed even under docs/.
 docs/AGENTS.md
