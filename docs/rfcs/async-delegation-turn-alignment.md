@@ -1,6 +1,6 @@
 # 异步委派完成的 Turn 对齐与实时展示
 
-- **状态：** Proposed
+- **状态：** Implemented
 - **作者：** @wzq
 - **创建日期：** 2026-08-06
 - **关联契约：** [WebUI Run State Consistency Contract](webui-run-state-consistency-contract.md)、[Session Inspector Manifest](../session-inspector-manifest.md)
@@ -39,7 +39,9 @@ user 消息会产生三个错误：
 
 ## 非目标
 
-- 不修改异步委派任务自身的 Agent 数据库表、CLI、Gateway、TUI 或 `delegate_tool` 协议。
+- 不修改异步委派任务自身的 `async_delegations` 数据库表、CLI、Gateway、TUI 或
+  `delegate_tool` 协议；Agent 的 canonical `messages` 持久化表需要增加幂等元数据，以避免
+  上下文重放被误写成新的普通 user。
 - 不向 Hermes Agent 的异步委派完成事件加入 `origin_turn_key`。
 - 不改变 completion 注入的原文，也不以占位文本替换它。
 - 不让历史无语义标记的普通 user 消息因为正文相似而被隐藏。
@@ -234,7 +236,52 @@ turn:8:
 
 不得新建平行 transport，也不得把 completion anchor 作为普通 `message` SSE 广播。
 
-### 5. mapping 缺失或竞态
+### 5. 前端如何接收后台消息
+
+前端保持一个会话级 SSE 监听通道。该通道负责传递后台任务状态和 server-side turn 的
+启动通知；具体 assistant token 仍通过 `stream_id` 对应的既有 chat stream 接收。
+
+当普通 `turn:9` 仍在运行时，completion 到达会先发送状态事件：
+
+```json
+{
+  "event": "bg_task_complete",
+  "data": {
+    "delegation_id": "deleg_123",
+    "origin_turn_key": "turn:8",
+    "status": "completed",
+    "wakeup_state": "queued"
+  }
+}
+```
+
+前端只更新 `turn:8` 的后台任务状态，不创建隐藏 completion 的用户行，也不尝试
+`POST /api/chat/start`。当前 `turn:9` 收到 `done`、`stream_end`、`error` 或 `cancel` 等终态后，
+后端 session scheduler 消费 wakeup 队列并启动后台 Agent run，然后发送：
+
+```json
+{
+  "event": "server_turn_started",
+  "data": {
+    "session_id": "session_123",
+    "stream_id": "stream_async_123",
+    "source": "async_delegation_wakeup",
+    "delegation_id": "deleg_123",
+    "origin_turn_key": "turn:8"
+  }
+}
+```
+
+前端收到 `server_turn_started` 后复用现有 `attachLiveStream(stream_id)` 连接，接收后台
+assistant token、tool、MEDIA 和终态事件，并把可见内容追加到当前时间线尾部。前端不再为
+该 wakeup 发送第二次 `/api/chat/start`；这样既不会重复启动，也不会产生并发 stream。
+
+若浏览器未连接，后端仍可完成 server-side wakeup；浏览器重新打开或 SSE 重连时，通过
+已持久化的 session/run 状态恢复 `server_turn_started` 或相应的 stream replay。若用户在
+后台 wakeup stream 活跃期间提交新消息，前端保留输入并等待现有 stream 终态；后端按单
+session 调度规则接受或排队该输入，绝不并行执行。
+
+### 6. mapping 缺失或竞态
 
 派发工具 callback 与 completion 可能竞态。completion 到达但 origin mapping 尚未落盘时，
 `api/background_process.py` 仅在有上限的短暂重试窗口内重新读取 sidecar。
@@ -250,7 +297,7 @@ turn:8:
 
 这样宁可需要人工恢复，也不会把后台结果写到错误用户问题下。
 
-### 6. 统一语义显示投影
+### 7. 统一语义显示投影
 
 WebUI 的 `integration/agent_message_semantics/` 是分类和显示投影的唯一入口。
 分类优先级为：
@@ -273,7 +320,7 @@ projection 删除，但保留在 Agent model context 所需的位置。
 `drop_non_display_messages()`，候选循环再作一次防御性跳过。还必须阻止“当前输入缺失于显示
 transcript 时自动补一个可见 user”的 fallback 把 completion anchor 重新实体化。
 
-### 7. Turn、Manifest 与 artifact
+### 8. Turn、Manifest 与 artifact
 
 `_latest_user_turn_binding`、`_message_turns`、pending checkpoint/recovered pending turn 查找、
 `_next_turn_key` 和 artifact persistence 前的 user-anchor 校验，都必须将
@@ -291,6 +338,57 @@ assistant/tool/MEDIA/artifact from async wakeup
 Manifest 仍是派生索引，不是 transcript 或执行 journal。它可以显示 `turn:8` 的 background
 task lifecycle，但不会以 completion anchor 新建 `manifest.turns[]` 项；普通 `turns[]` 仍只
 来自真实 user anchor。
+
+### 9. Agent 写入幂等与数据库约束
+
+异步 wakeup 会重新构造一份包含原始 user 的模型上下文。该 user 不是新的用户输入，但如果
+复制后的消息字典没有 `_DB_PERSISTED_MARKER`，`run_agent.py::_flush_messages_to_session_db_unlocked`
+会把它误判为新消息。因此内存 marker 只能作为快速路径，不能作为持久化幂等的唯一依据。
+
+Agent 的 canonical `messages` 表增加一个可空字段：
+
+```sql
+hermes_dedupe_key TEXT
+```
+
+并创建只约束新写入、活动记录的部分唯一索引：
+
+```sql
+CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_hermes_dedupe
+ON messages(session_id, hermes_dedupe_key)
+WHERE active = 1 AND hermes_dedupe_key IS NOT NULL;
+```
+
+幂等键由消息来源生成并在 replay/recovery/wakeup 复制时保留：
+
+```text
+真实 user：       user:<origin_turn_key>
+异步 completion：  context:<delegation_id>:completion
+internal scaffold：不持久化，不生成幂等键
+```
+
+`_turn_key` 必须在 WebUI 创建真实 turn 时作为内部持久化元数据传入 Agent；它和
+`hermes_dedupe_key` 都不是 Provider API 字段。相同正文但不同真实 turn 必须生成不同幂等键，
+因此不能使用 `session_id + role + content` 做唯一约束。
+
+`SessionDB.append_message`、批量插入、replay/recovery 和消息重写路径统一使用事务级幂等写入：
+
+```sql
+INSERT INTO messages (...)
+VALUES (...)
+ON CONFLICT DO NOTHING;
+```
+
+这里使用无目标的 `ON CONFLICT DO NOTHING`，因为唯一性由带 `active` 条件的部分索引提供；
+实现必须通过插入结果判断是否真的新增了行，不能仅依赖 `lastrowid`。
+
+只有实际插入成功时才更新 `sessions.message_count` 与 `tool_call_count`；冲突时返回已有
+行 ID，并记录 `persistence_skip`。internal scaffold 仍直接跳过；context anchor 保留原始
+正文和语义字段，但不成为普通 user turn。
+
+迁移策略保持保守：为旧数据库增加可空列和索引，不回填历史行，不删除已有重复数据，不执行
+turn rebind 或 artifact store 迁移。旧行的幂等键为空，因此不会阻塞索引创建；新写入消息才使用
+该约束。
 
 ## 日志
 
@@ -323,7 +421,7 @@ delegation_id=...
 
 | 层 | 变更 |
 | --- | --- |
-| Hermes Agent | 仅增加 `user_message_metadata` 最小透传桥，给 completion anchor 赋予 `context_anchor/async_delegation_completion` 语义。 |
+| Hermes Agent | 增加 `messages.hermes_dedupe_key` 可空列和活动行部分唯一索引；统一 append、批量、replay/recovery 写入幂等；保留 `user_message_metadata` 最小透传桥，为 completion anchor 赋予 `context_anchor/async_delegation_completion` 语义。 |
 | WebUI sidecar | 保存 `delegation_id -> origin_turn_key` 与 per-turn 后台任务状态。 |
 | `api/background_process.py` | 解析 origin，调用带 `turn_key_override` 的 wakeup；处理有界竞态与失败关闭。 |
 | `api/streaming.py` | 使用语义显示投影、避免 completion fallback visible user、沿用 override 结算所有输出。 |
@@ -341,11 +439,13 @@ delegation_id=...
 | completion 无后续对话 | completion 不显示；最终 assistant 与 artifact 归属 origin turn。 |
 | completion 前有新 user turn | completion 不绑定新 turn；当前 turn 结束后才启动 origin 的 assistant 流，`_turn_key` 仍是 origin。 |
 | completion 到达时当前 turn 仍活动 | 不创建并发 stream、不混入当前 assistant；sidecar 为 `wakeup_state=queued`，当前 turn 终态后按顺序启动。 |
+| 前端事件交互 | `bg_task_complete` 只更新任务状态；`server_turn_started` 携带 `stream_id` 后前端复用现有 live-stream 连接，不重复 POST wakeup。 |
 | 多个后台任务 | 每个 delegation id 独立解析、更新状态，不能交叉结算。 |
 | 多 profile/session | origin mapping 不能跨 profile 或 session 命中。 |
 | callback/completion 竞态 | mapping 在重试窗口内落盘可继续；窗口耗尽不 continuation、不新建 turn。 |
 | 语义投影 | `GET /api/session`、分页、SSE、merge、replay、导出均不含 completion anchor；真实最终 assistant 保留。 |
 | Manifest/artifact | synthetic user 不生成 turn；`turn:8` 的 MEDIA、工具和 artifact 持久化成功。 |
+| Agent 持久化幂等 | async wakeup 重放原始 user 时只保留一条 active 数据库记录；重复 flush 不重复增加 session 计数；不同 turn 的相同正文仍分别保留。 |
 | 历史数据 | 旧 flag 仍被识别；无任何语义字段的普通历史 user 即使正文相同也保留。 |
 
 建议新增/更新：
@@ -362,10 +462,12 @@ tests/test_async_delegation_turn_alignment.py
 
 1. 在 `turn:8` 派发后台任务，确认该 turn 显示 `running` 的非 transcript 任务标记。
 2. completion 前发送 `turn:9` 并获得回复。
-3. 确认 completion 的原始 user 正文未显示；当前 turn 结束后，后台 assistant token 在时间线尾部实时出现。
-4. 确认这段晚到 assistant 的工具、MEDIA、artifact chips 与 Manifest 都属于 `turn:8`。
-5. 刷新、重连、切换会话后确认后台任务标记和已收到的输出不重复、不转移归属。
-6. 模拟 mapping 缺失，确认日志为 `async_delegation_origin_unresolved`，且没有假 user 或错误新 turn。
+3. 在 `turn:9` 仍流式时确认收到 `bg_task_complete`，但没有第二条 assistant stream。
+4. `turn:9` 收到终态后确认收到 `server_turn_started`，前端使用其 `stream_id` 连接后台流，未重复调用 `/api/chat/start`。
+5. 确认 completion 的原始 user 正文未显示；后台 assistant token 在时间线尾部实时出现。
+6. 确认这段晚到 assistant 的工具、MEDIA、artifact chips 与 Manifest 都属于 `turn:8`。
+7. 刷新、重连、切换会话后确认后台任务标记和已收到的输出不重复、不转移归属。
+8. 模拟 mapping 缺失，确认日志为 `async_delegation_origin_unresolved`，且没有假 user 或错误新 turn。
 
 ## 发布与兼容
 
@@ -373,7 +475,9 @@ tests/test_async_delegation_turn_alignment.py
 
 1. 先部署 Agent metadata bridge，使新 completion 可被明确分类。
 2. 再部署 WebUI sidecar origin mapping、显示过滤、turn override 和 SSE 投影。
-3. 保留旧 synthetic flag 的回退识别，兼容新旧版本短暂并存。
+3. 先执行可重复的 `messages` 表加列和部分唯一索引迁移；迁移失败时 fail closed，不启动
+   新的 async wakeup 写入。
+4. 保留旧 synthetic flag 的回退识别，兼容新旧版本短暂并存。
 
-已存在的会话不做 schema 回填、turn rebind、store 重写或正文清理。新版本仅在可确认的语义
-字段或旧 flag 存在时隐藏内部消息；没有标记的历史消息保持原样。
+已存在的会话不做幂等键回填、turn rebind、store 重写或正文清理。新版本仅对带稳定幂等键的
+新写入执行数据库约束；没有标记的历史消息保持原样，并由 WebUI 读取投影负责兼容隐藏/合并。

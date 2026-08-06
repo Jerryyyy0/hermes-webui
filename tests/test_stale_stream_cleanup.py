@@ -142,7 +142,8 @@ def test_chat_start_rechecks_active_stream_under_session_lock(monkeypatch, tmp_p
 
     The first request can pass the pre-lock active_stream_id check while another
     request is waiting/running. Once this request enters the session lock, it
-    must re-read active_stream_id and reject instead of creating a ghost stream.
+    must re-read active_stream_id and durably queue instead of creating a ghost
+    stream or dropping the prompt.
     """
     config.STREAMS.clear()
     config.SESSION_AGENT_LOCKS.clear()
@@ -203,9 +204,11 @@ def test_chat_start_rechecks_active_stream_under_session_lock(monkeypatch, tmp_p
             model_provider=None,
         )
 
-        assert response["_status"] == 409
+        assert response["_status"] == 202
+        assert response["queued"] is True
         assert response["active_stream_id"] == existing_stream_id
         assert session.active_stream_id == existing_stream_id
+        assert session.pending_next_turns[0]["text"] == "please start once"
         assert "new-stream" not in routes.STREAMS
     finally:
         routes.STREAMS.pop(existing_stream_id, None)
@@ -214,10 +217,8 @@ def test_chat_start_rechecks_active_stream_under_session_lock(monkeypatch, tmp_p
 def test_chat_start_blocks_same_session_active_run_after_cancel_clears_stream_id(monkeypatch, tmp_path):
     """Regression for #3808: cancel clears active_stream_id before worker exit.
 
-    interrupt-and-send queues a successor message, then calls cancel_stream().
-    cancel_stream() intentionally clears session.active_stream_id so Stop remains
-    responsive, but the old worker remains in ACTIVE_RUNS until its finally block
-    unregisters it. chat/start must still block by session_id during that window.
+    interrupt-and-send queues a successor message while the old worker remains
+    in ACTIVE_RUNS until its finally block unregisters it.
     """
     config.STREAMS.clear()
     config.ACTIVE_RUNS.clear()
@@ -268,10 +269,10 @@ def test_chat_start_blocks_same_session_active_run_after_cancel_clears_stream_id
             model_provider=None,
         )
 
-        assert response["_status"] == 409
+        assert response["_status"] == 202
+        assert response["queued"] is True
         assert response["active_stream_id"] == old_stream_id
-        assert session.active_stream_id is None
-        assert session.pending_user_message is None
+        assert session.pending_next_turns[0]["text"] == "successor prompt"
         assert "new-stream" not in routes.STREAMS
     finally:
         config.unregister_active_run(old_stream_id)

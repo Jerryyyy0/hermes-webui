@@ -21,6 +21,7 @@ import threading
 import time
 import traceback
 import copy
+import inspect
 from pathlib import Path
 from typing import Optional
 from integration.project_logging import get_logger
@@ -1514,7 +1515,13 @@ def _finalize_cancelled_turn(session, *, ephemeral: bool = False, message: str =
 def _latest_user_turn_binding(session, msg_text: str, turn_key: str) -> dict[str, str]:
     """Validate the latest real user row without mutating transcript identity."""
     expected = str(turn_key or '').strip()
-    expected_text = _normalize_user_text(msg_text)
+    # An async-delegation wakeup carries completion prose as a hidden model
+    # anchor.  Its content is intentionally not the originating human prompt,
+    # so only the explicit origin turn key is a valid binding proof.
+    expected_text = "" if (
+        str(getattr(session, "pending_user_source", "") or "").strip()
+        == "async_delegation_wakeup"
+    ) else _normalize_user_text(msg_text)
     for message in reversed(getattr(session, 'messages', None) or []):
         if not isinstance(message, dict) or message.get('role') != 'user':
             continue
@@ -2310,6 +2317,40 @@ def _drain_webui_process_notifications(
                 is_stale = stale_age > stale_completion_max_age
 
         if is_async_delegation:
+            _webui_session_exists = True
+            try:
+                from api.models import get_session as _get_semantics_session
+
+                _get_semantics_session(session_id)
+            except (KeyError, FileNotFoundError):
+                # Legacy process-registry callers can be drained without a
+                # WebUI sidecar. Preserve their historical direct-acceptance
+                # behavior; real WebUI sessions always fail closed below.
+                _webui_session_exists = False
+            except Exception:
+                _webui_session_exists = True
+            if not _webui_session_exists:
+                # Fall through to the legacy claim/accept path below.
+                pass
+            else:
+                # Async delegation completions are consumed by the dedicated
+                # background scheduler. Never prepend their completion prose
+                # to a human turn; doing so creates a false user anchor and
+                # can race the origin-turn wakeup. Put the event back untouched
+                # so the scheduler can claim it when the session is idle.
+                skipped_events.append(evt)
+                log_control_message(
+                    "async_completion_deferred",
+                    {
+                        "role": "user",
+                        "content": _format_process_notification(evt) or "",
+                        "_hermes_message_class": "context_anchor",
+                        "_hermes_scaffold_kind": "async_delegation_completion",
+                    },
+                )
+                continue
+            # Legacy sidecar-less path continues with the original durable
+            # claim/acceptance logic below.
             try:
                 claim = claim_async_delegation_delivery(evt, "webui-next-turn")
             except Exception:
@@ -2325,31 +2366,21 @@ def _drain_webui_process_notifications(
                 else:
                     notification = _format_process_notification(evt)
                     if not notification:
-                        raise ValueError(
-                            "async delegation formatter returned an empty notification"
-                        )
+                        raise ValueError("async delegation formatter returned an empty notification")
                 if notification:
                     notifications.append(notification)
                     notification_added = True
                 if is_stale:
-                    # Stale async events are an explicit terminal disposition.
                     complete_async_delegation_delivery(evt, claim)
                 elif pending_async_acceptances is not None:
-                    pending_async_acceptances.append(
-                        (evt, claim, notification, completion_queue)
-                    )
+                    pending_async_acceptances.append((evt, claim, notification, completion_queue))
                 else:
-                    # Direct callers without a live agent turn retain the
-                    # historical synchronous acceptance behavior used by
-                    # CLI-style drains.
                     complete_async_delegation_delivery(evt, claim)
             except Exception:
                 if notification_added:
                     notifications.pop()
                 release_async_delegation_delivery(evt, claim)
-                async_retry_events.append(
-                    (evt, bool(getattr(claim, "durable", False)))
-                )
+                async_retry_events.append((evt, bool(getattr(claim, "durable", False))))
                 logger.warning(
                     "Failed to accept async delegation completion for session %s",
                     session_id,
@@ -2360,7 +2391,9 @@ def _drain_webui_process_notifications(
                 logger.info(
                     "Dropping stale async-delegation completion for session %s "
                     "(age %.0fs > cap %.0fs)",
-                    evt_sid, stale_age, stale_completion_max_age,
+                    evt_sid,
+                    stale_age,
+                    stale_completion_max_age,
                 )
             continue
 
@@ -6946,6 +6979,8 @@ def _run_agent_streaming(
     goal_related=False,
     stream_turn_key='',
     moa_config=None,
+    user_message_metadata=None,
+    async_delegation_id=None,
 ):
     """Run agent in background thread, writing SSE events to STREAMS[stream_id].
 
@@ -6957,6 +6992,10 @@ def _run_agent_streaming(
     q = STREAMS.get(stream_id)
     if q is None:
         return
+    # Completion wakeups reuse the origin turn key but their model-facing
+    # prompt is completion prose, not the original human text. Artifact
+    # settlement must therefore validate the explicit key only.
+    _artifact_expected_user_text = None if async_delegation_id else msg_text
     stream_diag = StreamDiag(
         stream_id=stream_id,
         session_id=session_id,
@@ -7960,6 +7999,24 @@ def _run_agent_streaming(
                 }])
                 return True
 
+            def _record_async_delegation_dispatch(name, function_result):
+                if str(name or "") != "delegate_task" or not _manifest_turn_key:
+                    return
+                try:
+                    from integration.async_delegation_turns import record_async_delegation_dispatch
+                    with _get_session_agent_lock(session_id):
+                        record_async_delegation_dispatch(
+                            s,
+                            function_result,
+                            turn_key=_manifest_turn_key,
+                        )
+                except Exception:
+                    logger.debug(
+                        "Failed to record async delegation origin for session %s",
+                        session_id,
+                        exc_info=True,
+                    )
+
             def on_tool(*cb_args, **cb_kwargs):
                 nonlocal _reasoning_segments, _current_reasoning_idx, _tool_boundary_advanced
                 event_type = None
@@ -8076,6 +8133,10 @@ def _run_agent_streaming(
                     return
 
                 if event_type == 'tool.completed':
+                    _record_async_delegation_dispatch(
+                        name,
+                        cb_kwargs.get('result') if cb_kwargs.get('result') is not None else preview,
+                    )
                     for live_tc in reversed(_live_tool_calls):
                         if live_tc.get('done'):
                             continue
@@ -8192,6 +8253,7 @@ def _run_agent_streaming(
             def on_tool_complete(tool_call_id, name, args, function_result):
                 try:
                     _record_live_tool_complete(tool_call_id, name, function_result)
+                    _record_async_delegation_dispatch(name, function_result)
                     if tool_call_id and tool_call_id not in _live_tool_event_complete_ids:
                         _live_tool_event_complete_ids.add(tool_call_id)
                         result_snippet = _tool_result_snippet(function_result)
@@ -9036,6 +9098,22 @@ def _run_agent_streaming(
             # run_conversation() predates the moa_config kwarg.
             if moa_config is not None:
                 _run_conversation_kwargs["moa_config"] = moa_config
+            if user_message_metadata:
+                try:
+                    signature = inspect.signature(agent.run_conversation)
+                    accepts_metadata = (
+                        "user_message_metadata" in signature.parameters
+                        or any(
+                            p.kind == inspect.Parameter.VAR_KEYWORD
+                            for p in signature.parameters.values()
+                        )
+                    )
+                except (TypeError, ValueError):
+                    accepts_metadata = False
+                if accepts_metadata:
+                    _run_conversation_kwargs["user_message_metadata"] = dict(
+                        user_message_metadata
+                    )
 
             # Finalize durable delegation claims at the current-turn acceptance
             # boundary. Failed acknowledgements are removed from this turn and
@@ -9109,12 +9187,15 @@ def _run_agent_streaming(
             # ── Ephemeral mode (/btw): deliver answer, skip persistence, cleanup ──
             if ephemeral:
                 _answer = ''
-                for _m in reversed(result.get('messages') or []):
+                _ephemeral_messages = drop_non_display_messages(
+                    result.get('messages') or [], action="sse_projection_drop"
+                )
+                for _m in reversed(_ephemeral_messages):
                     if isinstance(_m, dict) and _m.get('role') == 'assistant':
                         _answer = str(_m.get('content', ''))
                         break
                 put('done', {
-                    'session': {'session_id': session_id, 'messages': result.get('messages', [])},
+                    'session': {'session_id': session_id, 'messages': _ephemeral_messages},
                     'usage': {'input_tokens': 0, 'output_tokens': 0},
                     'ephemeral': True,
                     'answer': _answer,
@@ -9522,6 +9603,9 @@ def _run_agent_streaming(
                                     conversation_history=_sanitize_messages_for_api(_previous_context_messages, cfg=_cfg),
                                     task_id=session_id,
                                     persist_user_message=msg_text,
+                                    **({
+                                        "user_message_metadata": dict(user_message_metadata)
+                                    } if user_message_metadata else {}),
                                 )
                                 _heal_all_msgs = _heal_result.get('messages') or []
                                 _heal_ok = _has_new_assistant_reply(_heal_all_msgs, _prev_len) or _token_sent
@@ -9594,6 +9678,7 @@ def _run_agent_streaming(
                         _turn_duration = _terminal_turn_duration(s)
                         _materialize_pending_user_turn_before_error(s)
                         s.active_stream_id = None
+                        s.active_stream_generation = None
                         s.pending_user_message = None
                         s.pending_attachments = []
                         s.pending_started_at = None
@@ -9630,7 +9715,7 @@ def _run_agent_streaming(
                                 _manifest_turn_key,
                                 stream_id=stream_id,
                                 terminal_reason='error',
-                                expected_user_text=msg_text,
+                                expected_user_text=_artifact_expected_user_text,
                             )
                         _error_payload['session'] = redact_session_data(
                             _session_payload_with_full_messages(s, tool_calls=s.tool_calls)
@@ -9788,6 +9873,7 @@ def _run_agent_streaming(
                 )
                 s.tool_calls = tool_calls
                 s.active_stream_id = None
+                s.active_stream_generation = None
                 s.pending_user_message = None
                 s.pending_attachments = []
                 s.pending_started_at = None
@@ -10057,7 +10143,7 @@ def _run_agent_streaming(
                     _manifest_turn_key,
                     stream_id=stream_id,
                     terminal_reason='completed',
-                    expected_user_text=msg_text,
+                    expected_user_text=_artifact_expected_user_text,
                 )
                 if cancel_event.is_set():
                     _finalize_cancelled_turn(s, ephemeral=False)
@@ -10635,6 +10721,10 @@ def _run_agent_streaming(
                     )
                     if moa_config is not None:
                         _heal_kwargs2["moa_config"] = moa_config
+                    if user_message_metadata:
+                        _heal_kwargs2["user_message_metadata"] = dict(
+                            user_message_metadata
+                        )
                     _heal_result = _heal_agent.run_conversation(**_heal_kwargs2)
                     # Retry succeeded — persist the result normally
                     if s is not None:
@@ -10741,6 +10831,7 @@ def _run_agent_streaming(
                 _turn_duration = _terminal_turn_duration(s)
                 _materialize_pending_user_turn_before_error(s)
                 s.active_stream_id = None
+                s.active_stream_generation = None
                 s.pending_user_message = None
                 s.pending_attachments = []
                 s.pending_started_at = None
@@ -10777,7 +10868,7 @@ def _run_agent_streaming(
                         _manifest_turn_key,
                         stream_id=stream_id,
                         terminal_reason='error',
-                        expected_user_text=msg_text,
+                        expected_user_text=_artifact_expected_user_text,
                     )
                 if not ephemeral:
                     try:
@@ -10852,6 +10943,36 @@ def _run_agent_streaming(
                     _status = "error"
             except Exception:
                 pass
+        if async_delegation_id:
+            try:
+                from integration.async_delegation_turns import mark_async_delegation_wakeup
+                from integration.async_delegation_turns import resolve_async_delegation_origin
+                from api.background_process import emit_async_delegation_status
+                with _get_session_agent_lock(session_id):
+                    record = mark_async_delegation_wakeup(
+                        s,
+                        async_delegation_id,
+                        wakeup_state="failed" if _status == "error" else "settled",
+                        content=msg_text,
+                    )
+                    if record is None:
+                        record = resolve_async_delegation_origin(
+                            s, async_delegation_id,
+                        )
+                emit_async_delegation_status(
+                    session_id,
+                    async_delegation_id,
+                    record,
+                    status="failed" if _status == "error" else "completed",
+                    wakeup_state="failed" if _status == "error" else "settled",
+                    content=msg_text,
+                )
+            except Exception:
+                logger.debug(
+                    "Failed to settle async delegation wakeup %s",
+                    async_delegation_id,
+                    exc_info=True,
+                )
         _summary_fields = stream_diag.summary_fields()
         _summary_fields.update(
             status=_status,
@@ -10891,6 +11012,22 @@ def _run_agent_streaming(
             # POST /api/chat/start round-trip and erase the marker before
             # the next stream can read it, breaking the goal-continuation
             # chain. Stage-326 critical fix per Opus advisor review.
+
+        # A cancel-then-send request may have been durably queued while this
+        # worker was still unwinding. Drain only after unregistering ACTIVE_RUNS
+        # so the successor can never overlap this worker. The helper is imported
+        # lazily to keep the streaming/routes module boundary acyclic at import.
+        if not ephemeral:
+            try:
+                from api.routes import drain_pending_chat_turn
+
+                drain_pending_chat_turn(session_id)
+            except Exception:
+                logger.debug(
+                    "Failed to drain queued chat turn after stream %s teardown",
+                    stream_id,
+                    exc_info=True,
+                )
 
 # ============================================================
 # SECTION: HTTP Request Handler
@@ -11106,11 +11243,51 @@ def cancel_stream(stream_id: str) -> bool:
         if active_run_entry and not active_run_session_id:
             active_run_session_id = str(active_run_entry.get("session_id") or "").strip() or None
 
+    # Establish the durable cancel fence before signalling the Agent. A start
+    # request arriving after this save must enqueue behind the old generation,
+    # even though the stream sidecar is released eagerly below.
+    _cancel_session_id = active_run_session_id or getattr(_snap_agent, "session_id", None)
+    if not _cancel_session_id:
+        try:
+            from api.config import stream_owner_session_id
+
+            _cancel_session_id = stream_owner_session_id(stream_id)
+        except Exception:
+            _cancel_session_id = None
+    if _cancel_session_id:
+        try:
+            with _get_session_agent_lock(_cancel_session_id):
+                _fence_session = get_session(_cancel_session_id)
+                if _stream_writeback_is_current(_fence_session, stream_id):
+                    _fence_session.cancel_state = 'cancelling'
+                    _fence_session.cancel_stream_id = stream_id
+                    _fence_session.cancel_generation = getattr(
+                        _fence_session, 'active_stream_generation', None
+                    )
+                    _fence_session.save()
+        except Exception:
+            logger.debug(
+                "Failed to persist cancel fence for stream %s",
+                stream_id,
+                exc_info=True,
+            )
+
     # Set WebUI layer cancel flag. Prefer the snapshot captured under the lock;
     # fall back to a fresh lookup for the ACTIVE_RUNS-only path (stream absent).
     flag = _snap_flag if _snap_flag is not None else cancel_flags.get(stream_id)
     if flag:
         flag.set()
+    # Keep the worker lifecycle registry truthful while the interrupt unwinds.
+    # The stream sidecar may be released eagerly, but ACTIVE_RUNS must remain
+    # visibly cancelling until the worker's finally block unregisters it.
+    try:
+        update_active_run(
+            stream_id,
+            phase="cancelling",
+            cancel_requested_at=time.time(),
+        )
+    except Exception:
+        logger.debug("Failed to mark active run %s as cancelling", stream_id, exc_info=True)
 
     # Interrupt the AIAgent instance to stop tool execution. Use the
     # lock-snapshot agent when the stream was present; otherwise fall back to
@@ -11155,9 +11332,10 @@ def cancel_stream(stream_id: str) -> bool:
     _emit_cancel_event = True
 
     # ── Eager session lock release (fixes #653) ──────────────────────────
-    # Pop stream state now so the 409 guard in routes.py sees the session
-    # as idle and allows new /api/chat/start immediately after cancel,
-    # even if the agent thread is still blocked in a C-level syscall.
+    # Pop stream sidecar state now so the cancel request remains responsive,
+    # even if the agent thread is still blocked in a C-level syscall. A new
+    # /api/chat/start is durably queued while ACTIVE_RUNS still owns the old
+    # worker; it must not start a successor until that worker settles.
     # The worker thread's finally block uses .pop(key, None) too, so a
     # double-pop here is safe (no-op).
     if stream_present:
@@ -11174,7 +11352,8 @@ def cancel_stream(stream_id: str) -> bool:
     # Session cleanup (get_session + save) must happen OUTSIDE the lock —
     # get_session() acquires LOCK, and the streaming thread does LOCK first
     # then STREAMS_LOCK, so inverting the order here would cause deadlock.
-    _cancel_session_id = getattr(agent, 'session_id', None) if agent else None
+    if agent and getattr(agent, 'session_id', None):
+        _cancel_session_id = getattr(agent, 'session_id', None)
     if not _cancel_session_id and active_run_session_id:
         _cancel_session_id = active_run_session_id
     # Use the snapshots captured under streams_lock above (the worker's finally
@@ -11288,7 +11467,12 @@ def cancel_stream(stream_id: str) -> bool:
                         _cancel_session_id,
                     )
                 _cancel_turn_key = str(getattr(_cs, 'pending_turn_key', '') or '').strip()
+                _cancel_generation = getattr(_cs, 'active_stream_generation', None)
+                _cs.cancel_state = 'settled'
+                _cs.cancel_stream_id = stream_id
+                _cs.cancel_generation = _cancel_generation
                 _cs.active_stream_id = None
+                _cs.active_stream_generation = None
                 _cs.pending_user_message = None
                 _cs.pending_attachments = []
                 _cs.pending_started_at = None

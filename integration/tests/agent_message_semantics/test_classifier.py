@@ -49,13 +49,16 @@ def test_control_audit_log_includes_message_content(caplog):
         "content": "[System: run verification]",
         "_hermes_message_class": "internal_scaffold",
         "_hermes_scaffold_kind": "verification_stop",
+        "_turn_key": "turn:8",
     }
 
     with caplog.at_level("INFO"):
-        log_control_message("display_drop", control_message)
+        log_control_message("display_drop", control_message, session_id="session-1")
 
     assert "verification_stop" in caplog.text
     assert "content='[System: run verification]'" in caplog.text
+    assert "session_id=session-1" in caplog.text
+    assert "turn_key=turn:8" in caplog.text
 
 
 def test_context_anchor_audit_log_includes_original_model_content(caplog):
@@ -83,3 +86,20 @@ def test_legacy_control_audit_log_resolves_its_specific_kind(caplog):
     assert "class=internal_scaffold" in caplog.text
     assert "kind=pre_verify" in caplog.text
     assert "content='private legacy nudge'" in caplog.text
+
+
+def test_control_audit_log_truncates_long_content(caplog, monkeypatch):
+    monkeypatch.setenv("HERMES_MESSAGE_SEMANTICS_LOG_MAX_CHARS", "500")
+    long_content = "y" * 650
+    context_anchor = {
+        "role": "user",
+        "content": long_content,
+        "_hermes_message_class": "context_anchor",
+        "_hermes_scaffold_kind": "async_delegation_completion",
+    }
+
+    with caplog.at_level("INFO"):
+        log_control_message("manifest_turn_skip", context_anchor)
+
+    assert "content='" + ("y" * 500) + "…(+150 chars)'" in caplog.text
+    assert ("y" * 650) not in caplog.text

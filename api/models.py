@@ -934,6 +934,11 @@ def _append_recovered_pending_turn(session, *, timestamp: int | None = None) -> 
     }
     pending_source = getattr(session, 'pending_user_source', None)
     stamp_message_source(recovered, pending_source)
+    if str(pending_source or '').strip() == 'async_delegation_wakeup':
+        # Crash recovery must preserve the anchor semantics; otherwise a
+        # pending completion can reappear as a visible user turn after restart.
+        recovered['_hermes_message_class'] = 'context_anchor'
+        recovered['_hermes_scaffold_kind'] = 'async_delegation_completion'
     if session.pending_attachments:
         recovered['attachments'] = list(session.pending_attachments)
     pending_turn_key = str(getattr(session, 'pending_turn_key', '') or '').strip()
@@ -1235,6 +1240,12 @@ class Session:
                  cache_read_tokens: int=0, cache_write_tokens: int=0,
                  personality=None,
                  active_stream_id: str=None,
+                 active_stream_generation=None,
+                 control_generation: int=0,
+                 cancel_state: str='idle',
+                 cancel_stream_id: str=None,
+                 cancel_generation=None,
+                 pending_next_turns=None,
                  last_error_at=None,
                  pending_user_message: str=None,
                  pending_attachments=None,
@@ -1273,6 +1284,7 @@ class Session:
                  composer_draft=None,
                  anchor_activity_scenes=None,
                  process_wakeup_pause=None,
+                 async_delegation_origins=None,
                  share_token=None,
                  share_created_at=None,
                  **kwargs):
@@ -1313,6 +1325,29 @@ class Session:
         self.cache_write_tokens = cache_write_tokens or 0
         self.personality = personality
         self.active_stream_id = active_stream_id
+        try:
+            self.control_generation = max(0, int(control_generation or 0))
+        except (TypeError, ValueError):
+            self.control_generation = 0
+        try:
+            self.active_stream_generation = (
+                int(active_stream_generation)
+                if active_stream_generation is not None
+                else None
+            )
+        except (TypeError, ValueError):
+            self.active_stream_generation = None
+        self.cancel_state = str(cancel_state or 'idle')
+        self.cancel_stream_id = str(cancel_stream_id or '').strip() or None
+        try:
+            self.cancel_generation = int(cancel_generation) if cancel_generation is not None else None
+        except (TypeError, ValueError):
+            self.cancel_generation = None
+        self.pending_next_turns = (
+            [item for item in pending_next_turns if isinstance(item, dict)]
+            if isinstance(pending_next_turns, list)
+            else []
+        )
         try:
             parsed_last_error_at = float(last_error_at) if last_error_at is not None else None
         except (TypeError, ValueError):
@@ -1383,6 +1418,9 @@ class Session:
         self.composer_draft = composer_draft if isinstance(composer_draft, dict) else {}
         self.anchor_activity_scenes = anchor_activity_scenes if isinstance(anchor_activity_scenes, dict) else {}
         self.process_wakeup_pause = process_wakeup_pause if isinstance(process_wakeup_pause, dict) else {}
+        self.async_delegation_origins = (
+            async_delegation_origins if isinstance(async_delegation_origins, dict) else {}
+        )
         self.share_token = str(share_token).strip() if share_token else None
         self.share_created_at = share_created_at
         # #5854: a compact fingerprint of anchor_activity_scenes ({scene_key:
@@ -1438,7 +1476,9 @@ class Session:
             'pinned', 'pinned_at', 'archived', 'project_id', 'profile',
             'input_tokens', 'output_tokens', 'estimated_cost',
             'cache_read_tokens', 'cache_write_tokens',
-            'personality', 'active_stream_id', 'last_error_at',
+            'personality', 'active_stream_id', 'active_stream_generation',
+            'control_generation', 'cancel_state', 'cancel_stream_id', 'cancel_generation',
+            'pending_next_turns', 'last_error_at',
             'pending_user_message', 'pending_attachments', 'pending_started_at', 'pending_user_source', 'pending_turn_key',
             'compression_anchor_visible_idx', 'compression_anchor_message_key',
             'compression_anchor_summary', 'pre_compression_snapshot',
@@ -1457,6 +1497,7 @@ class Session:
             'is_cli_session', 'source_tag', 'raw_source', 'session_source', 'source_label', 'read_only',
             'enabled_toolsets', 'composer_draft',
             'process_wakeup_pause',
+            'async_delegation_origins',
             'share_token', 'share_created_at',
         ]
         meta = {k: getattr(self, k, None) for k in METADATA_FIELDS}
@@ -1838,6 +1879,9 @@ class Session:
             } if self.worktree_path else {}),
             'user_message_count': Session._compute_user_message_count(self.messages),
             'active_stream_id': self.active_stream_id,
+            'active_stream_generation': self.active_stream_generation,
+            'cancel_state': self.cancel_state,
+            'pending_next_turn_count': len(getattr(self, 'pending_next_turns', []) or []),
             'last_error_at': self.last_error_at,
             'pending_user_message': self.pending_user_message,
             'has_pending_user_message': has_pending_user_message,
@@ -1850,6 +1894,11 @@ class Session:
             'enabled_toolsets': self.enabled_toolsets,
             'composer_draft': self.composer_draft if isinstance(self.composer_draft, dict) else {},
             'process_wakeup_pause': self.process_wakeup_pause if isinstance(self.process_wakeup_pause, dict) else {},
+            'async_delegation_origins': (
+                self.async_delegation_origins
+                if isinstance(self.async_delegation_origins, dict)
+                else {}
+            ),
             'share_token': self.share_token,
             'share_created_at': self.share_created_at,
             'is_streaming': _is_streaming_session(

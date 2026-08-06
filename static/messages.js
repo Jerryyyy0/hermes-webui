@@ -7231,6 +7231,80 @@ function attachBtwStream(parentSid, streamId, question){
   src.onerror=()=>{src.close();if(!_streamDone&&btwRow&&btwRow.isConnected) btwRow.remove();};
 }
 
+// Session-level live view for server-initiated turns.  It carries lifecycle
+// events only; assistant tokens continue through the existing chat stream.
+let _sessionEventSource = null;
+let _sessionEventSessionId = '';
+
+function _handleBgTaskCompleteEvent(ev){
+  let data={};
+  try{data=JSON.parse(ev&&ev.data||'{}');}catch(_){return false;}
+  if(!data.event_id) return false;
+  if(typeof showToast==='function') showToast(t('bg_complete')||'Background task completed');
+  return true;
+}
+
+function stopSessionStream(){
+  if(_sessionEventSource){
+    try{_sessionEventSource.close();}catch(_){ }
+    _sessionEventSource=null;
+  }
+  _sessionEventSessionId='';
+}
+
+function startSessionStream(sid){
+  const sessionId=String(sid||'').trim();
+  if(!sessionId||typeof EventSource==='undefined') return;
+  if(_sessionEventSource&&_sessionEventSessionId===sessionId) return;
+  stopSessionStream();
+  _sessionEventSessionId=sessionId;
+  const url=new URL(`api/sessions/${encodeURIComponent(sessionId)}/events`,document.baseURI||location.href);
+  const source=new EventSource(url.href,{withCredentials:true});
+  _sessionEventSource=source;
+  source.addEventListener('server_turn_started',e=>{
+    const d={};
+    try{Object.assign(d,JSON.parse(e.data||'{}'));}catch(_){return;}
+    if(d.session_id&&String(d.session_id)!==sessionId) return;
+    const streamId=String(d.stream_id||'').trim();
+    if(!streamId||typeof attachLiveStream!=='function') return;
+    if(S.session&&S.session.session_id===sessionId){
+      S.activeStreamId=streamId;
+      S.session.active_stream_id=streamId;
+      if(d.pending_started_at) S.session.pending_started_at=d.pending_started_at;
+      if(typeof updateSendBtn==='function') updateSendBtn();
+      attachLiveStream(sessionId,streamId,S.session.pending_attachments||[],{
+        reconnecting:!!d.recovered,
+      });
+    }
+  });
+  source.addEventListener('bg_task_complete',ev=>{
+    let data={};
+    try{data=JSON.parse(ev.data||'{}');}catch(_){return;}
+    if(data.session_id&&String(data.session_id)!==sessionId) return;
+    _handleBgTaskCompleteEvent(ev);
+  });
+  source.addEventListener('background_task_status',ev=>{
+    let data={};
+    try{data=JSON.parse(ev.data||'{}');}catch(_){return;}
+    if(data.session_id&&String(data.session_id)!==sessionId) return;
+    // Status belongs to the origin turn's non-transcript activity state. Do
+    // not create a user/assistant bubble for it.
+    if(typeof window.onHermesBackgroundTaskStatus==='function'){
+      window.onHermesBackgroundTaskStatus(data);
+    }
+  });
+  source.onerror=()=>{
+    if(_sessionEventSource!==source) return;
+    try{source.close();}catch(_){ }
+    _sessionEventSource=null;
+    // EventSource's built-in retry is desirable; re-arm the same session
+    // stream after a short delay without affecting the chat stream.
+    setTimeout(()=>{
+      if(_sessionEventSessionId===sessionId&&!_sessionEventSource) startSessionStream(sessionId);
+    },1500);
+  };
+}
+
 // ── /background task tracking ────────────────────────────────────────────────
 
 let _bgPollTimers={};

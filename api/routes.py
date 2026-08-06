@@ -7435,7 +7435,11 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
                     cli_messages,
                     truncation_watermark=getattr(session, "truncation_watermark", None),
                 )
-                return drop_non_display_messages(messages, action="get_projection_drop")
+                return drop_non_display_messages(
+                    messages,
+                    action="get_projection_drop",
+                    session_id=getattr(session, "session_id", None),
+                )
             # Sidecar shorter than CLI: chronologically stitch both slices
             # (#2472) while visible-key-capping cross-source duplicates
             # (recovered/no-id sidecar vs id/_db_persisted state.db rows).
@@ -7443,10 +7447,22 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
                 sidecar_messages,
                 cli_messages,
             )
-            return drop_non_display_messages(messages, action="get_projection_drop")
+            return drop_non_display_messages(
+                messages,
+                action="get_projection_drop",
+                session_id=getattr(session, "session_id", None),
+            )
         messages = sidecar_messages if len(sidecar_messages) > len(cli_messages) else cli_messages
-        return drop_non_display_messages(messages, action="get_projection_drop")
-    return drop_non_display_messages(sidecar_messages, action="get_projection_drop")
+        return drop_non_display_messages(
+            messages,
+            action="get_projection_drop",
+            session_id=getattr(session, "session_id", None),
+        )
+    return drop_non_display_messages(
+        sidecar_messages,
+        action="get_projection_drop",
+        session_id=getattr(session, "session_id", None),
+    )
 
 
 
@@ -10842,7 +10858,9 @@ def handle_get(handler, parsed) -> bool:
                         truncation_watermark=getattr(s, "truncation_watermark", None),
                     )
                 _all_msgs = drop_non_display_messages(
-                    _all_msgs, action="get_projection_drop",
+                    _all_msgs,
+                    action="get_projection_drop",
+                    session_id=getattr(s, "session_id", None),
                 )
             else:
                 if is_messaging_session and cli_messages:
@@ -11613,11 +11631,21 @@ def handle_get(handler, parsed) -> bool:
         settled = True
         if cancelled:
             settled = _wait_for_stream_worker_settled(stream_id)
+        drained = None
+        if cancelled and settled:
+            try:
+                drained = drain_pending_chat_turn(session_id)
+            except Exception:
+                logger.debug("Failed to drain queued chat turn after cancel", exc_info=True)
         return j(handler, {
             "ok": True,
             "cancelled": cancelled,
             "settled": settled,
             "stream_id": stream_id,
+            **({
+                "successor_stream_id": drained.get("stream_id"),
+                "queued_entry_id": drained.get("entry_id"),
+            } if isinstance(drained, dict) and drained.get("stream_id") else {}),
             "settle_timeout_ms": int(CANCEL_SETTLE_TIMEOUT_SECONDS * 1000),
         })
 
@@ -18519,6 +18547,12 @@ def _checkpoint_user_message_for_eager_session_save(
             if latest_text == msg_text:
                 return
     user_msg = {"role": "user", "content": msg}
+    # Server-side async delegation wakeups are model-context anchors.  Keep
+    # their original role/content for the Agent, but make eager recovery and
+    # display projection aware of the hidden semantic class.
+    if str(source or "").strip() == "async_delegation_wakeup":
+        user_msg["_hermes_message_class"] = "context_anchor"
+        user_msg["_hermes_scaffold_kind"] = "async_delegation_completion"
     from api.process_event_utils import stamp_message_source
 
     stamp_message_source(user_msg, source)
@@ -18579,6 +18613,7 @@ def _prepare_chat_start_session_for_stream(
     started_at: float | None = None,
     turn_key: str = "",
     source: str = "webui",
+    generation: int | None = None,
 ):
     """Persist chat-start state according to webui.session_save_mode.
 
@@ -18593,6 +18628,16 @@ def _prepare_chat_start_session_for_stream(
     s.model = model
     s.model_provider = model_provider
     s.active_stream_id = stream_id
+    if generation is None:
+        try:
+            generation = int(getattr(s, "control_generation", 0) or 0) + 1
+        except (TypeError, ValueError):
+            generation = 1
+    s.control_generation = max(0, int(generation))
+    s.active_stream_generation = s.control_generation
+    s.cancel_state = "idle"
+    s.cancel_stream_id = None
+    s.cancel_generation = None
     s.post_compression_context_tokens_estimate = None
     s.pending_user_message = msg
     s.pending_attachments = attachments
@@ -18778,6 +18823,50 @@ def _session_can_start_chat(session) -> bool:
     return True
 
 
+def _queue_chat_start_locked(
+    s,
+    *,
+    msg: str,
+    attachments,
+    workspace: str,
+    model: str,
+    model_provider,
+    idempotency_key: str | None,
+    origin_stream_id: str | None,
+):
+    """Persist a chat/start submitted while the session is still busy.
+
+    The caller must hold ``_get_session_agent_lock(s.session_id)``. This is
+    deliberately a durable enqueue point: once ``save()`` succeeds the input
+    can be recovered without relying on the caller retrying a 409 response.
+    """
+    from integration.pending_chat_turns import enqueue_pending_turn
+
+    entry, created = enqueue_pending_turn(
+        s,
+        text=msg,
+        attachments=attachments,
+        workspace=workspace,
+        model=model,
+        model_provider=model_provider,
+        idempotency_key=idempotency_key,
+        source="stop_and_send" if origin_stream_id else "queue",
+        origin_stream_id=origin_stream_id,
+        origin_generation=getattr(s, "active_stream_generation", None),
+    )
+    s.save()
+    return {
+        "queued": True,
+        "status": "queued" if created else str(entry.get("status") or "queued"),
+        "entry_id": entry.get("entry_id"),
+        "session_id": s.session_id,
+        "idempotency_key": entry.get("idempotency_key"),
+        "active_stream_id": getattr(s, "active_stream_id", None) or origin_stream_id,
+        "retryable": True,
+        "_status": 202,
+    }
+
+
 def _agent_runtime_barrier_response(
     *,
     runner_local_owned: bool = False,
@@ -18817,12 +18906,25 @@ def _start_chat_stream_for_session(
     source: str = "webui",
     moa_config=None,
     external_runtime_owned: bool | None = None,
+    turn_key_override: str | None = None,
+    user_message_metadata: dict | None = None,
+    server_turn_metadata: dict | None = None,
+    idempotency_key: str | None = None,
+    allow_busy_queue: bool = True,
 ):
     """Persist pending state, register an SSE channel, and start an agent turn."""
     _stream_diag_started = _stream_diag_monotonic_ms()
     if external_runtime_owned is None:
         external_runtime_owned = webui_gateway_chat_enabled(get_config())
     backend_is_gateway = bool(external_runtime_owned)
+    if turn_key_override and backend_is_gateway:
+        # Gateway/runner transports do not own the local Agent transcript or
+        # the hidden-message metadata bridge. Never silently fall back to a
+        # fresh turn, which would lose artifact ownership.
+        return {
+            "error": "当前聊天后端不支持后台委派原轮次唤醒",
+            "_status": 501,
+        }
     stale_response = _agent_runtime_barrier_response(
         external_runtime_owned=backend_is_gateway,
     )
@@ -18836,16 +18938,11 @@ def _start_chat_stream_for_session(
     diag.stage("active_stream_check") if diag else None
     current_stream_id = getattr(s, "active_stream_id", None)
     if current_stream_id:
-        if _active_stream_blocks_chat_start(s, current_stream_id):
-            diag.stage("response_write") if diag else None
-            return {
-                "error": "该会话已有正在进行的对话流，请稍等再试",
-                "active_stream_id": current_stream_id,
-                "_status": 409,
-            }
-        # Stale stream id from a previous run; clear and continue.
-        diag.stage("stale_stream_cleanup") if diag else None
-        _clear_stale_stream_state(s)
+        if not _active_stream_blocks_chat_start(s, current_stream_id):
+            # Stale stream id from a previous run; clear and continue. Busy
+            # state is handled again under the session lock below.
+            diag.stage("stale_stream_cleanup") if diag else None
+            _clear_stale_stream_state(s)
 
     # #1932: check if this session has a pending goal continuation flag.
     # The streaming hook sets PENDING_GOAL_CONTINUATION when goal_continue fires,
@@ -18863,21 +18960,43 @@ def _start_chat_stream_for_session(
             if locked_stream_id:
                 if _active_stream_blocks_chat_start(s, locked_stream_id):
                     diag.stage("response_write") if diag else None
-                    return {
-                        "error": "该会话已有正在进行的对话流，请稍等再试",
-                        "active_stream_id": locked_stream_id,
-                        "_status": 409,
-                    }
+                    if not allow_busy_queue or source != "webui":
+                        return {
+                            "error": "该会话已有正在进行的对话流，请稍等再试",
+                            "active_stream_id": locked_stream_id,
+                            "_status": 409,
+                        }
+                    return _queue_chat_start_locked(
+                        s,
+                        msg=msg,
+                        attachments=attachments,
+                        workspace=workspace,
+                        model=model,
+                        model_provider=model_provider,
+                        idempotency_key=idempotency_key,
+                        origin_stream_id=locked_stream_id,
+                    )
                 needs_stale_cleanup = True
             else:
                 blocking_run_stream_id = _active_run_stream_for_session(s.session_id)
                 if blocking_run_stream_id:
                     diag.stage("response_write") if diag else None
-                    return {
-                        "error": "该会话已有正在进行的对话流，请稍等再试",
-                        "active_stream_id": blocking_run_stream_id,
-                        "_status": 409,
-                    }
+                    if not allow_busy_queue or source != "webui":
+                        return {
+                            "error": "该会话已有正在进行的对话流，请稍等再试",
+                            "active_stream_id": blocking_run_stream_id,
+                            "_status": 409,
+                        }
+                    return _queue_chat_start_locked(
+                        s,
+                        msg=msg,
+                        attachments=attachments,
+                        workspace=workspace,
+                        model=model,
+                        model_provider=model_provider,
+                        idempotency_key=idempotency_key,
+                        origin_stream_id=blocking_run_stream_id,
+                    )
                 needs_stale_cleanup = False
                 prepared_turn_key = ""
                 if str(getattr(s, "source_tag", "") or "") == "cron":
@@ -18897,6 +19016,16 @@ def _start_chat_stream_for_session(
                             "error": "定时任务会话轮次校验失败，暂时无法继续对话",
                             "_status": 409,
                         }
+                if turn_key_override:
+                    # Only the async-delegation wakeup path may reuse an
+                    # existing turn.  The per-session lock above makes this
+                    # check atomic with active-stream ownership.
+                    if source != "async_delegation_wakeup":
+                        return {
+                            "error": "turn_key_override 仅允许后台委派唤醒使用",
+                            "_status": 400,
+                        }
+                    prepared_turn_key = str(turn_key_override).strip()
                 if not prepared_turn_key:
                     from api.session_manifest import _next_turn_key
                     prepared_turn_key = _next_turn_key(getattr(s, "messages", None) or [])
@@ -18913,6 +19042,7 @@ def _start_chat_stream_for_session(
                     stream_id=stream_id,
                     turn_key=prepared_turn_key,
                     source=source,
+                    generation=int(getattr(s, "control_generation", 0) or 0) + 1,
                 )
                 stream_turn_key = str(getattr(s, "pending_turn_key", "") or "").strip()
                 if not stream_turn_key:
@@ -18987,6 +19117,10 @@ def _start_chat_stream_for_session(
         "goal_related": goal_related,
         "stream_turn_key": stream_turn_key,
     }
+    if user_message_metadata:
+        worker_kwargs["user_message_metadata"] = dict(user_message_metadata)
+    if isinstance(server_turn_metadata, dict) and server_turn_metadata.get("delegation_id"):
+        worker_kwargs["async_delegation_id"] = str(server_turn_metadata["delegation_id"])
     if moa_config and not backend_is_gateway:
         worker_kwargs["moa_config"] = moa_config
     if backend_is_gateway:
@@ -19025,6 +19159,11 @@ def _start_chat_stream_for_session(
         "turn_id": journal_event.get("turn_id"),
         "title": s.title,
     }
+    if server_turn_metadata:
+        response.update({
+            key: value for key, value in dict(server_turn_metadata).items()
+            if key in {"delegation_id", "origin_turn_key"}
+        })
     if normalized_model:
         response["effective_model"] = model
     if model_provider:
@@ -19098,6 +19237,10 @@ def _start_run(
     diag=None,
     moa_config=None,
     gateway_chat_enabled: bool | None = None,
+    turn_key_override: str | None = None,
+    user_message_metadata: dict | None = None,
+    server_turn_metadata: dict | None = None,
+    idempotency_key: str | None = None,
 ):
     """Shared start-run helper for /api/chat/start and start_session_turn.
 
@@ -19126,6 +19269,11 @@ def _start_run(
     )
 
     if runtime_adapter_enabled() or runtime_adapter_runner_enabled():
+        if turn_key_override and runtime_adapter_runner_enabled():
+            return {
+                "error": "当前运行时适配器不支持后台委派原轮次唤醒",
+                "_status": 501,
+            }
         def _legacy_start_run(request: StartRunRequest) -> dict:
             return _start_chat_stream_for_session(
                 s,
@@ -19139,6 +19287,10 @@ def _start_run(
                 source=request.source or source,
                 moa_config=moa_config,
                 external_runtime_owned=gateway_chat_enabled,
+                turn_key_override=turn_key_override,
+                user_message_metadata=user_message_metadata,
+                server_turn_metadata=server_turn_metadata,
+                idempotency_key=idempotency_key,
             )
 
         def _legacy_adapter_factory():
@@ -19180,7 +19332,85 @@ def _start_run(
         source=source,
         moa_config=moa_config,
         external_runtime_owned=gateway_chat_enabled,
+        turn_key_override=turn_key_override,
+        user_message_metadata=user_message_metadata,
+        server_turn_metadata=server_turn_metadata,
+        idempotency_key=idempotency_key,
     )
+
+
+def drain_pending_chat_turn(session_id: str):
+    """Start one durable queued chat turn after the session becomes idle.
+
+    The queue item is leased before dispatch and is only marked ``sent`` after
+    the successor stream has been created. A failed dispatch returns the item
+    to ``queued`` so a later worker teardown or recovery pass can retry it.
+    """
+    from integration.pending_chat_turns import find_entry, pending_turns
+
+    sid = str(session_id or "").strip()
+    if not sid:
+        return None
+    item = None
+    with _get_session_agent_lock(sid):
+        try:
+            s = get_session(sid)
+        except KeyError:
+            return None
+        if getattr(s, "active_stream_id", None):
+            return None
+        if _active_run_stream_for_session(sid):
+            return None
+        for candidate in pending_turns(s):
+            if str(candidate.get("status") or "") == "queued":
+                item = candidate
+                break
+        if item is None:
+            return None
+        item["status"] = "dispatching"
+        item["attempts"] = int(item.get("attempts") or 0) + 1
+        item["dispatch_token"] = uuid.uuid4().hex
+        item["last_error"] = None
+        s.save()
+        item = copy.deepcopy(item)
+
+    try:
+        s = get_session(sid)
+        result = _start_chat_stream_for_session(
+            s,
+            msg=str(item.get("text") or ""),
+            attachments=list(item.get("attachments") or []),
+            workspace=str(item.get("workspace") or getattr(s, "workspace", "")),
+            model=str(item.get("model") or getattr(s, "model", "")),
+            model_provider=item.get("model_provider"),
+            source="webui",
+            idempotency_key=item.get("idempotency_key"),
+            allow_busy_queue=False,
+        )
+    except Exception as exc:
+        result = {"_status": 500, "error": str(exc)}
+
+    status = int((result or {}).get("_status", 200) or 200)
+    stream_id = str((result or {}).get("stream_id") or "").strip()
+    with _get_session_agent_lock(sid):
+        try:
+            current = get_session(sid)
+        except KeyError:
+            return result
+        entry = find_entry(current, item.get("entry_id"))
+        if entry is None:
+            return result
+        if status < 400 and stream_id:
+            entry["status"] = "sent"
+            entry["stream_id"] = stream_id
+            entry["dispatch_token"] = None
+            current.save()
+        else:
+            entry["status"] = "queued"
+            entry["dispatch_token"] = None
+            entry["last_error"] = str((result or {}).get("error") or "chat start failed")[:500]
+            current.save()
+    return result
 
 
 def _process_wakeup_revalidation_provider(model, provider) -> str:
@@ -19239,6 +19469,9 @@ def start_session_turn(
     message: str,
     *,
     source: str = "process_wakeup",
+    turn_key_override: str | None = None,
+    user_message_metadata: dict | None = None,
+    server_turn_metadata: dict | None = None,
 ):
     """Start a server-side agent turn for ``session_id`` with ``message``.
 
@@ -19428,6 +19661,9 @@ def start_session_turn(
         normalized_model=normalized_model,
         source=turn_source,
         route="start_session_turn",
+        turn_key_override=turn_key_override,
+        user_message_metadata=user_message_metadata,
+        server_turn_metadata=server_turn_metadata,
     )
 
     # ── Defect B: live-view of server-initiated turns ──────────────────────
@@ -19460,6 +19696,10 @@ def start_session_turn(
                         "stream_id": str(stream_id),
                         "pending_started_at": (resp or {}).get("pending_started_at"),
                         "source": source,
+                        **({
+                            "delegation_id": server_turn_metadata.get("delegation_id"),
+                            "origin_turn_key": server_turn_metadata.get("origin_turn_key"),
+                        } if isinstance(server_turn_metadata, dict) else {}),
                     },
                 )
     except Exception:
@@ -19945,6 +20185,7 @@ def _handle_chat_start(handler, body, diag=None):
             "route": "/api/chat/start",
             "diag": diag,
             "gateway_chat_enabled": gateway_chat_enabled,
+            "idempotency_key": str(body.get("idempotency_key") or "").strip() or None,
         }
         if not gateway_chat_enabled and moa_config is not None:
             start_run_kwargs["moa_config"] = moa_config

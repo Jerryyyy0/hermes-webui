@@ -334,6 +334,7 @@ def persisted_message_count_for_session(session_id: str) -> Optional[int]:
     """
     try:
         from api.models import get_session
+        from api.config import _get_session_agent_lock
 
         s = get_session(session_id, metadata_only=True)
         count = getattr(s, "_metadata_message_count", None)
@@ -939,6 +940,29 @@ def _record_async_delegation_accepted(
     complete_async_delegation_delivery(evt, claim)
     payload = _build_payload(evt, session_id)
     try:
+        from api.models import get_session
+        from integration.async_delegation_turns import resolve_async_delegation_origin
+
+        origin = resolve_async_delegation_origin(
+            get_session(session_id), completion_delivery_id(evt)
+        )
+        if origin:
+            payload.update(
+                {
+                    "delegation_id": completion_delivery_id(evt),
+                    "origin_turn_key": str(origin.get("turn_key") or ""),
+                    "status": "completed",
+                    "wakeup_state": "running",
+                }
+            )
+    except Exception:
+        # Legacy process-only callers retain the minimal payload contract.
+        logger.debug(
+            "async delegation origin payload enrichment skipped for %s",
+            session_id,
+            exc_info=True,
+        )
+    try:
         _emit_bg_task_complete_events_coalesced(session_id, payload)
     except Exception:
         logger.debug(
@@ -946,6 +970,70 @@ def _record_async_delegation_accepted(
             session_id,
             exc_info=True,
         )
+
+
+def _emit_async_delegation_status(
+    session_id: str,
+    delegation_id: str,
+    record: dict | None,
+    *,
+    status: str,
+    wakeup_state: str,
+    content: object,
+) -> None:
+    """Publish non-transcript lifecycle state for one async delegation."""
+    payload = {
+        "session_id": str(session_id),
+        "delegation_id": str(delegation_id),
+        "origin_turn_key": str((record or {}).get("turn_key") or ""),
+        "status": status,
+        "wakeup_state": wakeup_state,
+    }
+    try:
+        _emit_to_session_streams(session_id, "background_task_status", payload)
+    except Exception:
+        logger.debug(
+            "async delegation status emit failed for session %s",
+            session_id,
+            exc_info=True,
+        )
+    logger.info(
+        "hermes_message_semantics action=background_task_status "
+        "class=context_anchor kind=async_delegation_completion role=user "
+        "content=%r session_id=%s turn_key=%s delegation_id=%s "
+        "status=%s wakeup_state=%s",
+        content,
+        session_id,
+        payload["origin_turn_key"],
+        delegation_id,
+        status,
+        wakeup_state,
+    )
+
+
+def emit_async_delegation_status(
+    session_id: str,
+    delegation_id: str,
+    record: dict | None,
+    *,
+    status: str,
+    wakeup_state: str,
+    content: object,
+) -> None:
+    """Publish one persisted async-delegation lifecycle transition.
+
+    Streaming owns the terminal ``settled`` / ``failed`` transition, while
+    this module owns the durable session-SSE transport.  Keeping the fan-out
+    here prevents a second event shape from drifting into the stream worker.
+    """
+    _emit_async_delegation_status(
+        session_id,
+        delegation_id,
+        record,
+        status=status,
+        wakeup_state=wakeup_state,
+        content=content,
+    )
 
 
 def _start_async_delegation_wakeup_turn(
@@ -956,6 +1044,7 @@ def _start_async_delegation_wakeup_turn(
     evt: dict,
     claim,
     process_registry,
+    origin_turn_key: str = "",
 ) -> None:
     """Start one autonomous delegation turn and ACK only after acceptance."""
 
@@ -966,7 +1055,16 @@ def _start_async_delegation_wakeup_turn(
             resp = start_session_turn(
                 session_id,
                 wakeup_prompt,
-                source="process_wakeup",
+                source="async_delegation_wakeup",
+                turn_key_override=origin_turn_key,
+                user_message_metadata={
+                    "_hermes_message_class": "context_anchor",
+                    "_hermes_scaffold_kind": "async_delegation_completion",
+                },
+                server_turn_metadata={
+                    "delegation_id": delegation_id,
+                    "origin_turn_key": origin_turn_key,
+                },
             )
             raw_status = (resp or {}).get("_status")
             if raw_status is None:
@@ -987,6 +1085,38 @@ def _start_async_delegation_wakeup_turn(
                 )
                 return
 
+            try:
+                from api.models import get_session
+                from api.config import _get_session_agent_lock
+                from integration.async_delegation_turns import (
+                    mark_async_delegation_completion,
+                    resolve_async_delegation_origin,
+                )
+                with _get_session_agent_lock(session_id):
+                    failed_session = get_session(session_id)
+                    failed_origin = resolve_async_delegation_origin(
+                        failed_session, delegation_id
+                    )
+                    failed_record = mark_async_delegation_completion(
+                        failed_session,
+                        delegation_id,
+                        wakeup_state="queued",
+                        content=wakeup_prompt,
+                    )
+                _emit_async_delegation_status(
+                    session_id,
+                    delegation_id,
+                    failed_record or failed_origin,
+                    status="completed",
+                    wakeup_state="queued",
+                    content=wakeup_prompt,
+                )
+            except Exception:
+                logger.debug(
+                    "failed to mark async delegation wakeup retry for %s",
+                    delegation_id,
+                    exc_info=True,
+                )
             release_async_delegation_delivery(evt, claim)
             _requeue_async_delegation_event(process_registry, evt, claim=claim)
             if status == 409 and (resp or {}).get("error") == "process_wakeup_paused":
@@ -1038,6 +1168,39 @@ def _process_async_delegation_event(
         return
 
     try:
+        from api.models import get_session
+        from api.config import _get_session_agent_lock
+        from integration.async_delegation_turns import (
+            mark_async_delegation_completion,
+            resolve_async_delegation_origin,
+        )
+
+        legacy_originless_route = False
+        try:
+            with _get_session_agent_lock(session_id):
+                session = get_session(session_id)
+                origin = resolve_async_delegation_origin(session, delegation_id)
+        except KeyError:
+            # Compatibility for old non-WebUI/test registries that have no
+            # sidecar session at all. A real WebUI session always exists here;
+            # a real session with a missing mapping remains fail-closed below.
+            session = None
+            origin = None
+            legacy_originless_route = True
+        if origin is None and not legacy_originless_route:
+            release_async_delegation_delivery(evt, claim)
+            _retry_unmapped_async_delegation_event(process_registry, evt)
+            logger.warning(
+                "async_delegation_origin_unresolved session_id=%s "
+                "delegation_id=%s content=%r",
+                session_id,
+                delegation_id,
+                evt,
+            )
+            return
+        if origin is None:
+            origin = {"turn_key": ""}
+        origin_turn_key = str(origin.get("turn_key") or "").strip()
         wakeup_prompt_raw = format_wakeup_prompt(evt)
         wakeup_prompt = wakeup_prompt_raw.strip() if wakeup_prompt_raw else ""
         if not wakeup_prompt:
@@ -1047,18 +1210,64 @@ def _process_async_delegation_event(
         # foreground turn owns the session, release the durable claim and retry
         # from the shared queue; the core record therefore remains restart-safe.
         if _session_has_active_turn(session_id):
+            with _get_session_agent_lock(session_id):
+                record = mark_async_delegation_completion(
+                    session,
+                    delegation_id,
+                    wakeup_state="queued",
+                    content=wakeup_prompt,
+                )
+            _emit_async_delegation_status(
+                session_id,
+                delegation_id,
+                record or origin,
+                status="completed",
+                wakeup_state="queued",
+                content=wakeup_prompt,
+            )
             release_async_delegation_delivery(evt, claim)
             _requeue_async_delegation_event(process_registry, evt, claim=claim)
             return
 
-        _start_async_delegation_wakeup_turn(
+        with _get_session_agent_lock(session_id):
+            record = mark_async_delegation_completion(
+                session,
+                delegation_id,
+                wakeup_state="running",
+                content=wakeup_prompt,
+            )
+        _emit_async_delegation_status(
             session_id,
-            wakeup_prompt,
-            delegation_id=delegation_id,
-            evt=evt,
-            claim=claim,
-            process_registry=process_registry,
+            delegation_id,
+            record or origin,
+            status="completed",
+            wakeup_state="running",
+            content=wakeup_prompt,
         )
+
+        try:
+            _start_async_delegation_wakeup_turn(
+                session_id,
+                wakeup_prompt,
+                delegation_id=delegation_id,
+                evt=evt,
+                claim=claim,
+                process_registry=process_registry,
+                origin_turn_key=origin_turn_key,
+            )
+        except TypeError as exc:
+            # Keep focused legacy integrations/test doubles callable while
+            # the production helper receives the explicit origin key.
+            if "origin_turn_key" not in str(exc):
+                raise
+            _start_async_delegation_wakeup_turn(
+                session_id,
+                wakeup_prompt,
+                delegation_id=delegation_id,
+                evt=evt,
+                claim=claim,
+                process_registry=process_registry,
+            )
     except Exception:
         release_async_delegation_delivery(evt, claim)
         _requeue_async_delegation_event(process_registry, evt, claim=claim)

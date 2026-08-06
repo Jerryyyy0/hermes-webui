@@ -133,7 +133,9 @@ class TestCancelInterrupt:
         assert mock_session.pending_user_message is None
         assert mock_session.pending_attachments == []
         assert mock_session.pending_started_at is None
-        mock_session.save.assert_called_once()
+        # The fence is persisted before interrupt; cleanup then persists the
+        # recovered turn and clears its pending turn key.
+        assert mock_session.save.call_count == 3
 
     def test_cancel_sets_cancel_event(self):
         """Verify that cancel_stream() sets the cancel_event flag"""

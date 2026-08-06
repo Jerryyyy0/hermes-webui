@@ -56,6 +56,8 @@ docs/*
 !docs/ui-ux/**
 !docs/rfcs/
 !docs/rfcs/**
+!docs/fix/
+!docs/fix/**
 !docs/architecture/
 !docs/architecture/**
 

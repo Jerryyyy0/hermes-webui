@@ -112,7 +112,9 @@ class TestCancelStreamEagerRelease:
             and msg.get("_source") == "process_wakeup"
             for msg in mock_session.messages
         ), "cancel_stream() should preserve process_wakeup source on recovered user turns"
-        mock_session.save.assert_called_once()
+        # The fence is persisted before interrupt; cleanup then persists the
+        # recovered turn and clears its pending turn key.
+        assert mock_session.save.call_count == 3
 
     def test_cancel_without_agent_still_pops_streams(self):
         """Cancel should pop STREAMS even when no agent instance exists."""
