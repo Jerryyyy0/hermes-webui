@@ -6,6 +6,10 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ## [Unreleased]
 
+### Fixed
+
+- **`GET /api/session/manifest` skill-scan amplification** — `skill_view` reference dedupe no longer runs `_canonical_skill_manifest_path` / `_find_skill` over file artifact keys (previously O(views × files × skills) full-directory frontmatter scans). `_find_skill` skips file-like miss scans without a process-wide lookup cache.
+
 ### Changed
 
 - **Hermes Agent message semantics** — Agent-generated `internal_scaffold` rows no longer leak into WebUI display transcripts, manifest turn anchors, or artifact settlement. Durable `context_anchor` rows retain their original model-facing content plus explicit semantic fields while remaining hidden from transcript/turn rendering; legacy verification/pre-verify flags remain recognized.

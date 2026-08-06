@@ -576,6 +576,16 @@ def list_custom_skills(
     }
 
 
+# Names with these suffixes are file paths, not skill identities. Path helpers
+# resolve SKILL.md / directory paths before the index scan; scanning the whole
+# tree for "notes.md" only burns CPU on misses.
+_FIND_SKILL_FILE_LIKE_SUFFIXES = frozenset({
+    ".md", ".markdown", ".py", ".html", ".htm", ".txt", ".json", ".yaml", ".yml",
+    ".css", ".js", ".ts", ".tsx", ".jsx", ".png", ".jpg", ".jpeg", ".gif", ".webp",
+    ".svg", ".pdf", ".docx", ".xlsx", ".csv", ".toml", ".ini", ".sh", ".zsh",
+})
+
+
 def _find_skill(name: str, skills_dir: Path) -> tuple[Path | None, Path | None]:
     from agent.skill_utils import iter_skill_index_files
     from tools.skills_tool import _EXCLUDED_SKILL_DIRS, _parse_frontmatter
@@ -599,6 +609,12 @@ def _find_skill(name: str, skills_dir: Path) -> tuple[Path | None, Path | None]:
             legacy = direct.with_suffix(".md")
             if legacy.is_file():
                 return legacy.parent, legacy
+
+    # File-like misses never match a skill directory / frontmatter name; skip
+    # the O(skills) index walk that previously dominated /api/session/manifest.
+    suffix = Path(raw).suffix.lower()
+    if suffix in _FIND_SKILL_FILE_LIKE_SUFFIXES and not raw.endswith("SKILL.md"):
+        return None, None
 
     for skill_md in iter_skill_index_files(skills_dir, "SKILL.md"):
         if any(part in _EXCLUDED_SKILL_DIRS for part in skill_md.parts):

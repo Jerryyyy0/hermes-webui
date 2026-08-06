@@ -1608,16 +1608,18 @@ def _extract_manifest_records(
             if skill_name:
                 canonical = _canonical_skill_manifest_path(skill_name, skills_dir)
                 if canonical:
-                    session_skill_keys = {
-                        _canonical_skill_manifest_path(str(key), skills_dir)
-                        for key in artifacts.keys()
-                    }
+                    # Only skill artifact rows participate in reference dedupe.
+                    # Canonicalizing every file artifact key (old behavior) forces
+                    # a full skills-dir scan/miss per key and dominates GET latency.
+                    session_skill_keys = _skill_canonical_keys_from_rows(
+                        list(artifacts.values()), skills_dir,
+                    )
                     turn_skill_keys = set()
                     if turn is not None:
-                        turn_skill_keys = {
-                            _canonical_skill_manifest_path(str(key), skills_dir)
-                            for key in turn.get('artifacts', {}).keys()
-                        }
+                        turn_skill_keys = _skill_canonical_keys_from_rows(
+                            list((turn.get('artifacts') or {}).values()),
+                            skills_dir,
+                        )
                     if canonical in session_skill_keys or canonical in turn_skill_keys:
                         continue
                     skill_name = canonical

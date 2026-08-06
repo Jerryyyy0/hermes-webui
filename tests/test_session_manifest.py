@@ -4162,6 +4162,81 @@ def test_build_session_manifest_skill_view_deduped_when_artifact(tmp_path, monke
     assert 'hermes-agent-skill-authoring' in reference_paths
 
 
+def test_extract_manifest_records_skips_skill_scan_for_file_artifact_keys(tmp_path, monkeypatch):
+    """Regression: skill_view dedupe must not canonicalize file artifact paths.
+
+    With many skills on disk, calling _find_skill for every file artifact key on
+    every skill_view event made GET /api/session/manifest take tens of seconds.
+    """
+    from integration.skills import local_skills
+
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    skills_dir = tmp_path / 'profile-home' / 'skills'
+    for i in range(40):
+        _write_local_skill(skills_dir, f'bulk-skill-{i:02d}', rel_path=f'cat/bulk-skill-{i:02d}')
+    _write_local_skill(skills_dir, 'viewed-skill', rel_path='cat/viewed-skill')
+
+    messages = [{'role': 'user', 'content': 'work', '_turn_key': 'turn:1'}]
+    tool_calls = []
+    events = []
+    for i in range(20):
+        rel = f'work/out-{i:02d}.md'
+        (workspace / 'work').mkdir(exist_ok=True)
+        (workspace / rel).write_text(f'# {i}', encoding='utf-8')
+        tid = f'w{i}'
+        events.append(ToolEvent(
+            name='write_file',
+            args={'path': rel},
+            assistant_msg_idx=1,
+            tool_msg_idx=2 + i,
+            tid=tid,
+            status='completed',
+            result='ok',
+        ))
+    for i in range(5):
+        tid = f'v{i}'
+        events.append(ToolEvent(
+            name='skill_view',
+            args={'name': 'viewed-skill'},
+            assistant_msg_idx=1,
+            tool_msg_idx=100 + i,
+            tid=tid,
+            status='completed',
+            result=json.dumps({
+                'success': True,
+                'name': 'viewed-skill',
+                'path': str(skills_dir / 'cat' / 'viewed-skill' / 'SKILL.md'),
+            }),
+        ))
+
+    find_calls: list[str] = []
+    real_find = local_skills._find_skill
+
+    def counting_find(name, skills_dir_arg):
+        find_calls.append(str(name or ''))
+        return real_find(name, skills_dir_arg)
+
+    monkeypatch.setattr(local_skills, '_find_skill', counting_find)
+    monkeypatch.setattr('api.session_manifest._skillhub_preview_available', lambda: True)
+
+    artifacts, references, turns = _extract_manifest_records(
+        events, workspace, messages, skills_dir=skills_dir,
+    )
+
+    assert len(artifacts) >= 20
+    assert any(row.get('path') == 'cat/viewed-skill' for row in references)
+    file_like_lookups = [
+        name for name in find_calls
+        if name.endswith(('.md', '.py', '.html')) and not name.endswith('SKILL.md')
+    ]
+    assert file_like_lookups == [], (
+        f'skill lookup must not scan for file artifact paths; got {file_like_lookups[:10]}'
+    )
+    # Bound lookups to skill identities (+ small constant), not O(files × views × skills).
+    assert len(find_calls) <= 20, f'unexpected skill-scan amplification: {len(find_calls)} calls'
+
+
 def test_canonical_skill_path_normalization(tmp_path, monkeypatch):
     from api.session_manifest import _canonical_skill_manifest_path
 
