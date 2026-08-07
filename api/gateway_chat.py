@@ -39,6 +39,7 @@ from integration.project_logging import get_logger
 from api.helpers import _redact_text, redact_session_data
 from api.models import clear_process_wakeup_pause, get_session, merge_session_messages_append_only
 from api.run_journal import RunJournalWriter, bound_run_journal_snapshot_args
+from api.workspace import resolve_session_workspace
 
 logger = get_logger(__name__)
 
@@ -791,7 +792,7 @@ def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, mode
         if not isinstance(session.messages, list):
             session.messages = []
         session.messages.append(error_message)
-        session.workspace = str(workspace)
+        session.workspace = str(resolve_session_workspace(session, workspace, requested_is_trusted=True))
         session.model = model
         session.model_provider = model_provider
         try:
@@ -1391,7 +1392,7 @@ def _run_gateway_chat_streaming(
             s.pending_started_at = None
             s.pending_user_source = None
             s.pending_turn_key = None
-            s.workspace = str(workspace)
+            s.workspace = str(resolve_session_workspace(s, workspace, requested_is_trusted=True))
             s.model = model
             s.model_provider = model_provider
 

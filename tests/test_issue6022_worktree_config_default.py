@@ -59,7 +59,7 @@ def _post_session_new(tmp_path, monkeypatch, body, *, config_default, workspace_
     monkeypatch.setattr(
         helpers,
         "j",
-        lambda handler, payload, status=200, extra_headers=None: captured.update(
+        lambda handler, payload, status=200, extra_headers=None, **_kwargs: captured.update(
             payload=payload, status=status
         )
         or True,

@@ -134,3 +134,45 @@ def test_async_wakeup_terminal_state_is_published_to_session_sse(monkeypatch):
             },
         )
     ]
+
+
+def test_async_wakeup_display_assistant_keeps_origin_identity():
+    """The visible wakeup answer is identifiable without exposing its anchor."""
+    from api.streaming import _merge_display_messages_after_agent_result
+
+    previous = [
+        {"role": "user", "content": "派发后台任务", "_turn_key": "turn:8"},
+        {"role": "assistant", "content": "已派发", "_turn_key": "turn:8"},
+    ]
+    result = previous + [
+        {
+            "role": "user",
+            "content": "[ASYNC DELEGATION BATCH COMPLETE - deleg-1]",
+            "_hermes_message_class": "context_anchor",
+            "_hermes_scaffold_kind": "async_delegation_completion",
+        },
+        {"role": "assistant", "content": "后台任务最终回复"},
+    ]
+
+    visible = _merge_display_messages_after_agent_result(
+        previous,
+        previous,
+        result,
+        "[ASYNC DELEGATION BATCH COMPLETE - deleg-1]",
+        source="async_delegation_wakeup",
+        canonical_turn_key="turn:8",
+        async_delegation_id="deleg-1",
+    )
+
+    assert visible[-1] == {
+        "role": "assistant",
+        "content": "后台任务最终回复",
+        "_turn_key": "turn:8",
+        "_source": "async_delegation_wakeup",
+        "delegation_id": "deleg-1",
+    }
+    assert not any(
+        message.get("_hermes_scaffold_kind") == "async_delegation_completion"
+        for message in visible
+        if isinstance(message, dict)
+    )

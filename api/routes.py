@@ -7439,6 +7439,7 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
                     messages,
                     action="get_projection_drop",
                     session_id=getattr(session, "session_id", None),
+                    background_task_origins=getattr(session, "async_delegation_origins", None),
                 )
             # Sidecar shorter than CLI: chronologically stitch both slices
             # (#2472) while visible-key-capping cross-source duplicates
@@ -7451,17 +7452,20 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
                 messages,
                 action="get_projection_drop",
                 session_id=getattr(session, "session_id", None),
+                background_task_origins=getattr(session, "async_delegation_origins", None),
             )
         messages = sidecar_messages if len(sidecar_messages) > len(cli_messages) else cli_messages
         return drop_non_display_messages(
             messages,
             action="get_projection_drop",
             session_id=getattr(session, "session_id", None),
+            background_task_origins=getattr(session, "async_delegation_origins", None),
         )
     return drop_non_display_messages(
         sidecar_messages,
         action="get_projection_drop",
         session_id=getattr(session, "session_id", None),
+        background_task_origins=getattr(session, "async_delegation_origins", None),
     )
 
 
@@ -8296,6 +8300,7 @@ from api.workspace import (
     read_file_content,
     safe_resolve_ws,
     resolve_trusted_workspace,
+    resolve_session_workspace,
     open_anchored_fd,
     open_anchored_create_fd,
     open_anchored_write_fd,
@@ -8303,6 +8308,7 @@ from api.workspace import (
     rmtree_anchored,
     rename_anchored,
     make_anchored_dir,
+    create_managed_workspace,
     validate_workspace_to_add,
     _is_blocked_system_path,
     _strip_surrounding_quotes,
@@ -10861,6 +10867,7 @@ def handle_get(handler, parsed) -> bool:
                     _all_msgs,
                     action="get_projection_drop",
                     session_id=getattr(s, "session_id", None),
+                    background_task_origins=getattr(s, "async_delegation_origins", None),
                 )
             else:
                 if is_messaging_session and cli_messages:
@@ -12588,6 +12595,8 @@ def handle_post(handler, parsed) -> bool:
             workspace = str(resolve_trusted_workspace(body.get("workspace"))) if body.get("workspace") else None
         except (TypeError, ValueError) as e:
             return bad(handler, str(e))
+        session_id = None
+        workspace_mode = "external"
         worktree_info = None
         worktree_skipped = None
         # Three-value worktree model (#6022): an explicit body value always
@@ -12630,6 +12639,35 @@ def handle_post(handler, parsed) -> bool:
             except Exception as e:
                 logger.exception("failed to create worktree-backed session error=%s", e)
                 return bad(handler, f"Failed to create worktree: {e}", status=500)
+        # A missing workspace means a managed per-session root.  This decision
+        # happens after the worktree default is resolved so a real worktree
+        # remains the authoritative isolation mechanism for Git projects.
+        if not workspace and not worktree_info:
+            if _terminal_remote_backend_enabled():
+                # A remote terminal cwd belongs to the target machine.  Do not
+                # create a host-local directory that the remote Agent cannot
+                # use; retain the existing target-side workspace contract.
+                try:
+                    workspace = str(resolve_trusted_workspace(get_last_workspace()))
+                except (TypeError, ValueError) as e:
+                    return bad(handler, str(e), status=400)
+            else:
+                workspace_mode = "managed"
+                for _ in range(3):
+                    session_id = uuid.uuid4().hex[:12]
+                    try:
+                        workspace = str(create_managed_workspace(session_id, DEFAULT_WORKSPACE))
+                        break
+                    except FileExistsError:
+                        session_id = None
+                        continue
+                    except (TypeError, ValueError, OSError) as e:
+                        logger.exception("failed to create managed workspace", exc_info=True)
+                        return bad(handler, f"Failed to create managed workspace: {e}", status=500)
+                if not workspace or not session_id:
+                    return bad(handler, "Failed to allocate a unique managed workspace", status=500)
+        elif worktree_info:
+            workspace_mode = "worktree"
         model, model_provider = _session_model_state_from_request(
             body.get("model"),
             body.get("model_provider"),
@@ -12691,14 +12729,26 @@ def handle_post(handler, parsed) -> bool:
                 if _register_background_commit_thread(t):
                     t.start()
         s = new_session(
+            session_id=session_id,
             workspace=workspace,
+            workspace_mode=workspace_mode,
             model=model,
             model_provider=model_provider,
             profile=body.get("profile") or None,
             project_id=body.get("project_id") or None,
             worktree_info=worktree_info,
         )
-        if worktree_info:
+        if workspace_mode == "managed":
+            try:
+                # Managed roots are real filesystem state, so unlike ordinary
+                # zero-message sessions they must survive a WebUI restart.
+                s.save()
+            except Exception as e:
+                logger.exception("failed to persist managed session %s", s.session_id)
+                with LOCK:
+                    SESSIONS.pop(s.session_id, None)
+                return bad(handler, f"Failed to persist managed session: {e}", status=500)
+        if worktree_info or workspace_mode == "managed":
             publish_session_list_changed(
                 "session_new",
                 profile=getattr(s, "profile", None),
@@ -13150,9 +13200,10 @@ def handle_post(handler, parsed) -> bool:
         old_model = getattr(s, "model", None)
         old_provider = getattr(s, "model_provider", None)
         try:
-            new_ws = str(resolve_trusted_workspace(body.get("workspace", s.workspace)))
+            new_ws = str(resolve_session_workspace(s, body.get("workspace")))
         except ValueError as e:
-            return bad(handler, str(e))
+            status = 409 if str(getattr(s, "workspace_mode", "") or "").strip().lower() == "managed" else 400
+            return bad(handler, str(e), status=status)
         with _get_session_agent_lock(body["session_id"]):
             s.workspace = new_ws
             if "model" in body or "model_provider" in body:
@@ -13184,7 +13235,8 @@ def handle_post(handler, parsed) -> bool:
                 close_terminal(body["session_id"])
             except Exception:
                 logger.debug("Failed to close workspace terminal after workspace update")
-        set_last_workspace(new_ws)
+        if str(getattr(s, "workspace_mode", "") or "").strip().lower() != "managed":
+            set_last_workspace(new_ws)
         return j(handler, {"session": s.compact() | {"messages": s.messages}})
     if parsed.path == "/api/session/worktree/remove":
         sid = body.get("session_id", "")
@@ -19098,7 +19150,8 @@ def _start_chat_stream_for_session(
     except Exception:
         logger.warning("Failed to append submitted turn journal event", exc_info=True)
     diag.stage("set_last_workspace") if diag else None
-    set_last_workspace(workspace)
+    if str(getattr(s, "workspace_mode", "") or "").strip().lower() != "managed":
+        set_last_workspace(workspace)
     diag.stage("stream_registration") if diag else None
     stream = create_stream_channel()
     with STREAMS_LOCK:
@@ -19921,9 +19974,10 @@ def _handle_goal_command(handler, body):
     previous_goal_state = None
     if will_kickoff:
         try:
-            workspace = str(resolve_trusted_workspace(body.get("workspace") or s.workspace))
+            workspace = str(resolve_session_workspace(s, body.get("workspace")))
         except ValueError as e:
-            return bad(handler, str(e))
+            status = 409 if str(getattr(s, "workspace_mode", "") or "").strip().lower() == "managed" else 400
+            return bad(handler, str(e), status=status)
         requested_model = body.get("model") or s.model
         requested_provider = (
             body.get("model_provider")
@@ -19971,9 +20025,10 @@ def _handle_goal_command(handler, body):
     if kickoff_prompt:
         if workspace is None:
             try:
-                workspace = str(resolve_trusted_workspace(body.get("workspace") or s.workspace))
+                workspace = str(resolve_session_workspace(s, body.get("workspace")))
             except ValueError as e:
-                return bad(handler, str(e))
+                status = 409 if str(getattr(s, "workspace_mode", "") or "").strip().lower() == "managed" else 400
+                return bad(handler, str(e), status=status)
         if model is None:
             requested_model = body.get("model") or s.model
             requested_provider = (
@@ -20074,7 +20129,8 @@ def _handle_chat_start(handler, body, diag=None):
         try:
             workspace = _resolve_chat_workspace_with_recovery(s, body.get("workspace"))
         except ValueError as e:
-            return bad(handler, str(e))
+            status = 409 if str(getattr(s, "workspace_mode", "") or "").strip().lower() == "managed" else 400
+            return bad(handler, str(e), status=status)
         requested_model = body.get("model") or s.model
         requested_provider = (
             body.get("model_provider")
@@ -20244,6 +20300,8 @@ def _handle_chat_start(handler, body, diag=None):
 
 def _resolve_chat_workspace_with_recovery(s, requested_workspace) -> str:
     """Recover stale implicit session workspaces without hiding explicit errors."""
+    if str(getattr(s, "workspace_mode", "") or "").strip().lower() == "managed":
+        return str(resolve_session_workspace(s, requested_workspace))
     explicit = requested_workspace not in (None, "")
     candidate = requested_workspace if explicit else getattr(s, "workspace", None)
     try:
@@ -20302,9 +20360,10 @@ def _handle_chat_sync(handler, body):
     if not msg:
         return j(handler, {"error": "empty message"}, status=400)
     try:
-        workspace = str(resolve_trusted_workspace(body.get("workspace") or s.workspace))
+        workspace = str(resolve_session_workspace(s, body.get("workspace")))
     except ValueError as e:
-        return bad(handler, str(e))
+        status = 409 if str(getattr(s, "workspace_mode", "") or "").strip().lower() == "managed" else 400
+        return bad(handler, str(e), status=status)
     with _get_session_agent_lock(s.session_id):
         s.workspace = workspace
         from api.session_manifest import _next_turn_key

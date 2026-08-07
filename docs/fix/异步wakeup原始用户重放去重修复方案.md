@@ -157,7 +157,10 @@ replay 副本；不删除数据库行，也不修改 Agent 模型上下文。
 `integration.agent_message_semantics.projection.drop_non_display_messages()`：它先隐藏
 内部 scaffold/context anchor，再按同一 `_turn_key` 隐藏后续 `role=user` replay。`GET
 /api/session` 在计算 `msg_limit`、`msg_before` 和 `turn_align` 窗口前调用该投影，因此分页不会把
-replay 当成一条可见消息；数据库原始行和 Agent 模型上下文不变。
+replay 当成一条可见消息；同时根据 session sidecar 的
+`async_delegation_origins` 给原始 user 显示副本补 `_background_task_ids`。异步 wakeup 写回的
+assistant/tool 显示副本补 `_turn_key`、`_source=async_delegation_wakeup` 和
+`delegation_id`。数据库原始行和 Agent 模型上下文不变。
 
 ### 5.4 日志
 
@@ -181,6 +184,7 @@ turn_key=turn:8
 - 没有稳定身份的历史普通 user 不按正文猜测隐藏。
 - 旧 synthetic flag 继续兼容识别。
 - `_background_task_ids` 只在成功派发后台任务的原始 user 显示投影中增加。
+- 新产生的异步 wakeup assistant/tool 在写回时补显示身份；已有历史 assistant 不执行回溯重绑。
 - 历史消息没有稳定身份时保持原样，不执行历史 rebind 或数据库清理。
 
 ## 7. 测试与验收

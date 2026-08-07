@@ -1606,6 +1606,29 @@ def _finalize_artifact_settlement(
     return result
 
 
+def _append_interrupted_turn_journal_event(
+    session_id: str,
+    stream_id: str,
+    *,
+    reason: str,
+) -> None:
+    """Best-effort terminal journal record for a non-completed stream."""
+    if not session_id or not stream_id:
+        return
+    try:
+        append_turn_journal_event_for_stream(
+            session_id,
+            stream_id,
+            {
+                "event": "interrupted",
+                "created_at": time.time(),
+                "reason": reason,
+            },
+        )
+    except Exception:
+        logger.debug("Failed to append interrupted turn journal event", exc_info=True)
+
+
 def _persist_turn_artifact_paths(
     s,
     turn_key: str = '',
@@ -1787,7 +1810,7 @@ def _aiagent_import_error_detail() -> str:
     lines.append('  Full troubleshooting: docs/operations/troubleshooting.md ("AIAgent not available")')
     return "\n".join(lines)
 from api.models import get_session, title_from
-from api.workspace import set_last_workspace
+from api.workspace import resolve_session_workspace, set_last_workspace
 
 # Fields that are safe to send to LLM provider APIs.
 # Everything else (attachments, timestamp, _ts, etc.) is display-only
@@ -5633,6 +5656,7 @@ def _merge_display_messages_after_agent_result(
     *,
     source: str = 'webui',
     canonical_turn_key: str = '',
+    async_delegation_id: str = '',
 ):
     """Keep UI transcript durable while allowing model context to compact.
 
@@ -5907,6 +5931,20 @@ def _merge_display_messages_after_agent_result(
             if canonical_turn_key:
                 display_msg['_turn_key'] = canonical_turn_key
             stamp_message_source(display_msg, source)
+        elif (
+            async_delegation_id
+            and canonical_turn_key
+            and isinstance(msg, dict)
+            and msg.get('role') in ('assistant', 'tool')
+        ):
+            # The Agent result does not own WebUI turn metadata. For an
+            # async wakeup, stamp the display copy with the sidecar-resolved
+            # origin turn so history/SSE consumers can identify the isolated
+            # assistant reply without changing the provider-facing context.
+            display_msg = copy.deepcopy(msg)
+            display_msg['_turn_key'] = canonical_turn_key
+            display_msg['_source'] = 'async_delegation_wakeup'
+            display_msg['delegation_id'] = str(async_delegation_id)
         merged.append(copy.deepcopy(display_msg))
         if (
             canonical_turn_key
@@ -7402,7 +7440,7 @@ def _run_agent_streaming(
         s = get_session(session_id)
         _turn_pending_source = getattr(s, 'pending_user_source', None) or 'webui'
         update_active_run(stream_id, phase="running", session_id=session_id)
-        s.workspace = str(Path(workspace).expanduser().resolve())
+        s.workspace = str(resolve_session_workspace(s, workspace, requested_is_trusted=True))
         s.model = model
         provider_context = (
             str(model_provider).strip().lower()
@@ -9316,6 +9354,7 @@ def _run_agent_streaming(
                         msg_text,
                         source=getattr(s, 'pending_user_source', None) or 'webui',
                         canonical_turn_key=_manifest_turn_key,
+                        async_delegation_id=async_delegation_id,
                     )
                     _compact_session_image_parts_for_persistence(s)
                     _advance_truncation_watermark_after_commit(s)  # #3831
@@ -9652,6 +9691,7 @@ def _run_agent_streaming(
                                     msg_text,
                                     source=getattr(s, 'pending_user_source', None) or 'webui',
                                     canonical_turn_key=_manifest_turn_key,
+                                    async_delegation_id=async_delegation_id,
                                 )
                                 _compact_session_image_parts_for_persistence(s)
                                 _advance_truncation_watermark_after_commit(s)  # #3831
@@ -9716,6 +9756,11 @@ def _run_agent_streaming(
                                 stream_id=stream_id,
                                 terminal_reason='error',
                                 expected_user_text=_artifact_expected_user_text,
+                            )
+                            _append_interrupted_turn_journal_event(
+                                s.session_id,
+                                stream_id,
+                                reason=_err_type,
                             )
                         _error_payload['session'] = redact_session_data(
                             _session_payload_with_full_messages(s, tool_calls=s.tool_calls)
@@ -10763,6 +10808,7 @@ def _run_agent_streaming(
                                 msg_text,
                                 source=getattr(s, 'pending_user_source', None) or 'webui',
                                 canonical_turn_key=_manifest_turn_key,
+                                async_delegation_id=async_delegation_id,
                             )
                             _compact_session_image_parts_for_persistence(s)
                             _advance_truncation_watermark_after_commit(s)

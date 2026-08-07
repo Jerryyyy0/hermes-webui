@@ -1221,6 +1221,14 @@ Mixture-of-Agents 聚合器附加 guidance 时，如果最后一条不是 user�
 
 这类消息和主聊天 loop 不完全同级，但本质上也是 Agent 主动补 user message 的一种。
 
+## Provider 请求合并与 durable transcript
+
+当严格 provider 不能接受连续 `user` 角色时，Agent 可以在**发送给模型的
+`api_messages` 副本**中临时合并相邻 user 文本。该副本不写入 Agent
+`state.db`、WebUI sidecar 或普通 SSE user 事件；canonical transcript 必须保留
+每条真实 user 提交及其独立 turn key。不得在 canonical `messages` 上原地合并，
+否则 workspace、附件和下一次真实请求会被持久化成一条伪造的 user 消息。
+
 文案信息：
 
 - guidance 文本不是固定一句

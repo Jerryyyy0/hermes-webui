@@ -1287,10 +1287,15 @@ class Session:
                  async_delegation_origins=None,
                  share_token=None,
                  share_created_at=None,
+                 workspace_mode=None,
                  **kwargs):
         self.session_id = session_id or uuid.uuid4().hex[:12]
         self.title = title
         self.workspace = str(Path(workspace).expanduser().resolve())
+        _workspace_mode = str(workspace_mode or '').strip().lower()
+        if _workspace_mode not in {'managed', 'external', 'worktree'}:
+            _workspace_mode = 'worktree' if worktree_path else 'external'
+        self.workspace_mode = _workspace_mode
         self.model = model
         self.model_provider = str(model_provider).strip().lower() if model_provider else None
         # #5979: signature of the model the user DELIBERATELY picked this session
@@ -1472,7 +1477,7 @@ class Session:
         # without parsing the full messages array (which may be 400KB+).
         # Fields are listed in the order they should appear in the JSON file.
         METADATA_FIELDS = [
-            'session_id', 'title', 'workspace', 'model', 'model_provider', 'model_explicit_pick_signature', 'created_at', 'updated_at',
+            'session_id', 'title', 'workspace', 'workspace_mode', 'model', 'model_provider', 'model_explicit_pick_signature', 'created_at', 'updated_at',
             'pinned', 'pinned_at', 'archived', 'project_id', 'profile',
             'input_tokens', 'output_tokens', 'estimated_cost',
             'cache_read_tokens', 'cache_write_tokens',
@@ -4796,7 +4801,7 @@ def _profile_default_model_state(profile=None):
     return default_model or get_effective_default_model(), default_provider
 
 
-def new_session(workspace=None, model=None, profile=None, model_provider=None, project_id=None, worktree_info=None, enabled_toolsets=None):
+def new_session(workspace=None, model=None, profile=None, model_provider=None, project_id=None, worktree_info=None, enabled_toolsets=None, session_id=None, workspace_mode=None):
     """Create a new in-memory session.
 
     The session lives in the SESSIONS dict only — no disk write happens until
@@ -4838,8 +4843,13 @@ def new_session(workspace=None, model=None, profile=None, model_provider=None, p
 
     wt = worktree_info if isinstance(worktree_info, dict) else None
     workspace_path = (wt.get('path') if wt and wt.get('path') else workspace) if wt else workspace
+    effective_workspace_mode = workspace_mode
+    if effective_workspace_mode is None:
+        effective_workspace_mode = 'worktree' if wt else 'external'
     s = Session(
+        session_id=session_id,
         workspace=workspace_path or get_last_workspace(),
+        workspace_mode=effective_workspace_mode,
         model=effective_model,
         model_provider=effective_model_provider,
         profile=profile,
@@ -8391,54 +8401,14 @@ def _has_visible_duplicate(visible_key: tuple, visible_keys: set[tuple]) -> bool
     return _matching_visible_duplicate(visible_key, visible_keys) is not None
 
 
-def _legacy_user_aggregate_component_keys(msg: dict) -> list[tuple] | None:
-    """Return components for an attachment-free, agent-merged user row.
-
-    The agent historically merged adjacent user rows with blank lines. A
-    persisted row is considered synthetic only when every component is also
-    represented by an independent canonical row. This uses message identity,
-    not a localized upload prompt.
-    """
-    if (
-        not isinstance(msg, dict)
-        or str(msg.get("role") or "") != "user"
-        or msg.get("attachments")
-        or msg.get("_db_persisted") is not True
-    ):
-        return None
-    parts = str(msg.get("content") or "").split("\n\n")
-    if len(parts) < 2 or any(not part.strip() for part in parts):
-        return None
-    return [
-        _session_message_content_key({"role": "user", "content": part})
-        for part in parts
-    ]
-
-
 def _drop_covered_legacy_user_aggregates(messages: list) -> list:
-    """Hide synthetic user aggregates once canonical component rows exist."""
-    messages = list(messages or [])
-    canonical_counts = {}
-    for msg in messages:
-        if (
-            isinstance(msg, dict)
-            and _legacy_user_aggregate_component_keys(msg) is None
-        ):
-            key = _session_message_content_key(msg)
-            canonical_counts[key] = canonical_counts.get(key, 0) + 1
-    kept = []
-    for msg in messages:
-        component_keys = _legacy_user_aggregate_component_keys(msg)
-        if component_keys is None:
-            kept.append(msg)
-            continue
-        available = dict(canonical_counts)
-        for key in component_keys:
-            if available.get(key, 0) <= 0:
-                kept.append(msg)
-                break
-            available[key] -= 1
-    return kept
+    """Keep legacy rows unless explicit provenance proves they are a replay.
+
+    A normal user prompt may contain blank lines, workspace context and
+    attachment descriptions, so text splitting cannot safely distinguish an
+    old provider-side aggregate from a real user submission.
+    """
+    return list(messages or [])
 
 
 def _sidecar_has_terminal_partial_error(sidecar_messages: list) -> bool:

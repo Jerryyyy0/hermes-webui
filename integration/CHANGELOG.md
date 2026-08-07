@@ -16,6 +16,8 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Changed
 
+- **Managed session workspace artifacts** — `POST /api/session/new` without an explicit `workspace` now creates a persisted `<HERMES_WEBUI_DEFAULT_WORKSPACE>/<session_id>` root on local terminal profiles. The managed root is immutable for that session across chat, Gateway, streaming and goal execution; existing browser requests that send a workspace, worktree sessions, legacy sessions and remote terminal profiles keep their prior behavior. Manifest records now carry the canonical workspace root, so `GET /api/integration/workspace/files` treats `A/report.md` and `B/report.md` as distinct artifacts instead of merging their bare relative paths.
+
 - **Message semantics audit log preview** — `hermes_message_semantics` 审计日志中的 `content` / `api_content` 默认截断至 500 字符（可用 `HERMES_MESSAGE_SEMANTICS_LOG_MAX_CHARS` 调整；`<=0` 关闭截断）。async delegation 的 sidecar state / background status 日志同样走该预览截断。仅影响日志预览，不改持久化或模型上下文正文。
 
 - **Hermes Agent message semantics** — Agent-generated `internal_scaffold` rows no longer leak into WebUI display transcripts, manifest turn anchors, or artifact settlement. Durable `context_anchor` rows retain their original model-facing content plus explicit semantic fields while remaining hidden from transcript/turn rendering; legacy verification/pre-verify flags remain recognized.

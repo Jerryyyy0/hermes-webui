@@ -104,6 +104,22 @@ user:      [原始异步完成正文]            context_anchor / async_delegati
 assistant: 后台任务的流式回复             _turn_key=turn:8
 ```
 
+WebUI 的显示副本会为异步回补产生的 assistant/tool 行补充：
+
+```json
+{
+  "role": "assistant",
+  "content": "后台任务的流式回复",
+  "_turn_key": "turn:8",
+  "_source": "async_delegation_wakeup",
+  "delegation_id": "deleg_123"
+}
+```
+
+原始 user 的显示副本同时从 session sidecar 的
+`async_delegation_origins` 补充 `_background_task_ids`。这些字段只属于 WebUI 显示/归属
+投影，不写入 Agent 模型上下文，也不对历史 assistant 执行回溯重绑。
+
 completion anchor 不显示、不产生普通 SSE `message` 事件，也不成为 turn anchor。最后一条
 assistant、其工具事件、`MEDIA:`、References 和 artifact 都属于 `turn:8`。
 

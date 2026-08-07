@@ -375,8 +375,8 @@ def test_state_db_duplicate_backfills_turn_duration():
     assert merged[0]["_turnDuration"] == 42.5
 
 
-def test_reconciliation_drops_covered_legacy_upload_aggregate():
-    """Historical agent upload composites must not survive canonical rows."""
+def test_reconciliation_preserves_legacy_upload_aggregate_without_provenance():
+    """Text shape alone cannot prove that an old user row is synthetic."""
     from api.models import merge_session_messages_append_only
 
     first = "attachment reference: /tmp/first.doc"
@@ -406,11 +406,9 @@ def test_reconciliation_drops_covered_legacy_upload_aggregate():
 
     merged = merge_session_messages_append_only(sidecar, state)
 
-    assert [msg["content"] for msg in merged] == [first, second]
-    assert [msg["attachments"] for msg in merged] == [
-        [{"name": "first.doc"}],
-        [{"name": "second.png"}],
-    ]
+    assert [msg["content"] for msg in merged] == [aggregate, first, second]
+    assert merged[1]["attachments"] == [{"name": "first.doc"}]
+    assert merged[2]["attachments"] == [{"name": "second.png"}]
 
 
 def test_api_sessions_overlays_webui_state_db_summary_after_desktop_append(monkeypatch, tmp_path):
