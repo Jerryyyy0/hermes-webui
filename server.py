@@ -1,6 +1,7 @@
 """Hermes Web UI server entry point."""
 import logging
 import os
+import random
 import re
 import signal
 import socket
@@ -849,6 +850,42 @@ def main() -> None:
     threading.Thread(
         target=_bootstrap_no_self_improve_hub_sync,
         name="no-self-improve-hub-sync",
+        daemon=True,
+    ).start()
+
+    def _bootstrap_skill_details_safe() -> None:
+        try:
+            from integration.config import integration_enabled
+            if not integration_enabled():
+                log_info("[--] skill detail bootstrap skipped: HERMES_INTEGRATION not enabled")
+                return
+            # Jitter to spread concurrent bootstrap scans across multi-instance
+            # deployments pointing at the same SkillHub upstream (thundering herd).
+            # Set HERMES_SKILL_BOOTSTRAP_JITTER=0 to disable.
+            jitter_max = float(os.getenv("HERMES_SKILL_BOOTSTRAP_JITTER", "30") or "30")
+            if jitter_max > 0:
+                jitter = random.uniform(0, jitter_max)
+                log_info(
+                    f"[--] skill detail bootstrap: waiting {jitter:.1f}s before scan (jitter, max {jitter_max:.0f}s)"
+                )
+                time.sleep(jitter)
+            from integration.skills.detail_bootstrap import bootstrap_missing_skill_details
+            result = bootstrap_missing_skill_details()
+            log_info(
+                f"[ok] skill detail bootstrap: scanned={result['scanned']}, "
+                f"missing={result['missing']}, extracted={result['extracted']}, "
+                f"synced={result['synced']}, failed={len(result['failed'])}"
+            )
+            if result["failed"]:
+                logger.warning(
+                    "skill detail bootstrap failed for: %s", result["failed"]
+                )
+        except Exception:
+            logger.exception("skill detail bootstrap failed")
+
+    threading.Thread(
+        target=_bootstrap_skill_details_safe,
+        name="skill-detail-bootstrap",
         daemon=True,
     ).start()
 
