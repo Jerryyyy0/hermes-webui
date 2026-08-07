@@ -6,7 +6,21 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ## [Unreleased]
 
+### Fixed
+
+- **Chat apperror Packy `Content Exists Risk`** — PackyAPI / 兼容网关返回的 `HTTP 400: Content Exists Risk`（`packy_invalid_request_error`）此前落到通用 `error`；现归入既有 `content_filtered`，展示「内容被审核拦截」与「审核详情」。匹配短语：`content exists risk` / `content_exists_risk`。
+
+- **`GET /api/session/manifest` skill-scan amplification** — `skill_view` reference dedupe no longer runs `_canonical_skill_manifest_path` / `_find_skill` over file artifact keys (previously O(views × files × skills) full-directory frontmatter scans). `_find_skill` skips file-like miss scans without a process-wide lookup cache.
+
+- **Managed session manifest file preview paths** — When a session workspace is a child of `HERMES_WEBUI_DEFAULT_WORKSPACE`, `GET /api/session/manifest` and SSE `manifest_delta` now project `preview=file` paths relative to that integration root (e.g. `<session_id>/report.md`), matching left-rail `/api/integration/workspace/files`. Inspector preview via `/api/integration/workspace/file` no longer 404s on bare session-relative names. Shared-root and out-of-base workspaces keep prior relative paths; skill and absolute MEDIA paths are unchanged. DB rows remain session-relative.
+
 ### Changed
+
+- **Managed session workspace artifacts** — `POST /api/session/new` without an explicit `workspace` now creates a persisted `<HERMES_WEBUI_DEFAULT_WORKSPACE>/<session_id>` root on local terminal profiles. The managed root is immutable for that session across chat, Gateway, streaming and goal execution; existing browser requests that send a workspace, worktree sessions, legacy sessions and remote terminal profiles keep their prior behavior. Manifest records now carry the canonical workspace root, so `GET /api/integration/workspace/files` treats `A/report.md` and `B/report.md` as distinct artifacts instead of merging their bare relative paths.
+
+- **Message semantics audit log preview** — `hermes_message_semantics` 审计日志中的 `content` / `api_content` 默认截断至 500 字符（可用 `HERMES_MESSAGE_SEMANTICS_LOG_MAX_CHARS` 调整；`<=0` 关闭截断）。async delegation 的 sidecar state / background status 日志同样走该预览截断。仅影响日志预览，不改持久化或模型上下文正文。
+
+- **Hermes Agent message semantics** — Agent-generated `internal_scaffold` rows no longer leak into WebUI display transcripts, manifest turn anchors, or artifact settlement. Durable `context_anchor` rows retain their original model-facing content plus explicit semantic fields while remaining hidden from transcript/turn rendering; legacy verification/pre-verify flags remain recognized.
 
 - **Cron manual no_agent empty-output backfill** — WebUI manual script runs now forward their scheduler result into session materialization. Scheduled and manual script runs reserve a stable session before output persistence, so output-save failures still retain the completed or failed run. When an older manual run lacks an `executions.db` row, history applies `jobs.json`'s failure or success only to the single artifact whose timestamp matches `last_run_at`; every other valid artifact still receives a stable minimal session with an unverified outcome rather than no session.
 - **Cron no_agent history failure reconciliation** — `GET /api/crons/history` now matches each script output artifact to the owning Profile's terminal execution record. Empty artifacts from missing scripts, timeouts, and non-zero exits persist as `cron_error` with the scheduler error detail instead of being inferred as successful; prior synthetic records are corrected only when a failed execution matches. Unmatched or `unknown` zero-byte artifacts also persist with an empty `end_reason`, and failed history rows expose optional `error`.
@@ -125,7 +139,7 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 - **Interrupted-turn user-visible copy (zh)** — 会话中断恢复 marker、SSE 断连提示、压缩后无响应错误、run journal 恢复控制消息改为中文。文案集中在 `integration/chat_provider_errors/interruption_copy.py`；`api/models.py` / `api/run_journal.py` 仅薄 import。`static/messages.js` 与 `static/ui.js` 同步更新。
 
 - **Notification action_status state mapping** — 下游 `state` 与 `action_status` 对齐文档 §6.1：`0`→`rejected`、`1`→`approved`、`2`→`pending`（此前错误映射为 `0`→`pending` 等）。
-- **Notification API massType documentation** — [`docs/integration-notifications-api.md`](../docs/integration-notifications-api.md) 补充下游 `massType` 四种类型（`1` 加入申请 / `2` 退出 / `3` 申请结果 / `4` 被踢出）及与 `actionable`、`action_status` 的对应关系。
+- **Notification API massType documentation** — [`docs/integration/integration-notifications-api.md`](../docs/integration/integration-notifications-api.md) 补充下游 `massType` 四种类型（`1` 加入申请 / `2` 退出 / `3` 申请结果 / `4` 被踢出）及与 `actionable`、`action_status` 的对应关系。
 
 - **Workspace artifact profile backfill on startup** — 服务启动时后台扫描补全 `session_manifest.db` 的 artifact profile。先跑 B 类：对 store 中无 artifact 记录、且 `session.profile` 非空的老会话（在流式落库特性 `_persist_turn_artifact_paths` 上线前创建），逐 turn 复用同一套提取逻辑（`_extract_turn_artifact_entries`）从 messages 抽取 path/source_tool/preview 并 upsert，path 格式与 turn_key 与流式落库一致，避免与 `/api/session/manifest` 的懒回填（`backfill_from_session_turn_artifacts`）冲突。再跑 A 类：修补 DB 已有记录中 `profile=''` 但 session 实际有 profile 的行。session 本身无 profile 的记录保持空（不从其他字段推断）。流式写入仍以 `session.profile` 为权威。
 - **Notification actionable by massType** — `actionable` 改为按下游 `massType` 判断：`1`（入群申请）为 `1`（可打开详情，含已审批历史）；`2`/`3` 等通知类为 `0`。`action_status` 与审批按钮仅对 `massType=1` 映射。
@@ -134,13 +148,13 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Added
 
-- **Browser preview for terminal agent-browser** — `browser_preview` SSE 现也在 `terminal` 工具执行 `agent-browser` CLI（含 `connect` / `snapshot` / `click` 等）时触发，与 `browser_*` 工具共用每 stream 一次性 `BrowserPreviewEmitter` 去重，不重复打开 VNC 面板。实现：`api/browser_preview.py`；`api/streaming.py` / `api/gateway_chat.py` 传入 `tool_args`。文档：`docs/browser-preview-sse.md`。
+- **Browser preview for terminal agent-browser** — `browser_preview` SSE 现也在 `terminal` 工具执行 `agent-browser` CLI（含 `connect` / `snapshot` / `click` 等）时触发，与 `browser_*` 工具共用每 stream 一次性 `BrowserPreviewEmitter` 去重，不重复打开 VNC 面板。实现：`api/browser_preview.py`；`api/streaming.py` / `api/gateway_chat.py` 传入 `tool_args`。文档：`docs/architecture/browser-preview-sse.md`。
 
-- **Notification API documentation** — [`docs/integration-notifications-api.md`](../docs/integration-notifications-api.md)：知识库通知接口说明（参数、响应字段、curl 示例、KB BFF 审批对照）。
+- **Notification API documentation** — [`docs/integration/integration-notifications-api.md`](../docs/integration/integration-notifications-api.md)：知识库通知接口说明（参数、响应字段、curl 示例、KB BFF 审批对照）。
 
 - **Notification Phase 1 (KB-only)** — 通知 HTTP 层收窄为仅知识库 `kb_apply`：
   - 列表/摘要新增 `read_type`、`action_status` 查询；响应新增 `actions[]`、`actionable`、字符串 `action_status`
-  - 下游 `state` 映射：`0=rejected, 1=approved, 2=pending`（`integration/notifications/constants.py`，见 `docs/integration-notifications-api.md` §6.1）
+  - 下游 `state` 映射：`0=rejected, 1=approved, 2=pending`（`integration/notifications/constants.py`，见 `docs/integration/integration-notifications-api.md` §6.1）
   - 新增 `normalize.py`、`filters.py`；handlers 不再读写 `store`
   - 删除 `GET /api/integration/notifications/{id}`；read/delete 仅处理 `kb:` ID
   - 审批仍走 `POST /api/integration/knowledge_base/creater_handle_application`
@@ -199,7 +213,7 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 - **SkillHub preview `scope=hub`** — `GET /api/skillhub/content|structure|file` with `scope=hub` resolves `{HERMES_HOME}/skills` first, then falls back to SkillHub upstream when no local `SKILL.md` exists. `scope=custom` remains local-only.
 
-- **Knowledge base BFF route segment names** — WebUI proxy paths `apply-join`, `upload-docs`, `update-docs`, and `delete-docs` are now `apply_join`, `upload_docs`, `update_docs`, and `delete_docs` (underscore only). Hyphenated segments are no longer served. Swagger and [`docs/integration-knowledge-base-api.md`](../docs/integration-knowledge-base-api.md) updated.
+- **Knowledge base BFF route segment names** — WebUI proxy paths `apply-join`, `upload-docs`, `update-docs`, and `delete-docs` are now `apply_join`, `upload_docs`, `update_docs`, and `delete_docs` (underscore only). Hyphenated segments are no longer served. Swagger and [`docs/integration/integration-knowledge-base-api.md`](../docs/integration/integration-knowledge-base-api.md) updated.
 
 - **Zhiling login/logout API paths** — `GET /api/integration/login` → `GET /api/integration/webui_login`; `POST|GET /api/integration/logout` → `POST|GET /api/integration/webui_logout`. Swagger, docs, and tests updated.
 

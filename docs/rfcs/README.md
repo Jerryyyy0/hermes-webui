@@ -70,3 +70,7 @@ First-time contributor RFCs should be discussed in an issue before opening a PR.
 - [`session-sse-contract-v1.md`](session-sse-contract-v1.md) — #4812 Proposed
   contract vocabulary, replay identity, event taxonomy, cursor/resume semantics,
   and implementation gates for `GET /api/sessions/{session_id}/events`.
+- [`async-delegation-turn-alignment.md`](async-delegation-turn-alignment.md) —
+  Proposed contract for keeping asynchronous delegation completions hidden as
+  model-context anchors while streaming their late results at the timeline tail
+  and retaining their original user-turn ownership.

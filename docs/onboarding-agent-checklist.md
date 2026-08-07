@@ -162,7 +162,7 @@ If onboarding reports `agent_unavailable`:
 
 - confirm the bootstrap found or installed Hermes Agent
 - check whether the running Python can import `run_agent.AIAgent`
-- use `docs/troubleshooting.md`, especially the `AIAgent not available` flow
+- use `docs/operations/troubleshooting.md`, especially the `AIAgent not available` flow
 
 If onboarding reports `provider_incomplete`:
 

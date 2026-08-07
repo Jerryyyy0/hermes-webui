@@ -198,6 +198,135 @@ def test_build_session_manifest_marks_deleted_artifact_expired(tmp_path, monkeyp
     assert manifest['turns'][0]['artifacts'][0]['status'] == 'expired'
 
 
+def test_build_session_manifest_prefixes_managed_workspace_file_paths(tmp_path, monkeypatch):
+    base = tmp_path / 'workspace-base'
+    sid = 'managedsid01'
+    workspace = base / sid
+    workspace.mkdir(parents=True)
+    (workspace / 'report.md').write_text('ok', encoding='utf-8')
+    monkeypatch.setattr(
+        'api.workspace.resolve_trusted_workspace',
+        lambda path=None: base.resolve() if path in (None, '') else Path(path).expanduser().resolve(),
+    )
+    session = Session(
+        session_id=sid,
+        workspace=str(workspace),
+        messages=[
+            {'role': 'user', 'content': 'write report', '_turn_key': 'turn:0'},
+            {
+                'role': 'assistant',
+                'tool_calls': [{
+                    'id': 'c1',
+                    'function': {'name': 'write_file', 'arguments': '{"path":"report.md"}'},
+                }],
+            },
+            {'role': 'tool', 'tool_call_id': 'c1', 'content': 'ok'},
+        ],
+        tool_calls=[],
+    )
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    manifest = build_session_manifest(session)
+    assert manifest['artifacts'][0]['path'] == f'{sid}/report.md'
+    assert manifest['turns'][0]['artifacts'][0]['path'] == f'{sid}/report.md'
+
+
+def test_build_session_manifest_keeps_path_when_workspace_is_integration_root(tmp_path, monkeypatch):
+    base = tmp_path / 'workspace-base'
+    base.mkdir()
+    (base / 'report.md').write_text('ok', encoding='utf-8')
+    monkeypatch.setattr(
+        'api.workspace.resolve_trusted_workspace',
+        lambda path=None: base.resolve() if path in (None, '') else Path(path).expanduser().resolve(),
+    )
+    session = Session(
+        session_id='sharedroot01',
+        workspace=str(base),
+        messages=[
+            {'role': 'user', 'content': 'write report', '_turn_key': 'turn:0'},
+            {
+                'role': 'assistant',
+                'tool_calls': [{
+                    'id': 'c1',
+                    'function': {'name': 'write_file', 'arguments': '{"path":"report.md"}'},
+                }],
+            },
+            {'role': 'tool', 'tool_call_id': 'c1', 'content': 'ok'},
+        ],
+        tool_calls=[],
+    )
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    manifest = build_session_manifest(session)
+    assert manifest['artifacts'][0]['path'] == 'report.md'
+
+
+def test_manifest_delta_prefixes_managed_workspace_file_paths(tmp_path, monkeypatch):
+    base = tmp_path / 'workspace-base'
+    sid = 'manageddelta01'
+    workspace = base / sid
+    workspace.mkdir(parents=True)
+    (workspace / 'notes.txt').write_text('hello', encoding='utf-8')
+    monkeypatch.setattr(
+        'api.workspace.resolve_trusted_workspace',
+        lambda path=None: base.resolve() if path in (None, '') else Path(path).expanduser().resolve(),
+    )
+    delta = extract_manifest_delta_from_tool_event(
+        ToolEvent(
+            name='write_file',
+            args={'path': 'notes.txt'},
+            result='ok',
+            tid='write-call',
+            status='completed',
+        ),
+        workspace,
+        session_id=sid,
+        stream_id='stream1',
+        turn_key='turn:0',
+        sequence=1,
+    )
+    assert delta['artifacts'] == [{
+        'path': f'{sid}/notes.txt',
+        'preview': 'file',
+        'source_tool': 'write_file',
+    }]
+
+
+def test_build_session_manifest_expired_managed_path_keeps_prefix(tmp_path, monkeypatch):
+    base = tmp_path / 'workspace-base'
+    sid = 'managedexp01'
+    workspace = base / sid
+    workspace.mkdir(parents=True)
+    target = workspace / 'gone.txt'
+    target.write_text('bye', encoding='utf-8')
+    monkeypatch.setattr(
+        'api.workspace.resolve_trusted_workspace',
+        lambda path=None: base.resolve() if path in (None, '') else Path(path).expanduser().resolve(),
+    )
+    session = Session(
+        session_id=sid,
+        workspace=str(workspace),
+        messages=[
+            {'role': 'user', 'content': 'write', '_turn_key': 'turn:0'},
+            {
+                'role': 'assistant',
+                'tool_calls': [{
+                    'id': 'c1',
+                    'function': {'name': 'write_file', 'arguments': '{"path":"gone.txt"}'},
+                }],
+            },
+            {'role': 'tool', 'tool_call_id': 'c1', 'content': 'ok'},
+        ],
+        tool_calls=[],
+        turn_artifacts={
+            'turn:0': [{'path': 'gone.txt', 'source_tool': 'write_file'}],
+        },
+    )
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    target.unlink()
+    manifest = build_session_manifest(session)
+    assert manifest['artifacts'][0]['path'] == f'{sid}/gone.txt'
+    assert manifest['artifacts'][0]['status'] == 'expired'
+
+
 def test_rows_to_wire_references_drops_missing_file_rows(tmp_path):
     workspace = tmp_path / 'ws'
     workspace.mkdir()
@@ -3319,6 +3448,21 @@ def test_next_turn_key_ignores_non_user():
     assert _next_turn_key(messages) == 'turn:1'
 
 
+def test_next_turn_key_reserves_synthetic_user_key():
+    messages = [
+        {'role': 'user', 'content': 'real', '_turn_key': 'turn:8'},
+        {
+            'role': 'user',
+            'content': '[System: run verification]',
+            '_turn_key': 'turn:9',
+            '_verification_stop_synthetic': True,
+        },
+    ]
+    # Synthetic rows are not visible turn anchors, but their allocated key is
+    # still reserved. Reusing turn:9 would corrupt artifact ownership.
+    assert _next_turn_key(messages) == 'turn:10'
+
+
 def test_next_turn_key_handles_invalid_key():
     """跳过无效的 _turn_key 值"""
     messages = [
@@ -3356,6 +3500,59 @@ def test_message_turns_falls_back_to_index():
     assert len(turns) == 2
     assert turns[0]['turn_key'] == 'turn:0'
     assert turns[1]['turn_key'] == 'turn:2'
+
+
+@pytest.mark.parametrize('marker', [
+    '_verification_stop_synthetic',
+    '_pre_verify_synthetic',
+])
+def test_message_turns_ignore_synthetic_nudge_and_preserve_interim_assistant(marker):
+    messages = [
+        {'role': 'user', 'content': '生成图片', '_turn_key': 'turn:8'},
+        {'role': 'assistant', 'content': 'premature done'},
+        {'role': 'user', 'content': '[System: run verification]', marker: True},
+        {'role': 'assistant', 'content': '已验证并修复'},
+        {'role': 'assistant', 'content': 'MEDIA: result.png'},
+    ]
+
+    turns = _message_turns(messages)
+
+    assert len(turns) == 1
+    assert turns[0]['turn_key'] == 'turn:8'
+    assert turns[0]['start_msg_idx'] == 0
+    assert turns[0]['end_msg_idx'] == 4
+    assert [message['content'] for message in _turn_message_slice(messages, 'turn:8')] == [
+        '生成图片',
+        'premature done',
+        '[System: run verification]',
+        '已验证并修复',
+        'MEDIA: result.png',
+    ]
+
+
+def test_manifest_diagnostics_ignore_synthetic_user_without_turn_key(tmp_path, monkeypatch):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    session = Session(
+        session_id='manifest-synthetic-nudge',
+        workspace=str(workspace),
+        messages=[
+            {'role': 'user', 'content': '生成图片', '_turn_key': 'turn:8'},
+            {'role': 'assistant', 'content': 'premature done'},
+            {
+                'role': 'user',
+                'content': '[System: run verification]',
+                '_verification_stop_synthetic': True,
+            },
+            {'role': 'assistant', 'content': '已验证并修复'},
+        ],
+    )
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+
+    manifest = build_session_manifest(session)
+
+    assert [turn['turn_key'] for turn in manifest['turns']] == ['turn:8']
+    assert manifest['diagnostics']['missing_turn_key_message_indices'] == []
 
 
 def test_ensure_turn_keys_does_not_invent_active_turn_numbers():
@@ -4092,6 +4289,81 @@ def test_build_session_manifest_skill_view_deduped_when_artifact(tmp_path, monke
     assert 'ai-news-top10' not in reference_paths
     assert 'research/ai-news-top10' not in reference_paths
     assert 'hermes-agent-skill-authoring' in reference_paths
+
+
+def test_extract_manifest_records_skips_skill_scan_for_file_artifact_keys(tmp_path, monkeypatch):
+    """Regression: skill_view dedupe must not canonicalize file artifact paths.
+
+    With many skills on disk, calling _find_skill for every file artifact key on
+    every skill_view event made GET /api/session/manifest take tens of seconds.
+    """
+    from integration.skills import local_skills
+
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    skills_dir = tmp_path / 'profile-home' / 'skills'
+    for i in range(40):
+        _write_local_skill(skills_dir, f'bulk-skill-{i:02d}', rel_path=f'cat/bulk-skill-{i:02d}')
+    _write_local_skill(skills_dir, 'viewed-skill', rel_path='cat/viewed-skill')
+
+    messages = [{'role': 'user', 'content': 'work', '_turn_key': 'turn:1'}]
+    tool_calls = []
+    events = []
+    for i in range(20):
+        rel = f'work/out-{i:02d}.md'
+        (workspace / 'work').mkdir(exist_ok=True)
+        (workspace / rel).write_text(f'# {i}', encoding='utf-8')
+        tid = f'w{i}'
+        events.append(ToolEvent(
+            name='write_file',
+            args={'path': rel},
+            assistant_msg_idx=1,
+            tool_msg_idx=2 + i,
+            tid=tid,
+            status='completed',
+            result='ok',
+        ))
+    for i in range(5):
+        tid = f'v{i}'
+        events.append(ToolEvent(
+            name='skill_view',
+            args={'name': 'viewed-skill'},
+            assistant_msg_idx=1,
+            tool_msg_idx=100 + i,
+            tid=tid,
+            status='completed',
+            result=json.dumps({
+                'success': True,
+                'name': 'viewed-skill',
+                'path': str(skills_dir / 'cat' / 'viewed-skill' / 'SKILL.md'),
+            }),
+        ))
+
+    find_calls: list[str] = []
+    real_find = local_skills._find_skill
+
+    def counting_find(name, skills_dir_arg):
+        find_calls.append(str(name or ''))
+        return real_find(name, skills_dir_arg)
+
+    monkeypatch.setattr(local_skills, '_find_skill', counting_find)
+    monkeypatch.setattr('api.session_manifest._skillhub_preview_available', lambda: True)
+
+    artifacts, references, turns = _extract_manifest_records(
+        events, workspace, messages, skills_dir=skills_dir,
+    )
+
+    assert len(artifacts) >= 20
+    assert any(row.get('path') == 'cat/viewed-skill' for row in references)
+    file_like_lookups = [
+        name for name in find_calls
+        if name.endswith(('.md', '.py', '.html')) and not name.endswith('SKILL.md')
+    ]
+    assert file_like_lookups == [], (
+        f'skill lookup must not scan for file artifact paths; got {file_like_lookups[:10]}'
+    )
+    # Bound lookups to skill identities (+ small constant), not O(files × views × skills).
+    assert len(find_calls) <= 20, f'unexpected skill-scan amplification: {len(find_calls)} calls'
 
 
 def test_canonical_skill_path_normalization(tmp_path, monkeypatch):

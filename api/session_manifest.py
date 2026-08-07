@@ -10,8 +10,14 @@ import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from integration.agent_message_semantics.audit import log_control_message
+from integration.agent_message_semantics.classifier import is_non_anchor_control_message
 
 logger = logging.getLogger(__name__)
+
+def _is_synthetic_control_message(message) -> bool:
+    """Return whether Agent provenance says this row is not a user anchor."""
+    return is_non_anchor_control_message(message)
 
 ARTIFACT_IGNORE_RE = re.compile(
     r'(^|/)(?:\.git|\.hg|\.svn|node_modules|\.venv|venv|__pycache__|dist|build|\.next|\.cache)(?:/|$)'
@@ -1417,13 +1423,16 @@ def _message_turns(messages: list) -> list[dict[str, Any]]:
     from api.compression_anchor import is_context_compression_marker
 
     message_rows = list(messages or [])
-    user_rows = [
-        (idx, message)
-        for idx, message in enumerate(message_rows)
-        if isinstance(message, dict)
-        and message.get('role') == 'user'
-        and not is_context_compression_marker(message)
-    ]
+    user_rows = []
+    for idx, message in enumerate(message_rows):
+        if not isinstance(message, dict) or message.get('role') != 'user':
+            continue
+        if is_context_compression_marker(message):
+            continue
+        if _is_synthetic_control_message(message):
+            log_control_message("manifest_turn_skip", message)
+            continue
+        user_rows.append((idx, message))
     has_stable_turn_keys = any(
         str(message.get('_turn_key') or '').strip()
         for _idx, message in user_rows
@@ -1599,16 +1608,18 @@ def _extract_manifest_records(
             if skill_name:
                 canonical = _canonical_skill_manifest_path(skill_name, skills_dir)
                 if canonical:
-                    session_skill_keys = {
-                        _canonical_skill_manifest_path(str(key), skills_dir)
-                        for key in artifacts.keys()
-                    }
+                    # Only skill artifact rows participate in reference dedupe.
+                    # Canonicalizing every file artifact key (old behavior) forces
+                    # a full skills-dir scan/miss per key and dominates GET latency.
+                    session_skill_keys = _skill_canonical_keys_from_rows(
+                        list(artifacts.values()), skills_dir,
+                    )
                     turn_skill_keys = set()
                     if turn is not None:
-                        turn_skill_keys = {
-                            _canonical_skill_manifest_path(str(key), skills_dir)
-                            for key in turn.get('artifacts', {}).keys()
-                        }
+                        turn_skill_keys = _skill_canonical_keys_from_rows(
+                            list((turn.get('artifacts') or {}).values()),
+                            skills_dir,
+                        )
                     if canonical in session_skill_keys or canonical in turn_skill_keys:
                         continue
                     skill_name = canonical
@@ -2278,6 +2289,17 @@ def _serialize_manifest_row(
     return row
 
 
+def _wire_file_path_for_integration(workspace: Path, path: str) -> str:
+    """Project session-relative file paths onto DEFAULT_WORKSPACE for wire/SSE.
+
+    Matches left-rail ``/api/integration/workspace/files`` prefixing so
+    ``/api/integration/workspace/file`` can open managed-session artifacts.
+    """
+    from api.session_manifest_store import project_artifact_path_for_integration_root
+
+    return project_artifact_path_for_integration_root(path, workspace)
+
+
 def _expired_workspace_file_wire_path(workspace: Path, rel: str, entry_kind: str) -> str | None:
     if entry_kind == 'dir':
         return None
@@ -2394,11 +2416,16 @@ def _row_to_wire(
     preview_path = _file_preview_path(workspace, rel, entry_kind)
     if preview_path:
         return _serialize_manifest_row(
-            preview_path, MANIFEST_PREVIEW_FILE, source_tool, profile=profile,
+            _wire_file_path_for_integration(workspace, preview_path),
+            MANIFEST_PREVIEW_FILE,
+            source_tool,
+            profile=profile,
         )
     if source_tool == MEDIA_ARTIFACT_SOURCE:
         media_path = _session_media_preview_path(workspace, rel, entry_kind)
         if media_path:
+            # Absolute MEDIA paths stay absolute; in-workspace MEDIA already
+            # returned via _file_preview_path above.
             return _serialize_manifest_row(
                 media_path, MANIFEST_PREVIEW_FILE, source_tool, profile=profile,
             )
@@ -2414,6 +2441,8 @@ def _row_to_wire(
             expired_path = _expired_media_file_wire_path(workspace, rel, entry_kind)
         else:
             expired_path = _expired_workspace_file_wire_path(workspace, rel, entry_kind)
+            if expired_path:
+                expired_path = _wire_file_path_for_integration(workspace, expired_path)
         if expired_path:
             return _serialize_manifest_row(
                 expired_path,
@@ -2788,6 +2817,7 @@ def build_session_manifest(session, source_info: dict[str, str] | None = None) -
     has_stable_turn_keys = any(
         isinstance(message, dict)
         and message.get('role') == 'user'
+        and not _is_synthetic_control_message(message)
         and str(message.get('_turn_key') or '').strip()
         for message in messages
     )
@@ -2797,6 +2827,7 @@ def build_session_manifest(session, source_info: dict[str, str] | None = None) -
         and isinstance(message, dict)
         and message.get('role') == 'user'
         and not is_context_compression_marker(message)
+        and not _is_synthetic_control_message(message)
         and not str(message.get('_turn_key') or '').strip()
     ]
     tool_calls = list(getattr(session, 'tool_calls', None) or [])
@@ -2858,7 +2889,7 @@ def build_session_manifest(session, source_info: dict[str, str] | None = None) -
     # Prefer persisted turn_artifacts over reconcile results.
     # When the streaming pipeline persists artifact paths at turn completion,
     # those paths are more reliable than the reconcile pass (which can suffer
-    # from cross-turn prose contamination — see docs/turn-key-backend.md §8.3).
+    # from cross-turn prose contamination — see docs/architecture/turn-key-backend.md §8.3).
     persisted = getattr(session, 'turn_artifacts', None)
     if not decided_turn_keys and isinstance(persisted, dict) and persisted:
         default_profile = str(getattr(session, 'profile', None) or '').strip()

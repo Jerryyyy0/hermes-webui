@@ -43,6 +43,7 @@ from api.agent_sessions import (
     read_session_lineage_report,
 )
 from integration.project_logging import get_logger
+from integration.agent_message_semantics.projection import drop_non_display_messages
 from api.compression_anchor import visible_messages_for_anchor
 from api.compression_recovery import (
     COMPRESSION_RECOVERY_ACTION_START_FOCUSED,
@@ -3818,7 +3819,7 @@ def _share_snapshot_messages_for_session(session, *, cli_meta: dict | None = Non
     sid = str(getattr(session, "session_id", "") or "").strip()
     current_messages = list(getattr(session, "messages", None) or [])
     if not sid:
-        return current_messages
+        return drop_non_display_messages(current_messages, action="share_projection_drop")
     profile = getattr(session, "profile", None)
     is_messaging = (
         _is_messaging_session_record(session)
@@ -3829,8 +3830,8 @@ def _share_snapshot_messages_for_session(session, *, cli_meta: dict | None = Non
         if cli_messages:
             if is_messaging:
                 return _merged_session_messages_for_display(session, cli_messages)
-            return list(cli_messages)
-    return current_messages
+            return drop_non_display_messages(cli_messages, action="share_projection_drop")
+    return drop_non_display_messages(current_messages, action="share_projection_drop")
 
 
 def _build_share_metadata_sidecar(
@@ -7429,20 +7430,43 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
     if cli_messages:
         if sidecar_messages and sidecar_messages != cli_messages:
             if len(sidecar_messages) >= len(cli_messages):
-                return merge_session_messages_append_only(
+                messages = merge_session_messages_append_only(
                     sidecar_messages,
                     cli_messages,
                     truncation_watermark=getattr(session, "truncation_watermark", None),
                 )
+                return drop_non_display_messages(
+                    messages,
+                    action="get_projection_drop",
+                    session_id=getattr(session, "session_id", None),
+                    background_task_origins=getattr(session, "async_delegation_origins", None),
+                )
             # Sidecar shorter than CLI: chronologically stitch both slices
             # (#2472) while visible-key-capping cross-source duplicates
             # (recovered/no-id sidecar vs id/_db_persisted state.db rows).
-            return chronological_merge_session_messages_for_display(
+            messages = chronological_merge_session_messages_for_display(
                 sidecar_messages,
                 cli_messages,
             )
-        return sidecar_messages if len(sidecar_messages) > len(cli_messages) else cli_messages
-    return sidecar_messages
+            return drop_non_display_messages(
+                messages,
+                action="get_projection_drop",
+                session_id=getattr(session, "session_id", None),
+                background_task_origins=getattr(session, "async_delegation_origins", None),
+            )
+        messages = sidecar_messages if len(sidecar_messages) > len(cli_messages) else cli_messages
+        return drop_non_display_messages(
+            messages,
+            action="get_projection_drop",
+            session_id=getattr(session, "session_id", None),
+            background_task_origins=getattr(session, "async_delegation_origins", None),
+        )
+    return drop_non_display_messages(
+        sidecar_messages,
+        action="get_projection_drop",
+        session_id=getattr(session, "session_id", None),
+        background_task_origins=getattr(session, "async_delegation_origins", None),
+    )
 
 
 
@@ -8276,6 +8300,7 @@ from api.workspace import (
     read_file_content,
     safe_resolve_ws,
     resolve_trusted_workspace,
+    resolve_session_workspace,
     open_anchored_fd,
     open_anchored_create_fd,
     open_anchored_write_fd,
@@ -8283,6 +8308,7 @@ from api.workspace import (
     rmtree_anchored,
     rename_anchored,
     make_anchored_dir,
+    create_managed_workspace,
     validate_workspace_to_add,
     _is_blocked_system_path,
     _strip_surrounding_quotes,
@@ -10837,6 +10863,12 @@ def handle_get(handler, parsed) -> bool:
                         state_db_messages,
                         truncation_watermark=getattr(s, "truncation_watermark", None),
                     )
+                _all_msgs = drop_non_display_messages(
+                    _all_msgs,
+                    action="get_projection_drop",
+                    session_id=getattr(s, "session_id", None),
+                    background_task_origins=getattr(s, "async_delegation_origins", None),
+                )
             else:
                 if is_messaging_session and cli_messages:
                     _all_msgs = _merged_session_messages_for_display(s, cli_messages)
@@ -11076,7 +11108,13 @@ def handle_get(handler, parsed) -> bool:
                                 if reconcile_cron_session_transcript(s):
                                     s.save(touch_updated_at=False)
                             raw = s.compact()
-                            raw["messages"] = list(getattr(s, "messages", []) or []) if load_messages else []
+                            raw["messages"] = (
+                                drop_non_display_messages(
+                                    getattr(s, "messages", []) or [],
+                                    action="get_projection_drop",
+                                )
+                                if load_messages else []
+                            )
                             raw["message_count"] = len(raw["messages"])
                             raw["tool_calls"] = getattr(s, "tool_calls", []) if load_messages else []
                             return j(handler, {"session": redact_session_data(raw)})
@@ -11125,7 +11163,13 @@ def handle_get(handler, parsed) -> bool:
             # Build the legacy dict response from the synthesized Session so
             # the wire shape stays byte-equivalent to the previous inline
             # synthesis (the frontend has been reading these exact keys).
-            msgs = list(synth.messages or [])
+            msgs = (
+                drop_non_display_messages(
+                    list(synth.messages or []),
+                    action="get_projection_drop",
+                )
+                if load_messages else []
+            )
             sess = {
                 "session_id": synth.session_id,
                 "title": synth.title,
@@ -11594,11 +11638,21 @@ def handle_get(handler, parsed) -> bool:
         settled = True
         if cancelled:
             settled = _wait_for_stream_worker_settled(stream_id)
+        drained = None
+        if cancelled and settled:
+            try:
+                drained = drain_pending_chat_turn(session_id)
+            except Exception:
+                logger.debug("Failed to drain queued chat turn after cancel", exc_info=True)
         return j(handler, {
             "ok": True,
             "cancelled": cancelled,
             "settled": settled,
             "stream_id": stream_id,
+            **({
+                "successor_stream_id": drained.get("stream_id"),
+                "queued_entry_id": drained.get("entry_id"),
+            } if isinstance(drained, dict) and drained.get("stream_id") else {}),
             "settle_timeout_ms": int(CANCEL_SETTLE_TIMEOUT_SECONDS * 1000),
         })
 
@@ -11774,6 +11828,14 @@ def handle_get(handler, parsed) -> bool:
         from integration.assistant_bubbles.handlers import try_handle_get as _assistant_bubbles_try_get
 
         if _assistant_bubbles_try_get(handler, parsed) is True:
+            return True
+    except ImportError:
+        pass
+
+    try:
+        from integration.common_tasks.handlers import try_handle_get as _common_tasks_try_get
+
+        if _common_tasks_try_get(handler, parsed) is True:
             return True
     except ImportError:
         pass
@@ -12533,6 +12595,8 @@ def handle_post(handler, parsed) -> bool:
             workspace = str(resolve_trusted_workspace(body.get("workspace"))) if body.get("workspace") else None
         except (TypeError, ValueError) as e:
             return bad(handler, str(e))
+        session_id = None
+        workspace_mode = "external"
         worktree_info = None
         worktree_skipped = None
         # Three-value worktree model (#6022): an explicit body value always
@@ -12575,6 +12639,35 @@ def handle_post(handler, parsed) -> bool:
             except Exception as e:
                 logger.exception("failed to create worktree-backed session error=%s", e)
                 return bad(handler, f"Failed to create worktree: {e}", status=500)
+        # A missing workspace means a managed per-session root.  This decision
+        # happens after the worktree default is resolved so a real worktree
+        # remains the authoritative isolation mechanism for Git projects.
+        if not workspace and not worktree_info:
+            if _terminal_remote_backend_enabled():
+                # A remote terminal cwd belongs to the target machine.  Do not
+                # create a host-local directory that the remote Agent cannot
+                # use; retain the existing target-side workspace contract.
+                try:
+                    workspace = str(resolve_trusted_workspace(get_last_workspace()))
+                except (TypeError, ValueError) as e:
+                    return bad(handler, str(e), status=400)
+            else:
+                workspace_mode = "managed"
+                for _ in range(3):
+                    session_id = uuid.uuid4().hex[:12]
+                    try:
+                        workspace = str(create_managed_workspace(session_id, DEFAULT_WORKSPACE))
+                        break
+                    except FileExistsError:
+                        session_id = None
+                        continue
+                    except (TypeError, ValueError, OSError) as e:
+                        logger.exception("failed to create managed workspace", exc_info=True)
+                        return bad(handler, f"Failed to create managed workspace: {e}", status=500)
+                if not workspace or not session_id:
+                    return bad(handler, "Failed to allocate a unique managed workspace", status=500)
+        elif worktree_info:
+            workspace_mode = "worktree"
         model, model_provider = _session_model_state_from_request(
             body.get("model"),
             body.get("model_provider"),
@@ -12636,14 +12729,26 @@ def handle_post(handler, parsed) -> bool:
                 if _register_background_commit_thread(t):
                     t.start()
         s = new_session(
+            session_id=session_id,
             workspace=workspace,
+            workspace_mode=workspace_mode,
             model=model,
             model_provider=model_provider,
             profile=body.get("profile") or None,
             project_id=body.get("project_id") or None,
             worktree_info=worktree_info,
         )
-        if worktree_info:
+        if workspace_mode == "managed":
+            try:
+                # Managed roots are real filesystem state, so unlike ordinary
+                # zero-message sessions they must survive a WebUI restart.
+                s.save()
+            except Exception as e:
+                logger.exception("failed to persist managed session %s", s.session_id)
+                with LOCK:
+                    SESSIONS.pop(s.session_id, None)
+                return bad(handler, f"Failed to persist managed session: {e}", status=500)
+        if worktree_info or workspace_mode == "managed":
             publish_session_list_changed(
                 "session_new",
                 profile=getattr(s, "profile", None),
@@ -13095,9 +13200,10 @@ def handle_post(handler, parsed) -> bool:
         old_model = getattr(s, "model", None)
         old_provider = getattr(s, "model_provider", None)
         try:
-            new_ws = str(resolve_trusted_workspace(body.get("workspace", s.workspace)))
+            new_ws = str(resolve_session_workspace(s, body.get("workspace")))
         except ValueError as e:
-            return bad(handler, str(e))
+            status = 409 if str(getattr(s, "workspace_mode", "") or "").strip().lower() == "managed" else 400
+            return bad(handler, str(e), status=status)
         with _get_session_agent_lock(body["session_id"]):
             s.workspace = new_ws
             if "model" in body or "model_provider" in body:
@@ -13129,7 +13235,8 @@ def handle_post(handler, parsed) -> bool:
                 close_terminal(body["session_id"])
             except Exception:
                 logger.debug("Failed to close workspace terminal after workspace update")
-        set_last_workspace(new_ws)
+        if str(getattr(s, "workspace_mode", "") or "").strip().lower() != "managed":
+            set_last_workspace(new_ws)
         return j(handler, {"session": s.compact() | {"messages": s.messages}})
     if parsed.path == "/api/session/worktree/remove":
         sid = body.get("session_id", "")
@@ -14987,7 +15094,11 @@ def _handle_session_export(handler, parsed):
         s = get_session(sid)
     except KeyError:
         return bad(handler, "Session not found", 404)
-    safe = redact_session_data(s.__dict__)
+    export_payload = dict(s.__dict__)
+    export_payload["messages"] = drop_non_display_messages(
+        export_payload.get("messages"), action="export_projection_drop",
+    )
+    safe = redact_session_data(export_payload)
     payload = json.dumps(safe, ensure_ascii=False, indent=2)
     handler.send_response(200)
     handler.send_header("Content-Type", "application/json; charset=utf-8")
@@ -15107,7 +15218,10 @@ def _handle_sessions_search(handler, parsed):
                 sess = get_session_for_scan(s["session_id"])
                 if sess is None:
                     continue
-                msgs = sess.messages[:depth] if depth else sess.messages
+                visible_messages = drop_non_display_messages(
+                    sess.messages, action="search_projection_drop",
+                )
+                msgs = visible_messages[:depth] if depth else visible_messages
                 for m in msgs:
                     c = _session_search_message_text(m)
                     if q in str(c).lower():
@@ -18493,6 +18607,12 @@ def _checkpoint_user_message_for_eager_session_save(
             if latest_text == msg_text:
                 return
     user_msg = {"role": "user", "content": msg}
+    # Server-side async delegation wakeups are model-context anchors.  Keep
+    # their original role/content for the Agent, but make eager recovery and
+    # display projection aware of the hidden semantic class.
+    if str(source or "").strip() == "async_delegation_wakeup":
+        user_msg["_hermes_message_class"] = "context_anchor"
+        user_msg["_hermes_scaffold_kind"] = "async_delegation_completion"
     from api.process_event_utils import stamp_message_source
 
     stamp_message_source(user_msg, source)
@@ -18553,6 +18673,7 @@ def _prepare_chat_start_session_for_stream(
     started_at: float | None = None,
     turn_key: str = "",
     source: str = "webui",
+    generation: int | None = None,
 ):
     """Persist chat-start state according to webui.session_save_mode.
 
@@ -18567,6 +18688,16 @@ def _prepare_chat_start_session_for_stream(
     s.model = model
     s.model_provider = model_provider
     s.active_stream_id = stream_id
+    if generation is None:
+        try:
+            generation = int(getattr(s, "control_generation", 0) or 0) + 1
+        except (TypeError, ValueError):
+            generation = 1
+    s.control_generation = max(0, int(generation))
+    s.active_stream_generation = s.control_generation
+    s.cancel_state = "idle"
+    s.cancel_stream_id = None
+    s.cancel_generation = None
     s.post_compression_context_tokens_estimate = None
     s.pending_user_message = msg
     s.pending_attachments = attachments
@@ -18752,6 +18883,50 @@ def _session_can_start_chat(session) -> bool:
     return True
 
 
+def _queue_chat_start_locked(
+    s,
+    *,
+    msg: str,
+    attachments,
+    workspace: str,
+    model: str,
+    model_provider,
+    idempotency_key: str | None,
+    origin_stream_id: str | None,
+):
+    """Persist a chat/start submitted while the session is still busy.
+
+    The caller must hold ``_get_session_agent_lock(s.session_id)``. This is
+    deliberately a durable enqueue point: once ``save()`` succeeds the input
+    can be recovered without relying on the caller retrying a 409 response.
+    """
+    from integration.pending_chat_turns import enqueue_pending_turn
+
+    entry, created = enqueue_pending_turn(
+        s,
+        text=msg,
+        attachments=attachments,
+        workspace=workspace,
+        model=model,
+        model_provider=model_provider,
+        idempotency_key=idempotency_key,
+        source="stop_and_send" if origin_stream_id else "queue",
+        origin_stream_id=origin_stream_id,
+        origin_generation=getattr(s, "active_stream_generation", None),
+    )
+    s.save()
+    return {
+        "queued": True,
+        "status": "queued" if created else str(entry.get("status") or "queued"),
+        "entry_id": entry.get("entry_id"),
+        "session_id": s.session_id,
+        "idempotency_key": entry.get("idempotency_key"),
+        "active_stream_id": getattr(s, "active_stream_id", None) or origin_stream_id,
+        "retryable": True,
+        "_status": 202,
+    }
+
+
 def _agent_runtime_barrier_response(
     *,
     runner_local_owned: bool = False,
@@ -18791,12 +18966,25 @@ def _start_chat_stream_for_session(
     source: str = "webui",
     moa_config=None,
     external_runtime_owned: bool | None = None,
+    turn_key_override: str | None = None,
+    user_message_metadata: dict | None = None,
+    server_turn_metadata: dict | None = None,
+    idempotency_key: str | None = None,
+    allow_busy_queue: bool = True,
 ):
     """Persist pending state, register an SSE channel, and start an agent turn."""
     _stream_diag_started = _stream_diag_monotonic_ms()
     if external_runtime_owned is None:
         external_runtime_owned = webui_gateway_chat_enabled(get_config())
     backend_is_gateway = bool(external_runtime_owned)
+    if turn_key_override and backend_is_gateway:
+        # Gateway/runner transports do not own the local Agent transcript or
+        # the hidden-message metadata bridge. Never silently fall back to a
+        # fresh turn, which would lose artifact ownership.
+        return {
+            "error": "当前聊天后端不支持后台委派原轮次唤醒",
+            "_status": 501,
+        }
     stale_response = _agent_runtime_barrier_response(
         external_runtime_owned=backend_is_gateway,
     )
@@ -18810,16 +18998,11 @@ def _start_chat_stream_for_session(
     diag.stage("active_stream_check") if diag else None
     current_stream_id = getattr(s, "active_stream_id", None)
     if current_stream_id:
-        if _active_stream_blocks_chat_start(s, current_stream_id):
-            diag.stage("response_write") if diag else None
-            return {
-                "error": "该会话已有正在进行的对话流，请稍等再试",
-                "active_stream_id": current_stream_id,
-                "_status": 409,
-            }
-        # Stale stream id from a previous run; clear and continue.
-        diag.stage("stale_stream_cleanup") if diag else None
-        _clear_stale_stream_state(s)
+        if not _active_stream_blocks_chat_start(s, current_stream_id):
+            # Stale stream id from a previous run; clear and continue. Busy
+            # state is handled again under the session lock below.
+            diag.stage("stale_stream_cleanup") if diag else None
+            _clear_stale_stream_state(s)
 
     # #1932: check if this session has a pending goal continuation flag.
     # The streaming hook sets PENDING_GOAL_CONTINUATION when goal_continue fires,
@@ -18837,21 +19020,43 @@ def _start_chat_stream_for_session(
             if locked_stream_id:
                 if _active_stream_blocks_chat_start(s, locked_stream_id):
                     diag.stage("response_write") if diag else None
-                    return {
-                        "error": "该会话已有正在进行的对话流，请稍等再试",
-                        "active_stream_id": locked_stream_id,
-                        "_status": 409,
-                    }
+                    if not allow_busy_queue or source != "webui":
+                        return {
+                            "error": "该会话已有正在进行的对话流，请稍等再试",
+                            "active_stream_id": locked_stream_id,
+                            "_status": 409,
+                        }
+                    return _queue_chat_start_locked(
+                        s,
+                        msg=msg,
+                        attachments=attachments,
+                        workspace=workspace,
+                        model=model,
+                        model_provider=model_provider,
+                        idempotency_key=idempotency_key,
+                        origin_stream_id=locked_stream_id,
+                    )
                 needs_stale_cleanup = True
             else:
                 blocking_run_stream_id = _active_run_stream_for_session(s.session_id)
                 if blocking_run_stream_id:
                     diag.stage("response_write") if diag else None
-                    return {
-                        "error": "该会话已有正在进行的对话流，请稍等再试",
-                        "active_stream_id": blocking_run_stream_id,
-                        "_status": 409,
-                    }
+                    if not allow_busy_queue or source != "webui":
+                        return {
+                            "error": "该会话已有正在进行的对话流，请稍等再试",
+                            "active_stream_id": blocking_run_stream_id,
+                            "_status": 409,
+                        }
+                    return _queue_chat_start_locked(
+                        s,
+                        msg=msg,
+                        attachments=attachments,
+                        workspace=workspace,
+                        model=model,
+                        model_provider=model_provider,
+                        idempotency_key=idempotency_key,
+                        origin_stream_id=blocking_run_stream_id,
+                    )
                 needs_stale_cleanup = False
                 prepared_turn_key = ""
                 if str(getattr(s, "source_tag", "") or "") == "cron":
@@ -18871,6 +19076,16 @@ def _start_chat_stream_for_session(
                             "error": "定时任务会话轮次校验失败，暂时无法继续对话",
                             "_status": 409,
                         }
+                if turn_key_override:
+                    # Only the async-delegation wakeup path may reuse an
+                    # existing turn.  The per-session lock above makes this
+                    # check atomic with active-stream ownership.
+                    if source != "async_delegation_wakeup":
+                        return {
+                            "error": "turn_key_override 仅允许后台委派唤醒使用",
+                            "_status": 400,
+                        }
+                    prepared_turn_key = str(turn_key_override).strip()
                 if not prepared_turn_key:
                     from api.session_manifest import _next_turn_key
                     prepared_turn_key = _next_turn_key(getattr(s, "messages", None) or [])
@@ -18887,6 +19102,7 @@ def _start_chat_stream_for_session(
                     stream_id=stream_id,
                     turn_key=prepared_turn_key,
                     source=source,
+                    generation=int(getattr(s, "control_generation", 0) or 0) + 1,
                 )
                 stream_turn_key = str(getattr(s, "pending_turn_key", "") or "").strip()
                 if not stream_turn_key:
@@ -18934,7 +19150,8 @@ def _start_chat_stream_for_session(
     except Exception:
         logger.warning("Failed to append submitted turn journal event", exc_info=True)
     diag.stage("set_last_workspace") if diag else None
-    set_last_workspace(workspace)
+    if str(getattr(s, "workspace_mode", "") or "").strip().lower() != "managed":
+        set_last_workspace(workspace)
     diag.stage("stream_registration") if diag else None
     stream = create_stream_channel()
     with STREAMS_LOCK:
@@ -18961,6 +19178,10 @@ def _start_chat_stream_for_session(
         "goal_related": goal_related,
         "stream_turn_key": stream_turn_key,
     }
+    if user_message_metadata:
+        worker_kwargs["user_message_metadata"] = dict(user_message_metadata)
+    if isinstance(server_turn_metadata, dict) and server_turn_metadata.get("delegation_id"):
+        worker_kwargs["async_delegation_id"] = str(server_turn_metadata["delegation_id"])
     if moa_config and not backend_is_gateway:
         worker_kwargs["moa_config"] = moa_config
     if backend_is_gateway:
@@ -18999,6 +19220,11 @@ def _start_chat_stream_for_session(
         "turn_id": journal_event.get("turn_id"),
         "title": s.title,
     }
+    if server_turn_metadata:
+        response.update({
+            key: value for key, value in dict(server_turn_metadata).items()
+            if key in {"delegation_id", "origin_turn_key"}
+        })
     if normalized_model:
         response["effective_model"] = model
     if model_provider:
@@ -19072,6 +19298,10 @@ def _start_run(
     diag=None,
     moa_config=None,
     gateway_chat_enabled: bool | None = None,
+    turn_key_override: str | None = None,
+    user_message_metadata: dict | None = None,
+    server_turn_metadata: dict | None = None,
+    idempotency_key: str | None = None,
 ):
     """Shared start-run helper for /api/chat/start and start_session_turn.
 
@@ -19100,6 +19330,11 @@ def _start_run(
     )
 
     if runtime_adapter_enabled() or runtime_adapter_runner_enabled():
+        if turn_key_override and runtime_adapter_runner_enabled():
+            return {
+                "error": "当前运行时适配器不支持后台委派原轮次唤醒",
+                "_status": 501,
+            }
         def _legacy_start_run(request: StartRunRequest) -> dict:
             return _start_chat_stream_for_session(
                 s,
@@ -19113,6 +19348,10 @@ def _start_run(
                 source=request.source or source,
                 moa_config=moa_config,
                 external_runtime_owned=gateway_chat_enabled,
+                turn_key_override=turn_key_override,
+                user_message_metadata=user_message_metadata,
+                server_turn_metadata=server_turn_metadata,
+                idempotency_key=idempotency_key,
             )
 
         def _legacy_adapter_factory():
@@ -19154,7 +19393,85 @@ def _start_run(
         source=source,
         moa_config=moa_config,
         external_runtime_owned=gateway_chat_enabled,
+        turn_key_override=turn_key_override,
+        user_message_metadata=user_message_metadata,
+        server_turn_metadata=server_turn_metadata,
+        idempotency_key=idempotency_key,
     )
+
+
+def drain_pending_chat_turn(session_id: str):
+    """Start one durable queued chat turn after the session becomes idle.
+
+    The queue item is leased before dispatch and is only marked ``sent`` after
+    the successor stream has been created. A failed dispatch returns the item
+    to ``queued`` so a later worker teardown or recovery pass can retry it.
+    """
+    from integration.pending_chat_turns import find_entry, pending_turns
+
+    sid = str(session_id or "").strip()
+    if not sid:
+        return None
+    item = None
+    with _get_session_agent_lock(sid):
+        try:
+            s = get_session(sid)
+        except KeyError:
+            return None
+        if getattr(s, "active_stream_id", None):
+            return None
+        if _active_run_stream_for_session(sid):
+            return None
+        for candidate in pending_turns(s):
+            if str(candidate.get("status") or "") == "queued":
+                item = candidate
+                break
+        if item is None:
+            return None
+        item["status"] = "dispatching"
+        item["attempts"] = int(item.get("attempts") or 0) + 1
+        item["dispatch_token"] = uuid.uuid4().hex
+        item["last_error"] = None
+        s.save()
+        item = copy.deepcopy(item)
+
+    try:
+        s = get_session(sid)
+        result = _start_chat_stream_for_session(
+            s,
+            msg=str(item.get("text") or ""),
+            attachments=list(item.get("attachments") or []),
+            workspace=str(item.get("workspace") or getattr(s, "workspace", "")),
+            model=str(item.get("model") or getattr(s, "model", "")),
+            model_provider=item.get("model_provider"),
+            source="webui",
+            idempotency_key=item.get("idempotency_key"),
+            allow_busy_queue=False,
+        )
+    except Exception as exc:
+        result = {"_status": 500, "error": str(exc)}
+
+    status = int((result or {}).get("_status", 200) or 200)
+    stream_id = str((result or {}).get("stream_id") or "").strip()
+    with _get_session_agent_lock(sid):
+        try:
+            current = get_session(sid)
+        except KeyError:
+            return result
+        entry = find_entry(current, item.get("entry_id"))
+        if entry is None:
+            return result
+        if status < 400 and stream_id:
+            entry["status"] = "sent"
+            entry["stream_id"] = stream_id
+            entry["dispatch_token"] = None
+            current.save()
+        else:
+            entry["status"] = "queued"
+            entry["dispatch_token"] = None
+            entry["last_error"] = str((result or {}).get("error") or "chat start failed")[:500]
+            current.save()
+    return result
 
 
 def _process_wakeup_revalidation_provider(model, provider) -> str:
@@ -19213,6 +19530,9 @@ def start_session_turn(
     message: str,
     *,
     source: str = "process_wakeup",
+    turn_key_override: str | None = None,
+    user_message_metadata: dict | None = None,
+    server_turn_metadata: dict | None = None,
 ):
     """Start a server-side agent turn for ``session_id`` with ``message``.
 
@@ -19402,6 +19722,9 @@ def start_session_turn(
         normalized_model=normalized_model,
         source=turn_source,
         route="start_session_turn",
+        turn_key_override=turn_key_override,
+        user_message_metadata=user_message_metadata,
+        server_turn_metadata=server_turn_metadata,
     )
 
     # ── Defect B: live-view of server-initiated turns ──────────────────────
@@ -19434,6 +19757,10 @@ def start_session_turn(
                         "stream_id": str(stream_id),
                         "pending_started_at": (resp or {}).get("pending_started_at"),
                         "source": source,
+                        **({
+                            "delegation_id": server_turn_metadata.get("delegation_id"),
+                            "origin_turn_key": server_turn_metadata.get("origin_turn_key"),
+                        } if isinstance(server_turn_metadata, dict) else {}),
                     },
                 )
     except Exception:
@@ -19647,9 +19974,10 @@ def _handle_goal_command(handler, body):
     previous_goal_state = None
     if will_kickoff:
         try:
-            workspace = str(resolve_trusted_workspace(body.get("workspace") or s.workspace))
+            workspace = str(resolve_session_workspace(s, body.get("workspace")))
         except ValueError as e:
-            return bad(handler, str(e))
+            status = 409 if str(getattr(s, "workspace_mode", "") or "").strip().lower() == "managed" else 400
+            return bad(handler, str(e), status=status)
         requested_model = body.get("model") or s.model
         requested_provider = (
             body.get("model_provider")
@@ -19697,9 +20025,10 @@ def _handle_goal_command(handler, body):
     if kickoff_prompt:
         if workspace is None:
             try:
-                workspace = str(resolve_trusted_workspace(body.get("workspace") or s.workspace))
+                workspace = str(resolve_session_workspace(s, body.get("workspace")))
             except ValueError as e:
-                return bad(handler, str(e))
+                status = 409 if str(getattr(s, "workspace_mode", "") or "").strip().lower() == "managed" else 400
+                return bad(handler, str(e), status=status)
         if model is None:
             requested_model = body.get("model") or s.model
             requested_provider = (
@@ -19800,7 +20129,8 @@ def _handle_chat_start(handler, body, diag=None):
         try:
             workspace = _resolve_chat_workspace_with_recovery(s, body.get("workspace"))
         except ValueError as e:
-            return bad(handler, str(e))
+            status = 409 if str(getattr(s, "workspace_mode", "") or "").strip().lower() == "managed" else 400
+            return bad(handler, str(e), status=status)
         requested_model = body.get("model") or s.model
         requested_provider = (
             body.get("model_provider")
@@ -19919,6 +20249,7 @@ def _handle_chat_start(handler, body, diag=None):
             "route": "/api/chat/start",
             "diag": diag,
             "gateway_chat_enabled": gateway_chat_enabled,
+            "idempotency_key": str(body.get("idempotency_key") or "").strip() or None,
         }
         if not gateway_chat_enabled and moa_config is not None:
             start_run_kwargs["moa_config"] = moa_config
@@ -19969,6 +20300,8 @@ def _handle_chat_start(handler, body, diag=None):
 
 def _resolve_chat_workspace_with_recovery(s, requested_workspace) -> str:
     """Recover stale implicit session workspaces without hiding explicit errors."""
+    if str(getattr(s, "workspace_mode", "") or "").strip().lower() == "managed":
+        return str(resolve_session_workspace(s, requested_workspace))
     explicit = requested_workspace not in (None, "")
     candidate = requested_workspace if explicit else getattr(s, "workspace", None)
     try:
@@ -20027,9 +20360,10 @@ def _handle_chat_sync(handler, body):
     if not msg:
         return j(handler, {"error": "empty message"}, status=400)
     try:
-        workspace = str(resolve_trusted_workspace(body.get("workspace") or s.workspace))
+        workspace = str(resolve_session_workspace(s, body.get("workspace")))
     except ValueError as e:
-        return bad(handler, str(e))
+        status = 409 if str(getattr(s, "workspace_mode", "") or "").strip().lower() == "managed" else 400
+        return bad(handler, str(e), status=status)
     with _get_session_agent_lock(s.session_id):
         s.workspace = workspace
         from api.session_manifest import _next_turn_key
@@ -23313,12 +23647,16 @@ def _handle_session_import_cli(handler, body):
                 "session_import_cli",
                 profile=getattr(existing, "profile", None),
             )
+        visible_messages = drop_non_display_messages(
+            existing.messages, action="import_projection_drop",
+        )
         return j(
             handler,
             {
                 "session": existing.compact()
                 | {
-                    "messages": existing.messages,
+                    "messages": visible_messages,
+                    "message_count": len(visible_messages),
                     "is_cli_session": True,
                     "read_only": bool((cli_meta or {}).get("read_only")),
                 },
@@ -23330,6 +23668,7 @@ def _handle_session_import_cli(handler, body):
     msgs = get_cli_session_messages(sid)
     if not msgs:
         return bad(handler, "Session not found in CLI store", 404)
+    visible_msgs = drop_non_display_messages(msgs, action="import_projection_drop")
 
     # Get profile, model, timestamps, and title from CLI session metadata
     profile = None
@@ -23371,7 +23710,7 @@ def _handle_session_import_cli(handler, body):
             break
 
     # Use the CLI session title if available (e.g., cron job name), otherwise derive from messages
-    title = cli_title or title_from(msgs, "CLI Session")
+    title = cli_title or title_from(visible_msgs, "CLI Session")
 
     # Auto-assign cron sessions to the dedicated "Cron Jobs" project (#1079)
     cron_project_id = None
@@ -23384,7 +23723,7 @@ def _handle_session_import_cli(handler, body):
             "title": title,
             "workspace": str(get_last_workspace()),
             "model": model,
-            "message_count": len(msgs),
+            "message_count": len(visible_msgs),
             "created_at": created_at,
             "updated_at": updated_at,
             "last_message_at": updated_at or created_at,
@@ -23399,7 +23738,7 @@ def _handle_session_import_cli(handler, body):
             "source_label": cli_source_label,
             "parent_session_id": cli_parent_session_id,
             "read_only": True,
-            "messages": msgs,
+            "messages": visible_msgs,
             "tool_calls": [],
         }
         return j(handler, {"session": session_payload, "imported": False})
@@ -23438,7 +23777,8 @@ def _handle_session_import_cli(handler, body):
         {
             "session": s.compact()
             | {
-                "messages": msgs,
+                "messages": visible_msgs,
+                "message_count": len(visible_msgs),
                 "is_cli_session": True,
             },
             "imported": True,

@@ -21,6 +21,7 @@ import threading
 import time
 import traceback
 import copy
+import inspect
 from pathlib import Path
 from typing import Optional
 from integration.project_logging import get_logger
@@ -56,7 +57,10 @@ from api.todo_state import attach_todo_state, emit_todo_state
 from api.turn_journal import append_turn_journal_event_for_stream
 from api.usage import prompt_cache_hit_percent
 from api.models import (
+    _apply_pending_checkpoint_metadata,
+    _find_pending_user_checkpoint,
     _is_empty_partial_activity_message,
+    _recovered_model_context_projection,
     _evict_sessions_over_cap,
     clear_process_wakeup_pause,
     get_state_db_session_messages,
@@ -87,6 +91,9 @@ from integration.approval_localization import (
 from integration.clarify_localization.policy import (
     clarify_language_rule as _clarify_language_rule,
 )
+from integration.agent_message_semantics.audit import log_control_message
+from integration.agent_message_semantics.classifier import is_non_anchor_control_message
+from integration.agent_message_semantics.projection import drop_non_display_messages
 from integration.session_titles.policy import (
     should_validate_source_language_match as _should_validate_title_source_language_match,
     title_language_rule as _title_language_rule,
@@ -1295,12 +1302,12 @@ _MAX_ITERATION_SUMMARY_REQUEST = (
 
 
 def _is_synthetic_max_iteration_summary_request(message) -> bool:
-    """Return True for Hermes Agent's internal max-iteration summary prompt."""
-    if not isinstance(message, dict) or message.get('role') != 'user':
-        return False
-    text = " ".join(_message_text(message.get('content', '')).split())
-    expected = " ".join(_MAX_ITERATION_SUMMARY_REQUEST.split())
-    return text == expected
+    """Use provenance only; ordinary user text is never an internal marker."""
+    return bool(
+        is_non_anchor_control_message(message)
+        and isinstance(message, dict)
+        and message.get('_hermes_scaffold_kind') == 'max_iteration_summary_request'
+    )
 
 
 def _drop_synthetic_max_iteration_summary_requests(messages, *, enabled: bool = True):
@@ -1314,28 +1321,9 @@ def _drop_synthetic_max_iteration_summary_requests(messages, *, enabled: bool = 
     ]
 
 
-# Structured markers the Hermes Agent stamps on synthetic scaffolding turns that
-# drive its internal verify-before-finish loop. The agent appends BOTH a
-# synthetic assistant "premature done" answer AND a synthetic ``user`` nudge
-# (e.g. "[System: You edited code in this turn, but the workspace does not have
-# fresh passing verification evidence yet...]") to preserve role alternation for
-# the next API turn, and flags each with one of these keys. They exist only to
-# run the loop; they must never surface as visible user/assistant turns in the
-# WebUI transcript. This mirrors ``run_agent._EPHEMERAL_SCAFFOLDING_FLAGS`` on
-# the agent side (which keeps them out of the durable session store); WebUI
-# honors the same markers when building the visible transcript. Keep roughly in
-# sync with the agent set. (#5334; same class as #3320/#3821/#4373/#4875)
-_SYNTHETIC_CONTROL_MESSAGE_FLAGS = (
-    "_verification_stop_synthetic",
-    "_pre_verify_synthetic",
-)
-
-
 def _is_synthetic_control_message(message) -> bool:
-    """Return True for an Agent-internal synthetic scaffolding turn flagged by marker."""
-    return isinstance(message, dict) and any(
-        message.get(flag) for flag in _SYNTHETIC_CONTROL_MESSAGE_FLAGS
-    )
+    """Return whether Agent provenance says this row is not a visible turn."""
+    return is_non_anchor_control_message(message)
 
 
 def _drop_synthetic_control_messages(messages):
@@ -1344,11 +1332,7 @@ def _drop_synthetic_control_messages(messages):
     Honors the structured ``_verification_stop_synthetic`` / ``_pre_verify_synthetic``
     markers the agent already sets, rather than string-matching the nudge copy.
     """
-    return [
-        msg
-        for msg in list(messages or [])
-        if not _is_synthetic_control_message(msg)
-    ]
+    return drop_non_display_messages(messages)
 
 
 def _agent_result_tool_limit_reached(result) -> bool:
@@ -1531,11 +1515,20 @@ def _finalize_cancelled_turn(session, *, ephemeral: bool = False, message: str =
 def _latest_user_turn_binding(session, msg_text: str, turn_key: str) -> dict[str, str]:
     """Validate the latest real user row without mutating transcript identity."""
     expected = str(turn_key or '').strip()
-    expected_text = _normalize_user_text(msg_text)
+    # An async-delegation wakeup carries completion prose as a hidden model
+    # anchor.  Its content is intentionally not the originating human prompt,
+    # so only the explicit origin turn key is a valid binding proof.
+    expected_text = "" if (
+        str(getattr(session, "pending_user_source", "") or "").strip()
+        == "async_delegation_wakeup"
+    ) else _normalize_user_text(msg_text)
     for message in reversed(getattr(session, 'messages', None) or []):
         if not isinstance(message, dict) or message.get('role') != 'user':
             continue
         if _is_context_compression_marker(message):
+            continue
+        if _is_synthetic_control_message(message):
+            log_control_message("turn_binding_skip", message)
             continue
         actual = str(message.get('_turn_key') or '').strip()
         if not actual:
@@ -1613,6 +1606,29 @@ def _finalize_artifact_settlement(
     return result
 
 
+def _append_interrupted_turn_journal_event(
+    session_id: str,
+    stream_id: str,
+    *,
+    reason: str,
+) -> None:
+    """Best-effort terminal journal record for a non-completed stream."""
+    if not session_id or not stream_id:
+        return
+    try:
+        append_turn_journal_event_for_stream(
+            session_id,
+            stream_id,
+            {
+                "event": "interrupted",
+                "created_at": time.time(),
+                "reason": reason,
+            },
+        )
+    except Exception:
+        logger.debug("Failed to append interrupted turn journal event", exc_info=True)
+
+
 def _persist_turn_artifact_paths(
     s,
     turn_key: str = '',
@@ -1651,6 +1667,21 @@ def _persist_turn_artifact_paths(
                 'artifact_count': 0,
             })
 
+    try:
+        from api.session_manifest import (
+            _skills_dir_for_session,
+            extract_turn_artifact_entries_for_manifest,
+            filter_existing_turn_artifact_entries,
+        )
+    except Exception:
+        logger.warning(
+            "Manifest artifact helpers unavailable: session=%s turn=%s",
+            session_id,
+            _turn_key,
+            exc_info=True,
+        )
+        return finish({'status': 'failed', 'stage': 'extract', 'turn_key': _turn_key, 'artifact_count': 0})
+
     evidence_entries = _stream_artifact_evidence(stream, _turn_key) if stream else None
     _entries = list(evidence_entries or [])
     needs_transcript_reconcile = evidence_entries is None or str(terminal_reason or '').strip() == 'completed'
@@ -1658,7 +1689,6 @@ def _persist_turn_artifact_paths(
         if not getattr(s, 'messages', None):
             return finish({'status': 'pending', 'stage': 'transcript_unavailable', 'turn_key': _turn_key, 'artifact_count': 0})
         try:
-            from api.session_manifest import extract_turn_artifact_entries_for_manifest
             transcript_entries = extract_turn_artifact_entries_for_manifest(s, _turn_key)
         except Exception:
             logger.warning(
@@ -1679,6 +1709,22 @@ def _persist_turn_artifact_paths(
             entry for entry in transcript_entries
             if isinstance(entry, dict) and str(entry.get('path') or '').strip() not in known_paths
         )
+
+    try:
+        workspace = Path(str(getattr(s, 'workspace', '') or '')).expanduser().resolve()
+        _entries = filter_existing_turn_artifact_entries(
+            workspace,
+            _skills_dir_for_session(s),
+            _entries,
+        )
+    except Exception:
+        logger.warning(
+            "Manifest artifact preview validation failed: session=%s turn=%s",
+            session_id,
+            _turn_key,
+            exc_info=True,
+        )
+        return finish({'status': 'failed', 'stage': 'validate', 'turn_key': _turn_key, 'artifact_count': 0})
 
     _store_entries = [
         {
@@ -1761,10 +1807,10 @@ def _aiagent_import_error_detail() -> str:
     lines.append("")
     lines.append("  Then restart the WebUI.")
     lines.append("")
-    lines.append('  Full troubleshooting: docs/troubleshooting.md ("AIAgent not available")')
+    lines.append('  Full troubleshooting: docs/operations/troubleshooting.md ("AIAgent not available")')
     return "\n".join(lines)
 from api.models import get_session, title_from
-from api.workspace import set_last_workspace
+from api.workspace import resolve_session_workspace, set_last_workspace
 
 # Fields that are safe to send to LLM provider APIs.
 # Everything else (attachments, timestamp, _ts, etc.) is display-only
@@ -2294,6 +2340,40 @@ def _drain_webui_process_notifications(
                 is_stale = stale_age > stale_completion_max_age
 
         if is_async_delegation:
+            _webui_session_exists = True
+            try:
+                from api.models import get_session as _get_semantics_session
+
+                _get_semantics_session(session_id)
+            except (KeyError, FileNotFoundError):
+                # Legacy process-registry callers can be drained without a
+                # WebUI sidecar. Preserve their historical direct-acceptance
+                # behavior; real WebUI sessions always fail closed below.
+                _webui_session_exists = False
+            except Exception:
+                _webui_session_exists = True
+            if not _webui_session_exists:
+                # Fall through to the legacy claim/accept path below.
+                pass
+            else:
+                # Async delegation completions are consumed by the dedicated
+                # background scheduler. Never prepend their completion prose
+                # to a human turn; doing so creates a false user anchor and
+                # can race the origin-turn wakeup. Put the event back untouched
+                # so the scheduler can claim it when the session is idle.
+                skipped_events.append(evt)
+                log_control_message(
+                    "async_completion_deferred",
+                    {
+                        "role": "user",
+                        "content": _format_process_notification(evt) or "",
+                        "_hermes_message_class": "context_anchor",
+                        "_hermes_scaffold_kind": "async_delegation_completion",
+                    },
+                )
+                continue
+            # Legacy sidecar-less path continues with the original durable
+            # claim/acceptance logic below.
             try:
                 claim = claim_async_delegation_delivery(evt, "webui-next-turn")
             except Exception:
@@ -2309,31 +2389,21 @@ def _drain_webui_process_notifications(
                 else:
                     notification = _format_process_notification(evt)
                     if not notification:
-                        raise ValueError(
-                            "async delegation formatter returned an empty notification"
-                        )
+                        raise ValueError("async delegation formatter returned an empty notification")
                 if notification:
                     notifications.append(notification)
                     notification_added = True
                 if is_stale:
-                    # Stale async events are an explicit terminal disposition.
                     complete_async_delegation_delivery(evt, claim)
                 elif pending_async_acceptances is not None:
-                    pending_async_acceptances.append(
-                        (evt, claim, notification, completion_queue)
-                    )
+                    pending_async_acceptances.append((evt, claim, notification, completion_queue))
                 else:
-                    # Direct callers without a live agent turn retain the
-                    # historical synchronous acceptance behavior used by
-                    # CLI-style drains.
                     complete_async_delegation_delivery(evt, claim)
             except Exception:
                 if notification_added:
                     notifications.pop()
                 release_async_delegation_delivery(evt, claim)
-                async_retry_events.append(
-                    (evt, bool(getattr(claim, "durable", False)))
-                )
+                async_retry_events.append((evt, bool(getattr(claim, "durable", False))))
                 logger.warning(
                     "Failed to accept async delegation completion for session %s",
                     session_id,
@@ -2344,7 +2414,9 @@ def _drain_webui_process_notifications(
                 logger.info(
                     "Dropping stale async-delegation completion for session %s "
                     "(age %.0fs > cap %.0fs)",
-                    evt_sid, stale_age, stale_completion_max_age,
+                    evt_sid,
+                    stale_age,
+                    stale_completion_max_age,
                 )
             continue
 
@@ -5584,6 +5656,7 @@ def _merge_display_messages_after_agent_result(
     *,
     source: str = 'webui',
     canonical_turn_key: str = '',
+    async_delegation_id: str = '',
 ):
     """Keep UI transcript durable while allowing model context to compact.
 
@@ -5597,13 +5670,11 @@ def _merge_display_messages_after_agent_result(
         if not _is_context_compression_marker(m)
         and not _is_compressed_context_tool_result_summary_message(m)
     ]
-    # Drop Hermes Agent internal verify-loop scaffolding (synthetic "premature
-    # done" answer + the "[System: ...verification evidence...]" nudge) before
-    # it can become a visible user/assistant turn. The agent flags these with
-    # structured markers (_verification_stop_synthetic / _pre_verify_synthetic)
-    # and already keeps them out of its own durable store; honor the same
-    # markers here so they never leak into the WebUI transcript. Filter all
-    # three inputs consistently so prefix/delta detection below stays aligned.
+    # Drop Hermes Agent's synthetic verification nudge before it can become a
+    # visible user turn. The attempted assistant answer before that nudge is
+    # real interim content and intentionally has no marker, so it remains in
+    # the transcript. Filter all three inputs consistently so prefix/delta
+    # detection below stays aligned.
     # (#5334; same internal-control-message class as #3320/#3821/#4373/#4875)
     previous_display = _drop_synthetic_control_messages(previous_display)
     # Deduplicate stale _partial messages that accumulated in previous_display.
@@ -5632,6 +5703,8 @@ def _merge_display_messages_after_agent_result(
     previous_display = _deduped
     previous_context = list(previous_context or [])
     result_messages = list(result_messages or [])
+    previous_context = _drop_synthetic_control_messages(previous_context)
+    result_messages = _drop_synthetic_control_messages(result_messages)
     if not result_messages:
         return previous_display
 
@@ -5795,6 +5868,9 @@ def _merge_display_messages_after_agent_result(
         candidates = candidates[:insert_at] + [current_user_msg] + candidates[insert_at:]
 
     for msg in candidates:
+        if _is_synthetic_control_message(msg):
+            log_control_message("display_candidate_skip", msg)
+            continue
         if (
             _is_context_compression_marker(msg)
             or _is_compressed_context_tool_result_summary_message(msg)
@@ -5855,6 +5931,20 @@ def _merge_display_messages_after_agent_result(
             if canonical_turn_key:
                 display_msg['_turn_key'] = canonical_turn_key
             stamp_message_source(display_msg, source)
+        elif (
+            async_delegation_id
+            and canonical_turn_key
+            and isinstance(msg, dict)
+            and msg.get('role') in ('assistant', 'tool')
+        ):
+            # The Agent result does not own WebUI turn metadata. For an
+            # async wakeup, stamp the display copy with the sidecar-resolved
+            # origin turn so history/SSE consumers can identify the isolated
+            # assistant reply without changing the provider-facing context.
+            display_msg = copy.deepcopy(msg)
+            display_msg['_turn_key'] = canonical_turn_key
+            display_msg['_source'] = 'async_delegation_wakeup'
+            display_msg['delegation_id'] = str(async_delegation_id)
         merged.append(copy.deepcopy(display_msg))
         if (
             canonical_turn_key
@@ -6276,60 +6366,18 @@ def _materialize_pending_user_turn_before_error(session) -> bool:
     pending_started_at = getattr(session, 'pending_started_at', None)
     if isinstance(pending_started_at, (int, float)) and pending_started_at > 0:
         recovered_ts = int(pending_started_at)
-    pending_source = getattr(session, 'pending_user_source', None) or 'webui'
-    pending_attachments = list(getattr(session, 'pending_attachments', None) or [])
-
-    def has_pending_checkpoint(messages):
-        if not isinstance(messages, list) or not messages:
-            return False
-        existing = messages[-1]
-        if not isinstance(existing, dict) or existing.get('role') != 'user':
-            return False
-        existing_source = existing.get('_source') or 'webui'
-        if (
-            _normalize_user_text(existing.get('content')) != _normalize_user_text(pending_text)
-            or existing_source != pending_source
-        ):
-            return False
-        try:
-            existing_ts = int(existing.get('timestamp'))
-        except (TypeError, ValueError):
-            # The eager WebUI checkpoint can be persisted before state.db
-            # assigns a timestamp. Attachment metadata is added only by
-            # recovery, so an already-persisted optimistic row can legitimately
-            # have no `attachments` field. Its tail position plus text and
-            # source prove it is the current turn. state.db may have rewritten
-            # its turn key since request state captured the original value, so
-            # that key cannot reject this narrow optimistic-checkpoint case.
-            # Appending a `_recovered` copy here creates two adjacent user rows.
-            if existing.get('_db_persisted') is True and 'attachments' not in existing:
-                return True
-            return list(existing.get('attachments') or []) == pending_attachments
-        pending_turn_key = str(getattr(session, 'pending_turn_key', '') or '').strip()
-        existing_turn_key = str(existing.get('_turn_key') or '').strip()
-        if pending_turn_key and existing_turn_key and existing_turn_key != pending_turn_key:
-            return False
-        return (
-            existing_ts == recovered_ts
-            and list(existing.get('attachments') or []) == pending_attachments
-        )
-
     display_messages = getattr(session, 'messages', None)
-    if has_pending_checkpoint(display_messages):
-        # A successful optimistic persistence can happen before attachment
-        # metadata is copied onto the visible row.  Preserve that metadata on
-        # the one canonical user turn instead of creating a recovered duplicate.
-        if pending_attachments and 'attachments' not in display_messages[-1]:
-            display_messages[-1]['attachments'] = list(pending_attachments)
-        pending_turn_key = str(getattr(session, 'pending_turn_key', '') or '').strip()
-        if pending_turn_key:
-            display_messages[-1]['_turn_key'] = pending_turn_key
+    display_checkpoint = _find_pending_user_checkpoint(session, display_messages)
+    if display_checkpoint is not None:
+        _apply_pending_checkpoint_metadata(session, display_checkpoint)
         context_messages = getattr(session, 'context_messages', None)
-        if has_pending_checkpoint(context_messages):
-            if pending_attachments and 'attachments' not in context_messages[-1]:
-                context_messages[-1]['attachments'] = list(pending_attachments)
-            if pending_turn_key:
-                context_messages[-1]['_turn_key'] = pending_turn_key
+        context_checkpoint = _find_pending_user_checkpoint(session, context_messages)
+        if context_checkpoint is not None:
+            _apply_pending_checkpoint_metadata(session, context_checkpoint)
+        elif isinstance(context_messages, list) and context_messages:
+            projected = _recovered_model_context_projection(display_checkpoint)
+            if projected is not None:
+                context_messages.append(projected)
         return False
     recovered = {
         'role': 'user',
@@ -6337,7 +6385,9 @@ def _materialize_pending_user_turn_before_error(session) -> bool:
         'timestamp': recovered_ts,
         '_recovered': True,
     }
+    pending_source = getattr(session, 'pending_user_source', None) or 'webui'
     stamp_message_source(recovered, pending_source)
+    pending_attachments = list(getattr(session, 'pending_attachments', None) or [])
     if pending_attachments:
         recovered['attachments'] = pending_attachments
     pending_turn_key = str(getattr(session, 'pending_turn_key', '') or '').strip()
@@ -6353,7 +6403,7 @@ def _materialize_pending_user_turn_before_error(session) -> bool:
     # round-trip (#4283). state.db has no _recovered column, so without this
     # mirror the next turn's reconciled state-db messages cannot filter it.
     ctx = getattr(session, 'context_messages', None)
-    if isinstance(ctx, list) and ctx and not has_pending_checkpoint(ctx):
+    if isinstance(ctx, list) and ctx and _find_pending_user_checkpoint(session, ctx) is None:
         ctx.append(dict(recovered))
     # Keep post-edit state-db reconciliation bounded by the recovered turn.
     if getattr(session, 'truncation_watermark', None):
@@ -6967,6 +7017,8 @@ def _run_agent_streaming(
     goal_related=False,
     stream_turn_key='',
     moa_config=None,
+    user_message_metadata=None,
+    async_delegation_id=None,
 ):
     """Run agent in background thread, writing SSE events to STREAMS[stream_id].
 
@@ -6978,6 +7030,10 @@ def _run_agent_streaming(
     q = STREAMS.get(stream_id)
     if q is None:
         return
+    # Completion wakeups reuse the origin turn key but their model-facing
+    # prompt is completion prose, not the original human text. Artifact
+    # settlement must therefore validate the explicit key only.
+    _artifact_expected_user_text = None if async_delegation_id else msg_text
     stream_diag = StreamDiag(
         stream_id=stream_id,
         session_id=session_id,
@@ -7384,7 +7440,7 @@ def _run_agent_streaming(
         s = get_session(session_id)
         _turn_pending_source = getattr(s, 'pending_user_source', None) or 'webui'
         update_active_run(stream_id, phase="running", session_id=session_id)
-        s.workspace = str(Path(workspace).expanduser().resolve())
+        s.workspace = str(resolve_session_workspace(s, workspace, requested_is_trusted=True))
         s.model = model
         provider_context = (
             str(model_provider).strip().lower()
@@ -7981,6 +8037,24 @@ def _run_agent_streaming(
                 }])
                 return True
 
+            def _record_async_delegation_dispatch(name, function_result):
+                if str(name or "") != "delegate_task" or not _manifest_turn_key:
+                    return
+                try:
+                    from integration.async_delegation_turns import record_async_delegation_dispatch
+                    with _get_session_agent_lock(session_id):
+                        record_async_delegation_dispatch(
+                            s,
+                            function_result,
+                            turn_key=_manifest_turn_key,
+                        )
+                except Exception:
+                    logger.debug(
+                        "Failed to record async delegation origin for session %s",
+                        session_id,
+                        exc_info=True,
+                    )
+
             def on_tool(*cb_args, **cb_kwargs):
                 nonlocal _reasoning_segments, _current_reasoning_idx, _tool_boundary_advanced
                 event_type = None
@@ -8097,6 +8171,10 @@ def _run_agent_streaming(
                     return
 
                 if event_type == 'tool.completed':
+                    _record_async_delegation_dispatch(
+                        name,
+                        cb_kwargs.get('result') if cb_kwargs.get('result') is not None else preview,
+                    )
                     for live_tc in reversed(_live_tool_calls):
                         if live_tc.get('done'):
                             continue
@@ -8213,6 +8291,7 @@ def _run_agent_streaming(
             def on_tool_complete(tool_call_id, name, args, function_result):
                 try:
                     _record_live_tool_complete(tool_call_id, name, function_result)
+                    _record_async_delegation_dispatch(name, function_result)
                     if tool_call_id and tool_call_id not in _live_tool_event_complete_ids:
                         _live_tool_event_complete_ids.add(tool_call_id)
                         result_snippet = _tool_result_snippet(function_result)
@@ -9057,6 +9136,22 @@ def _run_agent_streaming(
             # run_conversation() predates the moa_config kwarg.
             if moa_config is not None:
                 _run_conversation_kwargs["moa_config"] = moa_config
+            if user_message_metadata:
+                try:
+                    signature = inspect.signature(agent.run_conversation)
+                    accepts_metadata = (
+                        "user_message_metadata" in signature.parameters
+                        or any(
+                            p.kind == inspect.Parameter.VAR_KEYWORD
+                            for p in signature.parameters.values()
+                        )
+                    )
+                except (TypeError, ValueError):
+                    accepts_metadata = False
+                if accepts_metadata:
+                    _run_conversation_kwargs["user_message_metadata"] = dict(
+                        user_message_metadata
+                    )
 
             # Finalize durable delegation claims at the current-turn acceptance
             # boundary. Failed acknowledgements are removed from this turn and
@@ -9130,12 +9225,15 @@ def _run_agent_streaming(
             # ── Ephemeral mode (/btw): deliver answer, skip persistence, cleanup ──
             if ephemeral:
                 _answer = ''
-                for _m in reversed(result.get('messages') or []):
+                _ephemeral_messages = drop_non_display_messages(
+                    result.get('messages') or [], action="sse_projection_drop"
+                )
+                for _m in reversed(_ephemeral_messages):
                     if isinstance(_m, dict) and _m.get('role') == 'assistant':
                         _answer = str(_m.get('content', ''))
                         break
                 put('done', {
-                    'session': {'session_id': session_id, 'messages': result.get('messages', [])},
+                    'session': {'session_id': session_id, 'messages': _ephemeral_messages},
                     'usage': {'input_tokens': 0, 'output_tokens': 0},
                     'ephemeral': True,
                     'answer': _answer,
@@ -9256,6 +9354,7 @@ def _run_agent_streaming(
                         msg_text,
                         source=getattr(s, 'pending_user_source', None) or 'webui',
                         canonical_turn_key=_manifest_turn_key,
+                        async_delegation_id=async_delegation_id,
                     )
                     _compact_session_image_parts_for_persistence(s)
                     _advance_truncation_watermark_after_commit(s)  # #3831
@@ -9543,6 +9642,9 @@ def _run_agent_streaming(
                                     conversation_history=_sanitize_messages_for_api(_previous_context_messages, cfg=_cfg),
                                     task_id=session_id,
                                     persist_user_message=msg_text,
+                                    **({
+                                        "user_message_metadata": dict(user_message_metadata)
+                                    } if user_message_metadata else {}),
                                 )
                                 _heal_all_msgs = _heal_result.get('messages') or []
                                 _heal_ok = _has_new_assistant_reply(_heal_all_msgs, _prev_len) or _token_sent
@@ -9589,6 +9691,7 @@ def _run_agent_streaming(
                                     msg_text,
                                     source=getattr(s, 'pending_user_source', None) or 'webui',
                                     canonical_turn_key=_manifest_turn_key,
+                                    async_delegation_id=async_delegation_id,
                                 )
                                 _compact_session_image_parts_for_persistence(s)
                                 _advance_truncation_watermark_after_commit(s)  # #3831
@@ -9615,6 +9718,7 @@ def _run_agent_streaming(
                         _turn_duration = _terminal_turn_duration(s)
                         _materialize_pending_user_turn_before_error(s)
                         s.active_stream_id = None
+                        s.active_stream_generation = None
                         s.pending_user_message = None
                         s.pending_attachments = []
                         s.pending_started_at = None
@@ -9651,7 +9755,12 @@ def _run_agent_streaming(
                                 _manifest_turn_key,
                                 stream_id=stream_id,
                                 terminal_reason='error',
-                                expected_user_text=msg_text,
+                                expected_user_text=_artifact_expected_user_text,
+                            )
+                            _append_interrupted_turn_journal_event(
+                                s.session_id,
+                                stream_id,
+                                reason=_err_type,
                             )
                         _error_payload['session'] = redact_session_data(
                             _session_payload_with_full_messages(s, tool_calls=s.tool_calls)
@@ -9809,6 +9918,7 @@ def _run_agent_streaming(
                 )
                 s.tool_calls = tool_calls
                 s.active_stream_id = None
+                s.active_stream_generation = None
                 s.pending_user_message = None
                 s.pending_attachments = []
                 s.pending_started_at = None
@@ -10078,7 +10188,7 @@ def _run_agent_streaming(
                     _manifest_turn_key,
                     stream_id=stream_id,
                     terminal_reason='completed',
-                    expected_user_text=msg_text,
+                    expected_user_text=_artifact_expected_user_text,
                 )
                 if cancel_event.is_set():
                     _finalize_cancelled_turn(s, ephemeral=False)
@@ -10656,6 +10766,10 @@ def _run_agent_streaming(
                     )
                     if moa_config is not None:
                         _heal_kwargs2["moa_config"] = moa_config
+                    if user_message_metadata:
+                        _heal_kwargs2["user_message_metadata"] = dict(
+                            user_message_metadata
+                        )
                     _heal_result = _heal_agent.run_conversation(**_heal_kwargs2)
                     # Retry succeeded — persist the result normally
                     if s is not None:
@@ -10694,6 +10808,7 @@ def _run_agent_streaming(
                                 msg_text,
                                 source=getattr(s, 'pending_user_source', None) or 'webui',
                                 canonical_turn_key=_manifest_turn_key,
+                                async_delegation_id=async_delegation_id,
                             )
                             _compact_session_image_parts_for_persistence(s)
                             _advance_truncation_watermark_after_commit(s)
@@ -10762,6 +10877,7 @@ def _run_agent_streaming(
                 _turn_duration = _terminal_turn_duration(s)
                 _materialize_pending_user_turn_before_error(s)
                 s.active_stream_id = None
+                s.active_stream_generation = None
                 s.pending_user_message = None
                 s.pending_attachments = []
                 s.pending_started_at = None
@@ -10798,7 +10914,7 @@ def _run_agent_streaming(
                         _manifest_turn_key,
                         stream_id=stream_id,
                         terminal_reason='error',
-                        expected_user_text=msg_text,
+                        expected_user_text=_artifact_expected_user_text,
                     )
                 if not ephemeral:
                     try:
@@ -10873,6 +10989,36 @@ def _run_agent_streaming(
                     _status = "error"
             except Exception:
                 pass
+        if async_delegation_id:
+            try:
+                from integration.async_delegation_turns import mark_async_delegation_wakeup
+                from integration.async_delegation_turns import resolve_async_delegation_origin
+                from api.background_process import emit_async_delegation_status
+                with _get_session_agent_lock(session_id):
+                    record = mark_async_delegation_wakeup(
+                        s,
+                        async_delegation_id,
+                        wakeup_state="failed" if _status == "error" else "settled",
+                        content=msg_text,
+                    )
+                    if record is None:
+                        record = resolve_async_delegation_origin(
+                            s, async_delegation_id,
+                        )
+                emit_async_delegation_status(
+                    session_id,
+                    async_delegation_id,
+                    record,
+                    status="failed" if _status == "error" else "completed",
+                    wakeup_state="failed" if _status == "error" else "settled",
+                    content=msg_text,
+                )
+            except Exception:
+                logger.debug(
+                    "Failed to settle async delegation wakeup %s",
+                    async_delegation_id,
+                    exc_info=True,
+                )
         _summary_fields = stream_diag.summary_fields()
         _summary_fields.update(
             status=_status,
@@ -10912,6 +11058,22 @@ def _run_agent_streaming(
             # POST /api/chat/start round-trip and erase the marker before
             # the next stream can read it, breaking the goal-continuation
             # chain. Stage-326 critical fix per Opus advisor review.
+
+        # A cancel-then-send request may have been durably queued while this
+        # worker was still unwinding. Drain only after unregistering ACTIVE_RUNS
+        # so the successor can never overlap this worker. The helper is imported
+        # lazily to keep the streaming/routes module boundary acyclic at import.
+        if not ephemeral:
+            try:
+                from api.routes import drain_pending_chat_turn
+
+                drain_pending_chat_turn(session_id)
+            except Exception:
+                logger.debug(
+                    "Failed to drain queued chat turn after stream %s teardown",
+                    stream_id,
+                    exc_info=True,
+                )
 
 # ============================================================
 # SECTION: HTTP Request Handler
@@ -11127,11 +11289,51 @@ def cancel_stream(stream_id: str) -> bool:
         if active_run_entry and not active_run_session_id:
             active_run_session_id = str(active_run_entry.get("session_id") or "").strip() or None
 
+    # Establish the durable cancel fence before signalling the Agent. A start
+    # request arriving after this save must enqueue behind the old generation,
+    # even though the stream sidecar is released eagerly below.
+    _cancel_session_id = active_run_session_id or getattr(_snap_agent, "session_id", None)
+    if not _cancel_session_id:
+        try:
+            from api.config import stream_owner_session_id
+
+            _cancel_session_id = stream_owner_session_id(stream_id)
+        except Exception:
+            _cancel_session_id = None
+    if _cancel_session_id:
+        try:
+            with _get_session_agent_lock(_cancel_session_id):
+                _fence_session = get_session(_cancel_session_id)
+                if _stream_writeback_is_current(_fence_session, stream_id):
+                    _fence_session.cancel_state = 'cancelling'
+                    _fence_session.cancel_stream_id = stream_id
+                    _fence_session.cancel_generation = getattr(
+                        _fence_session, 'active_stream_generation', None
+                    )
+                    _fence_session.save()
+        except Exception:
+            logger.debug(
+                "Failed to persist cancel fence for stream %s",
+                stream_id,
+                exc_info=True,
+            )
+
     # Set WebUI layer cancel flag. Prefer the snapshot captured under the lock;
     # fall back to a fresh lookup for the ACTIVE_RUNS-only path (stream absent).
     flag = _snap_flag if _snap_flag is not None else cancel_flags.get(stream_id)
     if flag:
         flag.set()
+    # Keep the worker lifecycle registry truthful while the interrupt unwinds.
+    # The stream sidecar may be released eagerly, but ACTIVE_RUNS must remain
+    # visibly cancelling until the worker's finally block unregisters it.
+    try:
+        update_active_run(
+            stream_id,
+            phase="cancelling",
+            cancel_requested_at=time.time(),
+        )
+    except Exception:
+        logger.debug("Failed to mark active run %s as cancelling", stream_id, exc_info=True)
 
     # Interrupt the AIAgent instance to stop tool execution. Use the
     # lock-snapshot agent when the stream was present; otherwise fall back to
@@ -11176,9 +11378,10 @@ def cancel_stream(stream_id: str) -> bool:
     _emit_cancel_event = True
 
     # ── Eager session lock release (fixes #653) ──────────────────────────
-    # Pop stream state now so the 409 guard in routes.py sees the session
-    # as idle and allows new /api/chat/start immediately after cancel,
-    # even if the agent thread is still blocked in a C-level syscall.
+    # Pop stream sidecar state now so the cancel request remains responsive,
+    # even if the agent thread is still blocked in a C-level syscall. A new
+    # /api/chat/start is durably queued while ACTIVE_RUNS still owns the old
+    # worker; it must not start a successor until that worker settles.
     # The worker thread's finally block uses .pop(key, None) too, so a
     # double-pop here is safe (no-op).
     if stream_present:
@@ -11195,7 +11398,8 @@ def cancel_stream(stream_id: str) -> bool:
     # Session cleanup (get_session + save) must happen OUTSIDE the lock —
     # get_session() acquires LOCK, and the streaming thread does LOCK first
     # then STREAMS_LOCK, so inverting the order here would cause deadlock.
-    _cancel_session_id = getattr(agent, 'session_id', None) if agent else None
+    if agent and getattr(agent, 'session_id', None):
+        _cancel_session_id = getattr(agent, 'session_id', None)
     if not _cancel_session_id and active_run_session_id:
         _cancel_session_id = active_run_session_id
     # Use the snapshots captured under streams_lock above (the worker's finally
@@ -11309,7 +11513,12 @@ def cancel_stream(stream_id: str) -> bool:
                         _cancel_session_id,
                     )
                 _cancel_turn_key = str(getattr(_cs, 'pending_turn_key', '') or '').strip()
+                _cancel_generation = getattr(_cs, 'active_stream_generation', None)
+                _cs.cancel_state = 'settled'
+                _cs.cancel_stream_id = stream_id
+                _cs.cancel_generation = _cancel_generation
                 _cs.active_stream_id = None
+                _cs.active_stream_generation = None
                 _cs.pending_user_message = None
                 _cs.pending_attachments = []
                 _cs.pending_started_at = None

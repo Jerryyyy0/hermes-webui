@@ -134,6 +134,51 @@ matrix expands to additional behavior rows. The maintainer's private QA harness
 remains broader; later public slices will add session switching, reconnect/replay,
 cancellation, compression, and recovery.
 
+## Manual Real-Model Turn/Artifact Alignment Campaign
+
+`scripts/real_model_campaign.py` is an explicit, paid, real-model E2E campaign.
+It is outside `tests/`, is not run by CI or `./scripts/test.sh`, and does not
+start a server. Start WebUI normally, verify `/health` has no active streams,
+then run it manually:
+
+```bash
+python scripts/real_model_campaign.py --sessions 10 --turns 15
+# optional: reproducible history sampling
+python scripts/real_model_campaign.py --sessions 1 --turns 5 --seed 42
+# default is first-turn only; replay/mixed remain optional
+python scripts/real_model_campaign.py --sessions 1 --turns 5 --context-mode first
+# optional bool: first session is cancel-only (every turn cancels; trigger chosen randomly)
+python scripts/real_model_campaign.py --sessions 2 --turns 5 --cancel-verify true --seed 42
+# delete campaign test sessions AND wipe e2e_campaigns artifact workspaces
+python scripts/real_model_campaign.py --cleanup
+```
+
+The campaign runs one stream at a time and uses the configured default model.
+Each trial question is randomly sampled from historical WebUI sessions under
+`HERMES_WEBUI_STATE_DIR` that stably produced write-sourced delivery artifacts
+(`session_manifest.db` + transcript write/patch tools; cron/campaign noise
+excluded).
+
+`--context-mode` controls how history context is applied:
+
+- `first` (default) — only opening-turn prompts; one continuous plain session per batch
+- `replay` — only mid-turn prompts; each trial imports the source transcript
+  prefix via `/api/session/import` and copies prior delivery files when available
+- `mixed` — both: first-turn prompts continue a plain session; mid-turn
+  prompts open a fresh replay session with prefix + files
+
+Each campaign session enables YOLO (`POST /api/session/yolo`) and drains pending
+approval/clarify prompts only when the SSE stream emits `approval`/`clarify`
+(plus one final drain after the stream ends) so dangerous-tool cards do not
+block unattended runs.
+
+It preserves sessions, workspaces, files, and JSON evidence below
+`HERMES_WEBUI_STATE_DIR/e2e_campaigns/<timestamp>/`. Alignment checks are
+API-only: transcript, Manifest, and on-disk artifact ownership (no browser /
+DOM chip probe). Use `--cleanup` to delete those campaign sessions via the API
+and remove the `e2e_campaigns` artifact trees (session delete alone does not
+remove workspaces).
+
 
 `tests/test_static_js_runtime_lint.py` runs this automatically when eslint is present
 and **skips gracefully** (clear message) when it isn't — so environments without the

@@ -3300,7 +3300,7 @@
       "post": {
         "tags": ["Session"],
         "summary": "创建新会话",
-        "description": "创建新会话并返回会话信息。",
+        "description": "创建新会话并返回会话信息。未传 `workspace` 且未请求 worktree 时，后端会在 `HERMES_WEBUI_DEFAULT_WORKSPACE/<session_id>` 创建会话专属目录；响应仍使用既有 `session.workspace` 字段返回最终目录，不新增 mode 字段。显式 `workspace` 保持既有外部工作区语义。远程 terminal profile 保持远端 cwd，不创建本机目录。",
         "requestBody": {
           "content": {
             "application/json": {
@@ -3309,7 +3309,8 @@
                 "properties": {
                   "profile": { "type": "string", "description": "可选，Profile 名称" },
                   "project": { "type": "string", "description": "可选，项目名称" },
-                  "session_id": { "type": "string", "description": "可选，指定会话 ID" }
+                  "workspace": { "type": "string", "description": "可选，显式工作区。省略时创建会话专属目录；与 worktree: true 同时传入时作为 worktree 源目录。" },
+                  "worktree": { "type": "boolean", "description": "可选，创建 Git worktree 会话；优先于 managed workspace 分配。" }
                 }
               }
             }

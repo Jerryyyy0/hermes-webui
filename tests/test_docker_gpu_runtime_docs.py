@@ -38,7 +38,7 @@ def test_dockerfile_handles_missing_intel_non_free_driver():
 
 
 def test_docker_docs_show_gpu_build_command():
-    docker_docs = _repo_text("docs/docker.md")
+    docker_docs = _repo_text("docs/guides/docker.md")
 
     assert "Optional GPU runtime image" in docker_docs
     assert "--build-arg INSTALL_GPU_LIBS=1" in docker_docs
@@ -46,7 +46,7 @@ def test_docker_docs_show_gpu_build_command():
 
 
 def test_docker_docs_cover_intel_amd_dri_mapping():
-    docker_docs = _repo_text("docs/docker.md")
+    docker_docs = _repo_text("docs/guides/docker.md")
 
     assert "Intel and AMD VA-API" in docker_docs
     assert "--device /dev/dri:/dev/dri" in docker_docs
@@ -59,7 +59,7 @@ def test_docker_docs_cover_intel_amd_dri_mapping():
 
 
 def test_docker_docs_cover_nvidia_host_runtime_guidance():
-    docker_docs = _repo_text("docs/docker.md")
+    docker_docs = _repo_text("docs/guides/docker.md")
 
     assert "NVIDIA Container Toolkit" in docker_docs
     assert "--gpus all" in docker_docs
@@ -70,7 +70,7 @@ def test_docker_docs_cover_nvidia_host_runtime_guidance():
 
 
 def test_docker_docs_do_not_claim_native_gpu_passthrough_verification():
-    docker_docs = _repo_text("docs/docker.md")
+    docker_docs = _repo_text("docs/guides/docker.md")
 
     assert "not a claim that native GPU passthrough was verified" in docker_docs
     assert "depends on host drivers" in docker_docs

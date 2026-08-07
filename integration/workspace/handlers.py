@@ -105,9 +105,9 @@ def _handle_files_list(handler, parsed) -> bool:
 
     t0 = time.perf_counter()
     if profile_filter:
-        allowed_paths = get_artifact_paths_for_profile(profile_filter)
+        allowed_paths = get_artifact_paths_for_profile(profile_filter, workspace_root=root)
     else:
-        artifact_index = get_artifact_profile_index()
+        artifact_index = get_artifact_profile_index(workspace_root=root)
     artifact_ms = (time.perf_counter() - t0) * 1000.0
 
     try:

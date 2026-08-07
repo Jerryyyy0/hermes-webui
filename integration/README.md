@@ -427,7 +427,7 @@ curl -sS -F 'relate_name=demo_flow' -F 'file=@data.csv' \
 
 ### 通知系统（`HERMES_INTEGRATION=1` + `KNOWLEDGE_BASE_URL`）
 
-完整 API 文档：[`docs/integration-notifications-api.md`](../docs/integration-notifications-api.md)。
+完整 API 文档：[`docs/integration/integration-notifications-api.md`](../docs/integration/integration-notifications-api.md)。
 
 HTTP 接口仅服务知识库通知（`kb_apply`），从下游 `get_user_messages` 实时聚合。`{HERMES_WEBUI_STATE_DIR}/notifications.db` 表结构与 `store.py` 预留，当前 HTTP 层不读写。
 
@@ -530,6 +530,7 @@ Response includes global `stats`: `{ hub, installed, not_installed, custom }` ac
 | `profiles/` | `GET /api/profiles` enrich; `POST /api/profile/info`; `GET /api/profile/logo-presets` |
 | `scripts/fetch_profile_logos.py` | Generate built-in logo library |
 | `assets/profile-logos/` | Logo preset PNGs + manifest |
+| `agent_message_semantics/` | Hermes Agent 内部脚手架与 model-only context anchor 的兼容分类、显示投影和审计日志（含原始 `content`）；`api/streaming.py` / `api/session_manifest.py` 只保留薄调用 |
 | `assets/hermes_skillhub.js` | SkillHub sidebar panel |
 | `assets/hermes_profiles.js` | Profiles panel enrich |
 | `swagger/openapi.json` | Integration API 规范（`GET /api/openapi.json` 动态 `servers`） |
@@ -542,10 +543,10 @@ Response includes global `stats`: `{ hub, installed, not_installed, custom }` ac
 
 - `server.py` — starts the fork-owned all-profile Gateway coordinator asynchronously; lifecycle logic remains in `integration/gateway_startup/`
 - `api/routes.py` — integration GET/POST dispatch, profiles enrich, static mapping, `__INTEGRATION_SKILLS__`, `__SKILLHUB_ENABLED__`; `GET /api/sessions` filters cron execution rows and injects session status fields when `HERMES_INTEGRATION=1`; chat start clears old error state and advances the user's own-message read cursor
-- `api/streaming.py` — provider-error persistence records the current session error timestamp used by `integration/session_status/`
-- `api/models.py` — Session sidecar persists the nullable `last_error_at` fact used to derive list status
+- `api/streaming.py` — provider-error persistence records the current session error timestamp used by `integration/session_status/`; imports the Agent message-semantics classifier to keep internal control rows out of the visible transcript and turn settlement
+- `api/models.py` — Session sidecar persists the nullable `last_error_at` fact used to derive list status; state.db reader restores durable context-anchor 语义字段
 - `api/profiles.py` — profile deletion best-effort removes that profile's global session read cursors
-- `api/session_manifest.py` — after sidecar/state.db merge, cron-only GET normalization delegates to `integration.crons.hooks.normalize_cron_manifest_messages`; ordinary session turn extraction is unchanged
+- `api/session_manifest.py` — after sidecar/state.db merge, cron-only GET normalization delegates to `integration.crons.hooks.normalize_cron_manifest_messages`; semantic internal/context rows are skipped as turn anchors while every allocated `turn:N` remains reserved
 - `static/index.html` — integration scripts + SkillHub panel markup
 - `static/panels.js` — `HermesProfiles` guard (`loadProfilesPanel`, `toggleProfileDropdown`, `renderProfileDetail`, `renderProfileForm`, `saveProfileForm`)
 - `requirements.txt` — `httpx`

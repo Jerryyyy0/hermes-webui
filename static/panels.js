@@ -40,11 +40,11 @@ let _logsSeverityFilter = 'all';
 
 // Map of panel names → i18n keys for the app titlebar label.
 const APP_TITLEBAR_KEYS = {
-  chat: 'tab_chat', tasks: 'tab_tasks', skills: 'tab_skills',
+  chat: 'tab_chat', tasks: 'tab_tasks', integrationCrons: 'tab_integration_crons', skills: 'tab_skills', skillhub: 'tab_skillhub',
   memory: 'tab_memory', workspaces: 'tab_workspaces',
   profiles: 'tab_profiles', todos: 'tab_todos', insights: 'tab_insights', logs: 'tab_logs', settings: 'tab_settings',
 };
-const MAIN_VIEW_PANELS = ['settings','skills','memory','tasks','kanban','workspaces','profiles','insights','logs','plugin'];
+const MAIN_VIEW_PANELS = ['settings','skills','skillhub','memory','tasks','integrationCrons','kanban','workspaces','profiles','insights','logs','plugin'];
 const MAIN_VIEW_SIDEBAR_PANEL_FALLBACKS = { plugin: 'settings' };
 
 /**
@@ -403,6 +403,14 @@ async function switchPanel(name, opts = {}) {
   document.querySelectorAll('.panel-view').forEach(p => p.classList.remove('active'));
   const panelEl = $('panel' + nextPanel.charAt(0).toUpperCase() + nextPanel.slice(1));
   if (panelEl) panelEl.classList.add('active');
+  if (nextPanel === 'skillhub') {
+    $('panelSkillhub').hidden = false;
+    $('mainSkillhub').hidden = false;
+  }
+  if (nextPanel === 'integrationCrons') {
+    $('panelIntegrationCrons').hidden = false;
+    $('mainIntegrationCrons').hidden = false;
+  }
   // Update main content view. Each entry in MAIN_VIEW_PANELS gets a matching
   // showing-<name> class on <main>; no class means chat (the default).
   const mainEl = document.querySelector('main.main');
@@ -415,6 +423,8 @@ async function switchPanel(name, opts = {}) {
   if (nextPanel === 'tasks') await loadCrons();
   if (nextPanel === 'kanban') await loadKanban();
   if (nextPanel === 'skills') await loadSkills();
+  if (nextPanel === 'skillhub' && window.HermesSkillHub?.loadSkillHub) await window.HermesSkillHub.loadSkillHub();
+  if (nextPanel === 'integrationCrons' && window.HermesIntegrationCrons?.load) await window.HermesIntegrationCrons.load();
   if (nextPanel === 'memory') await loadMemory();
   if (nextPanel === 'workspaces') await loadWorkspacesPanel();
   if (nextPanel === 'profiles') await loadProfilesPanel();
@@ -971,7 +981,7 @@ function _cronGatewayNoticeHtml(status) {
       : isRemoteUnreachable
         ? 'The gateway health endpoint is not reachable from WebUI. Verify the configured gateway URL env var (`GATEWAY_HEALTH_URL`, `HERMES_GATEWAY_HEALTH_URL`, `HERMES_API_URL`, or `HERMES_WEBUI_GATEWAY_BASE_URL`) points to a reachable gateway service and network path before relying on cron ticking.'
         : 'In Hermes WebUI, scheduled jobs require the Hermes gateway daemon to be running. Start the gateway container or `hermes gateway` before relying on offline scheduled runs.';
-  const docsHref = 'https://github.com/nesquena/hermes-webui/blob/master/docs/docker.md#scheduled-jobs-and-the-gateway-daemon';
+  const docsHref = 'https://github.com/nesquena/hermes-webui/blob/master/docs/guides/docker.md#scheduled-jobs-and-the-gateway-daemon';
   const helpLink = notConfigured || isRemoteUnreachable || isStaleMetadata
     ? `<p><a href="${docsHref}" target="_blank" rel="noopener">How to enable scheduled jobs in Docker ↗</a></p>`
     : '';
@@ -1977,6 +1987,24 @@ function _formatCronRunUsageStrip(usage) {
   if (Number.isFinite(cost) && cost > 0) parts.push(`$${cost < 0.01 ? cost.toFixed(4) : cost.toFixed(3)}`);
   if (usage.model) parts.push(String(usage.model));
   return parts.join(' · ');
+}
+
+if (typeof window !== 'undefined') {
+  window.HermesCronShared = {
+    statusMeta: _cronStatusMeta,
+    profileLabel: _cronProfileLabel,
+    profileTitle: _cronProfileTitle,
+    formatRunUsageStrip: _formatCronRunUsageStrip,
+    profileOptions: _cronProfileOptions,
+    loadProfiles: loadCronProfiles,
+  };
+}
+
+async function openCronRunSession(sessionId) {
+  if (!sessionId) return;
+  await switchPanel('chat');
+  if (typeof loadSession === 'function') await loadSession(sessionId);
+  if (typeof renderSessionList === 'function') renderSessionList();
 }
 
 // ── Cron run watch ────────────────────────────────────────────────────────────

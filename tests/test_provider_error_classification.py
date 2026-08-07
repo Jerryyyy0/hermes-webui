@@ -138,6 +138,28 @@ class TestContentFilteredClassification:
         result = classify_provider_error('content_filter_triggered')
         assert result['type'] == 'content_filtered'
 
+    def test_packy_content_exists_risk_maps_to_content_filtered(self):
+        # PackyAPI / OpenRouter-compatible gateways return HTTP 400 with this
+        # message instead of OpenAI-style content_filter / data_inspection_failed.
+        raw = (
+            'HTTP 400: Content Exists Risk '
+            '(request id: 01KZD9Q6G33M5GQYHMRQES3R7Z)\n'
+            "Details: {'message': 'Content Exists Risk "
+            "(request id: 01KZD9Q6G33M5GQYHMRQES3R7Z)', "
+            "'type': 'packy_invalid_request_error', 'param': '', "
+            "'code': 'invalid_request_error'}"
+        )
+        result = classify_provider_error(raw)
+        assert result['type'] == 'content_filtered'
+        assert result['label'] == '内容被审核拦截'
+        assert '审核策略' in result['message']
+        assert 'Content Exists Risk' not in result['message']
+        assert result['type'] != 'error'
+
+    def test_content_exists_risk_snake_case_maps_to_content_filtered(self):
+        result = classify_provider_error('content_exists_risk: blocked by gateway')
+        assert result['type'] == 'content_filtered'
+
     def test_content_filtered_payload_preserves_raw_in_details(self):
         raw = 'data_inspection_failed: Input text data may contain inappropriate content.'
         classification = classify_provider_error(raw)

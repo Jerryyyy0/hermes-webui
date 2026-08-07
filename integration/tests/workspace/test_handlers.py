@@ -396,7 +396,7 @@ def test_files_profile_filter_uses_path_collect(ws_root):
                     return_value=[{"path": "a.txt", "size": 3, "ext": ".txt", "mime": "text/plain"}],
                 ) as collect:
                     assert try_handle_get(handler, parsed) is True
-                    get_paths.assert_called_once_with("ops")
+                    get_paths.assert_called_once_with("ops", workspace_root=ws_root)
                     collect.assert_called_once()
                     args, _ = collect.call_args
                     assert args[1] == frozenset({"a.txt"})

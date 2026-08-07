@@ -33,6 +33,7 @@ from api.config import (
     get_effective_default_model, _get_session_agent_lock,
 )
 from integration.project_logging import get_logger
+from integration.agent_message_semantics.classifier import is_non_anchor_control_message
 from integration.chat_provider_errors.interruption_copy import (
     INTERRUPTED_NEUTRAL_ZH,
     INTERRUPTED_NO_OUTPUT_ZH,
@@ -918,6 +919,10 @@ def _append_recovered_pending_turn(session, *, timestamp: int | None = None) -> 
     pending_text = str(session.pending_user_message or '')
     if not pending_text:
         return None
+    checkpoint = _find_pending_user_checkpoint(session, getattr(session, 'messages', None))
+    if checkpoint is not None:
+        _apply_pending_checkpoint_metadata(session, checkpoint)
+        return checkpoint
     recovered_ts = int(time.time())
     if isinstance(timestamp, (int, float)) and timestamp > 0:
         recovered_ts = int(timestamp)
@@ -929,6 +934,11 @@ def _append_recovered_pending_turn(session, *, timestamp: int | None = None) -> 
     }
     pending_source = getattr(session, 'pending_user_source', None)
     stamp_message_source(recovered, pending_source)
+    if str(pending_source or '').strip() == 'async_delegation_wakeup':
+        # Crash recovery must preserve the anchor semantics; otherwise a
+        # pending completion can reappear as a visible user turn after restart.
+        recovered['_hermes_message_class'] = 'context_anchor'
+        recovered['_hermes_scaffold_kind'] = 'async_delegation_completion'
     if session.pending_attachments:
         recovered['attachments'] = list(session.pending_attachments)
     pending_turn_key = str(getattr(session, 'pending_turn_key', '') or '').strip()
@@ -1230,6 +1240,12 @@ class Session:
                  cache_read_tokens: int=0, cache_write_tokens: int=0,
                  personality=None,
                  active_stream_id: str=None,
+                 active_stream_generation=None,
+                 control_generation: int=0,
+                 cancel_state: str='idle',
+                 cancel_stream_id: str=None,
+                 cancel_generation=None,
+                 pending_next_turns=None,
                  last_error_at=None,
                  pending_user_message: str=None,
                  pending_attachments=None,
@@ -1268,12 +1284,18 @@ class Session:
                  composer_draft=None,
                  anchor_activity_scenes=None,
                  process_wakeup_pause=None,
+                 async_delegation_origins=None,
                  share_token=None,
                  share_created_at=None,
+                 workspace_mode=None,
                  **kwargs):
         self.session_id = session_id or uuid.uuid4().hex[:12]
         self.title = title
         self.workspace = str(Path(workspace).expanduser().resolve())
+        _workspace_mode = str(workspace_mode or '').strip().lower()
+        if _workspace_mode not in {'managed', 'external', 'worktree'}:
+            _workspace_mode = 'worktree' if worktree_path else 'external'
+        self.workspace_mode = _workspace_mode
         self.model = model
         self.model_provider = str(model_provider).strip().lower() if model_provider else None
         # #5979: signature of the model the user DELIBERATELY picked this session
@@ -1308,6 +1330,29 @@ class Session:
         self.cache_write_tokens = cache_write_tokens or 0
         self.personality = personality
         self.active_stream_id = active_stream_id
+        try:
+            self.control_generation = max(0, int(control_generation or 0))
+        except (TypeError, ValueError):
+            self.control_generation = 0
+        try:
+            self.active_stream_generation = (
+                int(active_stream_generation)
+                if active_stream_generation is not None
+                else None
+            )
+        except (TypeError, ValueError):
+            self.active_stream_generation = None
+        self.cancel_state = str(cancel_state or 'idle')
+        self.cancel_stream_id = str(cancel_stream_id or '').strip() or None
+        try:
+            self.cancel_generation = int(cancel_generation) if cancel_generation is not None else None
+        except (TypeError, ValueError):
+            self.cancel_generation = None
+        self.pending_next_turns = (
+            [item for item in pending_next_turns if isinstance(item, dict)]
+            if isinstance(pending_next_turns, list)
+            else []
+        )
         try:
             parsed_last_error_at = float(last_error_at) if last_error_at is not None else None
         except (TypeError, ValueError):
@@ -1378,6 +1423,9 @@ class Session:
         self.composer_draft = composer_draft if isinstance(composer_draft, dict) else {}
         self.anchor_activity_scenes = anchor_activity_scenes if isinstance(anchor_activity_scenes, dict) else {}
         self.process_wakeup_pause = process_wakeup_pause if isinstance(process_wakeup_pause, dict) else {}
+        self.async_delegation_origins = (
+            async_delegation_origins if isinstance(async_delegation_origins, dict) else {}
+        )
         self.share_token = str(share_token).strip() if share_token else None
         self.share_created_at = share_created_at
         # #5854: a compact fingerprint of anchor_activity_scenes ({scene_key:
@@ -1429,11 +1477,13 @@ class Session:
         # without parsing the full messages array (which may be 400KB+).
         # Fields are listed in the order they should appear in the JSON file.
         METADATA_FIELDS = [
-            'session_id', 'title', 'workspace', 'model', 'model_provider', 'model_explicit_pick_signature', 'created_at', 'updated_at',
+            'session_id', 'title', 'workspace', 'workspace_mode', 'model', 'model_provider', 'model_explicit_pick_signature', 'created_at', 'updated_at',
             'pinned', 'pinned_at', 'archived', 'project_id', 'profile',
             'input_tokens', 'output_tokens', 'estimated_cost',
             'cache_read_tokens', 'cache_write_tokens',
-            'personality', 'active_stream_id', 'last_error_at',
+            'personality', 'active_stream_id', 'active_stream_generation',
+            'control_generation', 'cancel_state', 'cancel_stream_id', 'cancel_generation',
+            'pending_next_turns', 'last_error_at',
             'pending_user_message', 'pending_attachments', 'pending_started_at', 'pending_user_source', 'pending_turn_key',
             'compression_anchor_visible_idx', 'compression_anchor_message_key',
             'compression_anchor_summary', 'pre_compression_snapshot',
@@ -1452,6 +1502,7 @@ class Session:
             'is_cli_session', 'source_tag', 'raw_source', 'session_source', 'source_label', 'read_only',
             'enabled_toolsets', 'composer_draft',
             'process_wakeup_pause',
+            'async_delegation_origins',
             'share_token', 'share_created_at',
         ]
         meta = {k: getattr(self, k, None) for k in METADATA_FIELDS}
@@ -1833,6 +1884,9 @@ class Session:
             } if self.worktree_path else {}),
             'user_message_count': Session._compute_user_message_count(self.messages),
             'active_stream_id': self.active_stream_id,
+            'active_stream_generation': self.active_stream_generation,
+            'cancel_state': self.cancel_state,
+            'pending_next_turn_count': len(getattr(self, 'pending_next_turns', []) or []),
             'last_error_at': self.last_error_at,
             'pending_user_message': self.pending_user_message,
             'has_pending_user_message': has_pending_user_message,
@@ -1845,6 +1899,11 @@ class Session:
             'enabled_toolsets': self.enabled_toolsets,
             'composer_draft': self.composer_draft if isinstance(self.composer_draft, dict) else {},
             'process_wakeup_pause': self.process_wakeup_pause if isinstance(self.process_wakeup_pause, dict) else {},
+            'async_delegation_origins': (
+                self.async_delegation_origins
+                if isinstance(self.async_delegation_origins, dict)
+                else {}
+            ),
             'share_token': self.share_token,
             'share_created_at': self.share_created_at,
             'is_streaming': _is_streaming_session(
@@ -2341,6 +2400,84 @@ def _latest_user_matches_pending_text(messages, pending_text):
         if isinstance(message, dict) and message.get('role') == 'user':
             return _message_matches_pending_text(message, pending_text)
     return False
+
+
+def _is_pending_turn_user_anchor(message) -> bool:
+    if not isinstance(message, dict) or message.get('role') != 'user':
+        return False
+    if is_context_compression_marker(message):
+        return False
+    return not is_non_anchor_control_message(message)
+
+
+def _normalized_pending_turn_text(value) -> str:
+    # Streaming owns workspace-prefix normalization. Import lazily because it
+    # imports this module during process startup.
+    from api.streaming import _normalize_user_text
+
+    return _normalize_user_text(str(value or ''))
+
+
+def _find_pending_user_checkpoint(session, messages):
+    """Return the current turn's durable user anchor when it is provable."""
+    if not isinstance(messages, list) or not messages:
+        return None
+    pending_text = str(getattr(session, 'pending_user_message', None) or '')
+    if not pending_text:
+        return None
+    pending_turn_key = str(getattr(session, 'pending_turn_key', '') or '').strip()
+    pending_source = str(getattr(session, 'pending_user_source', None) or 'webui')
+    pending_attachments = list(getattr(session, 'pending_attachments', None) or [])
+    try:
+        recovered_ts = int(getattr(session, 'pending_started_at', None))
+    except (TypeError, ValueError):
+        recovered_ts = None
+    normalized_pending = _normalized_pending_turn_text(pending_text)
+
+    for existing in reversed(messages):
+        if not _is_pending_turn_user_anchor(existing):
+            continue
+        existing_turn_key = str(existing.get('_turn_key') or '').strip()
+        if pending_turn_key and existing_turn_key:
+            if existing_turn_key == pending_turn_key:
+                return existing
+            # state.db can persist the optimistic user row before the WebUI
+            # request binds its final turn key. Keep this compatibility path
+            # narrow: it must still pass the text/source and untimestamped
+            # eager-checkpoint proof below.
+            if not (existing.get('_db_persisted') is True and 'attachments' not in existing):
+                return None
+        if (
+            _normalized_pending_turn_text(existing.get('content')) != normalized_pending
+            or str(existing.get('_source') or 'webui') != pending_source
+        ):
+            return None
+        try:
+            existing_ts = int(existing.get('timestamp'))
+        except (TypeError, ValueError):
+            # Eager state.db checkpoints can be untimestamped and carry a stale
+            # turn key. Their persistence marker proves this narrow legacy case.
+            if existing.get('_db_persisted') is True and 'attachments' not in existing:
+                return existing
+            return None
+        if recovered_ts is None:
+            return None
+        if existing_ts == recovered_ts and list(existing.get('attachments') or []) == pending_attachments:
+            return existing
+        return None
+    return None
+
+
+def _apply_pending_checkpoint_metadata(session, checkpoint: dict | None) -> None:
+    """Complete runtime metadata on an already-persisted pending user anchor."""
+    if not isinstance(checkpoint, dict):
+        return
+    pending_attachments = list(getattr(session, 'pending_attachments', None) or [])
+    if pending_attachments and 'attachments' not in checkpoint:
+        checkpoint['attachments'] = pending_attachments
+    pending_turn_key = str(getattr(session, 'pending_turn_key', '') or '').strip()
+    if pending_turn_key:
+        checkpoint['_turn_key'] = pending_turn_key
 
 
 def _partial_message_signature(message: dict) -> tuple:
@@ -3167,22 +3304,14 @@ def _apply_core_sync_or_error_marker(
         _recovered_ts = int(time.time())
         if isinstance(session.pending_started_at, (int, float)) and session.pending_started_at > 0:
             _recovered_ts = int(session.pending_started_at)
-        _already_checkpointed = _message_matches_pending_checkpoint(
-            session.messages[-1],
-            session.pending_user_message,
-            _recovered_ts,
-            session.pending_user_source,
-            session.pending_attachments,
-        )
-        _tail_user_already_checkpointed = _already_checkpointed or _message_matches_pending_text(
-            session.messages[-1],
-            session.pending_user_message,
-        )
+        display_checkpoint = _find_pending_user_checkpoint(session, session.messages)
         _stream_id = stream_id_for_recheck or session.active_stream_id
         _pending_started_at = session.pending_started_at
         if _run_journal_terminal_state(session, _stream_id) == 'completed':
-            if not (_already_checkpointed or _latest_user_matches_pending_text(session.messages, session.pending_user_message)):
+            if display_checkpoint is None:
                 _append_recovered_pending_turn(session, timestamp=_recovered_ts)
+            else:
+                _apply_pending_checkpoint_metadata(session, display_checkpoint)
             _append_journaled_partial_output(
                 session,
                 _stream_id,
@@ -3201,24 +3330,18 @@ def _apply_core_sync_or_error_marker(
                 _stream_id,
             )
             return True
-        if not _tail_user_already_checkpointed:
+        if display_checkpoint is None:
             _append_recovered_pending_turn(session, timestamp=_recovered_ts)
         else:
-            recovered = {
-                'role': 'user',
-                'content': session.pending_user_message,
-                'timestamp': _recovered_ts,
-                '_recovered': True,
-            }
-            pending_source = getattr(session, 'pending_user_source', None)
-            if pending_source and pending_source != 'webui':
-                recovered['_source'] = pending_source
-            if session.pending_attachments:
-                recovered['attachments'] = list(session.pending_attachments)
-            pending_turn_key = str(getattr(session, 'pending_turn_key', '') or '').strip()
-            if pending_turn_key:
-                recovered['_turn_key'] = pending_turn_key
-            _append_recovered_turn_to_context(session, recovered)
+            _apply_pending_checkpoint_metadata(session, display_checkpoint)
+            context_messages = getattr(session, 'context_messages', None)
+            context_checkpoint = _find_pending_user_checkpoint(session, context_messages)
+            if context_checkpoint is not None:
+                _apply_pending_checkpoint_metadata(session, context_checkpoint)
+            elif isinstance(context_messages, list):
+                projected = _recovered_model_context_projection(display_checkpoint)
+                if projected is not None:
+                    context_messages.append(projected)
         recovered_output = _append_journaled_partial_output(
             session,
             _stream_id,
@@ -3261,20 +3384,9 @@ def _apply_core_sync_or_error_marker(
             _recovered_ts = int(time.time())
             if isinstance(session.pending_started_at, (int, float)) and session.pending_started_at > 0:
                 _recovered_ts = int(session.pending_started_at)
-            _already_checkpointed = _message_matches_pending_checkpoint(
-                session.messages[-1] if session.messages else None,
-                session.pending_user_message,
-                _recovered_ts,
-                session.pending_user_source,
-                session.pending_attachments,
-            )
-            _tail_user_already_checkpointed = _already_checkpointed or _message_matches_pending_text(
-                session.messages[-1] if session.messages else None,
-                session.pending_user_message,
-            )
             if (
                 _pending_text
-                and not _tail_user_already_checkpointed
+                and _find_pending_user_checkpoint(session, session.messages) is None
                 and _run_journal_has_visible_output(session, _stream_id)
             ):
                 _append_recovered_pending_turn(session, timestamp=_recovered_ts)
@@ -4689,7 +4801,7 @@ def _profile_default_model_state(profile=None):
     return default_model or get_effective_default_model(), default_provider
 
 
-def new_session(workspace=None, model=None, profile=None, model_provider=None, project_id=None, worktree_info=None, enabled_toolsets=None):
+def new_session(workspace=None, model=None, profile=None, model_provider=None, project_id=None, worktree_info=None, enabled_toolsets=None, session_id=None, workspace_mode=None):
     """Create a new in-memory session.
 
     The session lives in the SESSIONS dict only — no disk write happens until
@@ -4731,8 +4843,13 @@ def new_session(workspace=None, model=None, profile=None, model_provider=None, p
 
     wt = worktree_info if isinstance(worktree_info, dict) else None
     workspace_path = (wt.get('path') if wt and wt.get('path') else workspace) if wt else workspace
+    effective_workspace_mode = workspace_mode
+    if effective_workspace_mode is None:
+        effective_workspace_mode = 'worktree' if wt else 'external'
     s = Session(
+        session_id=session_id,
         workspace=workspace_path or get_last_workspace(),
+        workspace_mode=effective_workspace_mode,
         model=effective_model,
         model_provider=effective_model_provider,
         profile=profile,
@@ -7681,6 +7798,9 @@ def get_state_db_session_messages(
                 'codex_reasoning_items',
                 'reasoning_content',
                 'codex_message_items',
+                'api_content',
+                'hermes_message_class',
+                'hermes_scaffold_kind',
             ]
             id_col = ['id'] if 'id' in available else []
             selected = id_col + ['role', 'content', 'timestamp'] + [c for c in optional if c in available]
@@ -7794,6 +7914,12 @@ def get_state_db_session_messages(
                     if col in {'tool_calls', 'reasoning_details', 'codex_reasoning_items', 'codex_message_items'}:
                         value = _json_loads_if_string(value)
                     msg[col] = value
+                message_class = msg.pop('hermes_message_class', None)
+                if message_class:
+                    msg['_hermes_message_class'] = message_class
+                scaffold_kind = msg.pop('hermes_scaffold_kind', None)
+                if scaffold_kind:
+                    msg['_hermes_scaffold_kind'] = scaffold_kind
                 if msg.get('role') == 'tool' and msg.get('tool_name') and not msg.get('name'):
                     msg['name'] = msg['tool_name']
                 msgs.append(msg)
@@ -8275,54 +8401,14 @@ def _has_visible_duplicate(visible_key: tuple, visible_keys: set[tuple]) -> bool
     return _matching_visible_duplicate(visible_key, visible_keys) is not None
 
 
-def _legacy_user_aggregate_component_keys(msg: dict) -> list[tuple] | None:
-    """Return components for an attachment-free, agent-merged user row.
-
-    The agent historically merged adjacent user rows with blank lines. A
-    persisted row is considered synthetic only when every component is also
-    represented by an independent canonical row. This uses message identity,
-    not a localized upload prompt.
-    """
-    if (
-        not isinstance(msg, dict)
-        or str(msg.get("role") or "") != "user"
-        or msg.get("attachments")
-        or msg.get("_db_persisted") is not True
-    ):
-        return None
-    parts = str(msg.get("content") or "").split("\n\n")
-    if len(parts) < 2 or any(not part.strip() for part in parts):
-        return None
-    return [
-        _session_message_content_key({"role": "user", "content": part})
-        for part in parts
-    ]
-
-
 def _drop_covered_legacy_user_aggregates(messages: list) -> list:
-    """Hide synthetic user aggregates once canonical component rows exist."""
-    messages = list(messages or [])
-    canonical_counts = {}
-    for msg in messages:
-        if (
-            isinstance(msg, dict)
-            and _legacy_user_aggregate_component_keys(msg) is None
-        ):
-            key = _session_message_content_key(msg)
-            canonical_counts[key] = canonical_counts.get(key, 0) + 1
-    kept = []
-    for msg in messages:
-        component_keys = _legacy_user_aggregate_component_keys(msg)
-        if component_keys is None:
-            kept.append(msg)
-            continue
-        available = dict(canonical_counts)
-        for key in component_keys:
-            if available.get(key, 0) <= 0:
-                kept.append(msg)
-                break
-            available[key] -= 1
-    return kept
+    """Keep legacy rows unless explicit provenance proves they are a replay.
+
+    A normal user prompt may contain blank lines, workspace context and
+    attachment descriptions, so text splitting cannot safely distinguish an
+    old provider-side aggregate from a real user submission.
+    """
+    return list(messages or [])
 
 
 def _sidecar_has_terminal_partial_error(sidecar_messages: list) -> bool:
@@ -9395,22 +9481,7 @@ def _delete_cli_session_locked(sid, hermes_home) -> bool:
     stale_cleanup_complete = _process_stale_cleanup_manifests(hermes_home)
 
     db_path = hermes_home / 'state.db'
-    return _delete_state_db_session_rows(db_path, sid)
-
-
-def _delete_state_db_session_rows(db_path: Path, sid: str) -> bool:
-    """Delete one Hermes session from a specific state.db (messages + session row)."""
-    try:
-        import sqlite3
-    except ImportError:
-        return False
-
-    db_path = Path(db_path)
     if not db_path.exists():
-        return False
-
-    sid = str(sid or "").strip()
-    if not sid:
         return False
 
     try:
@@ -9784,6 +9855,43 @@ def _delete_state_db_session_rows(db_path: Path, sid: str) -> bool:
     except Exception:
         logger.warning("Failed to delete CLI session %s from state.db", sid, exc_info=True)
         return False
+
+
+def _delete_state_db_session_rows(db_path: Path, sid: str) -> bool:
+    """Fork bridge: delete one session by ``state.db`` path.
+
+    Integration/cron callers may target a non-active profile home. Resolve
+    ``HERMES_HOME`` as the parent of ``state.db``, take the same cleanup locks
+    as ``delete_cli_session``, then reuse upstream ``_delete_cli_session_locked``.
+    """
+    db_path = Path(db_path)
+    sid = str(sid or "").strip()
+    if not sid:
+        return False
+    try:
+        hermes_home = db_path.resolve().parent
+        expected = (hermes_home / "state.db").resolve()
+        if db_path.resolve() != expected:
+            logger.warning(
+                "Rejecting state.db delete helper for non-canonical path %s",
+                db_path,
+            )
+            return False
+    except OSError:
+        logger.warning("Failed to resolve state.db path for session delete", exc_info=True)
+        return False
+    try:
+        with _cleanup_manifest_thread_lock(hermes_home):
+            with _cleanup_manifest_process_lock(hermes_home):
+                return _delete_cli_session_locked(sid, hermes_home)
+    except Exception:
+        logger.warning(
+            "Failed to delete CLI session %s via state.db helper",
+            sid,
+            exc_info=True,
+        )
+        return False
+
 
 # ---------------------------------------------------------------------------
 # ``delete_cli_session`` nests each profile's cross-process file lock inside

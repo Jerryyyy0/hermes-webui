@@ -150,3 +150,47 @@ def test_existing_cli_import_refreshes_same_length_tool_metadata(monkeypatch):
     assert existing.messages == enriched
     assert response["session"]["messages"] == enriched
     assert save_calls == [False]
+
+
+def test_cli_import_response_hides_anchor_but_keeps_it_in_session_context(monkeypatch):
+    """Import responses use the same visible transcript projection as GET."""
+    import api.routes as routes
+
+    session_id = "existing_cli_semantic_anchor"
+    anchor = {
+        "role": "user",
+        "content": "[Todo: keep this in model context]",
+        "_hermes_message_class": "context_anchor",
+        "_hermes_scaffold_kind": "todo_snapshot",
+    }
+    real_turn = {"role": "user", "content": "fix the bug"}
+    final = {"role": "assistant", "content": "fixed"}
+
+    class FakeSession:
+        messages = [anchor, real_turn, final]
+        source_tag = "cli"
+        raw_source = "cli"
+        session_source = "cli"
+        source_label = "CLI"
+        parent_session_id = None
+        is_cli_session = True
+
+        def compact(self):
+            return {"session_id": session_id, "title": "Imported CLI"}
+
+    existing = FakeSession()
+    monkeypatch.setattr(
+        routes.Session,
+        "load",
+        classmethod(lambda _cls, sid: existing if sid == session_id else None),
+    )
+    monkeypatch.setattr(routes, "require", lambda body, *keys: None)
+    monkeypatch.setattr(routes, "j", lambda _handler, payload, status=200, extra_headers=None: payload)
+    monkeypatch.setattr(routes, "get_cli_session_messages", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(routes, "get_cli_sessions", lambda *args, **kwargs: [])
+
+    response = routes._handle_session_import_cli(object(), {"session_id": session_id})
+
+    assert existing.messages == [anchor, real_turn, final]
+    assert response["session"]["messages"] == [real_turn, final]
+    assert response["session"]["message_count"] == 2

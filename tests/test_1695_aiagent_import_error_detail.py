@@ -15,7 +15,7 @@ This test suite locks the diagnostic shape of the new error message:
   - HERMES_WEBUI_AGENT_DIR is shown if set, "(not set)" otherwise.
   - The relevant sys.path entries are shown.
   - A pip install -e . hint is included.
-  - A pointer to docs/troubleshooting.md is included.
+  - A pointer to docs/operations/troubleshooting.md is included.
 
 Behavioural test for the actual raise path lives in the streaming integration
 suite; this file only exercises the helper.
@@ -98,13 +98,13 @@ class TestAIAgentImportErrorDetail:
         )
 
     def test_points_at_troubleshooting_doc(self):
-        """The diagnostic must point at the docs/troubleshooting.md entry so
+        """The diagnostic must point at the docs/operations/troubleshooting.md entry so
         users with edge-case failures know where to look next.
         """
         helper = _import_helper()
         out = helper()
         assert "troubleshooting" in out.lower(), (
-            "diagnostic must point at docs/troubleshooting.md for further help"
+            "diagnostic must point at docs/operations/troubleshooting.md for further help"
         )
 
     def test_lists_sys_path_entries_when_relevant(self, monkeypatch):
@@ -146,34 +146,34 @@ class TestAIAgentImportErrorDetail:
 
 
 class TestAIAgentImportErrorDocsPresence:
-    """Regression: the docs/troubleshooting.md file must exist with the
+    """Regression: the docs/operations/troubleshooting.md file must exist with the
     "AIAgent not available" entry the diagnostic links to.
     """
 
     def test_troubleshooting_md_exists(self):
-        path = REPO_ROOT / "docs" / "troubleshooting.md"
-        assert path.exists(), "docs/troubleshooting.md must exist (referenced by streaming.py)"
+        path = REPO_ROOT / "docs" / "operations" / "troubleshooting.md"
+        assert path.exists(), "docs/operations/troubleshooting.md must exist (referenced by streaming.py)"
 
     def test_troubleshooting_md_has_aiagent_section(self):
-        path = REPO_ROOT / "docs" / "troubleshooting.md"
+        path = REPO_ROOT / "docs" / "operations" / "troubleshooting.md"
         content = path.read_text(encoding="utf-8")
         assert "AIAgent not available" in content, (
-            "docs/troubleshooting.md must have an entry titled \"AIAgent not available\""
+            "docs/operations/troubleshooting.md must have an entry titled \"AIAgent not available\""
         )
 
     def test_troubleshooting_md_includes_pip_install_editable(self):
         """The doc must surface the `pip install -e .` fix."""
-        path = REPO_ROOT / "docs" / "troubleshooting.md"
+        path = REPO_ROOT / "docs" / "operations" / "troubleshooting.md"
         content = path.read_text(encoding="utf-8")
         assert "pip install -e ." in content, (
-            "docs/troubleshooting.md must include the pip install -e . fix"
+            "docs/operations/troubleshooting.md must include the pip install -e . fix"
         )
 
     def test_troubleshooting_md_describes_diagnostic_steps(self):
         """The doc must walk through diagnostic commands (readlink, ls, etc.)
         before jumping to the fix — that ordering is what worked for #1695.
         """
-        path = REPO_ROOT / "docs" / "troubleshooting.md"
+        path = REPO_ROOT / "docs" / "operations" / "troubleshooting.md"
         content = path.read_text(encoding="utf-8")
         # Look for the symlink-resolution diagnostic chain.
         assert "readlink" in content, (

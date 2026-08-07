@@ -202,9 +202,9 @@ does not match the touched subsystem.
 - [`docs/onboarding-agent-checklist.md`](onboarding-agent-checklist.md): safety
   rules for assistant-led install, reinstall, bootstrap, provider setup, local
   model setup, Docker onboarding, and WSL onboarding.
-- [`docs/docker.md`](docker.md): Docker compose setup, common failures, and
+- [`docs/guides/docker.md`](guides/docker.md): Docker compose setup, common failures, and
   bind-mount migration.
-- [`docs/troubleshooting.md`](troubleshooting.md): diagnostic flows for common
+- [`docs/operations/troubleshooting.md`](operations/troubleshooting.md): diagnostic flows for common
   failures.
 - [`docs/EXTENSIONS.md`](EXTENSIONS.md): administrator-controlled WebUI
   extension injection.

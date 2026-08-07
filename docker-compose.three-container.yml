@@ -167,6 +167,6 @@ volumes:
   #     docker compose -f docker-compose.three-container.yml pull
   #     docker compose -f docker-compose.three-container.yml up -d
   #
-  #   The full procedure (and why) is documented in docs/docker.md.
+  #   The full procedure (and why) is documented in docs/guides/docker.md.
   hermes-home:
   hermes-agent-src:
