@@ -2871,7 +2871,7 @@ def build_session_manifest(session, source_info: dict[str, str] | None = None) -
     # Prefer persisted turn_artifacts over reconcile results.
     # When the streaming pipeline persists artifact paths at turn completion,
     # those paths are more reliable than the reconcile pass (which can suffer
-    # from cross-turn prose contamination — see docs/turn-key-backend.md §8.3).
+    # from cross-turn prose contamination — see docs/architecture/turn-key-backend.md §8.3).
     persisted = getattr(session, 'turn_artifacts', None)
     if not decided_turn_keys and isinstance(persisted, dict) and persisted:
         default_profile = str(getattr(session, 'profile', None) or '').strip()

@@ -223,7 +223,7 @@ def build_report(root: Path) -> dict[str, object]:
             "docker-compose.two-container.yml",
             "docker-compose.three-container.yml",
             "docker_init.bash",
-            "docs/docker.md",
+            "docs/guides/docker.md",
             "docs/rfcs/agent-source-boundary.md",
         ),
         (

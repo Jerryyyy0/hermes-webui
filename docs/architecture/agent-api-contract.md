@@ -25,7 +25,7 @@ The multi-container setup still shares the agent source tree with the WebUI:
 - `docker-compose.three-container.yml` uses the same source volume pattern.
 - `docker_init.bash` documents that the WebUI-side mount is read-only and uses
   a staged copy when installing from the source checkout.
-- `docs/docker.md` explicitly documents that this is not a filesystem trust
+- `docs/guides/docker.md` explicitly documents that this is not a filesystem trust
   boundary: the WebUI cannot write the mount, but it still installs and imports
   code from it.
 

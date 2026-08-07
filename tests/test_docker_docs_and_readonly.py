@@ -13,7 +13,7 @@ Pins three invariants:
    convention so `~`/`${HOME}` doesn't disagree across Linux, macOS, WSL2, and
    Docker Desktop on Windows.
 
-3. `docs/docker.md` documents the agent-image upgrade procedure (`docker volume
+3. `docs/guides/docker.md` documents the agent-image upgrade procedure (`docker volume
    rm hermes-agent-src`) — the root cause of #1416.
 """
 
@@ -102,7 +102,7 @@ def test_single_container_workspace_already_uses_home_env_var():
     assert "${HERMES_WORKSPACE:-${HOME}/workspace}:/workspace" in src
 
 
-# ── 3: docs/docker.md documents the agent-image upgrade procedure ──────────
+# ── 3: docs/guides/docker.md documents the agent-image upgrade procedure ──────────
 
 
 def test_docker_md_documents_agent_image_upgrade():
@@ -111,12 +111,12 @@ def test_docker_md_documents_agent_image_upgrade():
     `docker pull` of the agent image. This is the root cause of #1416. The
     docs must give users the explicit `docker volume rm` recipe so they don't
     misdiagnose 'missing entrypoint' errors."""
-    docs = (REPO / "docs" / "docker.md").read_text(encoding="utf-8")
+    docs = (REPO / "docs" / "guides" / "docker.md").read_text(encoding="utf-8")
     assert "Upgrading the agent container" in docs, (
-        "docs/docker.md must have an 'Upgrading the agent container' section."
+        "docs/guides/docker.md must have an 'Upgrading the agent container' section."
     )
     assert "docker volume rm" in docs, (
-        "docs/docker.md must show the `docker volume rm` step in the upgrade recipe."
+        "docs/guides/docker.md must show the `docker volume rm` step in the upgrade recipe."
     )
     assert "hermes-agent-src" in docs
     # Cross-reference to the original issue so users searching for the
@@ -125,13 +125,13 @@ def test_docker_md_documents_agent_image_upgrade():
 
 
 def test_compose_files_point_to_docker_md_for_upgrades():
-    """Both multi-container compose files should reference docs/docker.md
+    """Both multi-container compose files should reference docs/guides/docker.md
     near the named-volumes block so anyone reading the compose file directly
     finds the upgrade procedure."""
     for fn in ("docker-compose.two-container.yml", "docker-compose.three-container.yml"):
         src = (REPO / fn).read_text(encoding="utf-8")
-        assert "docs/docker.md" in src, (
-            f"{fn}: must reference docs/docker.md so users reading the compose "
+        assert "docs/guides/docker.md" in src, (
+            f"{fn}: must reference docs/guides/docker.md so users reading the compose "
             f"file see the agent upgrade pointer."
         )
         assert "docker volume rm" in src, (
@@ -139,7 +139,7 @@ def test_compose_files_point_to_docker_md_for_upgrades():
         )
 
 
-# ── 4: docs/docker.md frames the isolation model honestly ──────────────────
+# ── 4: docs/guides/docker.md frames the isolation model honestly ──────────────────
 
 
 def test_docker_md_documents_isolation_model():
@@ -147,9 +147,9 @@ def test_docker_md_documents_isolation_model():
     but NOT filesystem isolation. Document that explicitly so users don't
     reach for multi-container expecting a trust boundary it doesn't provide
     (RustyLopez's concern on #2453)."""
-    docs = (REPO / "docs" / "docker.md").read_text(encoding="utf-8")
+    docs = (REPO / "docs" / "guides" / "docker.md").read_text(encoding="utf-8")
     assert "What the multi-container setup isolates" in docs, (
-        "docs/docker.md must have a section calibrating multi-container "
+        "docs/guides/docker.md must have a section calibrating multi-container "
         "isolation expectations — process/network/resource isolation, NOT "
         "filesystem isolation."
     )
@@ -311,4 +311,3 @@ def test_docker_init_makes_staged_dir_writable_after_ro_mount_copy():
         "inside one branch means the other copy path skips it and the "
         ":ro mount perm leak returns."
     )
-

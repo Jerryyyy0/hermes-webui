@@ -133,7 +133,7 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 - **Interrupted-turn user-visible copy (zh)** — 会话中断恢复 marker、SSE 断连提示、压缩后无响应错误、run journal 恢复控制消息改为中文。文案集中在 `integration/chat_provider_errors/interruption_copy.py`；`api/models.py` / `api/run_journal.py` 仅薄 import。`static/messages.js` 与 `static/ui.js` 同步更新。
 
 - **Notification action_status state mapping** — 下游 `state` 与 `action_status` 对齐文档 §6.1：`0`→`rejected`、`1`→`approved`、`2`→`pending`（此前错误映射为 `0`→`pending` 等）。
-- **Notification API massType documentation** — [`docs/integration-notifications-api.md`](../docs/integration-notifications-api.md) 补充下游 `massType` 四种类型（`1` 加入申请 / `2` 退出 / `3` 申请结果 / `4` 被踢出）及与 `actionable`、`action_status` 的对应关系。
+- **Notification API massType documentation** — [`docs/integration/integration-notifications-api.md`](../docs/integration/integration-notifications-api.md) 补充下游 `massType` 四种类型（`1` 加入申请 / `2` 退出 / `3` 申请结果 / `4` 被踢出）及与 `actionable`、`action_status` 的对应关系。
 
 - **Workspace artifact profile backfill on startup** — 服务启动时后台扫描补全 `session_manifest.db` 的 artifact profile。先跑 B 类：对 store 中无 artifact 记录、且 `session.profile` 非空的老会话（在流式落库特性 `_persist_turn_artifact_paths` 上线前创建），逐 turn 复用同一套提取逻辑（`_extract_turn_artifact_entries`）从 messages 抽取 path/source_tool/preview 并 upsert，path 格式与 turn_key 与流式落库一致，避免与 `/api/session/manifest` 的懒回填（`backfill_from_session_turn_artifacts`）冲突。再跑 A 类：修补 DB 已有记录中 `profile=''` 但 session 实际有 profile 的行。session 本身无 profile 的记录保持空（不从其他字段推断）。流式写入仍以 `session.profile` 为权威。
 - **Notification actionable by massType** — `actionable` 改为按下游 `massType` 判断：`1`（入群申请）为 `1`（可打开详情，含已审批历史）；`2`/`3` 等通知类为 `0`。`action_status` 与审批按钮仅对 `massType=1` 映射。
@@ -142,13 +142,13 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Added
 
-- **Browser preview for terminal agent-browser** — `browser_preview` SSE 现也在 `terminal` 工具执行 `agent-browser` CLI（含 `connect` / `snapshot` / `click` 等）时触发，与 `browser_*` 工具共用每 stream 一次性 `BrowserPreviewEmitter` 去重，不重复打开 VNC 面板。实现：`api/browser_preview.py`；`api/streaming.py` / `api/gateway_chat.py` 传入 `tool_args`。文档：`docs/browser-preview-sse.md`。
+- **Browser preview for terminal agent-browser** — `browser_preview` SSE 现也在 `terminal` 工具执行 `agent-browser` CLI（含 `connect` / `snapshot` / `click` 等）时触发，与 `browser_*` 工具共用每 stream 一次性 `BrowserPreviewEmitter` 去重，不重复打开 VNC 面板。实现：`api/browser_preview.py`；`api/streaming.py` / `api/gateway_chat.py` 传入 `tool_args`。文档：`docs/architecture/browser-preview-sse.md`。
 
-- **Notification API documentation** — [`docs/integration-notifications-api.md`](../docs/integration-notifications-api.md)：知识库通知接口说明（参数、响应字段、curl 示例、KB BFF 审批对照）。
+- **Notification API documentation** — [`docs/integration/integration-notifications-api.md`](../docs/integration/integration-notifications-api.md)：知识库通知接口说明（参数、响应字段、curl 示例、KB BFF 审批对照）。
 
 - **Notification Phase 1 (KB-only)** — 通知 HTTP 层收窄为仅知识库 `kb_apply`：
   - 列表/摘要新增 `read_type`、`action_status` 查询；响应新增 `actions[]`、`actionable`、字符串 `action_status`
-  - 下游 `state` 映射：`0=rejected, 1=approved, 2=pending`（`integration/notifications/constants.py`，见 `docs/integration-notifications-api.md` §6.1）
+  - 下游 `state` 映射：`0=rejected, 1=approved, 2=pending`（`integration/notifications/constants.py`，见 `docs/integration/integration-notifications-api.md` §6.1）
   - 新增 `normalize.py`、`filters.py`；handlers 不再读写 `store`
   - 删除 `GET /api/integration/notifications/{id}`；read/delete 仅处理 `kb:` ID
   - 审批仍走 `POST /api/integration/knowledge_base/creater_handle_application`
@@ -207,7 +207,7 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 - **SkillHub preview `scope=hub`** — `GET /api/skillhub/content|structure|file` with `scope=hub` resolves `{HERMES_HOME}/skills` first, then falls back to SkillHub upstream when no local `SKILL.md` exists. `scope=custom` remains local-only.
 
-- **Knowledge base BFF route segment names** — WebUI proxy paths `apply-join`, `upload-docs`, `update-docs`, and `delete-docs` are now `apply_join`, `upload_docs`, `update_docs`, and `delete_docs` (underscore only). Hyphenated segments are no longer served. Swagger and [`docs/integration-knowledge-base-api.md`](../docs/integration-knowledge-base-api.md) updated.
+- **Knowledge base BFF route segment names** — WebUI proxy paths `apply-join`, `upload-docs`, `update-docs`, and `delete-docs` are now `apply_join`, `upload_docs`, `update_docs`, and `delete_docs` (underscore only). Hyphenated segments are no longer served. Swagger and [`docs/integration/integration-knowledge-base-api.md`](../docs/integration/integration-knowledge-base-api.md) updated.
 
 - **Zhiling login/logout API paths** — `GET /api/integration/login` → `GET /api/integration/webui_login`; `POST|GET /api/integration/logout` → `POST|GET /api/integration/webui_logout`. Swagger, docs, and tests updated.
 

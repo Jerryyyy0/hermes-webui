@@ -48,26 +48,17 @@ api/_scm_version.py
 .DS_Store
 Thumbs.db
 
-# Local reference clones/artifacts — never committed by default.
-# Markdown docs at docs/*.md are intentionally trackable for contributor docs.
-docs/*
-!docs/*.md
-!docs/ui-ux/
-!docs/ui-ux/**
-!docs/rfcs/
-!docs/rfcs/**
-!docs/fix/
-!docs/fix/**
-!docs/architecture/
-!docs/architecture/**
-!docs/plans/
-!docs/plans/**
-
-# Local-only AI assistant context — never committed even under docs/.
+# Local-only AI assistant context — never committed under docs/.
 docs/AGENTS.md
 docs/CLAUDE.md
 docs/.cursorrules
 docs/.windsurfrules
+docs/operations/local/
+docs/integration/local/
+docs/pr-media/
+docs/pr-assets/
+docs/images/pr-*.png
+docs/images/update-banner-whats-new-*.png
 .specify/
 AGENT_TRACE.yaml
 EXECUTION_LOG.md

@@ -86,7 +86,7 @@ What makes it different from other agentic tools:
   the results back into its own memory
 - **Self-hosted** — your conversations, your memory, your hardware
 
-**vs. the field** *(landscape is actively shifting — see [docs/why-hermes.md](docs/why-hermes.md) for the full breakdown)*:
+**vs. the field** *(landscape is actively shifting — see [docs/guides/why-hermes.md](docs/guides/why-hermes.md) for the full breakdown)*:
 
 | | OpenClaw | Claude Code | Codex CLI | OpenCode | Hermes |
 |---|---|---|---|---|---|
@@ -107,7 +107,7 @@ with memory, cron, and messaging. The key differences: Hermes writes and saves i
 automatically as a core behavior (OpenClaw's skill system centers on a community marketplace);
 Hermes is more stable across updates (OpenClaw has documented release regressions and ClawHub
 has had security incidents involving malicious skills); and Hermes runs natively in the Python
-ecosystem. See [docs/why-hermes.md](docs/why-hermes.md) for the full side-by-side.
+ecosystem. See [docs/guides/why-hermes.md](docs/guides/why-hermes.md) for the full side-by-side.
 
 ---
 
@@ -160,12 +160,12 @@ For self-hosted VM or homelab installs, `ctl.sh` wraps the common daemon lifecyc
 >    **Settings → Providers** as a custom OpenAI-compatible provider with
 >    `base_url = http://127.0.0.1:8642/v1` and your bearer token.
 > 2. **Route chat through a Hermes Gateway API server** (supported today via
->    `HERMES_WEBUI_CHAT_BACKEND=gateway`): see [`docs/advanced-chat-setup.md`](docs/advanced-chat-setup.md).
+>    `HERMES_WEBUI_CHAT_BACKEND=gateway`): see [`docs/guides/advanced-chat-setup.md`](docs/guides/advanced-chat-setup.md).
 >    Full agent-loop delegation is not yet shipped; tracked in [#1925](https://github.com/nesquena/hermes-webui/issues/1925).
 
 ### Advanced: dynamic recall prefill & Gateway-backed chat
 
-Two optional, self-hosted-deployment features — attaching dynamic **session-recall prefill** to browser turns (Joplin/Obsidian/Notion/llm-wiki routers), and routing browser chat through a running **Hermes Gateway** — are documented in [`docs/advanced-chat-setup.md`](docs/advanced-chat-setup.md). Most users need neither.
+Two optional, self-hosted-deployment features — attaching dynamic **session-recall prefill** to browser turns (Joplin/Obsidian/Notion/llm-wiki routers), and routing browser chat through a running **Hermes Gateway** — are documented in [`docs/guides/advanced-chat-setup.md`](docs/guides/advanced-chat-setup.md). Most users need neither.
 
 The bootstrap will:
 
@@ -176,7 +176,7 @@ The bootstrap will:
 5. Drop you into a first-run onboarding wizard inside the WebUI.
 
 > Native Windows is not supported for this bootstrap yet. Use Linux, macOS, or WSL2.
-> For Windows / WSL auto-start at login, see [`docs/wsl-autostart.md`](docs/wsl-autostart.md).
+> For Windows / WSL auto-start at login, see [`docs/guides/wsl-autostart.md`](docs/guides/wsl-autostart.md).
 
 A community-maintained native Windows setup is documented at [@markwang2658/hermes-windows-native-guide](https://github.com/markwang2658/hermes-windows-native-guide) (companion setup repo: [@markwang2658/hermes-windows-native](https://github.com/markwang2658/hermes-windows-native)). Notes from the community report in [#1952](https://github.com/nesquena/hermes-webui/issues/1952):
 
@@ -262,7 +262,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 ### Authentication and security
 - Optional password auth -- off by default, zero friction for localhost
 - Enable via `HERMES_WEBUI_PASSWORD` env var or Settings panel
-- Installed PWAs work best with WebUI's own password. Reverse proxies are supported, but proxy basic auth can block the service-worker update fetches an installed app needs and leave it on a blank screen after an update; see `docs/troubleshooting.md` for recovery steps.
+- Installed PWAs work best with WebUI's own password. Reverse proxies are supported, but proxy basic auth can block the service-worker update fetches an installed app needs and leave it on a blank screen after an update; see `docs/operations/troubleshooting.md` for recovery steps.
 - Optional passkeys/WebAuthn -- register from Settings -> System after signing in with a password; the login page only shows passkey sign-in after at least one passkey exists
 - After registering at least one passkey, Settings -> System can remove the password and keep passkey-only sign-in enabled. Password auth remains the bootstrap/recovery path until you choose to go passwordless; passkeys are same-origin and stored locally in the WebUI state directory
 - Optional native OIDC login for WebUI sessions -- configure `webui_oidc.issuer`, `client_id`, `allow_claim`, and `allow_values` in `config.yaml`, or set the matching `HERMES_WEBUI_OIDC_*` environment variables. OIDC stays disabled until all four are present, and startup prints a warning if the config is partial.
@@ -446,7 +446,7 @@ Set `environmentFiles` for secrets like API keys. Protected WebUI runtime keys f
 
 ### Remote access (SSH tunnel, Tailscale, phone)
 
-The server binds to `127.0.0.1` by default. To reach it from another machine use an SSH tunnel (`ssh -N -L 8787:127.0.0.1:8787 user@host`, which `start.sh` prints for you over SSH), or join your server and phone to a [Tailscale](https://tailscale.com) network and browse to `http://<server-tailscale-ip>:8787` with `HERMES_WEBUI_HOST=0.0.0.0` + `HERMES_WEBUI_PASSWORD` set. Full walkthrough (incl. a community ARM64-Android field report): [`docs/remote-access.md`](docs/remote-access.md).
+The server binds to `127.0.0.1` by default. To reach it from another machine use an SSH tunnel (`ssh -N -L 8787:127.0.0.1:8787 user@host`, which `start.sh` prints for you over SSH), or join your server and phone to a [Tailscale](https://tailscale.com) network and browse to `http://<server-tailscale-ip>:8787` with `HERMES_WEBUI_HOST=0.0.0.0` + `HERMES_WEBUI_PASSWORD` set. Full walkthrough (incl. a community ARM64-Android field report): [`docs/guides/remote-access.md`](docs/guides/remote-access.md).
 
 ### Manual launch (without start.sh)
 
@@ -471,7 +471,7 @@ curl http://127.0.0.1:8787/health
 
 **Pre-built images** (amd64 + arm64) are published to GHCR on every release.
 
-For a comprehensive setup guide covering all 3 compose files, common failure modes, and bind-mount migration, see [`docs/docker.md`](docs/docker.md). The README covers the 5-minute happy path.
+For a comprehensive setup guide covering all 3 compose files, common failure modes, and bind-mount migration, see [`docs/guides/docker.md`](docs/guides/docker.md). The README covers the 5-minute happy path.
 
 ### 5-minute quickstart (single container)
 
@@ -535,7 +535,7 @@ docker compose -f docker-compose.two-container.yml up -d
 docker compose -f docker-compose.three-container.yml up -d
 ```
 
-Both compose files use **named Docker volumes** by default, which solves the UID/GID problem by construction. If you need bind mounts to share an existing host directory, see [`docs/docker.md`](docs/docker.md) for the full migration recipe.
+Both compose files use **named Docker volumes** by default, which solves the UID/GID problem by construction. If you need bind mounts to share an existing host directory, see [`docs/guides/docker.md`](docs/guides/docker.md) for the full migration recipe.
 
 > **Known limitation (#681)**: in the two-container setup, tools triggered from the WebUI run in the **WebUI container**, not the agent container. If you need git/node/etc. on the WebUI's filesystem, either use the single-container setup, extend the WebUI Dockerfile, or use the community [all-in-one image](https://github.com/sunnysktsang/hermes-suite).
 >
@@ -554,7 +554,7 @@ Both compose files use **named Docker volumes** by default, which solves the UID
 | Host API at `localhost` fails from WebUI | Container `localhost` means the container, not your host (#3012) | Use `http://host.docker.internal:<port>` on Docker Desktop, or `http://host.containers.internal:<port>` on Podman |
 | WebUI can't see `~/.hermes` after `sudo docker compose` | `${HOME}` expanded to the root user's home (#3006) | Run Compose as your user, or pass absolute `HERMES_HOME`/`HERMES_WORKSPACE` with `sudo -E` |
 
-For the deep dive on each of these, see [`docs/docker.md`](docs/docker.md).
+For the deep dive on each of these, see [`docs/guides/docker.md`](docs/guides/docker.md).
 
 > **Note:** By default, Docker Compose binds to `127.0.0.1` (localhost only).
 > To expose on a network, change the port to `"8787:8787"` in `docker-compose.yml`
@@ -664,28 +664,28 @@ The WebUI is still coupled to Hermes Agent internals for runtime execution, prov
 - Running pinned older/newer combinations is **untested and unsupported** until the stable API boundary work in [#1925](https://github.com/nesquena/hermes-webui/issues/1925) / [#2491](https://github.com/nesquena/hermes-webui/issues/2491) is in place.
 - Record the full `hermes-agent` + `hermes-webui` versions in issue reports when upgrade mismatches are suspected.
 
-**Docker users**: pin both image tags (or corresponding pinned source revisions) rather than using `latest` on one side and a fixed tag on the other. When upgrading the multi-container setup, follow the agent-image upgrade procedure in [`docs/docker.md`](docs/docker.md) (which requires dropping the `hermes-agent-src` volume before recreating). The current source-boundary status is tracked in [`docs/rfcs/agent-source-boundary.md`](docs/rfcs/agent-source-boundary.md).
+**Docker users**: pin both image tags (or corresponding pinned source revisions) rather than using `latest` on one side and a fixed tag on the other. When upgrading the multi-container setup, follow the agent-image upgrade procedure in [`docs/guides/docker.md`](docs/guides/docker.md) (which requires dropping the `hermes-agent-src` volume before recreating). The current source-boundary status is tracked in [`docs/rfcs/agent-source-boundary.md`](docs/rfcs/agent-source-boundary.md).
 
 ---
 
 ## Docs
 
 **Start here**
-- [`docs/why-hermes.md`](docs/why-hermes.md) — why Hermes, the mental model, and a detailed comparison to Claude Code / Codex / OpenCode / Cursor
+- [`docs/guides/why-hermes.md`](docs/guides/why-hermes.md) — why Hermes, the mental model, and a detailed comparison to Claude Code / Codex / OpenCode / Cursor
 - [`docs/onboarding.md`](docs/onboarding.md) — first-run wizard, provider setup, local model server Base URLs, and safe re-runs
-- [`docs/troubleshooting.md`](docs/troubleshooting.md) — diagnostic flows for common failures (e.g. "AIAgent not available")
+- [`docs/operations/troubleshooting.md`](docs/operations/troubleshooting.md) — diagnostic flows for common failures (e.g. "AIAgent not available")
 
 **Using & customizing**
 - [`THEMES.md`](THEMES.md) — theme + skin system, custom theme guide
-- [`docs/workspace-git.md`](docs/workspace-git.md) — the workspace Git controls
+- [`docs/guides/workspace-git.md`](docs/guides/workspace-git.md) — the workspace Git controls
 - [`docs/EXTENSIONS.md`](docs/EXTENSIONS.md) — administrator-controlled WebUI extension injection
 
 **Deploying & operating**
-- [`docs/remote-access.md`](docs/remote-access.md) — SSH tunnel, Tailscale, and phone access (incl. a community ARM64-Android field report)
-- [`docs/advanced-chat-setup.md`](docs/advanced-chat-setup.md) — optional dynamic recall-prefill and Gateway-backed browser chat for self-hosted deployments
-- [`docs/docker.md`](docs/docker.md) — Docker compose setup, common failures, and bind-mount migration
-- [`docs/supervisor.md`](docs/supervisor.md) — launchd, systemd, supervisord, runit, and s6 process-supervisor setup
-- [`docs/wsl-autostart.md`](docs/wsl-autostart.md) — WSL2 auto-start at Windows login
+- [`docs/guides/remote-access.md`](docs/guides/remote-access.md) — SSH tunnel, Tailscale, and phone access (incl. a community ARM64-Android field report)
+- [`docs/guides/advanced-chat-setup.md`](docs/guides/advanced-chat-setup.md) — optional dynamic recall-prefill and Gateway-backed browser chat for self-hosted deployments
+- [`docs/guides/docker.md`](docs/guides/docker.md) — Docker compose setup, common failures, and bind-mount migration
+- [`docs/operations/supervisor.md`](docs/operations/supervisor.md) — launchd, systemd, supervisord, runit, and s6 process-supervisor setup
+- [`docs/guides/wsl-autostart.md`](docs/guides/wsl-autostart.md) — WSL2 auto-start at Windows login
 - [`docs/onboarding-agent-checklist.md`](docs/onboarding-agent-checklist.md) — safety rules and pass/fail checks for assistant-led install/reinstall support
 
 **Contributing & design**

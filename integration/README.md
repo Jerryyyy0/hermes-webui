@@ -427,7 +427,7 @@ curl -sS -F 'relate_name=demo_flow' -F 'file=@data.csv' \
 
 ### 通知系统（`HERMES_INTEGRATION=1` + `KNOWLEDGE_BASE_URL`）
 
-完整 API 文档：[`docs/integration-notifications-api.md`](../docs/integration-notifications-api.md)。
+完整 API 文档：[`docs/integration/integration-notifications-api.md`](../docs/integration/integration-notifications-api.md)。
 
 HTTP 接口仅服务知识库通知（`kb_apply`），从下游 `get_user_messages` 实时聚合。`{HERMES_WEBUI_STATE_DIR}/notifications.db` 表结构与 `store.py` 预留，当前 HTTP 层不读写。
 

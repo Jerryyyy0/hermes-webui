@@ -20,8 +20,8 @@ def test_readme_has_compatibility_section():
         '("pin both image tags")'
     )
 
-    assert "docs/docker.md" in readme, (
-        "README.md Compatibility section must cross-link to docs/docker.md"
+    assert "docs/guides/docker.md" in readme, (
+        "README.md Compatibility section must cross-link to docs/guides/docker.md"
     )
 
     assert "docs/rfcs/agent-source-boundary.md" in readme, (

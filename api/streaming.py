@@ -1784,7 +1784,7 @@ def _aiagent_import_error_detail() -> str:
     lines.append("")
     lines.append("  Then restart the WebUI.")
     lines.append("")
-    lines.append('  Full troubleshooting: docs/troubleshooting.md ("AIAgent not available")')
+    lines.append('  Full troubleshooting: docs/operations/troubleshooting.md ("AIAgent not available")')
     return "\n".join(lines)
 from api.models import get_session, title_from
 from api.workspace import set_last_workspace

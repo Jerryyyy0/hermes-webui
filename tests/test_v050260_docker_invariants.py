@@ -10,7 +10,7 @@ extends coverage to the related fixes shipped alongside #1428:
   (`HERMES_SKIP_CHMOD`, `HERMES_HOME_MODE`) inline so users hit by #1389
   or #1399 see the fix in the file they're reading
 - The `.env.docker.example` template ships and documents the same vars
-- `docs/docker.md` exists and covers the multi-container architecture
+- `docs/guides/docker.md` exists and covers the multi-container architecture
 - Stale README references to `/root/.hermes` are gone (the agent images
   use `/home/hermes/.hermes`)
 """
@@ -123,26 +123,26 @@ def test_env_docker_example_exists():
         )
 
 
-# ── 4: docs/docker.md comprehensive guide ──────────────────────────────────
+# ── 4: docs/guides/docker.md comprehensive guide ──────────────────────────────────
 
 
 def test_docs_docker_md_exists_and_covers_failure_modes():
-    """The docs/docker.md guide must exist and cover the recurring failure
+    """The docs/guides/docker.md guide must exist and cover the recurring failure
     modes seen in #1399, #1389, #858, #681, #668."""
-    p = REPO / "docs" / "docker.md"
-    assert p.exists(), "docs/docker.md must exist as the comprehensive guide"
+    p = REPO / "docs" / "guides" / "docker.md"
+    assert p.exists(), "docs/guides/docker.md must exist as the comprehensive guide"
     src = p.read_text(encoding="utf-8")
 
     # Must mention each documented failure mode by issue ref
     for issue in ("#1389", "#1399", "#858", "#681"):
         assert issue in src, (
-            f"docs/docker.md must reference issue {issue} so users searching "
+            f"docs/guides/docker.md must reference issue {issue} so users searching "
             f"for the symptom find the right diagnostic path."
         )
 
     # Must explicitly link the alternate single-container community image
     assert "sunnysktsang/hermes-suite" in src, (
-        "docs/docker.md should point Podman 3.4 / multi-arch users to the "
+        "docs/guides/docker.md should point Podman 3.4 / multi-arch users to the "
         "community all-in-one image as a documented escape hatch."
     )
 
@@ -164,12 +164,12 @@ def test_readme_no_stale_root_hermes_path():
 
 
 def test_readme_links_to_docker_md():
-    """The README Docker section should point at docs/docker.md for the
+    """The README Docker section should point at docs/guides/docker.md for the
     deep dive so we don't have to keep two copies of the same content
     in sync."""
     src = (REPO / "README.md").read_text(encoding="utf-8")
-    assert "docs/docker.md" in src, (
-        "README.md should reference docs/docker.md so users with deeper "
+    assert "docs/guides/docker.md" in src, (
+        "README.md should reference docs/guides/docker.md so users with deeper "
         "needs (multi-container, bind mounts, Podman) find the full guide."
     )
 
@@ -288,7 +288,7 @@ def test_docs_docker_warns_about_sudo_compose_home_expansion():
     """REGRESSION (#3006): the Docker guide must explain that
     `sudo docker compose` can expand `${HOME}` to `/root`, mounting the wrong
     `.hermes` directory into the container."""
-    src = (REPO / "docs" / "docker.md").read_text(encoding="utf-8")
+    src = (REPO / "docs" / "guides" / "docker.md").read_text(encoding="utf-8")
     assert "sudo docker compose" in src
     assert "/root/.hermes" in src
     assert "sudo -E docker compose" in src

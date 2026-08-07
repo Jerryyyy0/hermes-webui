@@ -16,6 +16,6 @@ def test_why_hermes_doc_remains_linked_from_readme():
     repo_root = Path(__file__).resolve().parents[1]
     readme = (repo_root / "README.md").read_text(encoding="utf-8")
 
-    assert (repo_root / "docs" / "why-hermes.md").exists()
-    assert "docs/why-hermes.md" in readme
+    assert (repo_root / "docs" / "guides" / "why-hermes.md").exists()
+    assert "docs/guides/why-hermes.md" in readme
     assert "[HERMES.md](HERMES.md)" not in readme
