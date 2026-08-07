@@ -147,9 +147,8 @@ python scripts/real_model_campaign.py --sessions 10 --turns 15
 python scripts/real_model_campaign.py --sessions 1 --turns 5 --seed 42
 # default is first-turn only; replay/mixed remain optional
 python scripts/real_model_campaign.py --sessions 1 --turns 5 --context-mode first
-# when --sessions >= 2, +1 cancel-verify batch (every turn immediate cancel) is appended;
-# disable with --no-cancel-verify-session
-python scripts/real_model_campaign.py --sessions 2 --turns 5 --no-cancel-verify-session
+# optional: first session is cancel-verify (every turn immediate cancel)
+python scripts/real_model_campaign.py --sessions 2 --turns 5 --cancel-verify
 # delete campaign test sessions AND wipe e2e_campaigns artifact workspaces
 python scripts/real_model_campaign.py --cleanup
 ```

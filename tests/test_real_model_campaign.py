@@ -4,6 +4,7 @@ import sqlite3
 
 from scripts.real_model_campaign import (
     HistoryPrompt,
+    _wait_for_chat_ready,
     build_history_prompt,
     cancellation_plan,
     cleanup_campaign_test_data,
@@ -39,6 +40,18 @@ class _FakeApi:
         return {"ok": True}
 
 
+class _ReadinessApi:
+    def __init__(self, readiness):
+        self.calls = []
+        self.readiness = iter(readiness)
+
+    def request(self, method, path, body=None, timeout=20):
+        self.calls.append((method, path, body))
+        if path.startswith("/api/session/status"):
+            return {"can_start_chat": next(self.readiness)}
+        raise AssertionError(f"unexpected request: {method} {path}")
+
+
 def test_default_cancel_plan_covers_all_paths():
     assert cancellation_plan(15) == {
         3: "immediate_after_start",
@@ -58,16 +71,26 @@ def test_immediate_cancel_plan_covers_every_turn():
     }
 
 
-def test_resolve_batch_specs_adds_cancel_verify_when_sessions_ge_2():
-    assert [spec["kind"] for spec in resolve_batch_specs(1, 5)] == ["normal"]
-    specs = resolve_batch_specs(2, 5)
-    assert [spec["kind"] for spec in specs] == ["normal", "normal", "cancel_verify"]
-    assert specs[-1]["batch_index"] == 3
-    assert specs[-1]["cancel_plan"] == immediate_cancel_plan(5)
-    assert [spec["kind"] for spec in resolve_batch_specs(2, 5, cancel_verify_session=False)] == [
-        "normal",
-        "normal",
+def test_wait_for_chat_ready_waits_for_authoritative_status(monkeypatch):
+    api = _ReadinessApi([False, True])
+    monkeypatch.setattr("scripts.real_model_campaign.time.sleep", lambda _seconds: None)
+
+    status = _wait_for_chat_ready(api, "sid-1")
+
+    assert status == {"can_start_chat": True}
+    assert [path for _method, path, _body in api.calls] == [
+        "/api/session/status?session_id=sid-1",
+        "/api/session/status?session_id=sid-1",
     ]
+
+
+def test_resolve_batch_specs_cancel_verify_is_first_session_when_enabled():
+    assert [spec["kind"] for spec in resolve_batch_specs(2, 5)] == ["normal", "normal"]
+    specs = resolve_batch_specs(2, 5, cancel_verify_session=True)
+    assert [spec["kind"] for spec in specs] == ["cancel_verify", "normal"]
+    assert specs[0]["batch_index"] == 1
+    assert specs[0]["cancel_plan"] == immediate_cancel_plan(5)
+    assert resolve_batch_specs(1, 5, cancel_verify_session=True)[0]["kind"] == "cancel_verify"
 
 
 def test_history_prompt_wraps_nonce_and_turn_path():

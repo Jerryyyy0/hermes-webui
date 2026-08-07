@@ -7,9 +7,9 @@ stably produced write-sourced delivery artifacts (manifest evidence).
 Default ``--context-mode first``: only opening-turn prompts, one continuous
 plain session per batch (no transcript import / mid-turn replay).
 
-When ``--sessions >= 2``, one extra cancel-verify batch is appended by default:
+Optional ``--cancel-verify``: first session becomes a cancel-verify batch where
 every turn sends a message then cancels immediately (``immediate_after_start``).
-Use ``--no-cancel-verify-session`` to disable.
+Remaining sessions (if any) use the normal sparse cancellation plan.
 
 Optional modes remain available but are not the default:
 - replay: mid-turn prompts with transcript prefix via /api/session/import
@@ -101,19 +101,24 @@ def resolve_batch_specs(
     session_count: int,
     turns: int,
     *,
-    cancel_verify_session: bool = True,
+    cancel_verify_session: bool = False,
 ) -> list[dict[str, Any]]:
-    """Build batch specs; when sessions>=2, append one cancel-verify batch by default."""
+    """Build batch specs; cancel-verify (if enabled) always occupies the first session."""
     plan = cancellation_plan(turns)
-    specs: list[dict[str, Any]] = [
-        {"batch_index": index + 1, "kind": "normal", "cancel_plan": plan}
-        for index in range(session_count)
-    ]
-    if session_count >= 2 and cancel_verify_session:
+    specs: list[dict[str, Any]] = []
+    for index in range(session_count):
+        batch_index = index + 1
+        if cancel_verify_session and index == 0:
+            specs.append({
+                "batch_index": batch_index,
+                "kind": "cancel_verify",
+                "cancel_plan": immediate_cancel_plan(turns),
+            })
+            continue
         specs.append({
-            "batch_index": session_count + 1,
-            "kind": "cancel_verify",
-            "cancel_plan": immediate_cancel_plan(turns),
+            "batch_index": batch_index,
+            "kind": "normal",
+            "cancel_plan": plan,
         })
     return specs
 
@@ -753,13 +758,25 @@ def evaluate_alignment(session: dict, manifest: dict, ledger: dict, workspace: P
     return failures, observations, hashes
 
 
-def _settle(api: Api, session_id: str) -> dict:
+def _wait_for_chat_ready(api: Api, session_id: str) -> dict:
+    """Wait until the server confirms a successor turn cannot race teardown."""
     until, latest = time.monotonic() + SETTLE_TIMEOUT, {}
     while time.monotonic() < until:
-        latest = api.request("GET", "/api/session?session_id=" + urllib.parse.quote(session_id) + "&messages=1")
-        if not latest.get("session", {}).get("active_stream_id"): return latest
+        latest = api.request(
+            "GET",
+            "/api/session/status?session_id=" + urllib.parse.quote(session_id),
+        )
+        if latest.get("can_start_chat") is True:
+            return latest
         time.sleep(0.4)
     return latest
+
+
+def _settle(api: Api, session_id: str) -> dict:
+    readiness = _wait_for_chat_ready(api, session_id)
+    if readiness.get("can_start_chat") is not True:
+        return {}
+    return api.request("GET", "/api/session?session_id=" + urllib.parse.quote(session_id) + "&messages=1")
 
 
 def _run_round(
@@ -786,6 +803,11 @@ def _run_round(
         "alignment_failures": [],
         "auto_approve": {"yolo": None, "drains": []},
     }
+    readiness = _wait_for_chat_ready(api, session_id)
+    row["readiness_before_start"] = readiness
+    if readiness.get("can_start_chat") is not True:
+        row["observations"].append({"code": "SESSION_NOT_READY"})
+        return row
     row["auto_approve"]["yolo"] = enable_auto_approve(api, session_id)
     start = api.request("POST", "/api/chat/start", {"session_id": session_id, "workspace": str(workspace), "message": prompt})
     chat_start_received_at = time.monotonic()
@@ -817,7 +839,11 @@ def _run_round(
     drained = drain_blocking_prompts(api, session_id)
     if drained["approvals"] or drained["clarifies"]:
         row["auto_approve"]["drains"].append({"event": "post_stream", **drained})
-    session = _settle(api, session_id).get("session", {})
+    settled = _settle(api, session_id)
+    if not settled:
+        row["observations"].append({"code": "SESSION_NOT_READY_AFTER_STREAM"})
+        return row
+    session = settled.get("session", {})
     row["turn_key"] = _turn_key(session, nonce)
     manifest = api.request("GET", "/api/session/manifest?session_id=" + urllib.parse.quote(session_id)).get("manifest", {})
     failures, observations, hashes = evaluate_alignment(session, manifest, row, workspace)
@@ -834,7 +860,7 @@ def run_campaign(
     seed: int | None = None,
     context_mode: ContextMode = "first",
     *,
-    cancel_verify_session: bool = True,
+    cancel_verify_session: bool = False,
 ) -> int:
     api = Api(base_url); health = api.request("GET", "/health")
     if health.get("status") != "ok" or health.get("active_streams") or health.get("active_runs"):
@@ -869,7 +895,7 @@ def run_campaign(
     )
     if any(spec["kind"] == "cancel_verify" for spec in batch_specs):
         print(
-            f"cancel-verify batch enabled: +1 session, every turn immediate_after_start "
+            f"cancel-verify enabled: first session every turn immediate_after_start "
             f"(total batches={len(batch_specs)})",
             flush=True,
         )
@@ -985,7 +1011,7 @@ def run_campaign(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--sessions", type=int, default=5, help="Number of normal campaign batches")
+    parser.add_argument("--sessions", type=int, default=5, help="Number of campaign batches")
     parser.add_argument("--turns", type=int, default=15, help="Trials per batch")
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
     parser.add_argument("--seed", type=int, default=None, help="RNG seed for reproducible history prompt sampling")
@@ -996,9 +1022,9 @@ def main(argv: list[str] | None = None) -> int:
         help="default first=only opening prompts; replay/mixed keep mid-turn import (experimental)",
     )
     parser.add_argument(
-        "--no-cancel-verify-session",
+        "--cancel-verify",
         action="store_true",
-        help="Disable the extra cancel-verify batch (enabled by default when --sessions >= 2)",
+        help="Make the first session a cancel-verify batch (every turn immediate_after_start)",
     )
     parser.add_argument(
         "--cleanup",
@@ -1017,7 +1043,7 @@ def main(argv: list[str] | None = None) -> int:
         args.base_url,
         seed=args.seed,
         context_mode=args.context_mode,
-        cancel_verify_session=not args.no_cancel_verify_session,
+        cancel_verify_session=args.cancel_verify,
     )
 
 
