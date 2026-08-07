@@ -198,6 +198,135 @@ def test_build_session_manifest_marks_deleted_artifact_expired(tmp_path, monkeyp
     assert manifest['turns'][0]['artifacts'][0]['status'] == 'expired'
 
 
+def test_build_session_manifest_prefixes_managed_workspace_file_paths(tmp_path, monkeypatch):
+    base = tmp_path / 'workspace-base'
+    sid = 'managedsid01'
+    workspace = base / sid
+    workspace.mkdir(parents=True)
+    (workspace / 'report.md').write_text('ok', encoding='utf-8')
+    monkeypatch.setattr(
+        'api.workspace.resolve_trusted_workspace',
+        lambda path=None: base.resolve() if path in (None, '') else Path(path).expanduser().resolve(),
+    )
+    session = Session(
+        session_id=sid,
+        workspace=str(workspace),
+        messages=[
+            {'role': 'user', 'content': 'write report', '_turn_key': 'turn:0'},
+            {
+                'role': 'assistant',
+                'tool_calls': [{
+                    'id': 'c1',
+                    'function': {'name': 'write_file', 'arguments': '{"path":"report.md"}'},
+                }],
+            },
+            {'role': 'tool', 'tool_call_id': 'c1', 'content': 'ok'},
+        ],
+        tool_calls=[],
+    )
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    manifest = build_session_manifest(session)
+    assert manifest['artifacts'][0]['path'] == f'{sid}/report.md'
+    assert manifest['turns'][0]['artifacts'][0]['path'] == f'{sid}/report.md'
+
+
+def test_build_session_manifest_keeps_path_when_workspace_is_integration_root(tmp_path, monkeypatch):
+    base = tmp_path / 'workspace-base'
+    base.mkdir()
+    (base / 'report.md').write_text('ok', encoding='utf-8')
+    monkeypatch.setattr(
+        'api.workspace.resolve_trusted_workspace',
+        lambda path=None: base.resolve() if path in (None, '') else Path(path).expanduser().resolve(),
+    )
+    session = Session(
+        session_id='sharedroot01',
+        workspace=str(base),
+        messages=[
+            {'role': 'user', 'content': 'write report', '_turn_key': 'turn:0'},
+            {
+                'role': 'assistant',
+                'tool_calls': [{
+                    'id': 'c1',
+                    'function': {'name': 'write_file', 'arguments': '{"path":"report.md"}'},
+                }],
+            },
+            {'role': 'tool', 'tool_call_id': 'c1', 'content': 'ok'},
+        ],
+        tool_calls=[],
+    )
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    manifest = build_session_manifest(session)
+    assert manifest['artifacts'][0]['path'] == 'report.md'
+
+
+def test_manifest_delta_prefixes_managed_workspace_file_paths(tmp_path, monkeypatch):
+    base = tmp_path / 'workspace-base'
+    sid = 'manageddelta01'
+    workspace = base / sid
+    workspace.mkdir(parents=True)
+    (workspace / 'notes.txt').write_text('hello', encoding='utf-8')
+    monkeypatch.setattr(
+        'api.workspace.resolve_trusted_workspace',
+        lambda path=None: base.resolve() if path in (None, '') else Path(path).expanduser().resolve(),
+    )
+    delta = extract_manifest_delta_from_tool_event(
+        ToolEvent(
+            name='write_file',
+            args={'path': 'notes.txt'},
+            result='ok',
+            tid='write-call',
+            status='completed',
+        ),
+        workspace,
+        session_id=sid,
+        stream_id='stream1',
+        turn_key='turn:0',
+        sequence=1,
+    )
+    assert delta['artifacts'] == [{
+        'path': f'{sid}/notes.txt',
+        'preview': 'file',
+        'source_tool': 'write_file',
+    }]
+
+
+def test_build_session_manifest_expired_managed_path_keeps_prefix(tmp_path, monkeypatch):
+    base = tmp_path / 'workspace-base'
+    sid = 'managedexp01'
+    workspace = base / sid
+    workspace.mkdir(parents=True)
+    target = workspace / 'gone.txt'
+    target.write_text('bye', encoding='utf-8')
+    monkeypatch.setattr(
+        'api.workspace.resolve_trusted_workspace',
+        lambda path=None: base.resolve() if path in (None, '') else Path(path).expanduser().resolve(),
+    )
+    session = Session(
+        session_id=sid,
+        workspace=str(workspace),
+        messages=[
+            {'role': 'user', 'content': 'write', '_turn_key': 'turn:0'},
+            {
+                'role': 'assistant',
+                'tool_calls': [{
+                    'id': 'c1',
+                    'function': {'name': 'write_file', 'arguments': '{"path":"gone.txt"}'},
+                }],
+            },
+            {'role': 'tool', 'tool_call_id': 'c1', 'content': 'ok'},
+        ],
+        tool_calls=[],
+        turn_artifacts={
+            'turn:0': [{'path': 'gone.txt', 'source_tool': 'write_file'}],
+        },
+    )
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    target.unlink()
+    manifest = build_session_manifest(session)
+    assert manifest['artifacts'][0]['path'] == f'{sid}/gone.txt'
+    assert manifest['artifacts'][0]['status'] == 'expired'
+
+
 def test_rows_to_wire_references_drops_missing_file_rows(tmp_path):
     workspace = tmp_path / 'ws'
     workspace.mkdir()

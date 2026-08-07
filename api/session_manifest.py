@@ -2289,6 +2289,17 @@ def _serialize_manifest_row(
     return row
 
 
+def _wire_file_path_for_integration(workspace: Path, path: str) -> str:
+    """Project session-relative file paths onto DEFAULT_WORKSPACE for wire/SSE.
+
+    Matches left-rail ``/api/integration/workspace/files`` prefixing so
+    ``/api/integration/workspace/file`` can open managed-session artifacts.
+    """
+    from api.session_manifest_store import project_artifact_path_for_integration_root
+
+    return project_artifact_path_for_integration_root(path, workspace)
+
+
 def _expired_workspace_file_wire_path(workspace: Path, rel: str, entry_kind: str) -> str | None:
     if entry_kind == 'dir':
         return None
@@ -2405,11 +2416,16 @@ def _row_to_wire(
     preview_path = _file_preview_path(workspace, rel, entry_kind)
     if preview_path:
         return _serialize_manifest_row(
-            preview_path, MANIFEST_PREVIEW_FILE, source_tool, profile=profile,
+            _wire_file_path_for_integration(workspace, preview_path),
+            MANIFEST_PREVIEW_FILE,
+            source_tool,
+            profile=profile,
         )
     if source_tool == MEDIA_ARTIFACT_SOURCE:
         media_path = _session_media_preview_path(workspace, rel, entry_kind)
         if media_path:
+            # Absolute MEDIA paths stay absolute; in-workspace MEDIA already
+            # returned via _file_preview_path above.
             return _serialize_manifest_row(
                 media_path, MANIFEST_PREVIEW_FILE, source_tool, profile=profile,
             )
@@ -2425,6 +2441,8 @@ def _row_to_wire(
             expired_path = _expired_media_file_wire_path(workspace, rel, entry_kind)
         else:
             expired_path = _expired_workspace_file_wire_path(workspace, rel, entry_kind)
+            if expired_path:
+                expired_path = _wire_file_path_for_integration(workspace, expired_path)
         if expired_path:
             return _serialize_manifest_row(
                 expired_path,

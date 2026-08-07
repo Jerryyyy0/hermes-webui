@@ -59,6 +59,52 @@ def _connect(db_path: Path | str | None = None) -> sqlite3.Connection:
 
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
+    existing = conn.execute(
+        "SELECT name, sql FROM sqlite_master WHERE type = 'table' AND name = 'session_manifest_records'"
+    ).fetchone()
+    if existing is not None:
+        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(session_manifest_records)").fetchall()}
+        table_sql = str(existing[1] or "")
+        if "workspace_root" not in columns or "UNIQUE(lineage_key, profile, turn_key, record_kind, path, workspace_root)" not in table_sql:
+            # SQLite cannot remove a table-level UNIQUE constraint in place.
+            # Rebuild the small index table and retain old rows as legacy rows
+            # with an unknown root rather than guessing their workspace.
+            conn.execute("DROP INDEX IF EXISTS idx_session_manifest_records_session")
+            conn.execute("DROP INDEX IF EXISTS idx_session_manifest_records_lineage_profile")
+            conn.execute("ALTER TABLE session_manifest_records RENAME TO session_manifest_records_legacy")
+            conn.execute(
+                """
+                CREATE TABLE session_manifest_records (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  session_id TEXT NOT NULL,
+                  lineage_key TEXT NOT NULL,
+                  profile TEXT NOT NULL DEFAULT '',
+                  workspace_root TEXT NOT NULL DEFAULT '',
+                  turn_key TEXT NOT NULL,
+                  record_kind TEXT NOT NULL,
+                  path TEXT NOT NULL,
+                  preview TEXT NOT NULL,
+                  source_tool TEXT NOT NULL,
+                  created_at REAL NOT NULL,
+                  updated_at REAL NOT NULL,
+                  UNIQUE(lineage_key, profile, turn_key, record_kind, path, workspace_root)
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO session_manifest_records (
+                  id, session_id, lineage_key, profile, workspace_root, turn_key,
+                  record_kind, path, preview, source_tool, created_at, updated_at
+                )
+                SELECT id, session_id, lineage_key, profile, '', turn_key,
+                       record_kind, path, preview, source_tool, created_at, updated_at
+                FROM session_manifest_records_legacy
+                """
+            )
+            conn.execute("DROP TABLE session_manifest_records_legacy")
+            conn.commit()
+
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS session_manifest_records (
@@ -66,6 +112,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
           session_id TEXT NOT NULL,
           lineage_key TEXT NOT NULL,
           profile TEXT NOT NULL DEFAULT '',
+          workspace_root TEXT NOT NULL DEFAULT '',
           turn_key TEXT NOT NULL,
           record_kind TEXT NOT NULL,
           path TEXT NOT NULL,
@@ -73,7 +120,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
           source_tool TEXT NOT NULL,
           created_at REAL NOT NULL,
           updated_at REAL NOT NULL,
-          UNIQUE(lineage_key, profile, turn_key, record_kind, path)
+          UNIQUE(lineage_key, profile, turn_key, record_kind, path, workspace_root)
         )
         """
     )
@@ -203,6 +250,68 @@ def _profile_for_session(session) -> str:
     return str(getattr(session, "profile", "") or "").strip()
 
 
+def _workspace_root_for_session(session) -> str:
+    """Return the canonical session root, or empty for legacy/unknown rows."""
+    raw = str(getattr(session, "workspace", "") or "").strip()
+    if not raw:
+        return ""
+    try:
+        return str(Path(raw).expanduser().resolve())
+    except (OSError, RuntimeError, ValueError):
+        return ""
+
+
+def relative_prefix_under_root(
+    workspace_root: Path | str | None,
+    integration_root: Path | str | None = None,
+) -> str | None:
+    """Return the path of *workspace_root* relative to *integration_root*.
+
+    Returns:
+      ``None`` — empty/unknown root, or not contained under the integration root
+      ``""`` — *workspace_root* is the integration root itself
+      non-empty string — child prefix (e.g. managed ``<session_id>``)
+    """
+    row_root = str(workspace_root or "").strip()
+    if not row_root:
+        return None
+    try:
+        if integration_root in (None, ""):
+            from api.workspace import resolve_trusted_workspace
+
+            root_path = resolve_trusted_workspace(None)
+        else:
+            root_path = Path(integration_root).expanduser().resolve()
+        prefix = Path(row_root).expanduser().resolve().relative_to(root_path).as_posix()
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if prefix == ".":
+        return ""
+    return prefix
+
+
+def project_artifact_path_for_integration_root(
+    path: str,
+    workspace_root: Path | str | None,
+    *,
+    integration_root: Path | str | None = None,
+) -> str:
+    """Project a session-relative file path onto the integration workspace root.
+
+    Used for manifest/SSE wire rows consumed by
+    ``/api/integration/workspace/file``. Absolute paths and paths whose
+    session root is unknown or outside the integration root are returned
+    unchanged (fail closed — never invent a prefix).
+    """
+    text = str(path or "").strip()
+    if not text or text.startswith("/"):
+        return text
+    prefix = relative_prefix_under_root(workspace_root, integration_root)
+    if not prefix:
+        return text
+    return f"{prefix}/{text}"
+
+
 def _normalize_source_tool(value: Any) -> str:
     text = str(value or "").strip()
     return text or ASSISTANT_PROSE_SOURCE_TOOL
@@ -224,6 +333,7 @@ def _normalize_record(session, turn_key: str, row: dict[str, Any], record_kind: 
         "session_id": str(getattr(session, "session_id", "") or "").strip(),
         "lineage_key": resolve_manifest_lineage_key(session),
         "profile": _profile_for_session(session),
+        "workspace_root": _workspace_root_for_session(session),
         "turn_key": tk,
         "record_kind": ARTIFACT_RECORD_KIND,
         "path": path,
@@ -263,11 +373,11 @@ def upsert_manifest_records(
                     conn.execute(
                         """
                         INSERT INTO session_manifest_records (
-                          session_id, lineage_key, profile, turn_key, record_kind,
+                          session_id, lineage_key, profile, workspace_root, turn_key, record_kind,
                           path, preview, source_tool, created_at, updated_at
                         )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        ON CONFLICT(lineage_key, profile, turn_key, record_kind, path)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(lineage_key, profile, turn_key, record_kind, path, workspace_root)
                         DO UPDATE SET
                           session_id = excluded.session_id,
                           preview = excluded.preview,
@@ -278,6 +388,7 @@ def upsert_manifest_records(
                             record["session_id"],
                             record["lineage_key"],
                             record["profile"],
+                            record["workspace_root"],
                             record["turn_key"],
                             record["record_kind"],
                             record["path"],
@@ -320,20 +431,20 @@ def replace_manifest_turn_records(
                 conn.execute(
                     """
                     DELETE FROM session_manifest_records
-                    WHERE lineage_key = ? AND profile = ? AND turn_key = ? AND record_kind = ?
+                    WHERE lineage_key = ? AND profile = ? AND workspace_root = ? AND turn_key = ? AND record_kind = ?
                     """,
-                    (lineage_key, profile, tk, ARTIFACT_RECORD_KIND),
+                    (lineage_key, profile, _workspace_root_for_session(session), tk, ARTIFACT_RECORD_KIND),
                 )
                 for record in records:
                     conn.execute(
                         """
                         INSERT INTO session_manifest_records (
-                          session_id, lineage_key, profile, turn_key, record_kind,
+                          session_id, lineage_key, profile, workspace_root, turn_key, record_kind,
                           path, preview, source_tool, created_at, updated_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
-                            record["session_id"], record["lineage_key"], record["profile"],
+                            record["session_id"], record["lineage_key"], record["profile"], record["workspace_root"],
                             record["turn_key"], record["record_kind"], record["path"],
                             record["preview"], record["source_tool"], now, now,
                         ),
@@ -398,7 +509,7 @@ def load_manifest_records(
         with closing(_connect(db_path)) as conn:
             rows = conn.execute(
                 f"""
-                SELECT session_id, lineage_key, profile, turn_key, record_kind,
+                SELECT session_id, lineage_key, profile, workspace_root, turn_key, record_kind,
                        path, preview, source_tool, created_at, updated_at
                 FROM session_manifest_records
                 WHERE {where} AND record_kind = ? AND path != ''
@@ -475,6 +586,7 @@ def load_manifest_decided_turn_keys(
 
 
 def get_artifact_profile_index(
+    workspace_root: Path | str | None = None,
     *,
     db_path: Path | str | None = None,
 ) -> dict[str, str]:
@@ -486,65 +598,106 @@ def get_artifact_profile_index(
     winning profile is empty (sessions without a profile) are excluded so the
     index only maps paths to real profile labels.
 
-    The store does not record workspace per row; workspace scoping is left to
-    the caller (paths that do not resolve to real files under the target
-    workspace are dropped by the caller's file collection step).
+    When *workspace_root* is supplied, returned paths are relative to that
+    root and include each child session-root prefix. Records with an unknown
+    legacy root are excluded rather than being guessed into this index.
     """
+    root_norm = ""
+    if workspace_root not in (None, ""):
+        try:
+            root_norm = str(Path(workspace_root).expanduser().resolve())
+        except (OSError, RuntimeError, ValueError):
+            return {}
     try:
         with closing(_connect(db_path)) as conn:
+            where = "record_kind = ? AND preview = ?"
+            params: list[Any] = [ARTIFACT_RECORD_KIND, MANIFEST_PREVIEW_FILE]
             rows = conn.execute(
-                """
-                SELECT path, profile, MAX(updated_at) AS latest
+                f"""
+                SELECT workspace_root, path, profile, MAX(updated_at) AS latest
                 FROM session_manifest_records
-                WHERE record_kind = ? AND preview = ?
-                GROUP BY path, profile
+                WHERE {where}
+                GROUP BY workspace_root, path, profile
                 """,
-                (ARTIFACT_RECORD_KIND, MANIFEST_PREVIEW_FILE),
+                params,
             ).fetchall()
     except (sqlite3.Error, OSError):
         logger.debug("failed to read artifact profile index", exc_info=True)
         return {}
 
+    root_path = Path(root_norm) if root_norm else None
     latest_by_path: dict[str, tuple[str, float]] = {}
     for row in rows:
         path = str(row["path"] or "").strip()
         profile = str(row["profile"] or "").strip()
         if not path or not profile:
             continue
+        row_root = str(row["workspace_root"] or "").strip()
+        key = path
+        if root_path is not None:
+            prefix = relative_prefix_under_root(row_root, root_path)
+            if prefix is None:
+                continue
+            key = path if not prefix else f"{prefix}/{path}"
         updated_at = float(row["latest"] or 0.0)
-        current = latest_by_path.get(path)
+        current = latest_by_path.get(key)
         if current is None or updated_at > current[1]:
-            latest_by_path[path] = (profile, updated_at)
+            latest_by_path[key] = (profile, updated_at)
     return {path: profile for path, (profile, _ts) in latest_by_path.items()}
 
 
 def get_artifact_paths_for_profile(
     profile: str,
+    workspace_root: Path | str | None = None,
     *,
     db_path: Path | str | None = None,
 ) -> frozenset[str]:
     """Return workspace-relative artifact paths authored under *profile*.
 
     The profile label is matched exactly (case-sensitive) against the
-    ``profile`` column. Empty/None profile returns an empty set.
+    ``profile`` column. With *workspace_root*, paths are scoped to that root
+    and unknown-root legacy records are excluded. Empty/None profile returns
+    an empty set.
     """
     profile_norm = str(profile or "").strip()
     if not profile_norm:
         return frozenset()
+    root_norm = ""
+    if workspace_root not in (None, ""):
+        try:
+            root_norm = str(Path(workspace_root).expanduser().resolve())
+        except (OSError, RuntimeError, ValueError):
+            return frozenset()
     try:
         with closing(_connect(db_path)) as conn:
+            where = "record_kind = ? AND preview = ? AND profile = ?"
+            params: list[Any] = [ARTIFACT_RECORD_KIND, MANIFEST_PREVIEW_FILE, profile_norm]
             rows = conn.execute(
-                """
-                SELECT DISTINCT path
+                f"""
+                SELECT DISTINCT workspace_root, path
                 FROM session_manifest_records
-                WHERE record_kind = ? AND preview = ? AND profile = ?
+                WHERE {where}
                 """,
-                (ARTIFACT_RECORD_KIND, MANIFEST_PREVIEW_FILE, profile_norm),
+                params,
             ).fetchall()
     except (sqlite3.Error, OSError):
         logger.debug("failed to read artifact paths for profile %s", profile_norm, exc_info=True)
         return frozenset()
-    return frozenset(str(row["path"] or "").strip() for row in rows if str(row["path"] or "").strip())
+    root_path = Path(root_norm) if root_norm else None
+    paths: set[str] = set()
+    for row in rows:
+        path = str(row["path"] or "").strip()
+        if not path:
+            continue
+        if root_path is None:
+            paths.add(path)
+            continue
+        row_root = str(row["workspace_root"] or "").strip()
+        prefix = relative_prefix_under_root(row_root, root_path)
+        if prefix is None:
+            continue
+        paths.add(path if not prefix else f"{prefix}/{path}")
+    return frozenset(paths)
 
 
 def backfill_empty_profile_artifacts(*, db_path: Path | str | None = None) -> dict[str, int]:

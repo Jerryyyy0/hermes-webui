@@ -69,6 +69,105 @@ def test_store_keeps_same_path_separate_by_profile(tmp_path):
     assert len(store.load_manifest_records(_session('storesamepath02', profile='research'), db_path=db_path)) == 1
 
 
+def test_project_artifact_path_for_integration_root_prefixes_child_session(tmp_path):
+    base = tmp_path / 'workspace-base'
+    child = base / 'sid123'
+    child.mkdir(parents=True)
+
+    assert store.relative_prefix_under_root(child, base) == 'sid123'
+    assert store.relative_prefix_under_root(base, base) == ''
+    assert store.relative_prefix_under_root('', base) is None
+    assert store.relative_prefix_under_root(tmp_path / 'other', base) is None
+
+    assert store.project_artifact_path_for_integration_root('report.md', child, integration_root=base) == (
+        'sid123/report.md'
+    )
+    assert store.project_artifact_path_for_integration_root('report.md', base, integration_root=base) == 'report.md'
+    assert store.project_artifact_path_for_integration_root('report.md', '', integration_root=base) == 'report.md'
+    assert store.project_artifact_path_for_integration_root(
+        'report.md', tmp_path / 'other', integration_root=base,
+    ) == 'report.md'
+    assert store.project_artifact_path_for_integration_root(
+        '/abs/media.png', child, integration_root=base,
+    ) == '/abs/media.png'
+
+
+def test_workspace_profile_index_keeps_same_artifact_name_separate_by_root(tmp_path):
+    db_path = tmp_path / 'manifest.db'
+    base = tmp_path / 'workspace-base'
+    first = base / 'first'
+    second = base / 'second'
+    first.mkdir(parents=True)
+    second.mkdir()
+    (first / 'report.md').write_text('first', encoding='utf-8')
+    (second / 'report.md').write_text('second', encoding='utf-8')
+
+    first_session = SimpleNamespace(
+        session_id='workspaceone01', profile='ops', parent_session_id=None,
+        pre_compression_snapshot=False, workspace=str(first),
+    )
+    second_session = SimpleNamespace(
+        session_id='workspacetwo02', profile='research', parent_session_id=None,
+        pre_compression_snapshot=False, workspace=str(second),
+    )
+    store.upsert_manifest_records(
+        first_session, 'turn:1', [{'path': 'report.md', 'source_tool': 'write_file'}], db_path=db_path,
+    )
+    store.upsert_manifest_records(
+        second_session, 'turn:1', [{'path': 'report.md', 'source_tool': 'write_file'}], db_path=db_path,
+    )
+
+    assert store.get_artifact_profile_index(base, db_path=db_path) == {
+        'first/report.md': 'ops',
+        'second/report.md': 'research',
+    }
+    assert store.get_artifact_paths_for_profile('ops', base, db_path=db_path) == frozenset({'first/report.md'})
+    assert store.get_artifact_paths_for_profile('research', base, db_path=db_path) == frozenset({'second/report.md'})
+
+
+def test_manifest_store_migrates_old_relative_path_schema_conservatively(tmp_path):
+    db_path = tmp_path / 'manifest.db'
+    import sqlite3
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            '''
+            CREATE TABLE session_manifest_records (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              session_id TEXT NOT NULL,
+              lineage_key TEXT NOT NULL,
+              profile TEXT NOT NULL DEFAULT '',
+              turn_key TEXT NOT NULL,
+              record_kind TEXT NOT NULL,
+              path TEXT NOT NULL,
+              preview TEXT NOT NULL,
+              source_tool TEXT NOT NULL,
+              created_at REAL NOT NULL,
+              updated_at REAL NOT NULL,
+              UNIQUE(lineage_key, profile, turn_key, record_kind, path)
+            )
+            '''
+        )
+        conn.execute(
+            '''
+            INSERT INTO session_manifest_records (
+              session_id, lineage_key, profile, turn_key, record_kind,
+              path, preview, source_tool, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''',
+            ('legacyroot01', 'legacyroot01', 'ops', 'turn:1', 'artifact', 'report.md', 'file', 'write_file', 1.0, 1.0),
+        )
+
+    with store._connect(db_path) as conn:
+        columns = {row['name'] for row in conn.execute('PRAGMA table_info(session_manifest_records)').fetchall()}
+        row = conn.execute('SELECT workspace_root, path FROM session_manifest_records').fetchone()
+    assert 'workspace_root' in columns
+    assert dict(row) == {'workspace_root': '', 'path': 'report.md'}
+    # Legacy rows cannot be assigned to a base safely, so they never leak into
+    # cross-workspace file browsing after the migration.
+    assert store.get_artifact_profile_index(tmp_path, db_path=db_path) == {}
+
+
 def test_compression_child_reads_parent_lineage_records(tmp_path, monkeypatch):
     db_path = tmp_path / 'manifest.db'
     session_dir = tmp_path / 'sessions'

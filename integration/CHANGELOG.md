@@ -12,6 +12,8 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 - **`GET /api/session/manifest` skill-scan amplification** — `skill_view` reference dedupe no longer runs `_canonical_skill_manifest_path` / `_find_skill` over file artifact keys (previously O(views × files × skills) full-directory frontmatter scans). `_find_skill` skips file-like miss scans without a process-wide lookup cache.
 
+- **Managed session manifest file preview paths** — When a session workspace is a child of `HERMES_WEBUI_DEFAULT_WORKSPACE`, `GET /api/session/manifest` and SSE `manifest_delta` now project `preview=file` paths relative to that integration root (e.g. `<session_id>/report.md`), matching left-rail `/api/integration/workspace/files`. Inspector preview via `/api/integration/workspace/file` no longer 404s on bare session-relative names. Shared-root and out-of-base workspaces keep prior relative paths; skill and absolute MEDIA paths are unchanged. DB rows remain session-relative.
+
 ### Changed
 
 - **Message semantics audit log preview** — `hermes_message_semantics` 审计日志中的 `content` / `api_content` 默认截断至 500 字符（可用 `HERMES_MESSAGE_SEMANTICS_LOG_MAX_CHARS` 调整；`<=0` 关闭截断）。async delegation 的 sidecar state / background status 日志同样走该预览截断。仅影响日志预览，不改持久化或模型上下文正文。

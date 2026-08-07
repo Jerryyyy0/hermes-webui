@@ -106,7 +106,7 @@ References 仅允许 canonical skill row：`preview="skill"`、`source_tool="ski
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `path` | string | workspace 相对路径、允许的 media 绝对路径或 canonical skill 名 |
+| `path` | string | 见下方 path 语义；或允许的 media 绝对路径；或 canonical skill 名 |
 | `preview` | string | `file` 或 `skill` |
 | `source_tool` | string | 明确 provenance，不为空 |
 
@@ -117,9 +117,11 @@ References 仅允许 canonical skill row：`preview="skill"`、`source_tool="ski
 | `profile` | artifacts | 来自 `session.profile`；无明确值时省略 |
 | `status` | artifacts/references | 当前仅 `expired`，表示有历史 provenance 但不可预览 |
 
+**`preview=file` 的 `path` 语义（wire）：** 当会话 `workspace` 落在 `HERMES_WEBUI_DEFAULT_WORKSPACE`（integration 根）之下时，GET/SSE 返回**相对该 integration 根**的路径，以便直接调用 `GET /api/integration/workspace/file?path=...`。managed 会话因此形如 `<session_id>/report.md`；若 `workspace` 就是 integration 根本身，则仍为会话内相对路径（如 `report.md`）。`workspace` 未知、为空或不在 integration 根下时，保持原相对路径且不猜测前缀。store / DB 仍保存会话根内相对路径与绝对 `workspace_root`；前缀仅出现在对外投影。`preview=skill` 与 workspace 外绝对 `MEDIA:` path 不改写。
+
 Manifest 不返回文件或技能正文。非 expired 且 `preview` 为 `file`/`skill` 的条目可由 `HermesSessionInspector.openManifestPreview(item)` 打开；expired 条目不可预览。
 
-文件预览使用 integration workspace file API，skill 预览使用 SkillHub content API，workspace 外 `MEDIA:` 使用 session media API。具体接口与部署约束见 [integration/README.md](../integration/README.md)。
+文件预览使用 integration workspace file API（path 为上表 wire 语义），skill 预览使用 SkillHub content API，workspace 外 `MEDIA:` 使用 session media API。具体接口与部署约束见 [integration/README.md](../integration/README.md)。
 
 ### `turns[]`
 
