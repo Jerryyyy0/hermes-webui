@@ -8,6 +8,8 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Fixed
 
+- **Chat apperror Packy `Content Exists Risk`** — PackyAPI / 兼容网关返回的 `HTTP 400: Content Exists Risk`（`packy_invalid_request_error`）此前落到通用 `error`；现归入既有 `content_filtered`，展示「内容被审核拦截」与「审核详情」。匹配短语：`content exists risk` / `content_exists_risk`。
+
 - **`GET /api/session/manifest` skill-scan amplification** — `skill_view` reference dedupe no longer runs `_canonical_skill_manifest_path` / `_find_skill` over file artifact keys (previously O(views × files × skills) full-directory frontmatter scans). `_find_skill` skips file-like miss scans without a process-wide lookup cache.
 
 ### Changed

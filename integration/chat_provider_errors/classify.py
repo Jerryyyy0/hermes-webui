@@ -185,6 +185,8 @@ def classify_provider_error(err_str: str, exc=None, *, silent_failure: bool = Fa
         or 'content_filter' in _err_lower
         or 'content_policy_violation' in _err_lower
         or 'content policy violation' in _err_lower
+        or 'content exists risk' in _err_lower
+        or 'content_exists_risk' in _err_lower
         or 'moderation' in _err_lower
     )
     # Provider-specific codes (compression_exhausted, content_filtered) are
