@@ -1,0 +1,18 @@
+类别:common_tasks_seed
+目标:根据岗位助理人设与技能,生成 3 个常办任务卡片。
+上下文:
+- display_name: {display_name}
+- description: {description}
+- soul: {soul}
+- skills_block:
+{skills_block}
+
+要求:
+- 任务必须贴合 display_name/description/soul/skills,不得编造能力。
+- 3 个任务明显不同,覆盖助理最常被请求的工作类型。
+- title ≤ 15 字;description ≤ 50 字;trigger_language 是用户发起该任务的自然话术,≤ 30 字。
+- 只输出 JSON 数组,长度 3,每个元素含 title/description/trigger_language;无解释、无 Markdown、无代码块。
+
+Few-shot:
+输入 display_name=文书助手,description=整理会议纪要与周报,skills 含「PPT 生成」「邮件起草」
+正确:[{{"title":"整理会议纪要","description":"从会议记录提取决议与待办","trigger_language":"帮我整理今天的会议纪要"}},{{"title":"起草周报","description":"汇总本周工作生成周报初稿","trigger_language":"帮我写本周周报"}},{{"title":"起草邮件","description":"根据要点生成商务邮件","trigger_language":"帮我写一封邮件"}}]

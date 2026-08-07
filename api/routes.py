@@ -11826,6 +11826,14 @@ def handle_get(handler, parsed) -> bool:
         pass
 
     try:
+        from integration.common_tasks.handlers import try_handle_get as _common_tasks_try_get
+
+        if _common_tasks_try_get(handler, parsed) is True:
+            return True
+    except ImportError:
+        pass
+
+    try:
         from integration.crons.handlers import try_handle_get as _crons_try_get
 
         if _crons_try_get(handler, parsed) is True:
