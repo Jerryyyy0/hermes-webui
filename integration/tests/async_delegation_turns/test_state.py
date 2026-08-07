@@ -8,6 +8,28 @@ from integration.async_delegation_turns.state import (
 )
 
 
+def test_completion_status_log_truncates_long_content(caplog, monkeypatch):
+    monkeypatch.setenv("HERMES_MESSAGE_SEMANTICS_LOG_MAX_CHARS", "500")
+    session = _session()
+    record_async_delegation_dispatch(
+        session,
+        {"status": "dispatched", "mode": "background", "delegation_id": "deleg-1"},
+        turn_key="turn:8",
+    )
+    long_content = "y" * 650
+
+    with caplog.at_level("INFO"):
+        mark_async_delegation_completion(
+            session,
+            "deleg-1",
+            wakeup_state="settled",
+            content=long_content,
+        )
+
+    assert "content='" + ("y" * 500) + "…(+150 chars)'" in caplog.text
+    assert ("y" * 650) not in caplog.text
+
+
 def _session():
     session = SimpleNamespace(
         session_id="session-1",

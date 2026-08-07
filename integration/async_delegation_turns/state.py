@@ -7,6 +7,8 @@ import logging
 import time
 from typing import Any
 
+from integration.agent_message_semantics.audit import _log_content_preview
+
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +69,7 @@ def record_async_delegation_dispatch(
         "hermes_message_semantics action=async_delegation_origin_recorded "
         "class=context_anchor kind=async_delegation_completion role=user "
         "content=%r session_id=%s turn_key=%s delegation_id=%s",
-        function_result,
+        _log_content_preview(function_result),
         getattr(session, "session_id", ""),
         origin_turn_key,
         delegation_id,
@@ -107,7 +109,7 @@ def mark_async_delegation_completion(
         "hermes_message_semantics action=background_task_status "
         "class=context_anchor kind=async_delegation_completion role=user "
         "content=%r session_id=%s turn_key=%s delegation_id=%s wakeup_state=%s",
-        content,
+        _log_content_preview(content),
         getattr(session, "session_id", ""),
         record.get("turn_key") or "",
         delegation_id,
@@ -138,7 +140,7 @@ def mark_async_delegation_wakeup(
         "hermes_message_semantics action=background_task_status "
         "class=context_anchor kind=async_delegation_completion role=user "
         "content=%r session_id=%s turn_key=%s delegation_id=%s wakeup_state=%s",
-        content,
+        _log_content_preview(content),
         getattr(session, "session_id", ""),
         record.get("turn_key") or "",
         delegation_id,

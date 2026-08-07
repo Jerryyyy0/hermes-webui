@@ -56,6 +56,7 @@ from api.process_event_utils import (
     requeue_async_delegation_event,
     schedule_async_delegation_claim_retry,
 )
+from integration.agent_message_semantics.audit import _log_content_preview
 from integration.project_logging import get_logger
 
 logger = get_logger(__name__)
@@ -1002,7 +1003,7 @@ def _emit_async_delegation_status(
         "class=context_anchor kind=async_delegation_completion role=user "
         "content=%r session_id=%s turn_key=%s delegation_id=%s "
         "status=%s wakeup_state=%s",
-        content,
+        _log_content_preview(content),
         session_id,
         payload["origin_turn_key"],
         delegation_id,
