@@ -10,11 +10,13 @@ from scripts.real_model_campaign import (
     drain_blocking_prompts,
     enable_auto_approve,
     evaluate_alignment,
+    immediate_cancel_plan,
     list_campaign_test_sessions,
     load_history_prompt_pool,
     load_prefix_messages,
     pick_history_prompt,
     pool_for_context_mode,
+    resolve_batch_specs,
     sanitize_prefix_messages,
     seed_workspace,
 )
@@ -44,6 +46,28 @@ def test_default_cancel_plan_covers_all_paths():
         8: "after_manifest_delta",
         12: "after_first_artifact",
     }
+
+
+def test_immediate_cancel_plan_covers_every_turn():
+    assert immediate_cancel_plan(5) == {
+        1: "immediate_after_start",
+        2: "immediate_after_start",
+        3: "immediate_after_start",
+        4: "immediate_after_start",
+        5: "immediate_after_start",
+    }
+
+
+def test_resolve_batch_specs_adds_cancel_verify_when_sessions_ge_2():
+    assert [spec["kind"] for spec in resolve_batch_specs(1, 5)] == ["normal"]
+    specs = resolve_batch_specs(2, 5)
+    assert [spec["kind"] for spec in specs] == ["normal", "normal", "cancel_verify"]
+    assert specs[-1]["batch_index"] == 3
+    assert specs[-1]["cancel_plan"] == immediate_cancel_plan(5)
+    assert [spec["kind"] for spec in resolve_batch_specs(2, 5, cancel_verify_session=False)] == [
+        "normal",
+        "normal",
+    ]
 
 
 def test_history_prompt_wraps_nonce_and_turn_path():

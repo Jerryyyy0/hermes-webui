@@ -7,6 +7,10 @@ stably produced write-sourced delivery artifacts (manifest evidence).
 Default ``--context-mode first``: only opening-turn prompts, one continuous
 plain session per batch (no transcript import / mid-turn replay).
 
+When ``--sessions >= 2``, one extra cancel-verify batch is appended by default:
+every turn sends a message then cancels immediately (``immediate_after_start``).
+Use ``--no-cancel-verify-session`` to disable.
+
 Optional modes remain available but are not the default:
 - replay: mid-turn prompts with transcript prefix via /api/session/import
 - mixed: first-turn + replay
@@ -86,6 +90,32 @@ def cancellation_plan(turns: int) -> dict[int, str]:
             round_number += 1
         result[round_number] = trigger
     return dict(sorted(result.items()))
+
+
+def immediate_cancel_plan(turns: int) -> dict[int, str]:
+    """Every turn cancels immediately after chat/start (cancel-verify batch)."""
+    return {turn: "immediate_after_start" for turn in range(1, turns + 1)}
+
+
+def resolve_batch_specs(
+    session_count: int,
+    turns: int,
+    *,
+    cancel_verify_session: bool = True,
+) -> list[dict[str, Any]]:
+    """Build batch specs; when sessions>=2, append one cancel-verify batch by default."""
+    plan = cancellation_plan(turns)
+    specs: list[dict[str, Any]] = [
+        {"batch_index": index + 1, "kind": "normal", "cancel_plan": plan}
+        for index in range(session_count)
+    ]
+    if session_count >= 2 and cancel_verify_session:
+        specs.append({
+            "batch_index": session_count + 1,
+            "kind": "cancel_verify",
+            "cancel_plan": immediate_cancel_plan(turns),
+        })
+    return specs
 
 
 def _state_dir() -> Path:
@@ -803,6 +833,8 @@ def run_campaign(
     base_url: str,
     seed: int | None = None,
     context_mode: ContextMode = "first",
+    *,
+    cancel_verify_session: bool = True,
 ) -> int:
     api = Api(base_url); health = api.request("GET", "/health")
     if health.get("status") != "ok" or health.get("active_streams") or health.get("active_runs"):
@@ -827,11 +859,20 @@ def run_campaign(
         )
     first_n = sum(1 for item in pool if not item.needs_prefix_replay)
     replay_n = len(pool) - first_n
+    batch_specs = resolve_batch_specs(
+        session_count, turns, cancel_verify_session=cancel_verify_session,
+    )
     print(
         f"history pool ready: {len(pool)} prompts "
         f"(first_turn={first_n}, replay={replay_n}, mode={context_mode}, seed={seed!r})",
         flush=True,
     )
+    if any(spec["kind"] == "cancel_verify" for spec in batch_specs):
+        print(
+            f"cancel-verify batch enabled: +1 session, every turn immediate_after_start "
+            f"(total batches={len(batch_specs)})",
+            flush=True,
+        )
     rng = random.Random(seed)
     campaign_id = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:8]
     root = state_dir / "e2e_campaigns" / campaign_id; root.mkdir(parents=True, exist_ok=False)
@@ -846,15 +887,28 @@ def run_campaign(
         "history_pool_replay": replay_n,
         "history_source": str(state_dir),
         "cancellation_plan": cancellation_plan(turns),
+        "cancel_verify_session": any(spec["kind"] == "cancel_verify" for spec in batch_specs),
         "batches": [],
     }
     used: set[str] = set()
-    for index in range(session_count):
-        batch_root = root / "artifacts" / f"batch-{index + 1:02d}"
+    total_batches = len(batch_specs)
+    for spec in batch_specs:
+        batch_index = int(spec["batch_index"])
+        batch_kind = str(spec["kind"])
+        cancel_plan = dict(spec["cancel_plan"])
+        batch_root = root / "artifacts" / f"batch-{batch_index:02d}"
+        if batch_kind == "cancel_verify":
+            batch_root = root / "artifacts" / f"batch-{batch_index:02d}-cancel-verify"
         plain_workspace = batch_root / "plain"
         seed_workspace(plain_workspace)
         plain_session_id = ""
-        report: dict[str, Any] = {"batch_index": index + 1, "rounds": [], "session_ids": []}
+        report: dict[str, Any] = {
+            "batch_index": batch_index,
+            "batch_kind": batch_kind,
+            "cancel_plan": cancel_plan,
+            "rounds": [],
+            "session_ids": [],
+        }
         for turn in range(1, turns + 1):
             question = pick_history_prompt(pool, rng, used)
             if question.needs_prefix_replay:
@@ -871,9 +925,11 @@ def run_campaign(
                 strategy = "first_turn"
             if session_id and session_id not in report["session_ids"]:
                 report["session_ids"].append(session_id)
+            trigger = cancel_plan.get(turn)
             print(
-                f"batch {index + 1}/{session_count} trial {turn}/{turns}: "
-                f"strategy={strategy} hist_sid={question.source_session_id} "
+                f"batch {batch_index}/{total_batches} kind={batch_kind} "
+                f"trial {turn}/{turns}: strategy={strategy} "
+                f"cancel={trigger or '-'} hist_sid={question.source_session_id} "
                 f"hist_turn={question.turn} tools={question.n_tools} title={question.title!r}",
                 flush=True,
             )
@@ -885,10 +941,11 @@ def run_campaign(
                     "history_prompt": asdict(question),
                     "context_strategy": strategy,
                     "replay_meta": replay_meta,
+                    "cancel_trigger": trigger,
                 })
                 continue
             round_row = _run_round(
-                api, session_id, workspace, question, campaign_id, turn, cancellation_plan(turns).get(turn),
+                api, session_id, workspace, question, campaign_id, turn, trigger,
             )
             round_row["session_id"] = session_id
             round_row["context_strategy"] = strategy
@@ -897,10 +954,12 @@ def run_campaign(
         issues = [issue for row in report["rounds"] for issue in row.get("alignment_failures") or []]
         report["alignment_status"] = "FAIL" if issues else ("PASS" if report["rounds"] else "INDETERMINATE")
         primary = report["session_ids"][0] if report["session_ids"] else "uncreated"
-        name = f"{campaign_id}-batch-{index + 1:02d}-{primary}.json"
+        kind_suffix = "-cancel-verify" if batch_kind == "cancel_verify" else ""
+        name = f"{campaign_id}-batch-{batch_index:02d}{kind_suffix}-{primary}.json"
         (root / name).write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
         summary["batches"].append({
-            "batch_index": index + 1,
+            "batch_index": batch_index,
+            "batch_kind": batch_kind,
             "session_ids": report["session_ids"],
             "report": name,
             "alignment_status": report["alignment_status"],
@@ -910,6 +969,7 @@ def run_campaign(
                     "turn": row.get("turn"),
                     "context_strategy": row.get("context_strategy"),
                     "session_id": row.get("session_id"),
+                    "cancel_trigger": row.get("cancel_trigger"),
                     "source_session_id": (row.get("history_prompt") or {}).get("source_session_id"),
                     "source_turn": (row.get("history_prompt") or {}).get("turn"),
                     "title": (row.get("history_prompt") or {}).get("title"),
@@ -925,7 +985,7 @@ def run_campaign(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--sessions", type=int, default=1, help="Number of campaign batches")
+    parser.add_argument("--sessions", type=int, default=5, help="Number of normal campaign batches")
     parser.add_argument("--turns", type=int, default=15, help="Trials per batch")
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
     parser.add_argument("--seed", type=int, default=None, help="RNG seed for reproducible history prompt sampling")
@@ -934,6 +994,11 @@ def main(argv: list[str] | None = None) -> int:
         choices=("mixed", "first", "replay"),
         default="first",
         help="default first=only opening prompts; replay/mixed keep mid-turn import (experimental)",
+    )
+    parser.add_argument(
+        "--no-cancel-verify-session",
+        action="store_true",
+        help="Disable the extra cancel-verify batch (enabled by default when --sessions >= 2)",
     )
     parser.add_argument(
         "--cleanup",
@@ -947,7 +1012,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if result.get("ok") else 1
     if args.sessions < 1 or args.turns < 5: parser.error("--sessions must be >= 1 and --turns must be >= 5")
     return run_campaign(
-        args.sessions, args.turns, args.base_url, seed=args.seed, context_mode=args.context_mode,
+        args.sessions,
+        args.turns,
+        args.base_url,
+        seed=args.seed,
+        context_mode=args.context_mode,
+        cancel_verify_session=not args.no_cancel_verify_session,
     )
 
 
