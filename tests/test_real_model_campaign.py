@@ -6,6 +6,7 @@ import sqlite3
 import pytest
 
 from scripts.real_model_campaign import (
+    CANCEL_TRIGGERS,
     HistoryPrompt,
     _run_round,
     _wait_for_chat_ready,
@@ -15,13 +16,13 @@ from scripts.real_model_campaign import (
     drain_blocking_prompts,
     enable_auto_approve,
     evaluate_alignment,
-    immediate_cancel_plan,
     list_campaign_test_sessions,
     load_history_prompt_pool,
     load_prefix_messages,
     parse_bool_arg,
     pick_history_prompt,
     pool_for_context_mode,
+    random_cancel_verify_plan,
     resolve_batch_specs,
     run_campaign,
     sanitize_prefix_messages,
@@ -67,14 +68,12 @@ def test_default_cancel_plan_covers_all_paths():
     }
 
 
-def test_immediate_cancel_plan_covers_every_turn():
-    assert immediate_cancel_plan(5) == {
-        1: "immediate_after_start",
-        2: "immediate_after_start",
-        3: "immediate_after_start",
-        4: "immediate_after_start",
-        5: "immediate_after_start",
-    }
+def test_random_cancel_verify_plan_cancels_every_turn_with_known_triggers():
+    plan = random_cancel_verify_plan(8, random.Random(42))
+    assert set(plan) == set(range(1, 9))
+    assert all(trigger in CANCEL_TRIGGERS for trigger in plan.values())
+    assert plan == random_cancel_verify_plan(8, random.Random(42))
+    assert plan != random_cancel_verify_plan(8, random.Random(43))
 
 
 def test_parse_bool_arg_accepts_common_truthy_falsy_values():
@@ -214,6 +213,10 @@ def test_cancel_verify_reuses_post_cancel_readiness_for_next_start(tmp_path, mon
     monkeypatch.setattr("scripts.real_model_campaign.pool_for_context_mode", lambda pool, _mode: pool)
     monkeypatch.setattr("scripts.real_model_campaign.time.sleep", lambda _seconds: None)
     monkeypatch.setattr("scripts.real_model_campaign.uuid.uuid4", lambda: type("U", (), {"hex": "nonce-marker"})())
+    monkeypatch.setattr(
+        "scripts.real_model_campaign.random_cancel_verify_plan",
+        lambda turns, _rng: {turn: "immediate_after_start" for turn in range(1, turns + 1)},
+    )
 
     api = _CancelFlowApi(stream_events=[])
     question = HistoryPrompt("s1", "t", "生成报告", 1, "turn:0", 6, 1, ("a.md",))
@@ -229,6 +232,7 @@ def test_cancel_verify_reuses_post_cancel_readiness_for_next_start(tmp_path, mon
     assert new_idx < start_indices[0]
     assert not any(new_idx < index < start_indices[0] for index in status_indices)
     assert cancel_indices[0] < status_indices[0] < start_indices[1]
+    assert not any(path.startswith("/api/session/manifest") for path in paths)
 
 
 def test_midstream_cancel_stops_reading_sse(tmp_path, monkeypatch):
@@ -253,10 +257,12 @@ def test_midstream_cancel_stops_reading_sse(tmp_path, monkeypatch):
 
 def test_resolve_batch_specs_cancel_verify_is_first_session_when_enabled():
     assert [spec["kind"] for spec in resolve_batch_specs(2, 5)] == ["normal", "normal"]
-    specs = resolve_batch_specs(2, 5, cancel_verify_session=True)
+    specs = resolve_batch_specs(2, 5, cancel_verify_session=True, rng=random.Random(7))
     assert [spec["kind"] for spec in specs] == ["cancel_verify", "normal"]
     assert specs[0]["batch_index"] == 1
-    assert specs[0]["cancel_plan"] == immediate_cancel_plan(5)
+    assert specs[0]["cancel_plan"] == random_cancel_verify_plan(5, random.Random(7))
+    assert set(specs[0]["cancel_plan"].values()) <= set(CANCEL_TRIGGERS)
+    assert len(specs[0]["cancel_plan"]) == 5
     assert resolve_batch_specs(1, 5, cancel_verify_session=True)[0]["kind"] == "cancel_verify"
 
 

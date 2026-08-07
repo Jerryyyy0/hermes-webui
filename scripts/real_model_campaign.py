@@ -7,10 +7,11 @@ stably produced write-sourced delivery artifacts (manifest evidence).
 Default ``--context-mode first``: only opening-turn prompts, one continuous
 plain session per batch (no transcript import / mid-turn replay).
 
-Optional ``--cancel-verify true|false``: when true, the first session becomes a
-cancel-verify batch where every turn sends a message, establishes its SSE
-stream, then cancels immediately (``immediate_after_start``). Remaining
-sessions use the normal sparse plan.
+Optional ``--cancel-verify true|false``: when true, the first session is a
+cancel-only batch — every turn cancels, with a randomly chosen trigger
+(``immediate_after_start`` / ``after_first_tool`` / ``after_manifest_delta`` /
+``after_first_artifact``). Artifact alignment is skipped in that batch.
+Remaining sessions use the normal sparse cancellation plan.
 
 Optional modes remain available but are not the default:
 - replay: mid-turn prompts with transcript prefix via /api/session/import
@@ -74,6 +75,14 @@ class HistoryPrompt:
         return self.turn > 1
 
 
+CANCEL_TRIGGERS = (
+    "immediate_after_start",
+    "after_first_tool",
+    "after_manifest_delta",
+    "after_first_artifact",
+)
+
+
 def cancellation_plan(turns: int) -> dict[int, str]:
     count = min(4, max(1, -(-turns // 4)))
     choices = ((0.20, "immediate_after_start"), (0.40, "after_first_tool"),
@@ -93,9 +102,9 @@ def cancellation_plan(turns: int) -> dict[int, str]:
     return dict(sorted(result.items()))
 
 
-def immediate_cancel_plan(turns: int) -> dict[int, str]:
-    """Every turn opens its SSE stream, then cancels (cancel-verify batch)."""
-    return {turn: "immediate_after_start" for turn in range(1, turns + 1)}
+def random_cancel_verify_plan(turns: int, rng: random.Random) -> dict[int, str]:
+    """Every turn cancels; trigger type is chosen randomly (cancel-verify batch)."""
+    return {turn: rng.choice(CANCEL_TRIGGERS) for turn in range(1, turns + 1)}
 
 
 def parse_bool_arg(value: str) -> bool:
@@ -113,9 +122,11 @@ def resolve_batch_specs(
     turns: int,
     *,
     cancel_verify_session: bool = False,
+    rng: random.Random | None = None,
 ) -> list[dict[str, Any]]:
     """Build batch specs; cancel-verify (if enabled) always occupies the first session."""
     plan = cancellation_plan(turns)
+    cancel_rng = rng if rng is not None else random.Random()
     specs: list[dict[str, Any]] = []
     for index in range(session_count):
         batch_index = index + 1
@@ -123,7 +134,7 @@ def resolve_batch_specs(
             specs.append({
                 "batch_index": batch_index,
                 "kind": "cancel_verify",
-                "cancel_plan": immediate_cancel_plan(turns),
+                "cancel_plan": random_cancel_verify_plan(turns, cancel_rng),
             })
             continue
         specs.append({
@@ -824,6 +835,7 @@ def _run_round(
     trigger: str | None,
     *,
     start_ready: bool = False,
+    cancel_only: bool = False,
 ) -> dict:
     nonce = uuid.uuid4().hex
     prompt, expected = build_history_prompt(question, turn, nonce)
@@ -835,6 +847,7 @@ def _run_round(
         "history_prompt": asdict(question),
         "expected_artifact_path": expected,
         "cancel_trigger": trigger,
+        "cancel_only": cancel_only,
         "events": [],
         "observations": [],
         "alignment_failures": [],
@@ -870,6 +883,8 @@ def _run_round(
                 row["alignment_failures"].append({"code": "IMMEDIATE_CANCEL_SLOW", "actual_ms": row["cancel_dispatch_delay_ms"]})
             if not _cancel_accepted(row["cancel"]):
                 row["observations"].append({"code": "CANCEL_NOT_ACCEPTED", "detail": row["cancel"]})
+                if cancel_only:
+                    row["alignment_failures"].append({"code": "CANCEL_NOT_ACCEPTED", "detail": row["cancel"]})
         finally:
             if stream_connection is not None:
                 stream_connection.close()
@@ -888,6 +903,8 @@ def _run_round(
                     cancelled = True
                     if not _cancel_accepted(row["cancel"]):
                         row["observations"].append({"code": "CANCEL_NOT_ACCEPTED", "detail": row["cancel"]})
+                        if cancel_only:
+                            row["alignment_failures"].append({"code": "CANCEL_NOT_ACCEPTED", "detail": row["cancel"]})
                     # Stop reading SSE after cancel; wait on /api/session/status instead.
                     break
                 if event in {"done", "cancel", "apperror", "error", "stream_end"}:
@@ -900,6 +917,11 @@ def _run_round(
             cancelled = True
             if not _cancel_accepted(row["cancel"]):
                 row["observations"].append({"code": "CANCEL_NOT_ACCEPTED", "detail": row["cancel"]})
+                if cancel_only:
+                    row["alignment_failures"].append({"code": "CANCEL_NOT_ACCEPTED", "detail": row["cancel"]})
+            elif cancel_only:
+                # Fallback cancel still exercised the mechanism; keep as observation only.
+                pass
     # After cancel (or natural stream end): drain prompts, then poll status readiness.
     drained = drain_blocking_prompts(api, session_id)
     if drained["approvals"] or drained["clarifies"]:
@@ -913,6 +935,13 @@ def _run_round(
         return row
     session = settled.get("session", {})
     row["turn_key"] = _turn_key(session, nonce)
+    if cancel_only:
+        # Cancel-verify batch only scores cancel/readiness, not artifact alignment.
+        row["artifact_hashes"] = {}
+        row["observations"].append({"code": "ARTIFACT_ALIGNMENT_SKIPPED", "reason": "cancel_verify"})
+        if trigger and not cancelled:
+            row["alignment_failures"].append({"code": "CANCEL_NOT_PERFORMED"})
+        return row
     manifest = api.request("GET", "/api/session/manifest?session_id=" + urllib.parse.quote(session_id)).get("manifest", {})
     failures, observations, hashes = evaluate_alignment(session, manifest, row, workspace)
     row["alignment_failures"].extend(failures)
@@ -953,8 +982,9 @@ def run_campaign(
         )
     first_n = sum(1 for item in pool if not item.needs_prefix_replay)
     replay_n = len(pool) - first_n
+    rng = random.Random(seed)
     batch_specs = resolve_batch_specs(
-        session_count, turns, cancel_verify_session=cancel_verify_session,
+        session_count, turns, cancel_verify_session=cancel_verify_session, rng=rng,
     )
     print(
         f"history pool ready: {len(pool)} prompts "
@@ -963,11 +993,10 @@ def run_campaign(
     )
     if any(spec["kind"] == "cancel_verify" for spec in batch_specs):
         print(
-            f"cancel-verify enabled: first session opens SSE then immediate_after_start "
+            f"cancel-verify enabled: first session cancel-only with random triggers "
             f"(total batches={len(batch_specs)})",
             flush=True,
         )
-    rng = random.Random(seed)
     campaign_id = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:8]
     root = state_dir / "e2e_campaigns" / campaign_id; root.mkdir(parents=True, exist_ok=False)
     summary = {
@@ -1053,6 +1082,7 @@ def run_campaign(
                     and session_id == plain_session_id
                     and plain_session_ready
                 ),
+                cancel_only=(batch_kind == "cancel_verify"),
             )
             if batch_kind == "cancel_verify" and session_id == plain_session_id:
                 plain_session_ready = round_row.get("ready_for_next_start") is True
@@ -1109,7 +1139,7 @@ def main(argv: list[str] | None = None) -> int:
         type=parse_bool_arg,
         default=True,
         metavar="BOOL",
-        help="true: first session opens SSE then cancels on every turn; default false",
+        help="true: first session is cancel-only (every turn cancels with a random trigger); default true",
     )
     parser.add_argument(
         "--cleanup",
