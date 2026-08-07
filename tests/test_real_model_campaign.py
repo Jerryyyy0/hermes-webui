@@ -1,9 +1,13 @@
+import argparse
 import json
 import random
 import sqlite3
 
+import pytest
+
 from scripts.real_model_campaign import (
     HistoryPrompt,
+    _run_round,
     _wait_for_chat_ready,
     build_history_prompt,
     cancellation_plan,
@@ -15,9 +19,11 @@ from scripts.real_model_campaign import (
     list_campaign_test_sessions,
     load_history_prompt_pool,
     load_prefix_messages,
+    parse_bool_arg,
     pick_history_prompt,
     pool_for_context_mode,
     resolve_batch_specs,
+    run_campaign,
     sanitize_prefix_messages,
     seed_workspace,
 )
@@ -71,6 +77,15 @@ def test_immediate_cancel_plan_covers_every_turn():
     }
 
 
+def test_parse_bool_arg_accepts_common_truthy_falsy_values():
+    assert parse_bool_arg("true") is True
+    assert parse_bool_arg("FALSE") is False
+    assert parse_bool_arg("1") is True
+    assert parse_bool_arg("0") is False
+    with pytest.raises(argparse.ArgumentTypeError):
+        parse_bool_arg("maybe")
+
+
 def test_wait_for_chat_ready_waits_for_authoritative_status(monkeypatch):
     api = _ReadinessApi([False, True])
     monkeypatch.setattr("scripts.real_model_campaign.time.sleep", lambda _seconds: None)
@@ -82,6 +97,158 @@ def test_wait_for_chat_ready_waits_for_authoritative_status(monkeypatch):
         "/api/session/status?session_id=sid-1",
         "/api/session/status?session_id=sid-1",
     ]
+
+
+def test_unready_session_fails_campaign_round_without_starting_chat(monkeypatch, tmp_path):
+    question = HistoryPrompt("source", "title", "请创建交付文件", 1, "turn:0", 5, 1, ())
+    api = _FakeApi()
+    monkeypatch.setattr(
+        "scripts.real_model_campaign._wait_for_chat_ready",
+        lambda *_args: {"can_start_chat": False},
+    )
+
+    result = _run_round(
+        api,
+        "sid-1",
+        tmp_path,
+        question,
+        "campaign-1",
+        1,
+        None,
+    )
+
+    assert result["observations"] == [{"code": "SESSION_NOT_READY"}]
+    assert result["alignment_failures"] == [{"code": "SESSION_NOT_READY"}]
+    assert not api.calls
+
+
+class _CancelFlowApi:
+    """Minimal API stub for stream-open/cancel/status behavior."""
+
+    def __init__(self, stream_events):
+        self.calls = []
+        self.stream_events = list(stream_events)
+        self.events_opened = 0
+        self.stream_connections = []
+
+    def request(self, method, path, body=None, timeout=20):
+        self.calls.append((method, path, body))
+        if path == "/health":
+            return {"status": "ok", "active_streams": [], "active_runs": []}
+        if path == "/api/session/new":
+            return {"session": {"session_id": "sid-1"}}
+        if path.startswith("/api/session/status"):
+            return {"can_start_chat": True}
+        if path.startswith("/api/session/yolo"):
+            return {"ok": True}
+        if path == "/api/chat/start":
+            return {"stream_id": "stream-1", "session_id": "sid-1"}
+        if path.startswith("/api/chat/cancel"):
+            return {"ok": True, "cancelled": True, "settled": False, "stream_id": "stream-1"}
+        if path.startswith("/api/approval/pending") or path.startswith("/api/clarify/pending"):
+            return {"pending": None}
+        if path.startswith("/api/session?session_id="):
+            return {"session": {"messages": [{"role": "user", "content": "nonce-marker", "_turn_key": "turn:1"}]}}
+        if path.startswith("/api/session/manifest"):
+            return {"manifest": {"turns": [], "diagnostics": {"orphan_turn_keys": []}}}
+        return {"ok": True}
+
+    def events(self, stream_id):
+        self.events_opened += 1
+        yield from self.stream_events
+
+    def open_event_stream(self, stream_id):
+        connection = _FakeStreamConnection()
+        self.calls.append(("GET", f"/api/chat/stream?stream_id={stream_id}", None))
+        self.stream_connections.append(connection)
+        return connection
+
+
+class _FakeStreamConnection:
+    def __init__(self):
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+
+def test_immediate_cancel_uses_known_ready_state_then_polls_next_round_readiness(tmp_path, monkeypatch):
+    monkeypatch.setattr("scripts.real_model_campaign.time.sleep", lambda _seconds: None)
+    api = _CancelFlowApi(stream_events=[("token", {"text": "should-not-see"}), ("done", {})])
+    question = HistoryPrompt("s1", "t", "生成报告", 1, "turn:0", 6, 1, ("a.md",))
+    # Force a stable nonce so session lookup in evaluate_alignment can be skipped via empty turn_key path
+    monkeypatch.setattr("scripts.real_model_campaign.uuid.uuid4", lambda: type("U", (), {"hex": "nonce-marker"})())
+
+    row = _run_round(
+        api,
+        "sid-1",
+        tmp_path,
+        question,
+        "camp-1",
+        1,
+        "immediate_after_start",
+        start_ready=True,
+    )
+
+    assert api.events_opened == 0
+    assert len(api.stream_connections) == 1
+    assert api.stream_connections[0].closed is True
+    assert row["cancel"]["cancelled"] is True
+    paths = [path for _method, path, _body in api.calls]
+    start_idx = next(i for i, path in enumerate(paths) if path == "/api/chat/start")
+    stream_idx = next(i for i, path in enumerate(paths) if path.startswith("/api/chat/stream"))
+    cancel_idx = next(i for i, path in enumerate(paths) if path.startswith("/api/chat/cancel"))
+    assert not any(path.startswith("/api/session/status") for path in paths[:start_idx])
+    assert stream_idx < cancel_idx
+    status_after = [path for path in paths[cancel_idx + 1 :] if path.startswith("/api/session/status")]
+    assert status_after, "status poll must follow successful cancel"
+    assert row["ready_for_next_start"] is True
+    assert "token" not in {event["event"] for event in row["events"]}
+
+
+def test_cancel_verify_reuses_post_cancel_readiness_for_next_start(tmp_path, monkeypatch):
+    monkeypatch.setattr("api.config.get_config", lambda: {"model": {"default": "test-model"}})
+    monkeypatch.setattr("scripts.real_model_campaign.Api", lambda _base_url: api)
+    monkeypatch.setattr("scripts.real_model_campaign._state_dir", lambda: tmp_path)
+    monkeypatch.setattr("scripts.real_model_campaign.load_history_prompt_pool", lambda _state_dir: [question])
+    monkeypatch.setattr("scripts.real_model_campaign.pool_for_context_mode", lambda pool, _mode: pool)
+    monkeypatch.setattr("scripts.real_model_campaign.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr("scripts.real_model_campaign.uuid.uuid4", lambda: type("U", (), {"hex": "nonce-marker"})())
+
+    api = _CancelFlowApi(stream_events=[])
+    question = HistoryPrompt("s1", "t", "生成报告", 1, "turn:0", 6, 1, ("a.md",))
+
+    assert run_campaign(1, 2, "http://test", context_mode="first", cancel_verify_session=True) == 0
+
+    paths = [path for _method, path, _body in api.calls]
+    new_idx = paths.index("/api/session/new")
+    start_indices = [index for index, path in enumerate(paths) if path == "/api/chat/start"]
+    cancel_indices = [index for index, path in enumerate(paths) if path.startswith("/api/chat/cancel")]
+    status_indices = [index for index, path in enumerate(paths) if path.startswith("/api/session/status")]
+    assert len(start_indices) == len(cancel_indices) == 2
+    assert new_idx < start_indices[0]
+    assert not any(new_idx < index < start_indices[0] for index in status_indices)
+    assert cancel_indices[0] < status_indices[0] < start_indices[1]
+
+
+def test_midstream_cancel_stops_reading_sse(tmp_path, monkeypatch):
+    monkeypatch.setattr("scripts.real_model_campaign.time.sleep", lambda _seconds: None)
+    api = _CancelFlowApi(stream_events=[
+        ("tool", {"name": "read_file"}),
+        ("token", {"text": "after-cancel-should-not-be-consumed"}),
+        ("done", {}),
+    ])
+    question = HistoryPrompt("s1", "t", "生成报告", 1, "turn:0", 6, 1, ("a.md",))
+    monkeypatch.setattr("scripts.real_model_campaign.uuid.uuid4", lambda: type("U", (), {"hex": "nonce-marker"})())
+
+    row = _run_round(api, "sid-1", tmp_path, question, "camp-1", 1, "after_first_tool")
+
+    assert api.events_opened == 1
+    assert [event["event"] for event in row["events"]] == ["tool"]
+    assert row["cancel"]["cancelled"] is True
+    paths = [path for _method, path, _body in api.calls]
+    cancel_idx = next(i for i, path in enumerate(paths) if path.startswith("/api/chat/cancel"))
+    assert any(path.startswith("/api/session/status") for path in paths[cancel_idx + 1 :])
 
 
 def test_resolve_batch_specs_cancel_verify_is_first_session_when_enabled():

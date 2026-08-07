@@ -7,9 +7,10 @@ stably produced write-sourced delivery artifacts (manifest evidence).
 Default ``--context-mode first``: only opening-turn prompts, one continuous
 plain session per batch (no transcript import / mid-turn replay).
 
-Optional ``--cancel-verify``: first session becomes a cancel-verify batch where
-every turn sends a message then cancels immediately (``immediate_after_start``).
-Remaining sessions (if any) use the normal sparse cancellation plan.
+Optional ``--cancel-verify true|false``: when true, the first session becomes a
+cancel-verify batch where every turn sends a message, establishes its SSE
+stream, then cancels immediately (``immediate_after_start``). Remaining
+sessions use the normal sparse plan.
 
 Optional modes remain available but are not the default:
 - replay: mid-turn prompts with transcript prefix via /api/session/import
@@ -44,7 +45,7 @@ if str(ROOT) not in sys.path:
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8787"
 ROUND_TIMEOUT = 180
-SETTLE_TIMEOUT = 25
+SETTLE_TIMEOUT = 30
 MIN_TOOLS = 5
 PREFIX_TOOL_CONTENT_LIMIT = 12000
 ContextMode = Literal["mixed", "first", "replay"]
@@ -93,8 +94,18 @@ def cancellation_plan(turns: int) -> dict[int, str]:
 
 
 def immediate_cancel_plan(turns: int) -> dict[int, str]:
-    """Every turn cancels immediately after chat/start (cancel-verify batch)."""
+    """Every turn opens its SSE stream, then cancels (cancel-verify batch)."""
     return {turn: "immediate_after_start" for turn in range(1, turns + 1)}
+
+
+def parse_bool_arg(value: str) -> bool:
+    """Parse CLI bool values; do not use ``type=bool`` (``bool("false")`` is True)."""
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    raise argparse.ArgumentTypeError(f"expected bool (true/false), got {value!r}")
 
 
 def resolve_batch_specs(
@@ -674,9 +685,12 @@ class Api:
             payload["_http_status"] = exc.code
             return payload
 
-    def events(self, stream_id: str):
+    def open_event_stream(self, stream_id: str):
         request = urllib.request.Request(self.base_url + "/api/chat/stream?stream_id=" + urllib.parse.quote(stream_id))
-        with urllib.request.urlopen(request, timeout=ROUND_TIMEOUT) as response:
+        return urllib.request.urlopen(request, timeout=ROUND_TIMEOUT)
+
+    def events(self, stream_id: str):
+        with self.open_event_stream(stream_id) as response:
             event, data = "message", []
             for raw in response:
                 line = raw.decode(errors="replace").strip()
@@ -768,15 +782,36 @@ def _wait_for_chat_ready(api: Api, session_id: str) -> dict:
         )
         if latest.get("can_start_chat") is True:
             return latest
-        time.sleep(0.4)
+        time.sleep(1.0)
     return latest
 
 
-def _settle(api: Api, session_id: str) -> dict:
+def _settle(api: Api, session_id: str) -> tuple[dict, dict]:
     readiness = _wait_for_chat_ready(api, session_id)
     if readiness.get("can_start_chat") is not True:
-        return {}
-    return api.request("GET", "/api/session?session_id=" + urllib.parse.quote(session_id) + "&messages=1")
+        return readiness, {}
+    session = api.request("GET", "/api/session?session_id=" + urllib.parse.quote(session_id) + "&messages=1")
+    return readiness, session
+
+
+def _cancel_accepted(payload: dict | None) -> bool:
+    return isinstance(payload, dict) and payload.get("ok") is True and payload.get("cancelled") is True
+
+
+def _dispatch_cancel(api: Api, stream_id: str) -> tuple[dict, float]:
+    t0 = time.monotonic()
+    payload = api.request("GET", "/api/chat/cancel?stream_id=" + urllib.parse.quote(stream_id))
+    return payload, round((time.monotonic() - t0) * 1000, 1)
+
+
+def _trigger_matched(trigger: str | None, event: str, payload: dict) -> bool:
+    if trigger == "after_first_tool":
+        return event in {"tool", "tool_complete"}
+    if trigger == "after_manifest_delta":
+        return event == "manifest_delta"
+    if trigger == "after_first_artifact":
+        return event == "manifest_delta" and bool(payload.get("artifacts"))
+    return False
 
 
 def _run_round(
@@ -787,6 +822,8 @@ def _run_round(
     campaign_id: str,
     turn: int,
     trigger: str | None,
+    *,
+    start_ready: bool = False,
 ) -> dict:
     nonce = uuid.uuid4().hex
     prompt, expected = build_history_prompt(question, turn, nonce)
@@ -803,10 +840,11 @@ def _run_round(
         "alignment_failures": [],
         "auto_approve": {"yolo": None, "drains": []},
     }
-    readiness = _wait_for_chat_ready(api, session_id)
+    readiness = {"can_start_chat": True, "source": "known_ready"} if start_ready else _wait_for_chat_ready(api, session_id)
     row["readiness_before_start"] = readiness
     if readiness.get("can_start_chat") is not True:
         row["observations"].append({"code": "SESSION_NOT_READY"})
+        row["alignment_failures"].append({"code": "SESSION_NOT_READY"})
         return row
     row["auto_approve"]["yolo"] = enable_auto_approve(api, session_id)
     start = api.request("POST", "/api/chat/start", {"session_id": session_id, "workspace": str(workspace), "message": prompt})
@@ -816,32 +854,62 @@ def _run_round(
         row["observations"].append({"code": "CHAT_START_FAILED", "detail": start.get("error", "missing stream_id")}); return row
     cancelled = False
     if trigger == "immediate_after_start":
-        row["cancel_dispatch_delay_ms"] = round((time.monotonic() - chat_start_received_at) * 1000, 1)
-        t0 = time.monotonic(); row["cancel"] = api.request("GET", "/api/chat/cancel?stream_id=" + urllib.parse.quote(row["stream_id"])); row["cancel_response_ms"] = round((time.monotonic() - t0) * 1000, 1); cancelled = True
-        if row["cancel_dispatch_delay_ms"] > 250: row["alignment_failures"].append({"code": "IMMEDIATE_CANCEL_SLOW", "actual_ms": row["cancel_dispatch_delay_ms"]})
-    try:
-        for event, payload in api.events(row["stream_id"]):
-            row["events"].append({"event": event, "payload": payload})
-            # Drain only when the stream signals a blocking prompt; avoid
-            # polling /api/approval|clarify/pending on every tool/meter tick.
-            if event in {"approval", "clarify"}:
-                drained = drain_blocking_prompts(api, session_id)
-                if drained["approvals"] or drained["clarifies"]:
-                    row["auto_approve"]["drains"].append({"event": event, **drained})
-            matched = (trigger == "after_first_tool" and event in {"tool", "tool_complete"}) or (trigger == "after_manifest_delta" and event == "manifest_delta") or (trigger == "after_first_artifact" and event == "manifest_delta" and bool(payload.get("artifacts")))
-            if matched and not cancelled: row["cancel"] = api.request("GET", "/api/chat/cancel?stream_id=" + urllib.parse.quote(row["stream_id"])); cancelled = True
-            if event in {"done", "cancel", "apperror", "error", "stream_end"}: break
-    except (OSError, TimeoutError, urllib.error.URLError) as exc:
-        row["observations"].append({"code": "STREAM_ERROR", "detail": type(exc).__name__})
-    if trigger and not cancelled:
-        row["observations"].append({"code": "CANCEL_TRIGGER_NOT_REACHED", "trigger": trigger}); row["cancel"] = api.request("GET", "/api/chat/cancel?stream_id=" + urllib.parse.quote(row["stream_id"]))
-    # Final drain in case the stream ended while still awaiting a prompt.
+        # Confirm the SSE endpoint accepts the stream before exercising cancellation.
+        stream_connection = None
+        try:
+            stream_connection = api.open_event_stream(row["stream_id"])
+            row["stream_opened_for_cancel"] = True
+        except (OSError, TimeoutError, urllib.error.URLError) as exc:
+            row["stream_opened_for_cancel"] = False
+            row["observations"].append({"code": "STREAM_OPEN_ERROR", "detail": type(exc).__name__})
+        try:
+            row["cancel_dispatch_delay_ms"] = round((time.monotonic() - chat_start_received_at) * 1000, 1)
+            row["cancel"], row["cancel_response_ms"] = _dispatch_cancel(api, row["stream_id"])
+            cancelled = True
+            if row["cancel_dispatch_delay_ms"] > 250:
+                row["alignment_failures"].append({"code": "IMMEDIATE_CANCEL_SLOW", "actual_ms": row["cancel_dispatch_delay_ms"]})
+            if not _cancel_accepted(row["cancel"]):
+                row["observations"].append({"code": "CANCEL_NOT_ACCEPTED", "detail": row["cancel"]})
+        finally:
+            if stream_connection is not None:
+                stream_connection.close()
+    else:
+        try:
+            for event, payload in api.events(row["stream_id"]):
+                row["events"].append({"event": event, "payload": payload})
+                # Drain only when the stream signals a blocking prompt; avoid
+                # polling /api/approval|clarify/pending on every tool/meter tick.
+                if event in {"approval", "clarify"}:
+                    drained = drain_blocking_prompts(api, session_id)
+                    if drained["approvals"] or drained["clarifies"]:
+                        row["auto_approve"]["drains"].append({"event": event, **drained})
+                if trigger and not cancelled and _trigger_matched(trigger, event, payload if isinstance(payload, dict) else {}):
+                    row["cancel"], row["cancel_response_ms"] = _dispatch_cancel(api, row["stream_id"])
+                    cancelled = True
+                    if not _cancel_accepted(row["cancel"]):
+                        row["observations"].append({"code": "CANCEL_NOT_ACCEPTED", "detail": row["cancel"]})
+                    # Stop reading SSE after cancel; wait on /api/session/status instead.
+                    break
+                if event in {"done", "cancel", "apperror", "error", "stream_end"}:
+                    break
+        except (OSError, TimeoutError, urllib.error.URLError) as exc:
+            row["observations"].append({"code": "STREAM_ERROR", "detail": type(exc).__name__})
+        if trigger and not cancelled:
+            row["observations"].append({"code": "CANCEL_TRIGGER_NOT_REACHED", "trigger": trigger})
+            row["cancel"], row["cancel_response_ms"] = _dispatch_cancel(api, row["stream_id"])
+            cancelled = True
+            if not _cancel_accepted(row["cancel"]):
+                row["observations"].append({"code": "CANCEL_NOT_ACCEPTED", "detail": row["cancel"]})
+    # After cancel (or natural stream end): drain prompts, then poll status readiness.
     drained = drain_blocking_prompts(api, session_id)
     if drained["approvals"] or drained["clarifies"]:
         row["auto_approve"]["drains"].append({"event": "post_stream", **drained})
-    settled = _settle(api, session_id)
+    readiness_after_stream, settled = _settle(api, session_id)
+    row["readiness_after_stream"] = readiness_after_stream
+    row["ready_for_next_start"] = readiness_after_stream.get("can_start_chat") is True
     if not settled:
         row["observations"].append({"code": "SESSION_NOT_READY_AFTER_STREAM"})
+        row["alignment_failures"].append({"code": "SESSION_NOT_READY_AFTER_STREAM"})
         return row
     session = settled.get("session", {})
     row["turn_key"] = _turn_key(session, nonce)
@@ -895,7 +963,7 @@ def run_campaign(
     )
     if any(spec["kind"] == "cancel_verify" for spec in batch_specs):
         print(
-            f"cancel-verify enabled: first session every turn immediate_after_start "
+            f"cancel-verify enabled: first session opens SSE then immediate_after_start "
             f"(total batches={len(batch_specs)})",
             flush=True,
         )
@@ -928,6 +996,7 @@ def run_campaign(
         plain_workspace = batch_root / "plain"
         seed_workspace(plain_workspace)
         plain_session_id = ""
+        plain_session_ready = False
         report: dict[str, Any] = {
             "batch_index": batch_index,
             "batch_kind": batch_kind,
@@ -946,6 +1015,7 @@ def run_campaign(
                 workspace = plain_workspace
                 if not plain_session_id:
                     plain_session_id = create_plain_session(api, workspace)
+                    plain_session_ready = bool(plain_session_id)
                 session_id = plain_session_id
                 replay_meta = {"strategy": "first_turn_continuous"}
                 strategy = "first_turn"
@@ -971,8 +1041,21 @@ def run_campaign(
                 })
                 continue
             round_row = _run_round(
-                api, session_id, workspace, question, campaign_id, turn, trigger,
+                api,
+                session_id,
+                workspace,
+                question,
+                campaign_id,
+                turn,
+                trigger,
+                start_ready=(
+                    batch_kind == "cancel_verify"
+                    and session_id == plain_session_id
+                    and plain_session_ready
+                ),
             )
+            if batch_kind == "cancel_verify" and session_id == plain_session_id:
+                plain_session_ready = round_row.get("ready_for_next_start") is True
             round_row["session_id"] = session_id
             round_row["context_strategy"] = strategy
             round_row["replay_meta"] = replay_meta
@@ -1023,8 +1106,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--cancel-verify",
-        action="store_true",
-        help="Make the first session a cancel-verify batch (every turn immediate_after_start)",
+        type=parse_bool_arg,
+        default=True,
+        metavar="BOOL",
+        help="true: first session opens SSE then cancels on every turn; default false",
     )
     parser.add_argument(
         "--cleanup",
