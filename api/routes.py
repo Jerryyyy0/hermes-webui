@@ -12643,7 +12643,10 @@ def handle_post(handler, parsed) -> bool:
         # happens after the worktree default is resolved so a real worktree
         # remains the authoritative isolation mechanism for Git projects.
         if not workspace and not worktree_info:
-            if _terminal_remote_backend_enabled():
+            if (
+                _terminal_remote_backend_enabled()
+                and not _terminal_docker_backend_enabled()
+            ):
                 # A remote terminal cwd belongs to the target machine.  Do not
                 # create a host-local directory that the remote Agent cannot
                 # use; retain the existing target-side workspace contract.
@@ -16047,6 +16050,13 @@ _REMOTE_TERMINAL_BACKEND_UNSUPPORTED_MESSAGE = (
 def _terminal_remote_backend_enabled() -> bool:
     terminal_cfg = get_config().get("terminal", {})
     return _is_remote_terminal_backend(terminal_cfg)
+
+
+def _terminal_docker_backend_enabled() -> bool:
+    terminal_cfg = get_config().get("terminal", {})
+    if not isinstance(terminal_cfg, dict):
+        return False
+    return str(terminal_cfg.get("backend") or "").strip().lower() == "docker"
 
 
 def _handle_terminal_start(handler, body):
