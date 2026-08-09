@@ -147,21 +147,44 @@ python scripts/real_model_campaign.py --sessions 10 --turns 15
 python scripts/real_model_campaign.py --sessions 1 --turns 5 --seed 42
 # default is first-turn only; replay/mixed remain optional
 python scripts/real_model_campaign.py --sessions 1 --turns 5 --context-mode first
+# use the configured model to generate a multi-turn file-delivery scenario instead of sampling history
+python scripts/real_model_campaign.py --sessions 1 --turns 3 --prompt-source model
 # optional bool: first session is cancel-only (every turn cancels; trigger chosen randomly)
 python scripts/real_model_campaign.py --sessions 2 --turns 5 --cancel-verify true --seed 42
-# delete campaign test sessions AND wipe e2e_campaigns artifact workspaces
+# allow campaign sessions while other WebUI sessions are actively running
+python scripts/real_model_campaign.py --sessions 1 --turns 5 --prompt-source model --allow-concurrent
+# delete campaign test sessions and their campaign-owned workspaces
 python scripts/real_model_campaign.py --cleanup
 ```
 
 The campaign runs one stream at a time and uses the configured default model.
-Each trial question is randomly sampled from historical WebUI sessions under
-`HERMES_WEBUI_STATE_DIR` that stably produced write-sourced delivery artifacts
-(`session_manifest.db` + transcript write/patch tools; cron/campaign noise
-excluded).
+It requires an idle WebUI by default; pass `--allow-concurrent` to run alongside
+other active WebUI streams or runs.
+`--prompt-source` controls where trial questions come from:
+
+- `database` — samples historical WebUI sessions under
+  `HERMES_WEBUI_STATE_DIR` with stable write-sourced delivery artifacts
+  (`session_manifest.db` + transcript write/patch tools; cron/campaign noise excluded).
+- `model` (default) — directly calls the configured default model (the same
+  auxiliary call path as assistant bubbles) for a JSON string array of business
+  scenarios; it does not create a generator session. It prioritizes the current
+  profile's full `model` route, including custom endpoint, credential, and API
+  mode. One scenario is reused across all turns in its campaign session. This
+  mode supports only `--context-mode first` and requires `--turns >= 3`.
+
+Model-mode turns are progressive: the first three request a source CSV, a
+Markdown analysis, and an HTML page; later turns cycle through independent
+review Markdown, derived CSV, and HTML iteration files. A later turn may repair
+missing prerequisites after a cancelled earlier turn. The named files steer the
+task but are not exact-path assertions: the campaign accepts any real Artifact
+that the Session Manifest attributes to the current turn. A normal (non-cancel)
+turn with no Manifest Artifact is an alignment failure and makes the campaign
+exit non-zero. It does not validate References or require a content-hash change.
 
 `--context-mode` controls how history context is applied:
 
-- `first` (default) — only opening-turn prompts; one continuous plain session per batch
+- `first` (default) — only opening-turn prompts; one continuous plain session per batch,
+  created with the server-managed workspace default
 - `replay` — only mid-turn prompts; each trial imports the source transcript
   prefix via `/api/session/import` and copies prior delivery files when available
 - `mixed` — both: first-turn prompts continue a plain session; mid-turn
@@ -172,12 +195,13 @@ approval/clarify prompts only when the SSE stream emits `approval`/`clarify`
 (plus one final drain after the stream ends) so dangerous-tool cards do not
 block unattended runs.
 
-It preserves sessions, workspaces, files, and JSON evidence below
-`HERMES_WEBUI_STATE_DIR/e2e_campaigns/<timestamp>/`. Alignment checks are
-API-only: transcript, Manifest, and on-disk artifact ownership (no browser /
-DOM chip probe). Use `--cleanup` to delete those campaign sessions via the API
-and remove the `e2e_campaigns` artifact trees (session delete alone does not
-remove workspaces).
+It preserves JSON evidence and replay workspaces below
+`HERMES_WEBUI_STATE_DIR/e2e_campaigns/<timestamp>/`; first-turn artifacts live
+in their server-managed session workspaces. Alignment checks are API-only:
+transcript, Manifest, and on-disk artifact ownership (no browser / DOM chip
+probe). Use `--cleanup` to delete campaign sessions via the API and remove both
+the `e2e_campaigns` trees and campaign-owned managed roots (session delete
+alone does not remove workspaces).
 
 
 `tests/test_static_js_runtime_lint.py` runs this automatically when eslint is present
