@@ -1,12 +1,14 @@
 # Hermes Agent 消息补充说明
 
-本文整理 `hermes-agent` 运行时会主动向会话 `messages` 中补充 `user` / `assistant` message 的主要逻辑，目的是帮助 WebUI 侧区分：
+本文整理 `hermes-agent` 运行时会主动向会话 `messages` 中补写或修复 message 的主要逻辑。
+内容以 `user` / `assistant` 为主，必要时包含配套的 `tool` result，目的是帮助 WebUI 侧区分：
 
 - 哪些消息是模型的正常输出
 - 哪些消息是 Agent 为了继续循环、修复序列、压缩上下文、或在异常场景下闭合 transcript 而主动补上的
 - 哪些消息属于内部脚手架，原则上不应作为真实聊天内容直接展示
 
-本文只覆盖 **Agent 代码显式追加到 `messages` 的消息**。不讨论模型天然返回的正常回复，也不讨论 WebUI 额外生成的前端展示层消息。
+本文只覆盖 **Agent 代码显式追加、插入或修复到 `messages` 的消息**。
+不讨论模型天然返回的正常回复，也不讨论 WebUI 额外生成的前端展示层消息。
 
 ## 总览
 
@@ -73,9 +75,9 @@ token / reasoning / interim_assistant / tool / tool_complete / done / stream_end
 4. **WebUI 收口与历史**：`done.session.messages` 和之后的 `GET /api/session` 都会过滤 `internal_scaffold` 与 `context_anchor`。因此它们不会成为用户气泡。
 
 有一个重要例外：模型的候选 assistant 文本可能已经以 `token` 流出，之后 Agent 才把
-对应 assistant 行标成 `internal_scaffold` 并继续循环。此时用户会在实时画面短暂看到候选
-文本，但 `done` 和历史只保留后续的最终回答。verify-on-stop、pre_verify、Codex
-intermediate ack 和 kanban stop guard 都要按这个例外理解。
+对应 assistant 行标成 `internal_scaffold` 并继续循环。Agent durable 只保留后续最终回答；
+当前 WebUI 会过滤带标记的终态行，但已流出的未标记候选仍可能留在显示合并结果中。
+verify-on-stop、pre_verify、Codex intermediate ack 和 kanban stop guard 都要按这个例外理解。
 
 ## 1. 验证继续类
 
@@ -798,6 +800,41 @@ done / 历史：
 Operation interrupted: waiting for model response (<seconds>s elapsed).
 ```
 
+### 5.1.1 中断时跳过尚未执行的工具：补取消的 tool result
+
+实现位置：`hermes-agent/agent/tool_executor.py`
+
+若用户在工具批次开始前停止，或在顺序执行中途停止，Agent 不会启动剩余工具。
+它会为每个未执行的 tool call 补一条 `tool` result，并标明该调用没有产生外部效果。
+
+```text
+[Tool execution cancelled — <tool_name> was skipped due to user interrupt]
+```
+
+这些 `tool` result 没有 `internal_scaffold` 标记，且会随工具进度写入 session。
+它们不是新的用户输入；展示层应将其作为已取消的工具卡片，而不能误报为工具执行成功。
+
+**流式会话说明**
+
+```text
+补写本身不产生 user SSE。工具是否已显示为卡片由具体 tool / stream 事件决定；
+done 与历史中的 tool result 则必须保留“已取消、未执行”的事实。
+```
+
+### 5.1.2 中断后 transcript 以 tool 结尾：补 assistant 闭合行
+
+实现位置：`hermes-agent/agent/message_sanitization.py`、`hermes-agent/agent/turn_finalizer.py`
+
+中断可能发生在工具完成后、模型生成收尾回答前。若 `messages` 尾部是 `tool`，
+Agent 会补一条 assistant，避免下次真实 user 输入形成 `tool → user` 的非法序列。
+
+```text
+Operation interrupted.
+```
+
+重试等待或错误处理路径会传入更具体的中断原因，并优先使用该文本。
+这条 assistant 不是 internal scaffold；它是可持久化的收尾状态，不能被 WebUI 过滤掉。
+
 ### 5.2 tool guardrail halt assistant
 
 **完整轮次示例**
@@ -1123,7 +1160,7 @@ WebUI 合并后展示：
 流中制造第二个用户气泡。它只影响 Agent 后续请求的模型上下文和压缩恢复。
 ```
 
-## 7. 还有两类值得单独提到
+## 7. 还有四类值得单独提到
 
 ### 7.1 invalid tool JSON 恢复：补 assistant + tool
 
@@ -1186,7 +1223,40 @@ Error: Invalid JSON arguments. <error>. For tools with no required parameters, u
 Skipped: other tool call in this response had invalid JSON.
 ```
 
-### 7.2 MoA aggregator guidance：必要时补一条 user
+### 7.2 unknown tool name 恢复：补 assistant + tool error result
+
+实现位置：`hermes-agent/agent/conversation_loop.py`
+
+模型调用了不存在的工具时，Agent 会保留原始 assistant 的 `tool_calls`，再为该批次
+每个调用补 `tool` result，让模型在下一轮根据结构化错误自行改正。
+
+```text
+Tool '<tool_name>' does not exist. Available tools: <available tools>
+```
+
+同一批次里名称合法的调用不会被执行，而是收到如下结果，要求整体重试：
+
+```text
+Skipped: another tool call in this turn used an invalid name. Please retry this tool call.
+```
+
+这与 invalid tool JSON 恢复相似，但触发条件是**工具名不存在**，不是参数解析失败。
+这些 assistant / tool 行不带 `internal_scaffold`，应作为可恢复的工具失败轨迹保留。
+
+### 7.3 历史中的损坏 tool arguments：修复参数并补 tool marker
+
+实现位置：`hermes-agent/agent/agent_runtime_helpers.py`、`hermes-agent/agent/conversation_loop.py`
+
+Agent 在下一次请求前会扫描已有 transcript。若 assistant 的 `tool_calls[].function.arguments`
+已经损坏到无法解析，会将参数改为 `{}`，并确保紧随其后的对应 tool result 带有损坏标记。
+
+若该 tool result 缺失，Agent 会插入一条；若已经存在，则在其内容前追加 marker。
+这样严格 provider 会收到合法的 assistant / tool 对，而不是把历史损坏误判成新的用户输入。
+
+这是一条原地的历史修复路径，不是模型生成的新工具调用，也不是 `internal_scaffold`。
+展示层应按 tool 语义呈现该错误结果，并保留其“历史参数已损坏”的上下文。
+
+### 7.4 MoA aggregator guidance：必要时补一条 user
 
 **完整轮次示例**
 
@@ -1222,6 +1292,11 @@ Mixture-of-Agents 聚合器附加 guidance 时，如果最后一条不是 user�
 这类消息和主聊天 loop 不完全同级，但本质上也是 Agent 主动补 user message 的一种。
 
 ## Provider 请求合并与 durable transcript
+
+**WebUI 当前状态：— 无需专门实现。**
+
+这是 Agent 发送给 provider 的 `api_messages` 副本变换，不会直接成为 WebUI 的 session
+或 SSE 消息。WebUI 只需继续以 canonical transcript 作为展示和持久化输入。
 
 当严格 provider 不能接受连续 `user` 角色时，Agent 可以在**发送给模型的
 `api_messages` 副本**中临时合并相邻 user 文本。该副本不写入 Agent
@@ -1267,7 +1342,8 @@ References: <labels>
 **流式归类**
 
 这些行不会产生普通的 `user` SSE。若其配对 assistant 是在标记前已流出的模型文本，
-实时 token 仍可能短暂存在；最终是否保留必须以 `done` 的投影为准。
+实时 token 仍可能短暂存在。Agent durable 会过滤带标记的行；当前 WebUI 对未标记的
+实时候选仍可能保留在显示合并结果中，详见第 9 节的“部分实现”状态。
 
 ### 8.2 虽然是 Agent 主动补的，但通常应视为真实 transcript 内容
 
@@ -1290,24 +1366,37 @@ Codex intermediate ack continuation 的 assistant / user 都带
 partial assistant 是先通过 token 显示、再写回 durable；本地错误、guardrail 和 finalizer
 闭合则可能没有 token，只在 `done` 的最终 session 中出现。这两种都不是内部 user 气泡。
 
+取消的工具、未知工具名和历史损坏修复产生的 `tool` result 也不是 scaffold。
+若它们进入展示层，应保持工具卡片语义，尤其不能把“已取消”显示成执行成功。
+
 ## 9. 一张速查表
 
-| 类别 | 补 `user` | 补 `assistant` | SSE 实时会发生什么 | durable / 历史 |
-|---|---|---|---|---|
-| verify-on-stop | 是 | 临时候选 | 候选 token 可能先出现；nudge 不发 user SSE | 两边 scaffold 被过滤，只留验证后回答 |
-| pre_verify hook | 是 | 临时候选 | 与 verify-on-stop 相同，检查过程可见 | 两边 scaffold 被过滤，只留验证后回答 |
-| empty response recovery | 是 | 是 | 工具可见；内部 `(empty) + user` pair 不发角色事件 | pair 不保存、不显示 |
-| empty terminal sentinel | 否 | 是 | 不发 token/interim；由终态失败处理表达 | sentinel 不显示 |
-| thinking prefill | 否 | 是 | 可能只有 reasoning；预填充不发 interim | 只留后来真实正文 |
-| length continuation | 是 | 已输出的 partial | partial 已是 token；内部 continuation user 不发 SSE | partial 可保留，user 被过滤 |
-| Codex ack continue | 是 | 是 | 中间 ack token 可能先出现；nudge 不发 user SSE | pair 被过滤，保留工具和最终回答 |
-| kanban stop guard | 是 | 是 | 候选 token 可能先出现；状态/工具另行发事件 | pair 被过滤，保留看板终态和最终回答 |
-| Codex incomplete continuation | 必要时 | incomplete assistant | 可见 incomplete 可实时显示；nudge 不发 user SSE | nudge 过滤，assistant 视可重放状态处理 |
-| max-iterations summary | 是 | 是 | request 无 user SSE；Codex 可流式，其它 summary 分支通常等 done | 只保留真实 summary assistant |
-| interrupt / error / finalizer closure | 否 | 是 | partial 是已发 token；本地闭合回答通常由 done 出现 | 真实 transcript 收尾 |
-| compression todo / anchor | 是 | 否 | 不产生 user SSE，不是实时聊天输入 | 可存 state.db，但 WebUI 投影过滤 |
-| invalid tool JSON | 否 | 是（带 tool call） | 失败/重试通过 tool 事件呈现 | 保留可恢复工具轨迹 |
-| MoA guidance | 聚合器内部 | 否 | 不属于主 chat SSE | 不进入主会话 transcript |
+本列只评估**当前 Hermes WebUI** 对消息可见性、SSE 收口与历史读取的支持，
+不表示 Agent 运行时机制本身是否存在。
+
+- ✅ **已实现**：当前统一语义投影已覆盖，且有对应回归测试。
+- ⚠️ **部分实现**：终态/历史语义正确，或消息能保留，但实时展示或专用渲染未完成验证。
+- — **无需接入**：机制只在 Agent 内部或 provider 请求副本中运行，不进入主 WebUI transcript。
+
+| 类别 | 补 `user` | 补 `assistant` / `tool` | SSE 实时会发生什么 | durable / 历史 | 当前 WebUI 状态 |
+|---|---|---|---|---|---|
+| verify-on-stop | 是 | 临时候选 | 候选 token 可能先出现；nudge 不发 user SSE | 两边 scaffold 被过滤，只留验证后回答 | ⚠️ 终态/历史过滤已实现；已流出的候选可能保留 |
+| pre_verify hook | 是 | 临时候选 | 与 verify-on-stop 相同，检查过程可见 | 两边 scaffold 被过滤，只留验证后回答 | ⚠️ 终态/历史过滤已实现；已流出的候选可能保留 |
+| empty response recovery | 是 | 是 | 工具可见；内部 `(empty) + user` pair 不发角色事件 | pair 不保存、不显示 | ✅ 统一 `internal_scaffold` 过滤 |
+| empty terminal sentinel | 否 | 是 | 不发 token/interim；由终态失败处理表达 | sentinel 不显示 | ✅ legacy flag 与统一语义过滤 |
+| thinking prefill | 否 | 是 | 可能只有 reasoning；预填充不发 interim | 只留后来真实正文 | ✅ legacy flag 与统一语义过滤 |
+| length continuation | 是 | 已输出的 partial | partial 已是 token；内部 continuation user 不发 SSE | partial 可保留，user 被过滤 | ✅ nudge 过滤；partial 按真实回答保留 |
+| Codex ack continue | 是 | 是 | 中间 ack token 可能先出现；nudge 不发 user SSE | pair 被过滤，保留工具和最终回答 | ⚠️ nudge 过滤已实现；已流出的 ack 可能保留 |
+| kanban stop guard | 是 | 是 | 候选 token 可能先出现；状态/工具另行发事件 | pair 被过滤，保留看板终态和最终回答 | ⚠️ 终态/历史过滤已实现；已流出的候选可能保留 |
+| Codex incomplete continuation | 必要时 | incomplete assistant | 可见 incomplete 可实时显示；nudge 不发 user SSE | nudge 过滤，assistant 视可重放状态处理 | ✅ nudge 过滤；incomplete assistant 按设计保留 |
+| max-iterations summary | 是 | 是 | request 无 user SSE；Codex 可流式，其它 summary 分支通常等 done | 只保留真实 summary assistant | ✅ summary request 过滤，真实总结保留 |
+| interrupt partial / tool-tail closure | 否 | 是 | partial 是已发 token；工具尾闭合通常由 done 出现 | 真实 transcript 收尾 | ✅ 按真实 transcript 行保留 |
+| interrupt skipped tool | 否 | 仅 tool | 不发 user SSE；工具卡片按 transport 事件更新 | 保留“已取消、未执行”的 tool result | ⚠️ 不会被控制消息过滤；取消专用卡片未验证 |
+| compression todo / anchor | 是 | 否 | 不产生 user SSE，不是实时聊天输入 | 可存 state.db，但 WebUI 投影过滤 | ✅ `context_anchor` 过滤，含 state.db replay 回归 |
+| invalid tool JSON | 否 | assistant + tool | 失败/重试通过 tool 事件呈现 | 保留可恢复工具轨迹 | ⚠️ 真实行会保留；专用失败卡片未验证 |
+| unknown tool name | 否 | assistant + tool | 失败/重试通过 tool 事件呈现 | 保留工具名错误与跳过结果 | ⚠️ 真实行会保留；专用失败卡片未验证 |
+| corrupted historical tool arguments | 否 | 仅 tool | 不发 user SSE；按 tool 语义呈现 marker | 修复参数并保留对应 tool 错误轨迹 | ⚠️ 真实行会保留；marker 专用展示未验证 |
+| MoA guidance | 聚合器内部 | 否 | 不属于主 chat SSE | 不进入主会话 transcript | — Agent 聚合器内部，不需要 WebUI 接入 |
 
 ## 10. 对 WebUI / 展示层的直接启示
 
@@ -1321,12 +1410,15 @@ partial assistant 是先通过 token 显示、再写回 durable；本地错误�
 
 - verification continuation：当前实现 assistant 候选和 user nudge 都是 scaffold；后续最终答案才保留
 - verification / ack / kanban 的候选正文若已经走过 `token`，实时画面可能短暂显示；这不是
-  一条独立的 `interim_assistant` SSE，也不代表它会进入 done 或历史
+  一条独立的 `interim_assistant` SSE。Agent durable 不保留该候选，但当前 WebUI 仍可能将
+  未标记的实时文本留在显示合并结果中，因此这些机制在第 9 节标为“部分实现”
 - empty recovery：assistant 和 user 两边都是 scaffold
 - kanban stop guard：assistant 和 user 两边都是 scaffold
 - codex ack continue：当前实现使用 `internal_scaffold`，不能按普通 user/assistant 气泡展示
 - max-iterations summary：内部 user request 不显示，而最终 summary 是否逐字流出取决于所走的
   provider 分支，不能假定所有模型都在这一步继续 token streaming
+- 工具因 stop 被跳过、名称不存在或历史参数损坏时，补写的是可恢复的 `tool` 轨迹；
+  不能按内部控制消息过滤，也不能将取消结果渲染成成功
 
 因此，“所有补出来的 user / assistant 都统一过滤”是错误的；“所有 `[System: ...]` 都统一显示”也同样错误。
 

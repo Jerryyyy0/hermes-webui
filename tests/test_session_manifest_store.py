@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 from api import session_manifest_store as store
@@ -92,6 +93,112 @@ def test_project_artifact_path_for_integration_root_prefixes_child_session(tmp_p
     ) == '/abs/media.png'
 
 
+def test_legacy_blank_root_resolves_to_default_workspace_for_projection(tmp_path, monkeypatch):
+    base = tmp_path / 'workspace-base'
+    base.mkdir()
+    monkeypatch.setattr('api.workspace._BOOT_DEFAULT_WORKSPACE', base)
+
+    assert store.effective_manifest_workspace_root('', legacy_root=base) == base.resolve()
+    assert store.relative_prefix_under_root('', base) == ''
+    assert store.project_artifact_path_for_integration_root(
+        'report.md', '', integration_root=base,
+    ) == 'report.md'
+
+
+def test_manifest_file_wire_paths_use_the_record_workspace_and_skip_external_roots(tmp_path, monkeypatch):
+    from api.session_manifest import _rows_to_wire
+
+    base = tmp_path / 'workspace-base'
+    inside = base / 'project-a'
+    outside = tmp_path / 'project-b'
+    inside.mkdir(parents=True)
+    outside.mkdir()
+    (inside / 'report.md').write_text('inside', encoding='utf-8')
+    (outside / 'report.md').write_text('outside', encoding='utf-8')
+    monkeypatch.setattr('api.workspace._BOOT_DEFAULT_WORKSPACE', base)
+
+    wire = _rows_to_wire([
+        {
+            'path': 'report.md',
+            'source_tool': 'write_file',
+            'preview': 'file',
+            'turn_key': 'turn:1',
+            'workspace_root': str(inside),
+        },
+        {
+            'path': 'report.md',
+            'source_tool': 'write_file',
+            'preview': 'file',
+            'turn_key': 'turn:2',
+            'workspace_root': str(outside),
+        },
+    ], base)
+
+    assert wire == [{
+        'path': 'project-a/report.md',
+        'preview': 'file',
+        'source_tool': 'write_file',
+    }]
+
+
+def test_empty_decisions_are_scoped_to_their_effective_workspace_root(tmp_path, monkeypatch):
+    db_path = tmp_path / 'manifest.db'
+    base = tmp_path / 'workspace-base'
+    first = base / 'first'
+    second = base / 'second'
+    first.mkdir(parents=True)
+    second.mkdir()
+    first_session = _session('decisionfirst01')
+    second_session = _session('decisionsecond02')
+    first_session.workspace = str(first)
+    second_session.workspace = str(second)
+    monkeypatch.setattr(store, 'resolve_manifest_lineage_key', lambda _session: 'shared-lineage')
+
+    store.upsert_manifest_records(
+        first_session, 'turn:1', [{'path': '', 'source_tool': 'assistant_prose'}], db_path=db_path,
+    )
+    store.upsert_manifest_records(
+        second_session, 'turn:1', [{'path': 'report.md', 'source_tool': 'write_file'}], db_path=db_path,
+    )
+
+    assert store.load_manifest_empty_turn_keys(first_session, db_path=db_path) == {'turn:1'}
+    assert store.load_manifest_empty_turn_keys(second_session, db_path=db_path) == set()
+    assert store.load_manifest_decided_turn_keys_by_root(first_session, db_path=db_path) == {
+        ('turn:1', str(first.resolve())),
+        ('turn:1', str(second.resolve())),
+    }
+
+
+def test_default_root_aliases_are_deduped_and_replaced_without_database_backfill(tmp_path, monkeypatch):
+    db_path = tmp_path / 'manifest.db'
+    base = tmp_path / 'workspace-base'
+    base.mkdir()
+    legacy = _session('legacyalias01')
+    canonical = _session('canonicalalias02')
+    canonical.workspace = str(base)
+    monkeypatch.setattr('api.workspace._BOOT_DEFAULT_WORKSPACE', base)
+    monkeypatch.setattr(store, 'resolve_manifest_lineage_key', lambda _session: 'shared-lineage')
+
+    store.upsert_manifest_records(
+        legacy, 'turn:1', [{'path': 'report.md', 'source_tool': 'assistant_prose'}], db_path=db_path,
+    )
+    store.upsert_manifest_records(
+        canonical, 'turn:1', [{'path': 'report.md', 'source_tool': 'write_file'}], db_path=db_path,
+    )
+
+    loaded = store.load_manifest_records(canonical, db_path=db_path)
+    assert [(row['path'], row['source_tool'], row['workspace_root']) for row in loaded] == [
+        ('report.md', 'write_file', str(base.resolve())),
+    ]
+
+    store.replace_manifest_turn_records(
+        canonical, 'turn:1', [{'path': 'final.md', 'source_tool': 'write_file'}], db_path=db_path,
+    )
+    assert [(row['path'], row['workspace_root']) for row in store.load_manifest_records(canonical, db_path=db_path)] == [
+        ('final.md', str(base.resolve())),
+    ]
+
+
 def test_workspace_profile_index_keeps_same_artifact_name_separate_by_root(tmp_path):
     db_path = tmp_path / 'manifest.db'
     base = tmp_path / 'workspace-base'
@@ -125,7 +232,7 @@ def test_workspace_profile_index_keeps_same_artifact_name_separate_by_root(tmp_p
     assert store.get_artifact_paths_for_profile('research', base, db_path=db_path) == frozenset({'second/report.md'})
 
 
-def test_manifest_store_migrates_old_relative_path_schema_conservatively(tmp_path):
+def test_manifest_store_migrates_old_relative_path_schema_as_default_workspace_legacy(tmp_path, monkeypatch):
     db_path = tmp_path / 'manifest.db'
     import sqlite3
 
@@ -163,9 +270,10 @@ def test_manifest_store_migrates_old_relative_path_schema_conservatively(tmp_pat
         row = conn.execute('SELECT workspace_root, path FROM session_manifest_records').fetchone()
     assert 'workspace_root' in columns
     assert dict(row) == {'workspace_root': '', 'path': 'report.md'}
-    # Legacy rows cannot be assigned to a base safely, so they never leak into
-    # cross-workspace file browsing after the migration.
-    assert store.get_artifact_profile_index(tmp_path, db_path=db_path) == {}
+    monkeypatch.setattr('api.workspace._BOOT_DEFAULT_WORKSPACE', tmp_path)
+    # Legacy rows remain untouched in SQLite but are read relative to the
+    # boot-time default workspace.
+    assert store.get_artifact_profile_index(tmp_path, db_path=db_path) == {'report.md': 'ops'}
 
 
 def test_compression_child_reads_parent_lineage_records(tmp_path, monkeypatch):

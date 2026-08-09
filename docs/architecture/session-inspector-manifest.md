@@ -29,7 +29,7 @@ Artifacts 可来自成功写入工具的结构化参数/diff、成功 terminal �
 - SSE delta 不写入 transcript，也不替代持久化 Manifest。
 - 本轮 `done` 后，前端重新请求 `GET /api/session/manifest` 并覆盖乐观状态。
 - 聊天区每轮成果 chips 只使用 GET 返回的 `manifest.turns[].artifacts`，不直接使用 SSE delta。
-- Artifacts 的持久化权威来源是 profile-aware artifact store；transcript/tool/prose 只用于受控 backfill 或 empty-decision read-repair。
+- Artifacts 的持久化权威来源是 profile-aware artifact store。`GET /api/session/manifest` 只读取 store，或从 transcript / legacy sidecar 临时派生展示；不会由查看历史触发 backfill 或 empty-decision read-repair。
 - Store artifact 没有同 key user anchor 时仍保留在顶层 `artifacts`，并列入 `diagnostics.orphan_turn_keys`；不得追加为正常 `turns[]`。
 
 ## UI 消费
@@ -46,7 +46,7 @@ Artifacts 可来自成功写入工具的结构化参数/diff、成功 terminal �
 3. 每个 turn 只从最后一条 assistant prose 提取 artifact 路径；中间 assistant prose 不提取。
 4. 不扫描整个 workspace，不把搜索命中或目录子项提升为成果/参考。
 5. SSE 是乐观态；`done` 后 GET 是展示权威态。
-6. Store 中已有非空 artifact decision 的 turn 不重扫、不覆盖；empty decision 只允许严格同轮修复。
+6. Manifest GET 不重扫或覆盖 store decision；历史 backfill 和 empty-decision 修复只允许由显式维护操作执行。
 7. 重放同一稳定 `tool_call_id` 不得产生第二次执行或跨 turn artifact 归属。
 8. 正常 `turns[]` 必须有 user anchor；聊天区 assistant 容器使用该 user 的 `_turn_key` 作为 `data-turn-key`。混合 transcript 的无 key user 只进入 diagnostics，不由 Manifest GET 猜号。
 9. 带 `_hermes_message_class: internal_scaffold` 的 Agent 控制消息，以及保留原始正文并带语义字段的 `context_anchor` 不产生 turn；其间的 assistant/tool/MEDIA 仍归属前一个真实 user turn。

@@ -8113,6 +8113,7 @@ from api.models import (
     process_wakeup_credential_state_fingerprint,
     process_wakeup_pause_credential_state_changed,
     suppress_process_wakeup_for_provider_pause,
+    _evict_sessions_over_cap,
 )
 
 
@@ -12790,6 +12791,7 @@ def handle_post(handler, parsed) -> bool:
                 # so `+ " (copy)"` doesn't TypeError.
                 title=(session.title or "Untitled") + " (copy)",
                 workspace=session.workspace,
+                workspace_mode=getattr(session, "workspace_mode", None),
                 model=session.model,
                 model_provider=session.model_provider,
                 messages=copy.deepcopy(session.messages),
@@ -13647,6 +13649,7 @@ def handle_post(handler, parsed) -> bool:
         # Create new session inheriting workspace/model/profile
         branch = Session(
             workspace=source.workspace,
+            workspace_mode=getattr(source, "workspace_mode", None),
             model=source.model,
             model_provider=getattr(source, "model_provider", None),
             profile=getattr(source, "profile", None),
@@ -19865,6 +19868,7 @@ def _handle_session_compression_recovery_start(handler, body):
                 session_id=uuid.uuid4().hex[:12],
                 title=title,
                 workspace=getattr(source, "workspace", get_last_workspace()),
+                workspace_mode=getattr(source, "workspace_mode", None),
                 model=getattr(source, "model", None),
                 model_provider=getattr(source, "model_provider", None),
                 messages=[],

@@ -166,6 +166,7 @@ def test_cron_manifest_store_artifact_aligns_with_real_turn(tmp_path, monkeypatc
     monkeypatch.setattr(models, "get_state_db_session_messages", lambda *args, **kwargs: [])
     workspace = tmp_path / "workspace"
     workspace.mkdir()
+    monkeypatch.setattr("api.workspace._BOOT_DEFAULT_WORKSPACE", workspace)
     (workspace / "report.html").write_text("<h1>report</h1>", encoding="utf-8")
     session = Session(
         session_id="cron_job_20260713_120004",

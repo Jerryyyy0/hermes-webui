@@ -63,12 +63,11 @@ GET /api/session/manifest?session_id=abc123
 
 | 值 | 含义 |
 | --- | --- |
-| `db` | 使用 artifact store 中的非空或 empty decision；empty turn 可能执行严格 read-repair |
-| `backfill` | 当前 lineage 原先完全无 decision，本次从 legacy JSON 或 transcript 写回 |
-| `derived` | 无法写入 DB，仅临时从 transcript 派生 |
+| `db` | 使用 artifact store 中的非空或 empty decision |
+| `derived` | 当前 lineage 无 store decision 时，临时从 transcript 或 legacy sidecar 派生；不写入 DB |
 | `unknown` | 异常或无法判断 |
 
-GET read-repair 不得更新 session `updated_at`、sidebar recency，也不得发布 session-list 变更事件。
+GET 是只读的：不得执行 artifact backfill 或 empty-decision repair，不得更新 session `updated_at`、sidebar recency，也不得发布 session-list 变更事件。
 
 ### 错误响应
 
@@ -117,7 +116,7 @@ References 仅允许 canonical skill row：`preview="skill"`、`source_tool="ski
 | `profile` | artifacts | 来自 `session.profile`；无明确值时省略 |
 | `status` | artifacts/references | 当前仅 `expired`，表示有历史 provenance 但不可预览 |
 
-**`preview=file` 的 `path` 语义（wire）：** 当会话 `workspace` 落在 `HERMES_WEBUI_DEFAULT_WORKSPACE`（integration 根）之下时，GET/SSE 返回**相对该 integration 根**的路径，以便直接调用 `GET /api/integration/workspace/file?path=...`。managed 会话因此形如 `<session_id>/report.md`；若 `workspace` 就是 integration 根本身，则仍为会话内相对路径（如 `report.md`）。`workspace` 未知、为空或不在 integration 根下时，保持原相对路径且不猜测前缀。store / DB 仍保存会话根内相对路径与绝对 `workspace_root`；前缀仅出现在对外投影。`preview=skill` 与 workspace 外绝对 `MEDIA:` path 不改写。
+**`preview=file` 的 `path` 语义（wire）：** 持久化 artifact 以自身的 `workspace_root` 解析；历史 `workspace_root=""` 在运行时解释为启动时的 `HERMES_WEBUI_DEFAULT_WORKSPACE`，数据库原值不回填。当该根位于 integration 根之下时，GET/SSE 返回**相对 integration 根**的路径，以便直接调用 `GET /api/integration/workspace/file?path=...`：历史默认根为 `report.md`，新 managed 会话为 `sessions/<session_id>/report.md`，base 子目录 external workspace 为 `project-a/report.md`。根位于 integration 根之外的持久化 artifact 不返回 `preview=file`，不能退回裸相对路径或绝对路径。仅尚未持久化的 transcript/SSE 临时行沿用当前 session workspace 的既有投影。`preview=skill` 与 workspace 外绝对 `MEDIA:` path 不改写。
 
 Manifest 不返回文件或技能正文。非 expired 且 `preview` 为 `file`/`skill` 的条目可由 `HermesSessionInspector.openManifestPreview(item)` 打开；expired 条目不可预览。
 
