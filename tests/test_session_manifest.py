@@ -2130,6 +2130,39 @@ def test_collect_media_artifact_events_from_assistant_only(tmp_path):
     assert events[0].assistant_msg_idx == 2
 
 
+def test_collect_media_artifact_events_skips_control_assistants(tmp_path):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    synthetic = workspace / 'synthetic.png'
+    synthetic.write_bytes(b'synthetic')
+    anchored = workspace / 'anchored.png'
+    anchored.write_bytes(b'anchored')
+    delivered = workspace / 'delivered.png'
+    delivered.write_bytes(b'delivered')
+    messages = [
+        {'role': 'user', 'content': 'generate images', '_turn_key': 'turn:0'},
+        {
+            'role': 'assistant',
+            'content': f'MEDIA:{synthetic}',
+            '_hermes_message_class': 'internal_scaffold',
+            '_hermes_scaffold_kind': 'verification_stop',
+        },
+        {
+            'role': 'assistant',
+            'content': f'MEDIA:{anchored}',
+            '_hermes_message_class': 'context_anchor',
+            '_hermes_scaffold_kind': 'compression_no_user_anchor',
+        },
+        {'role': 'assistant', 'content': f'Delivered.\nMEDIA:{delivered}'},
+    ]
+
+    events = _collect_media_artifact_events(messages, workspace, turn_key='turn:0')
+
+    assert [(event.args['path'], event.assistant_msg_idx) for event in events] == [
+        ('delivered.png', 3),
+    ]
+
+
 def test_build_session_manifest_includes_media_artifacts(tmp_path, monkeypatch):
     workspace = tmp_path / 'ws'
     workspace.mkdir()

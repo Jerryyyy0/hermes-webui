@@ -129,7 +129,7 @@ Mutation 工具可以先形成内部记录；最终 wire 再判断是否可预�
 
 ### 4.3 MEDIA:
 
-_MEDIA_TOKEN_RE 只读取 assistant 消息中的显式 MEDIA:。远程 URL 跳过。Workspace 内 media 规范化为相对路径；允许的 workspace 外本地 media 保留绝对路径并走 session media preview。
+_MEDIA_TOKEN_RE 只读取非 `internal_scaffold` / `context_anchor` assistant 消息中的显式 MEDIA:。远程 URL 跳过。Workspace 内 media 规范化为相对路径；允许的 workspace 外本地 media 保留绝对路径并走 session media preview。
 
 User 消息中的 MEDIA:、工具结果 JSON 的相似字段和普通 URL 都不作为 media artifact。
 

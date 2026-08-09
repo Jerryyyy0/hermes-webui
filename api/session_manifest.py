@@ -262,6 +262,9 @@ def _collect_media_artifact_events(messages: list, workspace: Path, *, turn_key:
         ]
     for msg_idx in indices:
         message = messages[msg_idx]
+        if _is_synthetic_control_message(message):
+            log_control_message("manifest_media_skip", message)
+            continue
         text = _message_text(message.get('content'))
         # Skip context-compaction messages — those are system-generated
         # handoffs, not media produced during the turn.
