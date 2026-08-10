@@ -8113,6 +8113,7 @@ from api.models import (
     process_wakeup_credential_state_fingerprint,
     process_wakeup_pause_credential_state_changed,
     suppress_process_wakeup_for_provider_pause,
+    _evict_sessions_over_cap,
 )
 
 
@@ -12643,7 +12644,10 @@ def handle_post(handler, parsed) -> bool:
         # happens after the worktree default is resolved so a real worktree
         # remains the authoritative isolation mechanism for Git projects.
         if not workspace and not worktree_info:
-            if _terminal_remote_backend_enabled():
+            if (
+                _terminal_remote_backend_enabled()
+                and not _terminal_docker_backend_enabled()
+            ):
                 # A remote terminal cwd belongs to the target machine.  Do not
                 # create a host-local directory that the remote Agent cannot
                 # use; retain the existing target-side workspace contract.
@@ -12787,6 +12791,7 @@ def handle_post(handler, parsed) -> bool:
                 # so `+ " (copy)"` doesn't TypeError.
                 title=(session.title or "Untitled") + " (copy)",
                 workspace=session.workspace,
+                workspace_mode=getattr(session, "workspace_mode", None),
                 model=session.model,
                 model_provider=session.model_provider,
                 messages=copy.deepcopy(session.messages),
@@ -13644,6 +13649,7 @@ def handle_post(handler, parsed) -> bool:
         # Create new session inheriting workspace/model/profile
         branch = Session(
             workspace=source.workspace,
+            workspace_mode=getattr(source, "workspace_mode", None),
             model=source.model,
             model_provider=getattr(source, "model_provider", None),
             profile=getattr(source, "profile", None),
@@ -16047,6 +16053,13 @@ _REMOTE_TERMINAL_BACKEND_UNSUPPORTED_MESSAGE = (
 def _terminal_remote_backend_enabled() -> bool:
     terminal_cfg = get_config().get("terminal", {})
     return _is_remote_terminal_backend(terminal_cfg)
+
+
+def _terminal_docker_backend_enabled() -> bool:
+    terminal_cfg = get_config().get("terminal", {})
+    if not isinstance(terminal_cfg, dict):
+        return False
+    return str(terminal_cfg.get("backend") or "").strip().lower() == "docker"
 
 
 def _handle_terminal_start(handler, body):
@@ -19855,6 +19868,7 @@ def _handle_session_compression_recovery_start(handler, body):
                 session_id=uuid.uuid4().hex[:12],
                 title=title,
                 workspace=getattr(source, "workspace", get_last_workspace()),
+                workspace_mode=getattr(source, "workspace_mode", None),
                 model=getattr(source, "model", None),
                 model_provider=getattr(source, "model_provider", None),
                 messages=[],

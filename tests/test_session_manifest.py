@@ -162,7 +162,7 @@ def test_serialize_manifest_row_includes_status_when_set():
     assert row['status'] == 'expired'
 
 
-def test_build_session_manifest_marks_deleted_artifact_expired(tmp_path, monkeypatch):
+def test_build_session_manifest_keeps_deleted_legacy_artifact_in_turn_projection(tmp_path, monkeypatch):
     workspace = tmp_path / 'ws'
     workspace.mkdir()
     target = workspace / 'notes.txt'
@@ -187,15 +187,18 @@ def test_build_session_manifest_marks_deleted_artifact_expired(tmp_path, monkeyp
         },
     )
     monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('api.session_manifest_store.STATE_DIR', tmp_path / 'state')
+    monkeypatch.setattr('api.session_manifest_store.load_manifest_records', lambda *args, **kwargs: [])
+    monkeypatch.setattr('api.session_manifest_store.load_manifest_decided_turn_keys', lambda *args, **kwargs: set())
     target.unlink()
     manifest = build_session_manifest(session)
-    assert manifest['artifacts'] == [{
+    assert manifest['artifacts'] == []
+    assert manifest['turns'][0]['artifacts'] == [{
         'path': 'notes.txt',
         'preview': 'file',
         'source_tool': 'write_file',
         'status': 'expired',
     }]
-    assert manifest['turns'][0]['artifacts'][0]['status'] == 'expired'
 
 
 def test_build_session_manifest_prefixes_managed_workspace_file_paths(tmp_path, monkeypatch):
@@ -290,7 +293,7 @@ def test_manifest_delta_prefixes_managed_workspace_file_paths(tmp_path, monkeypa
     }]
 
 
-def test_build_session_manifest_expired_managed_path_keeps_prefix(tmp_path, monkeypatch):
+def test_build_session_manifest_keeps_deleted_managed_legacy_artifact_in_turn_projection(tmp_path, monkeypatch):
     base = tmp_path / 'workspace-base'
     sid = 'managedexp01'
     workspace = base / sid
@@ -321,10 +324,18 @@ def test_build_session_manifest_expired_managed_path_keeps_prefix(tmp_path, monk
         },
     )
     monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('api.session_manifest_store.STATE_DIR', tmp_path / 'state')
+    monkeypatch.setattr('api.session_manifest_store.load_manifest_records', lambda *args, **kwargs: [])
+    monkeypatch.setattr('api.session_manifest_store.load_manifest_decided_turn_keys', lambda *args, **kwargs: set())
     target.unlink()
     manifest = build_session_manifest(session)
-    assert manifest['artifacts'][0]['path'] == f'{sid}/gone.txt'
-    assert manifest['artifacts'][0]['status'] == 'expired'
+    assert manifest['artifacts'] == []
+    assert manifest['turns'][0]['artifacts'] == [{
+        'path': f'{sid}/gone.txt',
+        'preview': 'file',
+        'source_tool': 'write_file',
+        'status': 'expired',
+    }]
 
 
 def test_rows_to_wire_references_drops_missing_file_rows(tmp_path):
@@ -1267,6 +1278,10 @@ def test_build_session_manifest_dedupes_legacy_stripped_skill_store_path(tmp_pat
             'source_tool': 'skill_manage',
         }],
     )
+    monkeypatch.setattr(
+        'api.session_manifest_store.load_manifest_decided_turn_keys',
+        lambda s, include_lineage=True: {'turn:2'},
+    )
 
     manifest = build_session_manifest(session)
 
@@ -2113,6 +2128,39 @@ def test_collect_media_artifact_events_from_assistant_only(tmp_path):
     assert len(events) == 1
     assert events[0].name == MEDIA_ARTIFACT_SOURCE
     assert events[0].assistant_msg_idx == 2
+
+
+def test_collect_media_artifact_events_skips_control_assistants(tmp_path):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    synthetic = workspace / 'synthetic.png'
+    synthetic.write_bytes(b'synthetic')
+    anchored = workspace / 'anchored.png'
+    anchored.write_bytes(b'anchored')
+    delivered = workspace / 'delivered.png'
+    delivered.write_bytes(b'delivered')
+    messages = [
+        {'role': 'user', 'content': 'generate images', '_turn_key': 'turn:0'},
+        {
+            'role': 'assistant',
+            'content': f'MEDIA:{synthetic}',
+            '_hermes_message_class': 'internal_scaffold',
+            '_hermes_scaffold_kind': 'verification_stop',
+        },
+        {
+            'role': 'assistant',
+            'content': f'MEDIA:{anchored}',
+            '_hermes_message_class': 'context_anchor',
+            '_hermes_scaffold_kind': 'compression_no_user_anchor',
+        },
+        {'role': 'assistant', 'content': f'Delivered.\nMEDIA:{delivered}'},
+    ]
+
+    events = _collect_media_artifact_events(messages, workspace, turn_key='turn:0')
+
+    assert [(event.args['path'], event.assistant_msg_idx) for event in events] == [
+        ('delivered.png', 3),
+    ]
 
 
 def test_build_session_manifest_includes_media_artifacts(tmp_path, monkeypatch):
@@ -3963,7 +4011,7 @@ def test_persist_turn_artifact_paths_keeps_same_path_across_turns(tmp_path, monk
     assert session.turn_artifacts == {}
 
 
-def test_session_get_omits_turn_artifacts_and_manifest_is_authoritative(tmp_path, monkeypatch):
+def test_session_get_does_not_backfill_legacy_turn_artifacts(tmp_path, monkeypatch):
     from urllib.parse import urlparse
 
     import api.routes as routes
@@ -4005,8 +4053,10 @@ def test_session_get_omits_turn_artifacts_and_manifest_is_authoritative(tmp_path
         urlparse('/api/session/manifest?session_id=http_align01'),
     )
 
+    from api.session_manifest_store import load_manifest_decided_turn_keys, load_manifest_records
+
     assert 'turn_artifacts' not in session_resp['session']
-    assert manifest_resp['manifest_source'] == 'backfill'
+    assert manifest_resp['manifest_source'] == 'derived'
     manifest_by_turn = {
         turn['turn_key']: turn['artifacts']
         for turn in manifest_resp['manifest']['turns']
@@ -4015,6 +4065,42 @@ def test_session_get_omits_turn_artifacts_and_manifest_is_authoritative(tmp_path
     assert manifest_by_turn['turn:1'][0]['status'] == 'expired'
     assert [row['path'] for row in manifest_by_turn['turn:2']] == ['deliver.docx', 'make_docx.py']
     assert manifest_by_turn['turn:2'][1]['status'] == 'expired'
+    assert load_manifest_records(session) == []
+    assert load_manifest_decided_turn_keys(session) == set()
+
+
+def test_manifest_read_does_not_repair_empty_artifact_decision(tmp_path, monkeypatch):
+    from api.session_manifest_store import (
+        load_manifest_empty_turn_keys,
+        load_manifest_records,
+        upsert_manifest_records,
+    )
+
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    (workspace / 'report.md').write_text('# report', encoding='utf-8')
+    session = Session(
+        session_id='manifest_read_only01',
+        workspace=str(workspace),
+        profile='default',
+        messages=[
+            {'role': 'user', 'content': 'write a report', '_turn_key': 'turn:1'},
+            {'role': 'assistant', 'content': '文件位置：report.md'},
+        ],
+    )
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('api.session_manifest_store.STATE_DIR', tmp_path / 'state')
+    upsert_manifest_records(
+        session,
+        'turn:1',
+        [{'path': '', 'source_tool': 'assistant_prose', 'preview': 'file'}],
+    )
+
+    manifest = build_session_manifest(session)
+
+    assert manifest['artifacts'] == []
+    assert load_manifest_records(session) == []
+    assert load_manifest_empty_turn_keys(session) == {'turn:1'}
 
 
 def test_build_session_manifest_multi_turn_mixed_artifacts_and_references(tmp_path, monkeypatch):

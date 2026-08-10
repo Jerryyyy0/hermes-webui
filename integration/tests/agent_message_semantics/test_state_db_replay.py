@@ -10,7 +10,12 @@ from api.streaming import _drop_synthetic_control_messages
 
 
 CONTEXT_ANCHOR_KINDS = (
+    "length_continuation",
+    "codex_incomplete_nudge",
+    "intent_ack_continuation",
+    "max_iteration_summary_request",
     "todo_snapshot",
+    "compaction_summary",
     "compression_no_user_anchor",
     "mcp_reload",
     "model_switch",

@@ -203,6 +203,7 @@ def test_recovery_start_creates_focused_linked_session(monkeypatch, tmp_path):
         project_id="proj_1",
         messages=[{"role": "user", "content": "long task"}],
         context_messages=[{"role": "user", "content": "large context"}],
+        workspace_mode="managed",
     )
     stamp_compression_exhausted_recovery(session, message="Context length exceeded.")
     session.save()
@@ -218,6 +219,7 @@ def test_recovery_start_creates_focused_linked_session(monkeypatch, tmp_path):
     assert new_session["session_id"] != sid
     assert new_session["parent_session_id"] == sid
     assert new_session["workspace"] == str(tmp_path)
+    assert models.SESSIONS[new_session["session_id"]].workspace_mode == "managed"
     assert new_session["model"] == "gpt-4o"
     assert new_session["model_provider"] == "openai"
     assert new_session["messages"] == []
@@ -226,6 +228,7 @@ def test_recovery_start_creates_focused_linked_session(monkeypatch, tmp_path):
     saved = json.loads((session_dir / f"{new_session['session_id']}.json").read_text(encoding="utf-8"))
     assert saved["parent_session_id"] == sid
     assert saved["session_source"] == "fork"
+    assert saved["workspace_mode"] == "managed"
     assert saved["context_messages"] == []
     assert saved["compression_recovery_source_session_id"] == sid
     assert saved["compression_recovery_action"] == "start_focused_continuation"

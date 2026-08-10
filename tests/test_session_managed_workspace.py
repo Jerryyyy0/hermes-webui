@@ -22,12 +22,14 @@ def _isolate_sessions(tmp_path, monkeypatch):
     SESSIONS.clear()
 
 
-def _post_new(monkeypatch, body, *, remote_terminal=False):
+def _post_new(monkeypatch, body, *, remote_terminal=False, docker_terminal=None):
     captured = {}
     monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
     monkeypatch.setattr(routes, "read_body", lambda _handler: body)
     monkeypatch.setattr(routes, "_worktree_default_from_config", lambda _profile: False)
     monkeypatch.setattr(routes, "_terminal_remote_backend_enabled", lambda: remote_terminal)
+    if docker_terminal is not None:
+        monkeypatch.setattr(routes, "_terminal_docker_backend_enabled", lambda: docker_terminal)
     monkeypatch.setattr(
         routes,
         "j",
@@ -54,7 +56,7 @@ def test_session_new_without_workspace_creates_and_persists_managed_root(tmp_pat
     assert result["status"] == 200
     session_data = result["payload"]["session"]
     sid = session_data["session_id"]
-    root = base / sid
+    root = base / "sessions" / sid
     assert session_data["workspace"] == str(root.resolve())
     assert root.is_dir()
     assert "workspace_mode" not in session_data
@@ -83,7 +85,7 @@ def test_session_new_with_explicit_workspace_stays_external(tmp_path, monkeypatc
     assert result["status"] == 200
     sid = result["payload"]["session"]["session_id"]
     assert result["payload"]["session"]["workspace"] == str(external.resolve())
-    assert not (base / sid).exists()
+    assert not (base / "sessions" / sid).exists()
     # Ordinary zero-message external sessions retain the historic in-memory
     # lifecycle. Only managed roots need an immediate sidecar write.
     assert SESSIONS[sid].workspace_mode == "external"
@@ -104,12 +106,35 @@ def test_session_new_on_remote_terminal_keeps_existing_remote_workspace(tmp_path
         lambda *_args, **_kwargs: pytest.fail("remote terminal must not create a host managed root"),
     )
 
-    result = _post_new(monkeypatch, {}, remote_terminal=True)
+    result = _post_new(monkeypatch, {}, remote_terminal=True, docker_terminal=False)
 
     assert result["status"] == 200
     sid = result["payload"]["session"]["session_id"]
     assert result["payload"]["session"]["workspace"] == str(remote_cwd.resolve())
     assert SESSIONS[sid].workspace_mode == "external"
+
+
+def test_session_new_on_docker_terminal_creates_managed_workspace(tmp_path, monkeypatch):
+    base = tmp_path / "workspace-base"
+    base.mkdir()
+    monkeypatch.setattr(routes, "DEFAULT_WORKSPACE", base)
+    monkeypatch.setattr(
+        routes,
+        "get_last_workspace",
+        lambda: pytest.fail("Docker must not fall back to the remote cwd"),
+    )
+    monkeypatch.setattr(routes, "get_config", lambda: {"terminal": {"backend": "docker"}})
+
+    result = _post_new(monkeypatch, {}, remote_terminal=True)
+
+    assert result["status"] == 200
+    session_data = result["payload"]["session"]
+    sid = session_data["session_id"]
+    root = base / "sessions" / sid
+    assert session_data["workspace"] == str(root.resolve())
+    assert root.is_dir()
+    assert SESSIONS[sid].workspace_mode == "managed"
+    assert Session.load(sid).workspace_mode == "managed"
 
 
 def test_managed_session_persistence_failure_keeps_directory_but_not_memory_session(tmp_path, monkeypatch):
@@ -131,11 +156,25 @@ def test_managed_workspace_creation_rejects_preexisting_symlink(tmp_path):
     outside = tmp_path / "outside"
     base.mkdir()
     outside.mkdir()
-    (base / "session01").symlink_to(outside, target_is_directory=True)
+    namespace = base / "sessions"
+    namespace.mkdir()
+    (namespace / "session01").symlink_to(outside, target_is_directory=True)
 
     with pytest.raises(FileExistsError):
         create_managed_workspace("session01", base)
     assert outside.is_dir()
+
+
+def test_managed_workspace_creation_rejects_symlinked_sessions_namespace(tmp_path):
+    base = tmp_path / "workspace-base"
+    outside = tmp_path / "outside"
+    base.mkdir()
+    outside.mkdir()
+    (base / "sessions").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(FileNotFoundError):
+        create_managed_workspace("session01", base)
+    assert not (outside / "session01").exists()
 
 
 def test_managed_session_workspace_is_immutable_for_session_update(tmp_path, monkeypatch):

@@ -440,6 +440,7 @@ def test_passive_compression_rotation_keeps_canonical_turn_artifact_alignment(tm
     )
     monkeypatch.setattr(store, "STATE_DIR", state_dir)
     monkeypatch.setattr(store, "SESSION_DIR", session_dir)
+    monkeypatch.setattr("api.workspace._BOOT_DEFAULT_WORKSPACE", workspace)
     monkeypatch.setattr(
         "api.session_manifest._load_display_messages",
         lambda session: list(session.messages),

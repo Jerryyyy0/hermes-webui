@@ -261,6 +261,37 @@ def _workspace_root_for_session(session) -> str:
         return ""
 
 
+def effective_manifest_workspace_root(
+    workspace_root: Path | str | None,
+    *,
+    legacy_root: Path | str | None = None,
+) -> Path | None:
+    """Resolve a stored root without rewriting legacy ``workspace_root=''`` rows.
+
+    Empty roots are the pre-workspace-root representation.  In this deployment
+    those rows are defined to be relative to the boot-time default workspace,
+    not to whichever session happens to read them.  ``legacy_root`` is only a
+    test/maintenance override; production callers use the immutable boot-time
+    default exposed by ``resolve_trusted_workspace(None)``.
+    """
+    raw = str(workspace_root or "").strip()
+    try:
+        if raw:
+            return Path(raw).expanduser().resolve()
+        if legacy_root not in (None, ""):
+            return Path(legacy_root).expanduser().resolve()
+        from api.workspace import resolve_trusted_workspace
+
+        return resolve_trusted_workspace(None)
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def _effective_workspace_root_text(workspace_root: Path | str | None) -> str:
+    root = effective_manifest_workspace_root(workspace_root)
+    return str(root) if root is not None else ""
+
+
 def relative_prefix_under_root(
     workspace_root: Path | str | None,
     integration_root: Path | str | None = None,
@@ -268,21 +299,21 @@ def relative_prefix_under_root(
     """Return the path of *workspace_root* relative to *integration_root*.
 
     Returns:
-      ``None`` — empty/unknown root, or not contained under the integration root
+      ``None`` — invalid root, or not contained under the integration root
       ``""`` — *workspace_root* is the integration root itself
-      non-empty string — child prefix (e.g. managed ``<session_id>``)
+      non-empty string — child prefix (e.g. managed ``sessions/<session_id>``)
     """
-    row_root = str(workspace_root or "").strip()
-    if not row_root:
-        return None
     try:
+        row_root = effective_manifest_workspace_root(workspace_root)
+        if row_root is None:
+            return None
         if integration_root in (None, ""):
             from api.workspace import resolve_trusted_workspace
 
             root_path = resolve_trusted_workspace(None)
         else:
             root_path = Path(integration_root).expanduser().resolve()
-        prefix = Path(row_root).expanduser().resolve().relative_to(root_path).as_posix()
+        prefix = row_root.relative_to(root_path).as_posix()
     except (OSError, RuntimeError, ValueError):
         return None
     if prefix == ".":
@@ -424,17 +455,33 @@ def replace_manifest_turn_records(
         return []
     lineage_key = resolve_manifest_lineage_key(session)
     profile = _profile_for_session(session)
+    effective_root = _effective_workspace_root_text(_workspace_root_for_session(session))
     now = time.time()
     try:
         with closing(_connect(db_path)) as conn:
             with conn:
-                conn.execute(
+                existing_roots = conn.execute(
                     """
-                    DELETE FROM session_manifest_records
-                    WHERE lineage_key = ? AND profile = ? AND workspace_root = ? AND turn_key = ? AND record_kind = ?
+                    SELECT DISTINCT workspace_root
+                    FROM session_manifest_records
+                    WHERE lineage_key = ? AND profile = ? AND turn_key = ? AND record_kind = ?
                     """,
-                    (lineage_key, profile, _workspace_root_for_session(session), tk, ARTIFACT_RECORD_KIND),
-                )
+                    (lineage_key, profile, tk, ARTIFACT_RECORD_KIND),
+                ).fetchall()
+                # Empty legacy roots and an explicitly persisted default root
+                # are one logical root.  Replace both aliases atomically, while
+                # leaving other workspace histories untouched.
+                for existing in existing_roots:
+                    raw_root = str(existing["workspace_root"] or "").strip()
+                    if _effective_workspace_root_text(raw_root) != effective_root:
+                        continue
+                    conn.execute(
+                        """
+                        DELETE FROM session_manifest_records
+                        WHERE lineage_key = ? AND profile = ? AND workspace_root = ? AND turn_key = ? AND record_kind = ?
+                        """,
+                        (lineage_key, profile, raw_root, tk, ARTIFACT_RECORD_KIND),
+                    )
                 for record in records:
                     conn.execute(
                         """
@@ -517,7 +564,32 @@ def load_manifest_records(
                 """,
                 (*params, ARTIFACT_RECORD_KIND),
             ).fetchall()
-            return [dict(row) for row in rows]
+            # ``workspace_root=''`` is a legacy alias for the immutable default
+            # root.  Keep the database untouched, but make the logical root
+            # explicit to every reader and collapse alias duplicates.
+            selected: dict[tuple[str, str, str, str, str], tuple[tuple[int, float], dict[str, Any]]] = {}
+            for sqlite_row in rows:
+                row = dict(sqlite_row)
+                raw_root = str(row.get("workspace_root") or "").strip()
+                effective_root = _effective_workspace_root_text(raw_root)
+                if not effective_root:
+                    continue
+                row["workspace_root"] = effective_root
+                key = (
+                    str(row.get("turn_key") or "").strip(),
+                    str(row.get("record_kind") or "").strip(),
+                    str(row.get("path") or "").strip(),
+                    str(row.get("profile") or "").strip(),
+                    effective_root,
+                )
+                priority = (1 if raw_root else 0, float(row.get("updated_at") or 0.0))
+                current = selected.get(key)
+                if current is None or priority > current[0]:
+                    selected[key] = (priority, row)
+            return sorted(
+                (row for _priority, row in selected.values()),
+                key=lambda row: (str(row.get("turn_key") or ""), str(row.get("path") or "")),
+            )
     except (sqlite3.Error, OSError):
         logger.debug("failed to load session manifest records", exc_info=True)
         return []
@@ -536,23 +608,62 @@ def load_manifest_empty_turn_keys(
     lineage_key = resolve_manifest_lineage_key(session)
     where = "lineage_key = ? AND profile = ?" if include_lineage else "session_id = ? AND profile = ?"
     params = (lineage_key if include_lineage else sid, profile)
+    current_root = _effective_workspace_root_text(_workspace_root_for_session(session))
+    if not current_root:
+        return set()
+    decisions = _load_manifest_decision_paths(where, params, db_path=db_path)
+    return {
+        turn_key
+        for (turn_key, root), paths in decisions.items()
+        if root == current_root and paths == {""}
+    }
+
+
+def _load_manifest_decision_paths(
+    where: str,
+    params: tuple[str, str],
+    *,
+    db_path: Path | str | None = None,
+) -> dict[tuple[str, str], set[str]]:
+    """Return decision paths grouped by logical ``(turn_key, workspace_root)``."""
     try:
         with closing(_connect(db_path)) as conn:
             rows = conn.execute(
                 f"""
-                SELECT turn_key
+                SELECT turn_key, workspace_root, path
                 FROM session_manifest_records
                 WHERE {where} AND record_kind = ?
-                GROUP BY turn_key
-                HAVING COUNT(*) = 1 AND MAX(path) = ''
-                ORDER BY turn_key ASC
                 """,
                 (*params, ARTIFACT_RECORD_KIND),
             ).fetchall()
-            return {str(row["turn_key"] or "").strip() for row in rows if str(row["turn_key"] or "").strip()}
     except (sqlite3.Error, OSError):
-        logger.debug("failed to load empty session manifest turn keys", exc_info=True)
+        logger.debug("failed to load session manifest decisions", exc_info=True)
+        return {}
+    decisions: dict[tuple[str, str], set[str]] = {}
+    for row in rows:
+        turn_key = str(row["turn_key"] or "").strip()
+        root = _effective_workspace_root_text(row["workspace_root"])
+        if not turn_key or not root:
+            continue
+        decisions.setdefault((turn_key, root), set()).add(str(row["path"] or "").strip())
+    return decisions
+
+
+def load_manifest_decided_turn_keys_by_root(
+    session,
+    *,
+    include_lineage: bool = True,
+    db_path: Path | str | None = None,
+) -> set[tuple[str, str]]:
+    """Return lineage decisions without collapsing different workspace roots."""
+    sid = str(getattr(session, "session_id", "") or "").strip()
+    if not _is_safe_session_id(sid):
         return set()
+    profile = _profile_for_session(session)
+    lineage_key = resolve_manifest_lineage_key(session)
+    where = "lineage_key = ? AND profile = ?" if include_lineage else "session_id = ? AND profile = ?"
+    params = (lineage_key if include_lineage else sid, profile)
+    return set(_load_manifest_decision_paths(where, params, db_path=db_path))
 
 
 def load_manifest_decided_turn_keys(
@@ -561,28 +672,18 @@ def load_manifest_decided_turn_keys(
     include_lineage: bool = True,
     db_path: Path | str | None = None,
 ) -> set[str]:
-    sid = str(getattr(session, "session_id", "") or "").strip()
-    if not _is_safe_session_id(sid):
+    current_root = _effective_workspace_root_text(_workspace_root_for_session(session))
+    if not current_root:
         return set()
-    profile = _profile_for_session(session)
-    lineage_key = resolve_manifest_lineage_key(session)
-    where = "lineage_key = ? AND profile = ?" if include_lineage else "session_id = ? AND profile = ?"
-    params = (lineage_key if include_lineage else sid, profile)
-    try:
-        with closing(_connect(db_path)) as conn:
-            rows = conn.execute(
-                f"""
-                SELECT DISTINCT turn_key
-                FROM session_manifest_records
-                WHERE {where} AND record_kind = ?
-                ORDER BY turn_key ASC
-                """,
-                (*params, ARTIFACT_RECORD_KIND),
-            ).fetchall()
-            return {str(row["turn_key"] or "").strip() for row in rows if str(row["turn_key"] or "").strip()}
-    except (sqlite3.Error, OSError):
-        logger.debug("failed to load decided session manifest turn keys", exc_info=True)
-        return set()
+    return {
+        turn_key
+        for turn_key, root in load_manifest_decided_turn_keys_by_root(
+            session,
+            include_lineage=include_lineage,
+            db_path=db_path,
+        )
+        if root == current_root
+    }
 
 
 def get_artifact_profile_index(
@@ -599,8 +700,8 @@ def get_artifact_profile_index(
     index only maps paths to real profile labels.
 
     When *workspace_root* is supplied, returned paths are relative to that
-    root and include each child session-root prefix. Records with an unknown
-    legacy root are excluded rather than being guessed into this index.
+    root and include each child session-root prefix. Empty legacy roots are
+    interpreted as the boot-time default workspace; invalid roots are excluded.
     """
     root_norm = ""
     if workspace_root not in (None, ""):
@@ -656,8 +757,8 @@ def get_artifact_paths_for_profile(
 
     The profile label is matched exactly (case-sensitive) against the
     ``profile`` column. With *workspace_root*, paths are scoped to that root
-    and unknown-root legacy records are excluded. Empty/None profile returns
-    an empty set.
+    and empty legacy roots are interpreted as the boot-time default workspace.
+    Invalid roots are excluded. Empty/None profile returns an empty set.
     """
     profile_norm = str(profile or "").strip()
     if not profile_norm:

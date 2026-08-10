@@ -1169,7 +1169,16 @@ def create_managed_workspace(session_id: str, base: str | Path | None = None) ->
     if not base_path.is_dir():
         raise ValueError(f"Workspace base is not a directory: {base_path}")
 
-    candidate = base_path / session_id
+    # Keep server-owned workspaces in a dedicated namespace.  Legacy sessions
+    # historically used the base itself, so this avoids treating an existing
+    # user file/directory named like a session ID as managed state.
+    namespace = base_path / "sessions"
+    # ``Path.resolve()`` follows a parent symlink before ``make_anchored_dir``
+    # can open it with O_NOFOLLOW, so reject this namespace explicitly first.
+    # The subsequent anchored walk still closes the check-then-use race.
+    if namespace.is_symlink():
+        raise FileNotFoundError(f"Managed workspace namespace is a symlink: {namespace}")
+    candidate = namespace / session_id
     # ``exists()`` misses a dangling symlink.  Refuse every pre-existing leaf so
     # an ID collision can never reuse or follow an unrelated directory.
     if os.path.lexists(str(candidate)):

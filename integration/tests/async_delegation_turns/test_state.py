@@ -8,8 +8,7 @@ from integration.async_delegation_turns.state import (
 )
 
 
-def test_completion_status_log_truncates_long_content(caplog, monkeypatch):
-    monkeypatch.setenv("HERMES_MESSAGE_SEMANTICS_LOG_MAX_CHARS", "500")
+def test_completion_status_log_excludes_content_and_turn_key_value(caplog):
     session = _session()
     record_async_delegation_dispatch(
         session,
@@ -18,7 +17,7 @@ def test_completion_status_log_truncates_long_content(caplog, monkeypatch):
     )
     long_content = "y" * 650
 
-    with caplog.at_level("INFO"):
+    with caplog.at_level("DEBUG"):
         mark_async_delegation_completion(
             session,
             "deleg-1",
@@ -26,8 +25,10 @@ def test_completion_status_log_truncates_long_content(caplog, monkeypatch):
             content=long_content,
         )
 
-    assert "content='" + ("y" * 500) + "…(+150 chars)'" in caplog.text
+    assert "action=background_task_status" in caplog.text
+    assert "turn_key_present=True" in caplog.text
     assert ("y" * 650) not in caplog.text
+    assert "turn:8" not in caplog.text
 
 
 def _session():

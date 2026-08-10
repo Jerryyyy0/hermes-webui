@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Manual real-model E2E campaign for multi-turn artifact alignment.
 
-Each trial question is randomly sampled from historical WebUI sessions that
-stably produced write-sourced delivery artifacts (manifest evidence).
+Trial questions come either from historical WebUI sessions with stable
+write-sourced delivery artifacts, or from the configured model.
 
 Default ``--context-mode first``: only opening-turn prompts, one continuous
 plain session per batch (no transcript import / mid-turn replay).
@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib
+import inspect
 import json
 import os
 import random
@@ -47,9 +49,12 @@ if str(ROOT) not in sys.path:
 DEFAULT_BASE_URL = "http://127.0.0.1:8787"
 ROUND_TIMEOUT = 180
 SETTLE_TIMEOUT = 30
-MIN_TOOLS = 5
+# Database prompts must come from sufficiently involved turns. Count each
+# recorded tool-call event; provider/tool-call IDs are not a deduplication key.
+MIN_TOOLS = 10
 PREFIX_TOOL_CONTENT_LIMIT = 12000
 ContextMode = Literal["mixed", "first", "replay"]
+PromptSource = Literal["database", "model"]
 WRITE_TOOLS = frozenset({"write_file", "patch", "edit_file", "create_file", "apply_patch", "str_replace"})
 DELIVERY_SUFFIXES = frozenset({
     ".md", ".html", ".htm", ".docx", ".doc", ".pptx", ".xlsx", ".csv", ".pdf",
@@ -277,7 +282,7 @@ def load_history_prompt_pool(state_dir: Path | None = None) -> list[HistoryPromp
             turn_key = str(message.get("_turn_key") or "")
             user_msg_index = index
             cursor = index + 1
-            tool_ids: list[str] = []
+            tool_calls: list[tuple[str, str]] = []
             write_count = 0
             while cursor < len(messages):
                 row = messages[cursor]
@@ -285,12 +290,12 @@ def load_history_prompt_pool(state_dir: Path | None = None) -> list[HistoryPromp
                     break
                 if isinstance(row, dict) and row.get("role") == "assistant":
                     for tid, name in _tool_events(row):
-                        tool_ids.append(tid)
+                        tool_calls.append((tid, name))
                         if _is_write_tool(name):
                             write_count += 1
                 cursor += 1
             index = cursor
-            if _noise_prompt(prompt, session_id) or write_count < 1 or len(set(tool_ids)) < MIN_TOOLS:
+            if _noise_prompt(prompt, session_id) or write_count < 1 or len(tool_calls) < MIN_TOOLS:
                 continue
             if not turn_key:
                 continue
@@ -307,7 +312,7 @@ def load_history_prompt_pool(state_dir: Path | None = None) -> list[HistoryPromp
                 prompt=prompt.strip(),
                 turn=turn_no,
                 turn_key=turn_key,
-                n_tools=len(set(tool_ids)),
+                n_tools=len(tool_calls),
                 n_write_tools=write_count,
                 artifact_paths=artifacts,
                 user_msg_index=user_msg_index,
@@ -506,12 +511,27 @@ def drain_blocking_prompts(api: "Api", session_id: str, *, limit: int = 8) -> di
     return counts
 
 
-def create_plain_session(api: Api, workspace: Path) -> str:
-    created = api.request("POST", "/api/session/new", {"workspace": str(workspace), "worktree": False})
-    session_id = str(created.get("session", {}).get("session_id") or "")
+def create_plain_session(
+    api: Api,
+    *,
+    title_prefix: str = "campaign-first",
+) -> tuple[str, Path | None]:
+    """Create a campaign session in the server-managed workspace."""
+    created = api.request("POST", "/api/session/new", {"worktree": False})
+    session = created.get("session", {}) if isinstance(created, dict) else {}
+    session_id = str(session.get("session_id") or "")
+    workspace_text = str(session.get("workspace") or "").strip()
+    try:
+        workspace = Path(workspace_text).expanduser().resolve() if workspace_text else None
+    except OSError:
+        workspace = None
     if session_id:
+        api.request("POST", "/api/session/rename", {
+            "session_id": session_id,
+            "title": f"{title_prefix}:{session_id}",
+        })
         enable_auto_approve(api, session_id)
-    return session_id
+    return session_id, workspace
 
 
 def _is_campaign_test_session(session: dict, *, campaigns_root: Path) -> bool:
@@ -551,20 +571,22 @@ def list_campaign_test_sessions(state_dir: Path | None = None) -> list[dict[str,
             "session_id": sid,
             "title": str(data.get("title") or "")[:120],
             "workspace": str(data.get("workspace") or ""),
+            "workspace_mode": str(data.get("workspace_mode") or ""),
         })
     return out
 
 
 def cleanup_campaign_test_data(api: "Api | None" = None, state_dir: Path | None = None) -> dict[str, Any]:
-    """Delete campaign test sessions and wipe ``e2e_campaigns`` artifact trees.
+    """Delete campaign sessions and their external or managed workspaces.
 
-    ``/api/session/delete`` does not remove workspaces; campaign artifacts live
-    under ``HERMES_WEBUI_STATE_DIR/e2e_campaigns/`` and must be removed explicitly.
+    ``/api/session/delete`` does not remove workspaces. Managed roots are only
+    removed after their marked campaign session was deleted successfully.
     """
     root = (state_dir or _state_dir()).expanduser().resolve()
     campaigns_root = root / "e2e_campaigns"
     sessions = list_campaign_test_sessions(root)
     deleted: list[str] = []
+    deleted_session_ids: set[str] = set()
     failed: list[dict[str, Any]] = []
     client = api
     if client is None and sessions:
@@ -579,6 +601,7 @@ def cleanup_campaign_test_data(api: "Api | None" = None, state_dir: Path | None 
                 failed.append({"session_id": sid, "error": result})
                 continue
             deleted.append(sid)
+            deleted_session_ids.add(sid)
         except Exception as exc:
             failed.append({"session_id": sid, "error": str(exc)})
 
@@ -596,11 +619,29 @@ def cleanup_campaign_test_data(api: "Api | None" = None, state_dir: Path | None 
     else:
         campaigns_root.mkdir(parents=True, exist_ok=True)
 
+    removed_managed_workspaces: list[str] = []
+    for row in sessions:
+        if row["session_id"] not in deleted_session_ids:
+            continue
+        if not str(row.get("title") or "").startswith("campaign-first:"):
+            continue
+        if str(row.get("workspace_mode") or "").strip().lower() != "managed":
+            continue
+        try:
+            workspace = Path(str(row.get("workspace") or "")).expanduser().resolve()
+            if workspace.name != row["session_id"] or workspace.parent.name != "sessions":
+                continue
+            shutil.rmtree(workspace, ignore_errors=False)
+            removed_managed_workspaces.append(str(workspace))
+        except (OSError, ValueError):
+            failed.append({"session_id": row["session_id"], "error": "managed workspace cleanup failed"})
+
     return {
         "ok": not failed,
         "deleted_sessions": deleted,
         "failed_sessions": failed,
         "removed_campaign_dirs": removed_campaign_dirs,
+        "removed_managed_workspaces": removed_managed_workspaces,
         "campaigns_root": str(campaigns_root),
     }
 
@@ -611,13 +652,14 @@ def create_replay_session(
     workspace: Path,
     question: HistoryPrompt,
     model: str,
-) -> tuple[str, dict[str, Any]]:
+) -> tuple[str, dict[str, Any], Path | None]:
     meta: dict[str, Any] = {"strategy": "replay_prefix", "prefix_messages": 0, "copied_files": []}
     prefix = load_prefix_messages(state_dir, question)
     meta["prefix_messages"] = len(prefix)
     if not prefix:
         meta["fallback"] = "missing_prefix_use_plain_session"
-        return create_plain_session(api, workspace), meta
+        session_id, managed_workspace = create_plain_session(api)
+        return session_id, meta, managed_workspace
     paths = prefix_delivery_paths(state_dir, question)
     meta["copied_files"] = copy_replay_files(
         question.source_workspace,
@@ -634,9 +676,10 @@ def create_replay_session(
     if not session_id:
         meta["fallback"] = "import_failed_use_plain_session"
         meta["import_error"] = imported.get("error") or imported
-        return create_plain_session(api, workspace), meta
+        session_id, managed_workspace = create_plain_session(api)
+        return session_id, meta, managed_workspace
     enable_auto_approve(api, session_id)
-    return session_id, meta
+    return session_id, meta, workspace
 
 
 def seed_workspace(workspace: Path) -> None:
@@ -648,7 +691,56 @@ def seed_workspace(workspace: Path) -> None:
     (workspace / "deliverables").mkdir(parents=True, exist_ok=True)
 
 
-def build_history_prompt(question: HistoryPrompt, turn: int, nonce: str) -> tuple[str, str]:
+def model_campaign_phase(turn: int) -> tuple[str, str]:
+    """Return the model-campaign phase's requested business file and instructions."""
+    if turn < 1:
+        raise ValueError("campaign turn must be positive")
+    if turn == 1:
+        return "data/source.csv", """第 1 阶段：根据场景构造可用的源数据，并创建 `data/source.csv`。
+数据必须包含后续分析需要的字段、多个记录，以及与场景相关的至少一个异常或边界情况。"""
+    if turn == 2:
+        return "report/analysis.md", """第 2 阶段：先检查 `data/source.csv`；若前序轮因取消未完成，可补建必要的前序文件。
+完成数据清洗与分析，并创建 `report/analysis.md`，说明口径、发现、异常处理和可执行结论。"""
+    if turn == 3:
+        return "dashboard/index.html", """第 3 阶段：先检查已有数据和分析结果；若前序轮因取消未完成，可补建必要的前序文件。
+创建 `dashboard/index.html`，用真实场景数据呈现关键指标、趋势或分组比较，并体现分析结论。"""
+
+    cycle = (turn - 4) % 3
+    if cycle == 0:
+        target = f"review/iteration-{turn:02d}.md"
+        kind = "审查说明，记录本轮核验、发现的问题和对已有交付的改进"
+    elif cycle == 1:
+        target = f"data/derived-{turn:02d}.csv"
+        kind = "衍生数据集，补充可复算的指标、分组或质量标记"
+    else:
+        target = f"dashboard/iteration-{turn:02d}.html"
+        kind = "页面迭代，补充一个能帮助用户判断或比较的可视化视图"
+    return target, f"""第 {turn} 阶段：检查并利用此前已完成的工作；若前序轮因取消未完成，可补建必要的前序文件。
+创建 `{target}`，作为{kind}。不要只在回复中描述结果。"""
+
+
+def build_history_prompt(
+    question: HistoryPrompt,
+    turn: int,
+    nonce: str,
+    *,
+    model_campaign: bool = False,
+) -> tuple[str, str]:
+    if model_campaign:
+        _target, phase = model_campaign_phase(turn)
+        prompt = f"""{question.prompt}
+
+这是同一业务场景的连续多轮交付。{phase}
+请在工作区创建或修改真实文件完成本轮工作，不要只提供文字建议或结果摘要。
+完成后简要说明实际创建或修改的文件。
+CAMPAIGN_ID={{campaign_id}}
+SESSION_ID={{session_id}}
+TURN={turn}
+NONCE={nonce}"""
+        # The planned path guides the model only. Alignment accepts any real
+        # artifact the manifest attributes to this turn.
+        return prompt, ""
+
     artifact = f"deliverables/turn-{turn:02d}/delivery.md"
     prompt = f"""{question.prompt}
 
@@ -671,6 +763,158 @@ def pick_history_prompt(pool: list[HistoryPrompt], rng: random.Random, used: set
     if used is not None:
         used.add(choice.source_session_id + ":" + choice.turn_key)
     return choice
+
+
+_MODEL_PROMPT_GENERATION_REQUEST = """你是 Hermes WebUI 的 E2E 测试题目设计器。
+请生成 {count} 条彼此不同的中文业务场景，用于同一会话中的连续多轮文件交付测试。
+每条场景必须明确写出“生成”或“创建”一个具体类型的“文件”（例如“生成 Markdown 文件”“创建 HTML 文件”“生成 CSV 文件”），并给出足够具体的业务背景、数据对象、使用者和交付约束。场景应适合后续跨格式地依次产出 CSV 数据、Markdown 分析和 HTML 页面，并包含至少一个可变复杂约束，例如异常处理、字段映射、版本对比或验证清单。不得只要求分析、回答或提供建议。不要规定绝对路径、不要包含 CAMPAIGN_ID、不要要求联网、不要要求删除文件。
+不要执行任务、不要解释、不要使用工具。只返回 JSON 字符串数组，例如：["需求一", "需求二"]。"""
+
+
+def _generated_prompt_texts(response_text: str) -> list[str]:
+    """Parse the generator's strict JSON-array response without guessing prose."""
+    text = str(response_text or "").strip()
+    candidates = [text]
+    fenced = re.findall(r"```(?:json)?\s*(\[.*?\])\s*```", text, flags=re.IGNORECASE | re.DOTALL)
+    candidates.extend(fenced)
+    start, end = text.find("["), text.rfind("]")
+    if start >= 0 and end > start:
+        candidates.append(text[start : end + 1])
+    for candidate in candidates:
+        try:
+            values = json.loads(candidate)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if not isinstance(values, list):
+            continue
+        prompts: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            if not isinstance(value, str):
+                continue
+            prompt = value.strip()
+            key = re.sub(r"\s+", "", prompt)
+            if (
+                not key
+                or not re.search(r"(?:生成|创建).{0,80}文件", prompt)
+                or key in seen
+                or _noise_prompt(prompt, "model-generator")
+            ):
+                continue
+            seen.add(key)
+            prompts.append(prompt)
+        if prompts:
+            return prompts
+    raise RuntimeError("model prompt generator returned no valid JSON prompt array")
+
+
+def _model_prompt_generation_error(exc: Exception) -> str:
+    """Summarize an auxiliary-call failure without exposing upstream details."""
+    if isinstance(exc, ModuleNotFoundError):
+        return "Hermes Agent auxiliary runtime unavailable; check HERMES_WEBUI_AGENT_DIR and its dependencies"
+    status = getattr(exc, "status_code", None)
+    if not isinstance(status, int):
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+    if status in {401, 403}:
+        return (
+            f"model prompt generation authentication failed (HTTP {status}); "
+            "check the current profile's model credentials"
+        )
+    if status == 404:
+        return "model prompt generation endpoint or model was not found (HTTP 404); check the current profile's model route"
+    if isinstance(status, int):
+        return f"model prompt generation failed with HTTP {status}; check the current profile's model route"
+    return "model prompt generation failed; check the current profile's model endpoint and credentials"
+
+
+def _call_llm_accepts_api_mode(call_llm: Any) -> bool:
+    """Keep direct campaign calls compatible with older Hermes Agent runtimes."""
+    try:
+        parameters = inspect.signature(call_llm).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(
+        parameter.name == "api_mode" or parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
+
+
+def generate_model_prompt_pool(
+    model: str,
+    count: int,
+    *,
+    model_config: dict[str, Any] | str | None = None,
+) -> list[HistoryPrompt]:
+    """Generate multi-turn campaign scenarios without creating a WebUI session."""
+    try:
+        from api.config import _AGENT_DIR
+        from api.profiles import get_active_profile_name, get_hermes_home_for_profile, profile_env_for_background_worker
+        from integration.assistant_bubbles.collectors import model_route
+
+        profile = get_active_profile_name()
+        route = model_route(get_hermes_home_for_profile(profile))
+        agent_dir = str(_AGENT_DIR or "").strip()
+        if agent_dir and agent_dir not in sys.path:
+            sys.path.insert(0, agent_dir)
+        auxiliary_client = importlib.import_module("agent.auxiliary_client")
+        call_llm = getattr(auxiliary_client, "call_llm")
+        with profile_env_for_background_worker(profile, purpose="campaign prompt generation"):
+            if not isinstance(model_config, dict):
+                model_config = {"default": model_config}
+            configured_model = str(model_config.get("default") or "").strip()
+            resolved_model = str(model or configured_model or route.get("model") or "").strip()
+            if not resolved_model:
+                raise RuntimeError("configured default model is empty")
+            configured_provider = str(model_config.get("provider") or "").strip() or None
+            configured_base_url = str(model_config.get("base_url") or "").strip() or None
+            if configured_base_url:
+                provider = configured_provider or "custom"
+            else:
+                provider = configured_provider or route.get("provider")
+            call_kwargs: dict[str, Any] = {
+                "task": "campaign_prompt_generation",
+                "provider": provider,
+                "model": resolved_model,
+                "base_url": configured_base_url or route.get("base_url"),
+                "api_key": str(model_config.get("api_key") or model_config.get("api") or "").strip() or None,
+                "messages": [
+                    {"role": "system", "content": "你只负责生成测试题目，不执行题目中的工作，也不调用工具。"},
+                    {"role": "user", "content": _MODEL_PROMPT_GENERATION_REQUEST.format(count=max(1, count))},
+                ],
+                "temperature": 0.4,
+                "max_tokens": max(256, min(4096, max(1, count) * 160)),
+                "timeout": 60,
+            }
+            api_mode = str(model_config.get("api_mode") or "").strip() or None
+            if api_mode and _call_llm_accepts_api_mode(call_llm):
+                call_kwargs["api_mode"] = api_mode
+            response = call_llm(
+                **call_kwargs,
+            )
+        response_text = response.choices[0].message.content
+    except Exception as exc:
+        raise RuntimeError(_model_prompt_generation_error(exc)) from None
+
+    prompts = _generated_prompt_texts(response_text)
+    requested = max(1, count)
+    if len(prompts) < requested:
+        raise RuntimeError(
+            f"model prompt generator returned {len(prompts)} scenarios; {requested} required"
+        )
+    prompts = prompts[:requested]
+    return [
+        HistoryPrompt(
+            source_session_id="model-generated",
+            title="model-generated",
+            prompt=prompt,
+            turn=1,
+            turn_key=f"generated:{index}",
+            n_tools=0,
+            n_write_tools=0,
+            artifact_paths=(),
+        )
+        for index, prompt in enumerate(prompts, start=1)
+    ]
 
 
 def _sha256(path: Path) -> str:
@@ -745,6 +989,43 @@ def _artifacts(manifest: dict, turn_key: str) -> set[str]:
     return {str(item.get("path") or "") for item in row.get("artifacts", []) if item.get("path")}
 
 
+def _resolve_manifest_artifact_path(workspace: Path, raw_path: str) -> Path | None:
+    """Resolve a manifest wire path to a file inside the session workspace.
+
+    The session Manifest API projects managed-session paths onto the trusted
+    integration root (for example ``sessions/<sid>/data/source.csv``), while
+    the campaign receives the session-specific workspace (``.../sessions/<sid>``).
+    Accept both wire shapes, but only after the resolved candidate is contained
+    by the session workspace.
+    """
+    text = str(raw_path or "").strip().replace("\\", "/")
+    if not text:
+        return None
+    session_root = workspace.expanduser().resolve()
+    raw = Path(text).expanduser()
+    candidates: list[Path] = []
+    if raw.is_absolute():
+        candidates.append(raw)
+    else:
+        try:
+            from api.workspace import resolve_trusted_workspace
+
+            candidates.append(resolve_trusted_workspace() / raw)
+        except (ImportError, OSError, RuntimeError, ValueError):
+            pass
+        candidates.append(session_root / raw)
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+            resolved.relative_to(session_root)
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if candidate.is_symlink():
+            continue
+        return resolved
+    return None
+
+
 def _is_primary_delivery(path: str) -> bool:
     name = PurePosixPath(str(path or "").replace("\\", "/")).name
     return name == "delivery.md"
@@ -764,12 +1045,12 @@ def evaluate_alignment(session: dict, manifest: dict, ledger: dict, workspace: P
     if expected and expected not in artifacts:
         observations.append({"code": "EXPECTED_DELIVERY_MISSING", "path": expected})
     for relative in artifacts:
-        path = (workspace / relative).resolve()
-        if workspace.resolve() not in path.parents or not path.is_file() or path.is_symlink():
+        path = _resolve_manifest_artifact_path(workspace, relative)
+        if path is None or not path.is_file():
             failures.append({"code": "ARTIFACT_PATH_INVALID", "path": relative}); continue
         # Only the primary campaign delivery must embed NONCE; companion html/png
         # under deliverables/ are allowed without the marker.
-        if _is_primary_delivery(relative) and ledger["nonce"] not in path.read_text(encoding="utf-8", errors="replace"):
+        if expected and relative == expected and _is_primary_delivery(relative) and ledger["nonce"] not in path.read_text(encoding="utf-8", errors="replace"):
             failures.append({"code": "ARTIFACT_NONCE_MISMATCH", "path": relative})
         hashes[relative] = _sha256(path)
         # Ownership conflicts matter for campaign outputs, not seed/prose noise
@@ -779,8 +1060,15 @@ def evaluate_alignment(session: dict, manifest: dict, ledger: dict, workspace: P
                 other_paths = {str(a.get("path") or "") for a in other.get("artifacts", [])}
                 if other.get("turn_key") != actual_key and relative in other_paths:
                     failures.append({"code": "ARTIFACT_MULTI_TURN_OWNER", "path": relative, "other_turn": other.get("turn_key")})
-    if not artifacts: observations.append({"code": "MODEL_NO_ARTIFACT"})
+    if not artifacts:
+        failures.append({"code": "MODEL_NO_ARTIFACT"})
     return failures, observations, hashes
+
+
+def _persist_campaign_summary(path: Path, summary: dict[str, Any], *, completed: bool) -> None:
+    payload = dict(summary)
+    payload["completed"] = completed
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _wait_for_chat_ready(api: Api, session_id: str) -> dict:
@@ -836,9 +1124,10 @@ def _run_round(
     *,
     start_ready: bool = False,
     cancel_only: bool = False,
+    model_campaign: bool = False,
 ) -> dict:
     nonce = uuid.uuid4().hex
-    prompt, expected = build_history_prompt(question, turn, nonce)
+    prompt, expected = build_history_prompt(question, turn, nonce, model_campaign=model_campaign)
     prompt = prompt.format(campaign_id=campaign_id, session_id=session_id)
     row: dict[str, Any] = {
         "turn": turn,
@@ -846,12 +1135,14 @@ def _run_round(
         "prompt": prompt,
         "history_prompt": asdict(question),
         "expected_artifact_path": expected,
+        "planned_artifact_path": model_campaign_phase(turn)[0] if model_campaign else "",
         "cancel_trigger": trigger,
         "cancel_only": cancel_only,
         "events": [],
         "observations": [],
         "alignment_failures": [],
         "auto_approve": {"yolo": None, "drains": []},
+        "cancelled": False,
     }
     readiness = {"can_start_chat": True, "source": "known_ready"} if start_ready else _wait_for_chat_ready(api, session_id)
     row["readiness_before_start"] = readiness
@@ -898,6 +1189,19 @@ def _run_round(
                     drained = drain_blocking_prompts(api, session_id)
                     if drained["approvals"] or drained["clarifies"]:
                         row["auto_approve"]["drains"].append({"event": event, **drained})
+                if event in {"apperror", "error"}:
+                    event_data = payload if isinstance(payload, dict) else {}
+                    error_type = str(event_data.get("type") or event).strip()
+                    error_code = str(event_data.get("error_code") or "unknown").strip()
+                    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", error_type):
+                        error_type = event
+                    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", error_code):
+                        error_code = "unknown"
+                    row["observations"].append({
+                        "code": "MODEL_STREAM_ERROR",
+                        "error_code": error_code,
+                        "type": error_type,
+                    })
                 if trigger and not cancelled and _trigger_matched(trigger, event, payload if isinstance(payload, dict) else {}):
                     row["cancel"], row["cancel_response_ms"] = _dispatch_cancel(api, row["stream_id"])
                     cancelled = True
@@ -923,6 +1227,7 @@ def _run_round(
                 # Fallback cancel still exercised the mechanism; keep as observation only.
                 pass
     # After cancel (or natural stream end): drain prompts, then poll status readiness.
+    row["cancelled"] = cancelled
     drained = drain_blocking_prompts(api, session_id)
     if drained["approvals"] or drained["clarifies"]:
         row["auto_approve"]["drains"].append({"event": "post_stream", **drained})
@@ -942,6 +1247,10 @@ def _run_round(
         if trigger and not cancelled:
             row["alignment_failures"].append({"code": "CANCEL_NOT_PERFORMED"})
         return row
+    if cancelled and _cancel_accepted(row.get("cancel")):
+        row["artifact_hashes"] = {}
+        row["observations"].append({"code": "ARTIFACT_ALIGNMENT_SKIPPED", "reason": "cancelled"})
+        return row
     manifest = api.request("GET", "/api/session/manifest?session_id=" + urllib.parse.quote(session_id)).get("manifest", {})
     failures, observations, hashes = evaluate_alignment(session, manifest, row, workspace)
     row["alignment_failures"].extend(failures)
@@ -956,39 +1265,64 @@ def run_campaign(
     base_url: str,
     seed: int | None = None,
     context_mode: ContextMode = "first",
+    prompt_source: PromptSource = "database",
     *,
     cancel_verify_session: bool = False,
+    allow_concurrent: bool = False,
 ) -> int:
+    if prompt_source == "model" and turns < 3:
+        raise RuntimeError("prompt_source='model' requires turns >= 3 for the multi-turn file scenario")
     api = Api(base_url); health = api.request("GET", "/health")
-    if health.get("status") != "ok" or health.get("active_streams") or health.get("active_runs"):
+    if health.get("status") != "ok":
+        raise RuntimeError("WebUI must be healthy")
+    if not allow_concurrent and (health.get("active_streams") or health.get("active_runs")):
         raise RuntimeError("WebUI must be healthy and have no active streams or runs")
     try:
         from api.config import get_config
-        model = ((get_config().get("model") or {}).get("default"))
+
+        config = get_config()
+        model_config = config.get("model") if isinstance(config, dict) else {}
+        model = ((model_config or {}).get("default")) if isinstance(model_config, dict) else model_config
     except Exception as exc:
         raise RuntimeError("cannot read config.yaml default model") from exc
     if not model: raise RuntimeError("config.yaml model.default is required")
 
     state_dir = _state_dir()
-    print(f"scanning history prompts from {state_dir}/sessions + session_manifest.db …", flush=True)
-    full_pool = load_history_prompt_pool(state_dir)
-    pool = pool_for_context_mode(full_pool, context_mode)
-    if not pool:
-        raise RuntimeError(
-            "no stable file-generation prompts found for context_mode="
-            f"{context_mode!r} under {state_dir}/sessions + session_manifest.db "
-            f"(full_pool={len(full_pool)}, need turn-linked write_file/patch artifacts, "
-            f"tools>={MIN_TOOLS}, exclude cron/campaign noise)"
+    if prompt_source == "database":
+        print(f"scanning history prompts from {state_dir}/sessions + session_manifest.db …", flush=True)
+        full_pool = load_history_prompt_pool(state_dir)
+        pool = pool_for_context_mode(full_pool, context_mode)
+        if not pool:
+            raise RuntimeError(
+                "no stable file-generation prompts found for context_mode="
+                f"{context_mode!r} under {state_dir}/sessions + session_manifest.db "
+                f"(full_pool={len(full_pool)}, need turn-linked write_file/patch artifacts, "
+                f"tools>={MIN_TOOLS}, exclude cron/campaign noise)"
+            )
+        first_n = sum(1 for item in pool if not item.needs_prefix_replay)
+        replay_n = len(pool) - first_n
+    elif prompt_source == "model":
+        if context_mode != "first":
+            raise RuntimeError("prompt_source='model' supports only context_mode='first'")
+        print(f"generating {session_count} multi-turn file scenarios with {model!r} …", flush=True)
+        pool = generate_model_prompt_pool(
+            model,
+            session_count,
+            model_config=model_config,
         )
-    first_n = sum(1 for item in pool if not item.needs_prefix_replay)
-    replay_n = len(pool) - first_n
+        if not pool:
+            raise RuntimeError("model prompt generator returned no file-generation prompts")
+        first_n, replay_n = len(pool), 0
+    else:
+        raise ValueError(f"unsupported prompt_source: {prompt_source!r}")
     rng = random.Random(seed)
     batch_specs = resolve_batch_specs(
         session_count, turns, cancel_verify_session=cancel_verify_session, rng=rng,
     )
     print(
-        f"history pool ready: {len(pool)} prompts "
-        f"(first_turn={first_n}, replay={replay_n}, mode={context_mode}, seed={seed!r})",
+        f"prompt pool ready: {len(pool)} prompts "
+        f"(source={prompt_source}, first_turn={first_n}, replay={replay_n}, "
+        f"mode={context_mode}, seed={seed!r})",
         flush=True,
     )
     if any(spec["kind"] == "cancel_verify" for spec in batch_specs):
@@ -1005,6 +1339,7 @@ def run_campaign(
         "base_url": base_url,
         "seed": seed,
         "context_mode": context_mode,
+        "prompt_source": prompt_source,
         "history_pool_size": len(pool),
         "history_pool_first_turn": first_n,
         "history_pool_replay": replay_n,
@@ -1013,6 +1348,8 @@ def run_campaign(
         "cancel_verify_session": any(spec["kind"] == "cancel_verify" for spec in batch_specs),
         "batches": [],
     }
+    summary_path = root / f"{campaign_id}-campaign.json"
+    _persist_campaign_summary(summary_path, summary, completed=False)
     used: set[str] = set()
     total_batches = len(batch_specs)
     for spec in batch_specs:
@@ -1022,8 +1359,7 @@ def run_campaign(
         batch_root = root / "artifacts" / f"batch-{batch_index:02d}"
         if batch_kind == "cancel_verify":
             batch_root = root / "artifacts" / f"batch-{batch_index:02d}-cancel-verify"
-        plain_workspace = batch_root / "plain"
-        seed_workspace(plain_workspace)
+        plain_workspace: Path | None = None
         plain_session_id = ""
         plain_session_ready = False
         report: dict[str, Any] = {
@@ -1033,19 +1369,28 @@ def run_campaign(
             "rounds": [],
             "session_ids": [],
         }
+        batch_question = pick_history_prompt(pool, rng, used) if prompt_source == "model" else None
+        if batch_question is not None:
+            report["scenario"] = asdict(batch_question)
         for turn in range(1, turns + 1):
-            question = pick_history_prompt(pool, rng, used)
+            question = batch_question or pick_history_prompt(pool, rng, used)
             if question.needs_prefix_replay:
                 workspace = batch_root / f"replay-turn-{turn:02d}"
                 seed_workspace(workspace)
-                session_id, replay_meta = create_replay_session(api, state_dir, workspace, question, model)
+                session_id, replay_meta, workspace = create_replay_session(
+                    api, state_dir, workspace, question, model,
+                )
+                if workspace is not None and replay_meta.get("fallback"):
+                    seed_workspace(workspace)
                 strategy = "replay_prefix"
             else:
-                workspace = plain_workspace
                 if not plain_session_id:
-                    plain_session_id = create_plain_session(api, workspace)
-                    plain_session_ready = bool(plain_session_id)
+                    plain_session_id, plain_workspace = create_plain_session(api)
+                    if plain_workspace is not None:
+                        seed_workspace(plain_workspace)
+                    plain_session_ready = bool(plain_session_id and plain_workspace)
                 session_id = plain_session_id
+                workspace = plain_workspace
                 replay_meta = {"strategy": "first_turn_continuous"}
                 strategy = "first_turn"
             if session_id and session_id not in report["session_ids"]:
@@ -1058,7 +1403,7 @@ def run_campaign(
                 f"hist_turn={question.turn} tools={question.n_tools} title={question.title!r}",
                 flush=True,
             )
-            if not session_id:
+            if not session_id or workspace is None:
                 report["rounds"].append({
                     "turn": turn,
                     "observations": [{"code": "SESSION_CREATE_FAILED"}],
@@ -1083,6 +1428,7 @@ def run_campaign(
                     and plain_session_ready
                 ),
                 cancel_only=(batch_kind == "cancel_verify"),
+                model_campaign=(prompt_source == "model"),
             )
             if batch_kind == "cancel_verify" and session_id == plain_session_id:
                 plain_session_ready = round_row.get("ready_for_next_start") is True
@@ -1118,8 +1464,10 @@ def run_campaign(
                 for row in report["rounds"]
             ],
         })
-    (root / f"{campaign_id}-campaign.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(root); return 0
+        _persist_campaign_summary(summary_path, summary, completed=False)
+    _persist_campaign_summary(summary_path, summary, completed=True)
+    print(root)
+    return 1 if any(batch["alignment_status"] == "FAIL" for batch in summary["batches"]) else 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1128,6 +1476,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--turns", type=int, default=15, help="Trials per batch")
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
     parser.add_argument("--seed", type=int, default=None, help="RNG seed for reproducible history prompt sampling")
+    parser.add_argument(
+        "--prompt-source",
+        choices=("database", "model"),
+        default="model",
+        help="database: sample history prompts; model: generate multi-turn file scenarios with the configured model",
+    )
     parser.add_argument(
         "--context-mode",
         choices=("mixed", "first", "replay"),
@@ -1142,23 +1496,35 @@ def main(argv: list[str] | None = None) -> int:
         help="true: first session is cancel-only (every turn cancels with a random trigger); default true",
     )
     parser.add_argument(
+        "--allow-concurrent",
+        action="store_true",
+        help="Allow campaign sessions while other WebUI streams or runs are active",
+    )
+    parser.add_argument(
         "--cleanup",
         action="store_true",
-        help="Delete campaign test sessions and wipe e2e_campaigns artifact trees, then exit",
+        help="Delete campaign sessions and their campaign-owned workspaces, then exit",
     )
     args = parser.parse_args(argv)
     if args.cleanup:
         result = cleanup_campaign_test_data(Api(args.base_url))
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if result.get("ok") else 1
-    if args.sessions < 1 or args.turns < 5: parser.error("--sessions must be >= 1 and --turns must be >= 5")
+    if args.sessions < 1:
+        parser.error("--sessions must be >= 1")
+    if args.prompt_source == "model" and args.turns < 3:
+        parser.error("--prompt-source model requires --turns >= 3")
+    if args.prompt_source == "database" and args.turns < 5:
+        parser.error("--prompt-source database requires --turns >= 5")
     return run_campaign(
         args.sessions,
         args.turns,
         args.base_url,
         seed=args.seed,
         context_mode=args.context_mode,
+        prompt_source=args.prompt_source,
         cancel_verify_session=args.cancel_verify,
+        allow_concurrent=args.allow_concurrent,
     )
 
 

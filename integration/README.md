@@ -530,7 +530,7 @@ Response includes global `stats`: `{ hub, installed, not_installed, custom }` ac
 | `profiles/` | `GET /api/profiles` enrich; `POST /api/profile/info`; `GET /api/profile/logo-presets` |
 | `scripts/fetch_profile_logos.py` | Generate built-in logo library |
 | `assets/profile-logos/` | Logo preset PNGs + manifest |
-| `agent_message_semantics/` | Hermes Agent 内部脚手架与 model-only context anchor 的兼容分类、显示投影和审计日志（含原始 `content`）；`api/streaming.py` / `api/session_manifest.py` 只保留薄调用 |
+| `agent_message_semantics/` | Hermes Agent 内部脚手架与 model-only context anchor 的兼容分类、一问一答显示投影和无正文 DEBUG 审计；`api/streaming.py` / `api/session_manifest.py` 只保留薄调用 |
 | `assets/hermes_skillhub.js` | SkillHub sidebar panel |
 | `assets/hermes_profiles.js` | Profiles panel enrich |
 | `swagger/openapi.json` | Integration API 规范（`GET /api/openapi.json` 动态 `servers`） |

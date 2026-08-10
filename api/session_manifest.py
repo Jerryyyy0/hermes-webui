@@ -262,6 +262,9 @@ def _collect_media_artifact_events(messages: list, workspace: Path, *, turn_key:
         ]
     for msg_idx in indices:
         message = messages[msg_idx]
+        if _is_synthetic_control_message(message):
+            log_control_message("manifest_media_skip", message)
+            continue
         text = _message_text(message.get('content'))
         # Skip context-compaction messages — those are system-generated
         # handoffs, not media produced during the turn.
@@ -1985,10 +1988,17 @@ def _records_by_path(rows: list[dict] | None) -> dict[str, dict]:
     return out
 
 
-def _artifact_identity(row: dict, default_profile: str = '') -> str:
+def _artifact_identity(
+    row: dict,
+    default_profile: str = '',
+    default_workspace_root: str = '',
+) -> str:
     profile = str(row.get('profile') if 'profile' in row else default_profile or '').strip()
+    workspace_root = str(
+        row.get('workspace_root') if 'workspace_root' in row else default_workspace_root or ''
+    ).strip()
     path = str(row.get('path') or '').strip()
-    return f'{profile}\0{path}'
+    return f'{profile}\0{workspace_root}\0{path}'
 
 
 def _store_artifact_record(row: dict[str, Any]) -> dict[str, Any] | None:
@@ -2008,6 +2018,11 @@ def _store_artifact_record(row: dict[str, Any]) -> dict[str, Any] | None:
         'profile': profile,
         'turn_key': str(row.get('turn_key') or '').strip(),
     }
+    # Store reads always carry this field, including legacy ``''`` rows.  Keep
+    # unpersisted reconcile rows unscoped so their pre-existing SSE behavior is
+    # unchanged; the durable store is where root identity becomes mandatory.
+    if 'workspace_root' in row:
+        record['workspace_root'] = str(row.get('workspace_root') or '').strip()
     if is_skill:
         record['resource_type'] = 'skill'
         record['skill_name'] = path
@@ -2289,7 +2304,7 @@ def _serialize_manifest_row(
     return row
 
 
-def _wire_file_path_for_integration(workspace: Path, path: str) -> str:
+def _wire_file_path_for_integration(workspace_root: Path, path: str) -> str:
     """Project session-relative file paths onto DEFAULT_WORKSPACE for wire/SSE.
 
     Matches left-rail ``/api/integration/workspace/files`` prefixing so
@@ -2297,7 +2312,7 @@ def _wire_file_path_for_integration(workspace: Path, path: str) -> str:
     """
     from api.session_manifest_store import project_artifact_path_for_integration_root
 
-    return project_artifact_path_for_integration_root(path, workspace)
+    return project_artifact_path_for_integration_root(path, workspace_root)
 
 
 def _expired_workspace_file_wire_path(workspace: Path, rel: str, entry_kind: str) -> str | None:
@@ -2413,16 +2428,35 @@ def _row_to_wire(
         return None
     rel = str(row.get('path') or '').strip()
     entry_kind = str(row.get('kind') or row.get('entry_kind') or 'file')
-    preview_path = _file_preview_path(workspace, rel, entry_kind)
+    try:
+        from api.session_manifest_store import (
+            effective_manifest_workspace_root,
+            relative_prefix_under_root,
+        )
+
+        root_scoped = 'workspace_root' in row
+        stored_root = row.get('workspace_root') if root_scoped else workspace
+        row_workspace = effective_manifest_workspace_root(stored_root)
+    except Exception:
+        row_workspace = None
+    if row_workspace is None:
+        return None
+    integration_prefix = relative_prefix_under_root(row_workspace)
+    preview_path = _file_preview_path(row_workspace, rel, entry_kind)
     if preview_path:
+        # The existing workspace file endpoint is rooted at DEFAULT_WORKSPACE.
+        # A record outside that root has no safe locator in its current wire
+        # shape, so never fall back to a bare relative path.
+        if root_scoped and integration_prefix is None:
+            return None
         return _serialize_manifest_row(
-            _wire_file_path_for_integration(workspace, preview_path),
+            _wire_file_path_for_integration(row_workspace, preview_path),
             MANIFEST_PREVIEW_FILE,
             source_tool,
             profile=profile,
         )
     if source_tool == MEDIA_ARTIFACT_SOURCE:
-        media_path = _session_media_preview_path(workspace, rel, entry_kind)
+        media_path = _session_media_preview_path(row_workspace, rel, entry_kind)
         if media_path:
             # Absolute MEDIA paths stay absolute; in-workspace MEDIA already
             # returned via _file_preview_path above.
@@ -2438,11 +2472,13 @@ def _row_to_wire(
             return None
         expired_path = None
         if source_tool == MEDIA_ARTIFACT_SOURCE:
-            expired_path = _expired_media_file_wire_path(workspace, rel, entry_kind)
+            expired_path = _expired_media_file_wire_path(row_workspace, rel, entry_kind)
         else:
-            expired_path = _expired_workspace_file_wire_path(workspace, rel, entry_kind)
+            if root_scoped and integration_prefix is None:
+                return None
+            expired_path = _expired_workspace_file_wire_path(row_workspace, rel, entry_kind)
             if expired_path:
-                expired_path = _wire_file_path_for_integration(workspace, expired_path)
+                expired_path = _wire_file_path_for_integration(row_workspace, expired_path)
         if expired_path:
             return _serialize_manifest_row(
                 expired_path,
@@ -2847,27 +2883,37 @@ def build_session_manifest(session, source_info: dict[str, str] | None = None) -
     decided_turn_keys: set[str] = set()
     try:
         from api.session_manifest_store import (
-            backfill_missing_manifest_records,
+            effective_manifest_workspace_root,
             load_manifest_decided_turn_keys,
+            load_manifest_decided_turn_keys_by_root,
             load_manifest_records,
-            repair_empty_manifest_turns,
         )
 
-        repair_empty_manifest_turns(session)
+        # Historical artifact backfill and empty-decision repair deliberately
+        # remain disabled on manifest reads. GET must not mutate the artifact
+        # store merely because a user opens an older session.
+        # repair_empty_manifest_turns(session)
         store_rows = load_manifest_records(session, include_lineage=True)
-        decided_turn_keys = load_manifest_decided_turn_keys(session, include_lineage=True)
-        if decided_turn_keys:
+        current_root = effective_manifest_workspace_root(workspace)
+        decided_turn_keys = {
+            turn_key
+            for turn_key, root in load_manifest_decided_turn_keys_by_root(session, include_lineage=True)
+            if current_root is not None and root == str(current_root)
+        }
+        # Keep the public current-root helper as the compatibility seam for
+        # callers/tests that substitute the manifest-store reader.  Its real
+        # implementation is also root-scoped, so this cannot reintroduce
+        # cross-root suppression in production.
+        decided_turn_keys.update(load_manifest_decided_turn_keys(session, include_lineage=True))
+        if store_rows or decided_turn_keys:
             if source_info is not None:
                 source_info['manifest_source'] = 'db'
         else:
-            backfill_result = backfill_missing_manifest_records(session)
-            store_rows = load_manifest_records(session, include_lineage=True)
-            decided_turn_keys = load_manifest_decided_turn_keys(session, include_lineage=True)
-            if source_info is not None:
-                if store_rows or decided_turn_keys:
-                    source_info['manifest_source'] = str(backfill_result.get('source') or 'backfill')
-                else:
-                    source_info['manifest_source'] = str(backfill_result.get('source') or 'derived')
+            # backfill_missing_manifest_records(session)
+            # Historical sessions without store decisions remain derived-only
+            # until an explicit maintenance operation performs a backfill.
+            # ``manifest_source`` stays ``derived`` as initialized above.
+            pass
     except Exception:
         logger.debug("failed to read session manifest store", exc_info=True)
 

@@ -1,6 +1,6 @@
 # Session Manifest Artifacts 实现
 
-本文是 Artifacts 证据提取、路径安全、turn 归属、持久化、backfill/read-repair 和 wire projection 的唯一实现说明。产品语义见 [session-inspector-manifest.md](./session-inspector-manifest.md)；HTTP/SSE 字段见 [session-manifest-api.md](./session-manifest-api.md)。
+本文是 Artifacts 证据提取、路径安全、turn 归属、持久化、显式 backfill/read-repair 和 wire projection 的唯一实现说明。产品语义见 [session-inspector-manifest.md](./session-inspector-manifest.md)；HTTP/SSE 字段见 [session-manifest-api.md](./session-manifest-api.md)。
 
 实现入口：`api/session_manifest.py`、`api/session_manifest_store.py`、`api/streaming.py`、`api/gateway_chat.py`。
 
@@ -11,7 +11,7 @@ Artifacts 的权威持久化状态层是 `{HERMES_WEBUI_STATE_DIR}/session_manif
 身份键：
 
 ```text
-lineage_key + profile + turn_key + record_kind + path
+lineage_key + profile + workspace_root + turn_key + record_kind + path
 ```
 
 核心不变量：
@@ -20,10 +20,11 @@ lineage_key + profile + turn_key + record_kind + path
 2. 中间 assistant prose 不提取路径。
 3. 不扫描 terminal stdout、目录列表、heredoc/Python 源码或整个 workspace。
 4. 非空 DB decision 是该 turn 的权威记录；正常完成结算时，同轮最终 assistant 明确列出且存在的文件会追加到该 decision，重复路径保留工具来源。
-5. Empty decision 只能用同轮完整 transcript 的强证据原子修复。
-6. Read-repair 不更新 session recency 或 session-list 事件。
+5. Empty decision 只能由显式维护操作使用同轮完整 transcript 的强证据原子修复。
+6. `GET /api/session/manifest` 是只读操作，不更新 artifact store、session recency 或 session-list 事件。
 7. 同一稳定 `tool_call_id` 的重放不得跨 turn 重复归属。
 8. 工具来源只接受成功 completed 事件；成功文件读取只建立同 turn 瞬态 evidence，不进入 wire/store。
+9. `workspace_root=""` 是历史默认根别名：读取时映射到启动时的 `HERMES_WEBUI_DEFAULT_WORKSPACE`，不回填数据库；decision 与 artifact identity 必须按逻辑 root 隔离。
 
 
 
@@ -34,15 +35,11 @@ flowchart TD
   loadMessages[加载展示消息和工具调用] --> loadStore[加载 lineage/profile store decisions]
   loadStore --> classify{Decision 状态}
   classify -->|非空| useStore[直接使用 store rows]
-  classify -->|empty| repair[严格同轮 read-repair]
-  classify -->|lineage 无 decision| backfill[legacy 或 transcript backfill]
-  repair -->|发现真实成果| replace[原子替换该 turn decision]
-  repair -->|仍为空| keepEmpty[保留 empty decision]
-  backfill --> persist[写 artifacts 或 empty decision]
+  classify -->|empty| useEmpty[保留 empty decision]
+  classify -->|lineage 无 decision| derive[仅临时从 transcript 或 legacy sidecar 派生]
+  derive --> wire
   useStore --> wire[Wire projection]
-  replace --> wire
-  keepEmpty --> wire
-  persist --> wire
+  useEmpty --> wire
 ```
 
 
@@ -53,9 +50,9 @@ flowchart TD
 
 - **非空 decision**：该 turn 至少有一条 `path != ""` 的 artifact row。
 - **Empty decision**：该 turn 只有一条 `path = ""`、`preview = "file"`、`source_tool = "assistant_prose"` 的 marker；marker 不进入 wire。
-- **无 decision**：当前 lineage/profile 没有任何 store row，允许 legacy/transcript backfill。
+- **无 decision**：当前 lineage/profile/逻辑 workspace root 没有任何 store row；GET 仅临时从 transcript 或 legacy sidecar 派生 wire 结果，不写入 DB。
 
-`repair_empty_manifest_turns()` 只扫描 empty turns；提取到成果后，`replace_manifest_turn_records()` 按 `(lineage_key, profile, turn_key)` 删除旧 marker 并在同一事务写入新 rows。已有非空 turn 不参与 repair。
+`repair_empty_manifest_turns()` 与 `backfill_missing_manifest_records()` 保留给显式维护操作；`GET /api/session/manifest` 不调用它们。前者只扫描当前逻辑 root 的 empty turns；提取到成果后，`replace_manifest_turn_records()` 按 `(lineage_key, profile, workspace_root, turn_key)` 删除旧 marker 并在同一事务写入新 rows。已有非空 turn 不参与 repair。
 
 ## 3. Turn 与工具事件
 
@@ -132,7 +129,7 @@ Mutation 工具可以先形成内部记录；最终 wire 再判断是否可预�
 
 ### 4.3 MEDIA:
 
-_MEDIA_TOKEN_RE 只读取 assistant 消息中的显式 MEDIA:。远程 URL 跳过。Workspace 内 media 规范化为相对路径；允许的 workspace 外本地 media 保留绝对路径并走 session media preview。
+_MEDIA_TOKEN_RE 只读取非 `internal_scaffold` / `context_anchor` assistant 消息中的显式 MEDIA:。远程 URL 跳过。Workspace 内 media 规范化为相对路径；允许的 workspace 外本地 media 保留绝对路径并走 session media preview。
 
 User 消息中的 MEDIA:、工具结果 JSON 的相似字段和普通 URL 都不作为 media artifact。
 
@@ -244,13 +241,13 @@ final assistant 已进入 s.messages
 Store row 最小字段：
 
 ```text
-session_id, lineage_key, profile, turn_key, record_kind,
+session_id, lineage_key, profile, workspace_root, turn_key, record_kind,
 path, preview, source_tool, created_at, updated_at
 ```
 
 Profile 只来自 `session.profile`，缺失写空字符串；不从 active profile、parent、workspace 或 path 推断。
 
-Legacy `session.turn_artifacts` 不再是新会话写入目标，只在 lineage 完全无 decision 时作为 backfill 输入。Legacy 空 source 规范化为 `assistant_prose`，不伪装成写入工具。
+Legacy `session.turn_artifacts` 不再是新会话写入目标，只在显式 backfill 操作且 lineage 完全无 decision 时作为输入。Manifest GET 可将它作为临时展示投影，但绝不将其回填至 store。Legacy 空 source 规范化为 `assistant_prose`，不伪装成写入工具。
 
 ## 7. Wire projection 与 expired
 
@@ -260,6 +257,8 @@ Legacy `session.turn_artifacts` 不再是新会话写入目标，只在 lineage 
 
 - `preview=file`：workspace file 或允许的 media 可预览；
 - `preview=skill`：canonical skill 可预览。
+
+持久化 file artifact 必须用行内 `workspace_root`（历史空值映射默认根）解析；只有该根位于 integration workspace 根内时，才投影为 `/api/integration/workspace/file` 可使用的相对 path。默认根外的 external/worktree row 保留归属记录，但不输出 `preview=file`，不得退回裸相对 path。
 
 Expired 行：
 
@@ -306,8 +305,8 @@ Expired 只描述已成功写入 store 后才丢失的历史成果；结算前�
 | `_artifact_path_is_real`                   | Reconcile/持久化存在性闸门                |
 | `upsert_manifest_records`                  | 普通 store upsert                   |
 | `replace_manifest_turn_records`            | 原子替换单 turn decision               |
-| `repair_empty_manifest_turns`              | Empty-only read-repair            |
-| `backfill_missing_manifest_records`        | Lineage 无 decision 时 backfill     |
+| `repair_empty_manifest_turns`              | 显式维护时的 empty-only read-repair   |
+| `backfill_missing_manifest_records`        | 显式维护时、lineage 无 decision 的 backfill |
 | `_row_to_wire` / `_rows_to_wire`           | Wire 与 expired projection         |
 | `_persist_turn_artifact_paths`             | Turn 完成持久化                        |
 
@@ -328,6 +327,6 @@ Expired 只描述已成功写入 store 后才丢失的历史成果；结算前�
 - Terminal `-o` 与 stdout/heredoc 排除；
 - Workspace、`uploads/`、cruft、缺失文件过滤；
 - Skill canonicalization；
-- Empty decision 原子修复、profile/lineage 隔离和幂等；
+- Manifest GET 不触发 history backfill 或 empty-decision 修复；显式维护的 empty decision 原子修复、profile/lineage 隔离和幂等；
 - Expired provenance；
 - Transcript save 早于 manifest decision。
