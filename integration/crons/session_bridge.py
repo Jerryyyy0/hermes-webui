@@ -1728,6 +1728,7 @@ def _consume_matching_cron_fallback_state_user(
 def reconcile_cron_session_transcript(
     session,
     *,
+    job: dict | None = None,
     fallback_output: str | None = None,
     run_mtime: float | int | None = None,
 ) -> bool:
@@ -1782,6 +1783,22 @@ def reconcile_cron_session_transcript(
             merged_prefix.append(message)
             known.add(key)
     changed = merged_prefix != sidecar_prefix
+    if fallback_output and job is not None and not any(
+        isinstance(message, dict) and message.get("role") == "user"
+        for message in merged_prefix
+    ):
+        # Output can arrive after an empty sidecar was materialized but before
+        # the Agent commits its execution prompt to state.db. Restore the
+        # synthetic user anchor so the fallback assistant cannot become the
+        # first visible message in the cron session.
+        fallback_user = build_cron_fallback_messages(
+            job,
+            fallback_output,
+            run_mtime=run_mtime,
+        )[0]
+        merged_prefix.append(fallback_user)
+        merged_prefix.sort(key=lambda message: _cron_error_timestamp(message.get("timestamp")))
+        changed = True
     if fallback_output and not any(
         isinstance(message, dict) and message.get("role") == "assistant"
         for message in db_messages
@@ -1928,6 +1945,7 @@ def _materialize_cron_session_found(
                 changed = True
             if reconcile_cron_session_transcript(
                 full,
+                job=job,
                 fallback_output=fallback_output,
                 run_mtime=run_mtime,
             ):

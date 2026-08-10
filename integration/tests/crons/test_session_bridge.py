@@ -378,6 +378,42 @@ def test_materialize_uses_fallback_when_state_db_messages_empty(cron_env, monkey
     assert full.messages[0].get("source") == "cron_fallback"
 
 
+def test_materialize_existing_empty_sidecar_restores_fallback_user_anchor(cron_env, monkeypatch):
+    from api.models import Session
+    from integration.crons.session_bridge import materialize_cron_session
+
+    sid = "cron_job1_1700000000"
+    sidecar = Session(
+        session_id=sid,
+        title="Nightly",
+        profile="default",
+        messages=[],
+    )
+    sidecar.source_tag = "cron"
+    sidecar.cron_execution_profile = str(cron_env["home"])
+    sidecar.save()
+
+    job = {"id": "job1", "name": "Nightly", "profile": "", "prompt": "run nightly"}
+    with patch("api.models.get_state_db_session_messages", return_value=[]):
+        with patch(
+            "api.profiles.list_profiles_api",
+            return_value=[{"name": "default", "path": str(cron_env["home"])}],
+        ):
+            materialize_cron_session(
+                job,
+                owner_profile="default",
+                execution_home=cron_env["home"],
+                fallback_output="## Response\n\nHello from cron",
+                run_mtime=1700000001.0,
+            )
+
+    full = Session.load(sid)
+    assert full is not None
+    assert [message["role"] for message in full.messages] == ["user", "assistant"]
+    assert full.messages[0]["content"] == "run nightly"
+    assert full.messages[1]["content"] == "Hello from cron"
+
+
 def test_materialize_no_agent_output_creates_stable_session(cron_env):
     from integration.crons.session_bridge import materialize_cron_session
 
