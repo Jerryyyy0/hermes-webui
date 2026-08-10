@@ -379,7 +379,6 @@ def test_model_prompt_source_skips_history_database(tmp_path, monkeypatch):
         context_mode="first",
         cancel_verify_session=True,
         prompt_source="model",
-        allow_concurrent=True,
     ) == 0
 
 
@@ -445,7 +444,27 @@ def test_model_prompt_source_reuses_one_scenario_for_every_turn_in_a_batch(tmp_p
     assert first_batch[0] != second_batch[0]
 
 
-def test_campaign_rejects_busy_webui_without_allow_concurrent(monkeypatch):
+def test_campaign_allows_busy_webui_by_default(monkeypatch):
+    class _BusyApi:
+        def request(self, method, path, body=None, timeout=20):
+            assert (method, path) == ("GET", "/health")
+            return {"status": "ok", "active_streams": ["other-session"], "active_runs": []}
+
+    class _StopAfterHealth(Exception):
+        pass
+
+    monkeypatch.setattr("scripts.real_model_campaign.Api", lambda _base_url: _BusyApi())
+    monkeypatch.setattr("api.config.get_config", lambda: {"model": {"default": "test-model"}})
+    monkeypatch.setattr(
+        "scripts.real_model_campaign.generate_model_prompt_pool",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(_StopAfterHealth()),
+    )
+
+    with pytest.raises(_StopAfterHealth):
+        run_campaign(1, 3, "http://test", prompt_source="model")
+
+
+def test_campaign_can_still_require_an_idle_webui(monkeypatch):
     class _BusyApi:
         def request(self, method, path, body=None, timeout=20):
             assert (method, path) == ("GET", "/health")
@@ -454,7 +473,7 @@ def test_campaign_rejects_busy_webui_without_allow_concurrent(monkeypatch):
     monkeypatch.setattr("scripts.real_model_campaign.Api", lambda _base_url: _BusyApi())
 
     with pytest.raises(RuntimeError, match="active streams or runs"):
-        run_campaign(1, 5, "http://test")
+        run_campaign(1, 5, "http://test", allow_concurrent=False)
 
 
 def test_manifest_integration_prefix_resolves_inside_session_workspace(tmp_path, monkeypatch):

@@ -1294,7 +1294,7 @@ def run_campaign(
     prompt_source: PromptSource = "database",
     *,
     cancel_verify_session: bool = False,
-    allow_concurrent: bool = False,
+    allow_concurrent: bool = True,
 ) -> int:
     if prompt_source == "model" and turns < 3:
         raise RuntimeError("prompt_source='model' requires turns >= 3 for the multi-turn file scenario")
@@ -1524,7 +1524,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--allow-concurrent",
         action="store_true",
-        help="Allow campaign sessions while other WebUI streams or runs are active",
+        default=True,
+        help="Compatibility option; campaign sessions allow other WebUI streams or runs by default",
     )
     parser.add_argument(
         "--cleanup",

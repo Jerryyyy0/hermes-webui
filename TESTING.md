@@ -151,15 +151,15 @@ python scripts/real_model_campaign.py --sessions 1 --turns 5 --context-mode firs
 python scripts/real_model_campaign.py --sessions 1 --turns 3 --prompt-source model
 # optional bool: first session is cancel-only (every turn cancels; trigger chosen randomly)
 python scripts/real_model_campaign.py --sessions 2 --turns 5 --cancel-verify true --seed 42
-# allow campaign sessions while other WebUI sessions are actively running
-python scripts/real_model_campaign.py --sessions 1 --turns 5 --prompt-source model --allow-concurrent
+# campaign sessions may run while other WebUI sessions are actively running
+python scripts/real_model_campaign.py --sessions 1 --turns 5 --prompt-source model
 # delete campaign test sessions and their campaign-owned workspaces
 python scripts/real_model_campaign.py --cleanup
 ```
 
 The campaign runs one stream at a time and uses the configured default model.
-It requires an idle WebUI by default; pass `--allow-concurrent` to run alongside
-other active WebUI streams or runs.
+It permits other active WebUI streams or runs by default; `--allow-concurrent`
+remains accepted for compatibility.
 `--prompt-source` controls where trial questions come from:
 
 - `database` — samples historical WebUI sessions under
