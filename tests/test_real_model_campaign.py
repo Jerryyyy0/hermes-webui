@@ -31,6 +31,7 @@ from scripts.real_model_campaign import (
     parse_bool_arg,
     pick_history_prompt,
     pool_for_context_mode,
+    _persist_campaign_summary,
     random_cancel_verify_plan,
     resolve_batch_specs,
     run_campaign,
@@ -410,6 +411,72 @@ def test_campaign_rejects_busy_webui_without_allow_concurrent(monkeypatch):
         run_campaign(1, 5, "http://test")
 
 
+def test_manifest_integration_prefix_resolves_inside_session_workspace(tmp_path, monkeypatch):
+    integration_root = tmp_path / "workspace"
+    session_workspace = integration_root / "sessions" / "sid-1"
+    artifact = session_workspace / "data" / "source.csv"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text("id,value\n1,ok\n", encoding="utf-8")
+    monkeypatch.setattr("api.workspace.resolve_trusted_workspace", lambda _profile=None: integration_root)
+
+    session = {"messages": [{"role": "user", "content": "nonce", "_turn_key": "turn:1"}]}
+    manifest = {
+        "turns": [{
+            "turn_key": "turn:1",
+            "artifacts": [{"path": "sessions/sid-1/data/source.csv"}],
+        }],
+        "diagnostics": {"orphan_turn_keys": []},
+    }
+
+    failures, observations, hashes = evaluate_alignment(
+        session, manifest, {"nonce": "nonce"}, session_workspace,
+    )
+
+    assert failures == []
+    assert observations == []
+    assert "sessions/sid-1/data/source.csv" in hashes
+
+
+def test_nonce_only_checks_current_expected_delivery(tmp_path):
+    current = tmp_path / "deliverables/turn-04/delivery.md"
+    previous = tmp_path / "deliverables/turn-03/delivery.md"
+    current.parent.mkdir(parents=True)
+    current.write_text("NONCE=current\n", encoding="utf-8")
+    previous.parent.mkdir(parents=True)
+    previous.write_text("NONCE=previous\n", encoding="utf-8")
+    session = {"messages": [{"role": "user", "content": "current", "_turn_key": "turn:4"}]}
+    manifest = {
+        "turns": [{
+            "turn_key": "turn:4",
+            "artifacts": [
+                {"path": "deliverables/turn-03/delivery.md"},
+                {"path": "deliverables/turn-04/delivery.md"},
+            ],
+        }],
+        "diagnostics": {"orphan_turn_keys": []},
+    }
+
+    failures, observations, _ = evaluate_alignment(
+        session,
+        manifest,
+        {"nonce": "current", "expected_artifact_path": "deliverables/turn-04/delivery.md"},
+        tmp_path,
+    )
+
+    assert failures == []
+    assert observations == []
+
+
+def test_campaign_summary_persists_partial_and_complete_states(tmp_path):
+    path = tmp_path / "campaign.json"
+    summary = {"campaign_id": "camp-1", "batches": []}
+
+    _persist_campaign_summary(path, summary, completed=False)
+    assert json.loads(path.read_text(encoding="utf-8"))["completed"] is False
+    _persist_campaign_summary(path, summary, completed=True)
+    assert json.loads(path.read_text(encoding="utf-8"))["completed"] is True
+
+
 def test_unready_session_fails_campaign_round_without_starting_chat(monkeypatch, tmp_path):
     question = HistoryPrompt("source", "title", "请创建交付文件", 1, "turn:0", 5, 1, ())
     api = _FakeApi()
@@ -588,6 +655,34 @@ def test_midstream_cancel_stops_reading_sse(tmp_path, monkeypatch):
     assert any(path.startswith("/api/session/status") for path in paths[cancel_idx + 1 :])
 
 
+def test_successful_normal_cancel_skips_artifact_alignment(tmp_path, monkeypatch):
+    monkeypatch.setattr("scripts.real_model_campaign.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr("scripts.real_model_campaign.uuid.uuid4", lambda: type("U", (), {"hex": "nonce-marker"})())
+    api = _CancelFlowApi(stream_events=[("tool", {"name": "write_file"})], workspace=tmp_path)
+    question = HistoryPrompt("s1", "t", "生成报告", 1, "turn:0", 6, 1, ("a.md",))
+
+    row = _run_round(api, "sid-1", tmp_path, question, "camp-1", 1, "after_first_tool")
+
+    assert row["cancel"]["cancelled"] is True
+    assert {item["code"] for item in row["observations"]} >= {"ARTIFACT_ALIGNMENT_SKIPPED"}
+    assert not any(path.startswith("/api/session/manifest") for _method, path, _body in api.calls)
+
+
+def test_stream_error_is_recorded_without_upstream_error_details(tmp_path, monkeypatch):
+    monkeypatch.setattr("scripts.real_model_campaign.uuid.uuid4", lambda: type("U", (), {"hex": "nonce-marker"})())
+    api = _CancelFlowApi(
+        stream_events=[("apperror", {"type": "provider_error", "error_code": "model_unavailable", "details": "secret"})],
+        workspace=tmp_path,
+    )
+    question = HistoryPrompt("s1", "t", "生成报告", 1, "turn:0", 6, 1, ("a.md",))
+
+    row = _run_round(api, "sid-1", tmp_path, question, "camp-1", 1, None)
+
+    errors = [item for item in row["observations"] if item["code"] == "MODEL_STREAM_ERROR"]
+    assert errors == [{"code": "MODEL_STREAM_ERROR", "error_code": "model_unavailable", "type": "provider_error"}]
+    assert "secret" not in str(row["observations"])
+
+
 def test_resolve_batch_specs_cancel_verify_is_first_session_when_enabled():
     assert [spec["kind"] for spec in resolve_batch_specs(2, 5)] == ["normal", "normal"]
     specs = resolve_batch_specs(2, 5, cancel_verify_session=True, rng=random.Random(7))
@@ -690,10 +785,15 @@ def test_sanitize_prefix_messages_keeps_or_assigns_turn_keys_and_truncates_tools
     assert len(rows[3]["content"]) < 13000
 
 
-def _write_tools(ids_prefix: str):
+def _write_tools(ids_prefix: str, *, count: int = 10, duplicate_ids: bool = False):
+    names = ("terminal", "read_file", "search_files", "todo", "write_file")
     return [
-        {"id": f"{ids_prefix}{i}", "type": "function", "function": {"name": name, "arguments": "{}"}}
-        for i, name in enumerate(("terminal", "read_file", "search_files", "todo", "write_file"), start=1)
+        {
+            "id": f"{ids_prefix}{1 if duplicate_ids else i}",
+            "type": "function",
+            "function": {"name": names[(i - 1) % len(names)], "arguments": "{}"},
+        }
+        for i in range(1, count + 1)
     ]
 
 
@@ -703,11 +803,16 @@ def test_load_history_prompt_pool_keeps_first_and_mid_turns(tmp_path):
     sid = "hist001abc"
     messages = [
         {"role": "user", "content": "分析日志并生成可视化 html 报告", "_turn_key": "turn:0"},
-        {"role": "assistant", "content": "", "tool_calls": _write_tools("c")},
+        # All ten events carry the same ID to prove history selection counts
+        # calls as recorded rather than deduplicating tool_call_id values.
+        {"role": "assistant", "content": "", "tool_calls": _write_tools("c", duplicate_ids=True)},
         {"role": "tool", "tool_call_id": "c5", "name": "write_file", "content": "ok"},
         {"role": "user", "content": "再给我一个 word 版本", "_turn_key": "turn:1"},
         {"role": "assistant", "content": "", "tool_calls": _write_tools("d")},
         {"role": "tool", "tool_call_id": "d5", "name": "write_file", "content": "ok"},
+        {"role": "user", "content": "再生成一个 PDF 交付版本", "_turn_key": "turn:2"},
+        {"role": "assistant", "content": "", "tool_calls": _write_tools("e", count=9)},
+        {"role": "tool", "tool_call_id": "e5", "name": "write_file", "content": "ok"},
     ]
     (sessions / f"{sid}.json").write_text(
         json.dumps({
@@ -743,13 +848,18 @@ def test_load_history_prompt_pool_keeps_first_and_mid_turns(tmp_path):
         (session_id, lineage_key, profile, turn_key, record_kind, path, preview, source_tool, created_at, updated_at)
         VALUES (?, '', '', ?, 'artifact', ?, '', 'write_file', '', '')
         """,
-        [(sid, "turn:0", "report.html"), (sid, "turn:1", "report.docx")],
+        [
+            (sid, "turn:0", "report.html"),
+            (sid, "turn:1", "report.docx"),
+            (sid, "turn:2", "report.pdf"),
+        ],
     )
     con.commit()
     con.close()
 
     pool = load_history_prompt_pool(tmp_path)
     assert {p.turn for p in pool} == {1, 2}
+    assert {p.n_tools for p in pool} == {10}
     mid = next(p for p in pool if p.turn == 2)
     assert mid.user_msg_index == 3
     assert mid.needs_prefix_replay

@@ -49,7 +49,9 @@ if str(ROOT) not in sys.path:
 DEFAULT_BASE_URL = "http://127.0.0.1:8787"
 ROUND_TIMEOUT = 180
 SETTLE_TIMEOUT = 30
-MIN_TOOLS = 5
+# Database prompts must come from sufficiently involved turns. Count each
+# recorded tool-call event; provider/tool-call IDs are not a deduplication key.
+MIN_TOOLS = 10
 PREFIX_TOOL_CONTENT_LIMIT = 12000
 ContextMode = Literal["mixed", "first", "replay"]
 PromptSource = Literal["database", "model"]
@@ -280,7 +282,7 @@ def load_history_prompt_pool(state_dir: Path | None = None) -> list[HistoryPromp
             turn_key = str(message.get("_turn_key") or "")
             user_msg_index = index
             cursor = index + 1
-            tool_ids: list[str] = []
+            tool_calls: list[tuple[str, str]] = []
             write_count = 0
             while cursor < len(messages):
                 row = messages[cursor]
@@ -288,12 +290,12 @@ def load_history_prompt_pool(state_dir: Path | None = None) -> list[HistoryPromp
                     break
                 if isinstance(row, dict) and row.get("role") == "assistant":
                     for tid, name in _tool_events(row):
-                        tool_ids.append(tid)
+                        tool_calls.append((tid, name))
                         if _is_write_tool(name):
                             write_count += 1
                 cursor += 1
             index = cursor
-            if _noise_prompt(prompt, session_id) or write_count < 1 or len(set(tool_ids)) < MIN_TOOLS:
+            if _noise_prompt(prompt, session_id) or write_count < 1 or len(tool_calls) < MIN_TOOLS:
                 continue
             if not turn_key:
                 continue
@@ -310,7 +312,7 @@ def load_history_prompt_pool(state_dir: Path | None = None) -> list[HistoryPromp
                 prompt=prompt.strip(),
                 turn=turn_no,
                 turn_key=turn_key,
-                n_tools=len(set(tool_ids)),
+                n_tools=len(tool_calls),
                 n_write_tools=write_count,
                 artifact_paths=artifacts,
                 user_msg_index=user_msg_index,
@@ -987,6 +989,43 @@ def _artifacts(manifest: dict, turn_key: str) -> set[str]:
     return {str(item.get("path") or "") for item in row.get("artifacts", []) if item.get("path")}
 
 
+def _resolve_manifest_artifact_path(workspace: Path, raw_path: str) -> Path | None:
+    """Resolve a manifest wire path to a file inside the session workspace.
+
+    The session Manifest API projects managed-session paths onto the trusted
+    integration root (for example ``sessions/<sid>/data/source.csv``), while
+    the campaign receives the session-specific workspace (``.../sessions/<sid>``).
+    Accept both wire shapes, but only after the resolved candidate is contained
+    by the session workspace.
+    """
+    text = str(raw_path or "").strip().replace("\\", "/")
+    if not text:
+        return None
+    session_root = workspace.expanduser().resolve()
+    raw = Path(text).expanduser()
+    candidates: list[Path] = []
+    if raw.is_absolute():
+        candidates.append(raw)
+    else:
+        try:
+            from api.workspace import resolve_trusted_workspace
+
+            candidates.append(resolve_trusted_workspace() / raw)
+        except (ImportError, OSError, RuntimeError, ValueError):
+            pass
+        candidates.append(session_root / raw)
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+            resolved.relative_to(session_root)
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if candidate.is_symlink():
+            continue
+        return resolved
+    return None
+
+
 def _is_primary_delivery(path: str) -> bool:
     name = PurePosixPath(str(path or "").replace("\\", "/")).name
     return name == "delivery.md"
@@ -1006,12 +1045,12 @@ def evaluate_alignment(session: dict, manifest: dict, ledger: dict, workspace: P
     if expected and expected not in artifacts:
         observations.append({"code": "EXPECTED_DELIVERY_MISSING", "path": expected})
     for relative in artifacts:
-        path = (workspace / relative).resolve()
-        if workspace.resolve() not in path.parents or not path.is_file() or path.is_symlink():
+        path = _resolve_manifest_artifact_path(workspace, relative)
+        if path is None or not path.is_file():
             failures.append({"code": "ARTIFACT_PATH_INVALID", "path": relative}); continue
         # Only the primary campaign delivery must embed NONCE; companion html/png
         # under deliverables/ are allowed without the marker.
-        if _is_primary_delivery(relative) and ledger["nonce"] not in path.read_text(encoding="utf-8", errors="replace"):
+        if expected and relative == expected and _is_primary_delivery(relative) and ledger["nonce"] not in path.read_text(encoding="utf-8", errors="replace"):
             failures.append({"code": "ARTIFACT_NONCE_MISMATCH", "path": relative})
         hashes[relative] = _sha256(path)
         # Ownership conflicts matter for campaign outputs, not seed/prose noise
@@ -1024,6 +1063,12 @@ def evaluate_alignment(session: dict, manifest: dict, ledger: dict, workspace: P
     if not artifacts:
         failures.append({"code": "MODEL_NO_ARTIFACT"})
     return failures, observations, hashes
+
+
+def _persist_campaign_summary(path: Path, summary: dict[str, Any], *, completed: bool) -> None:
+    payload = dict(summary)
+    payload["completed"] = completed
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _wait_for_chat_ready(api: Api, session_id: str) -> dict:
@@ -1097,6 +1142,7 @@ def _run_round(
         "observations": [],
         "alignment_failures": [],
         "auto_approve": {"yolo": None, "drains": []},
+        "cancelled": False,
     }
     readiness = {"can_start_chat": True, "source": "known_ready"} if start_ready else _wait_for_chat_ready(api, session_id)
     row["readiness_before_start"] = readiness
@@ -1143,6 +1189,19 @@ def _run_round(
                     drained = drain_blocking_prompts(api, session_id)
                     if drained["approvals"] or drained["clarifies"]:
                         row["auto_approve"]["drains"].append({"event": event, **drained})
+                if event in {"apperror", "error"}:
+                    event_data = payload if isinstance(payload, dict) else {}
+                    error_type = str(event_data.get("type") or event).strip()
+                    error_code = str(event_data.get("error_code") or "unknown").strip()
+                    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", error_type):
+                        error_type = event
+                    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", error_code):
+                        error_code = "unknown"
+                    row["observations"].append({
+                        "code": "MODEL_STREAM_ERROR",
+                        "error_code": error_code,
+                        "type": error_type,
+                    })
                 if trigger and not cancelled and _trigger_matched(trigger, event, payload if isinstance(payload, dict) else {}):
                     row["cancel"], row["cancel_response_ms"] = _dispatch_cancel(api, row["stream_id"])
                     cancelled = True
@@ -1168,6 +1227,7 @@ def _run_round(
                 # Fallback cancel still exercised the mechanism; keep as observation only.
                 pass
     # After cancel (or natural stream end): drain prompts, then poll status readiness.
+    row["cancelled"] = cancelled
     drained = drain_blocking_prompts(api, session_id)
     if drained["approvals"] or drained["clarifies"]:
         row["auto_approve"]["drains"].append({"event": "post_stream", **drained})
@@ -1186,6 +1246,10 @@ def _run_round(
         row["observations"].append({"code": "ARTIFACT_ALIGNMENT_SKIPPED", "reason": "cancel_verify"})
         if trigger and not cancelled:
             row["alignment_failures"].append({"code": "CANCEL_NOT_PERFORMED"})
+        return row
+    if cancelled and _cancel_accepted(row.get("cancel")):
+        row["artifact_hashes"] = {}
+        row["observations"].append({"code": "ARTIFACT_ALIGNMENT_SKIPPED", "reason": "cancelled"})
         return row
     manifest = api.request("GET", "/api/session/manifest?session_id=" + urllib.parse.quote(session_id)).get("manifest", {})
     failures, observations, hashes = evaluate_alignment(session, manifest, row, workspace)
@@ -1284,6 +1348,8 @@ def run_campaign(
         "cancel_verify_session": any(spec["kind"] == "cancel_verify" for spec in batch_specs),
         "batches": [],
     }
+    summary_path = root / f"{campaign_id}-campaign.json"
+    _persist_campaign_summary(summary_path, summary, completed=False)
     used: set[str] = set()
     total_batches = len(batch_specs)
     for spec in batch_specs:
@@ -1398,7 +1464,8 @@ def run_campaign(
                 for row in report["rounds"]
             ],
         })
-    (root / f"{campaign_id}-campaign.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+        _persist_campaign_summary(summary_path, summary, completed=False)
+    _persist_campaign_summary(summary_path, summary, completed=True)
     print(root)
     return 1 if any(batch["alignment_status"] == "FAIL" for batch in summary["batches"]) else 0
 

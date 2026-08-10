@@ -165,6 +165,9 @@ other active WebUI streams or runs.
 - `database` — samples historical WebUI sessions under
   `HERMES_WEBUI_STATE_DIR` with stable write-sourced delivery artifacts
   (`session_manifest.db` + transcript write/patch tools; cron/campaign noise excluded).
+  A candidate turn must contain at least 10 recorded tool calls, counted as
+  events without deduplicating tool-call IDs, at least one write call, and a
+  write-sourced delivery Artifact for that turn.
 - `model` (default) — directly calls the configured default model (the same
   auxiliary call path as assistant bubbles) for a JSON string array of business
   scenarios; it does not create a generator session. It prioritizes the current
@@ -179,7 +182,10 @@ missing prerequisites after a cancelled earlier turn. The named files steer the
 task but are not exact-path assertions: the campaign accepts any real Artifact
 that the Session Manifest attributes to the current turn. A normal (non-cancel)
 turn with no Manifest Artifact is an alignment failure and makes the campaign
-exit non-zero. It does not validate References or require a content-hash change.
+exit non-zero. Intentionally cancelled normal turns skip Artifact alignment but
+retain their cancellation observations. Provider/SSE failures are recorded as
+safe `MODEL_STREAM_ERROR` observations. It does not validate References or
+require a content-hash change.
 
 `--context-mode` controls how history context is applied:
 
@@ -195,7 +201,10 @@ approval/clarify prompts only when the SSE stream emits `approval`/`clarify`
 (plus one final drain after the stream ends) so dangerous-tool cards do not
 block unattended runs.
 
-It preserves JSON evidence and replay workspaces below
+It persists the campaign summary before the first batch, after every completed
+batch, and once more with `completed: true` at normal exit. An interrupted run
+therefore leaves a partial summary instead of only per-batch reports. It
+preserves JSON evidence and replay workspaces below
 `HERMES_WEBUI_STATE_DIR/e2e_campaigns/<timestamp>/`; first-turn artifacts live
 in their server-managed session workspaces. Alignment checks are API-only:
 transcript, Manifest, and on-disk artifact ownership (no browser / DOM chip
