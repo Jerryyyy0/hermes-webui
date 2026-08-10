@@ -1386,8 +1386,10 @@ def test_reconcile_unkeyed_agent_snapshot_replaces_stale_compressed_sidecar(
             "_hermes_message_class": "context_anchor",
             "_hermes_scaffold_kind": "compaction_summary",
         },
-        {"role": "user", "content": "cron prompt", "timestamp": 201.0},
-        {"role": "assistant", "content": "final answer", "timestamp": 202.0},
+        {"role": "assistant", "content": "retrying tool", "timestamp": 201.0},
+        {"role": "tool", "content": "retry result", "timestamp": 202.0},
+        {"role": "user", "content": "cron prompt", "timestamp": 203.0},
+        {"role": "assistant", "content": "final answer", "timestamp": 204.0},
     ]
     session = Session(
         session_id="cron_job1_1700000675",
@@ -1406,6 +1408,8 @@ def test_reconcile_unkeyed_agent_snapshot_replaces_stale_compressed_sidecar(
     assert [message["content"] for message in session.messages] == [
         "compressed context",
         "cron prompt",
+        "retrying tool",
+        "retry result",
         "final answer",
     ]
     assert session.messages[0].get("_turn_key") is None

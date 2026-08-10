@@ -56,6 +56,48 @@ def test_normalize_cron_manifest_messages_preserves_real_matching_user_text():
     assert normalize_cron_manifest_messages(messages) == messages
 
 
+def test_normalize_cron_manifest_messages_moves_restored_user_before_agent_tail():
+    messages = [
+        {
+            "role": "user",
+            "content": "compressed context",
+            "_hermes_message_class": "context_anchor",
+            "_hermes_scaffold_kind": "compaction_summary",
+        },
+        {"role": "assistant", "content": "retrying weather"},
+        {"role": "tool", "content": "weather unavailable"},
+        {"role": "user", "content": "build the briefing", "_turn_key": "turn:1"},
+        {"role": "assistant", "content": "briefing ready"},
+    ]
+
+    normalized = normalize_cron_manifest_messages(messages)
+
+    assert [message["content"] for message in normalized] == [
+        "compressed context",
+        "build the briefing",
+        "retrying weather",
+        "weather unavailable",
+        "briefing ready",
+    ]
+
+
+def test_normalize_cron_manifest_messages_preserves_multiple_real_turns():
+    messages = [
+        {
+            "role": "user",
+            "content": "compressed context",
+            "_hermes_message_class": "context_anchor",
+            "_hermes_scaffold_kind": "compaction_summary",
+        },
+        {"role": "assistant", "content": "earlier answer"},
+        {"role": "user", "content": "first visible request"},
+        {"role": "assistant", "content": "first visible answer"},
+        {"role": "user", "content": "follow up"},
+    ]
+
+    assert normalize_cron_manifest_messages(messages) == messages
+
+
 def test_normalize_cron_manifest_messages_preserves_historical_stamped_internal_turn():
     messages = _tool_trace()
     messages[0]["_turn_key"] = "turn:1"

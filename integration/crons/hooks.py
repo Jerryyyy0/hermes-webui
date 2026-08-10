@@ -7,7 +7,10 @@ import logging
 import time
 from dataclasses import dataclass
 
-from integration.agent_message_semantics.classifier import is_non_anchor_control_message
+from integration.agent_message_semantics.classifier import (
+    is_context_anchor,
+    is_non_anchor_control_message,
+)
 from integration.crons.session_bridge import resolve_cron_execution_ended_at
 
 logger = logging.getLogger(__name__)
@@ -75,6 +78,30 @@ def _is_max_iteration_summary_request(messages: list, index: int) -> bool:
     )
 
 
+def _move_restored_cron_user_before_agent_tail(messages: list) -> list:
+    """Repair the single-user tail shape produced by Agent compaction."""
+    source = list(messages or [])
+    if (
+        len(source) < 3
+        or not is_context_anchor(source[0])
+        or source[0].get("_hermes_scaffold_kind") != "compaction_summary"
+    ):
+        return source
+
+    real_user_indexes = [
+        index for index, message in enumerate(source) if _is_real_user_message(message)
+    ]
+    if len(real_user_indexes) != 1:
+        return source
+    user_index = real_user_indexes[0]
+    if user_index <= 1 or not all(
+        isinstance(message, dict) and message.get("role") in {"assistant", "tool"}
+        for message in source[1:user_index]
+    ):
+        return source
+    return [source[0], source[user_index], *source[1:user_index], *source[user_index + 1:]]
+
+
 def normalize_cron_manifest_messages(
     messages: list,
     *,
@@ -94,10 +121,7 @@ def normalize_cron_manifest_messages(
         for index in range(len(source))
         if _is_max_iteration_summary_request(source, index)
     }
-    if not internal_indexes:
-        return source
-
-    if require_stable_real_turn:
+    if internal_indexes and require_stable_real_turn:
         stable_real_turn = any(
             isinstance(message, dict)
             and message.get("role") == "user"
@@ -113,11 +137,13 @@ def normalize_cron_manifest_messages(
         if not stable_real_turn or internal_was_stamped:
             return source
 
-    return [
-        message
-        for index, message in enumerate(source)
-        if index not in internal_indexes
-    ]
+    if internal_indexes:
+        source = [
+            message
+            for index, message in enumerate(source)
+            if index not in internal_indexes
+        ]
+    return _move_restored_cron_user_before_agent_tail(source)
 
 
 def _stamp_cron_manifest_turn_keys(messages: list) -> list:
