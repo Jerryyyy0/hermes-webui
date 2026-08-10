@@ -1010,9 +1010,20 @@ def _turn_key(session: dict, nonce: str) -> str:
     return str(rows[0].get("_turn_key") or "")
 
 
-def _artifacts(manifest: dict, turn_key: str) -> set[str]:
+def _artifacts(manifest: dict, turn_key: str) -> dict[str, dict]:
     row = next((r for r in manifest.get("turns", []) if r.get("turn_key") == turn_key), {})
-    return {str(item.get("path") or "") for item in row.get("artifacts", []) if item.get("path")}
+    return {
+        str(item.get("path") or ""): item
+        for item in row.get("artifacts", [])
+        if isinstance(item, dict) and item.get("path")
+    }
+
+
+def _is_skill_artifact(item: dict) -> bool:
+    return (
+        str(item.get("preview") or "").lower() == "skill"
+        or str(item.get("source_tool") or "").lower() == "skill_manage"
+    )
 
 
 def _resolve_manifest_artifact_path(workspace: Path, raw_path: str) -> Path | None:
@@ -1070,10 +1081,15 @@ def evaluate_alignment(session: dict, manifest: dict, ledger: dict, workspace: P
     expected = str(ledger.get("expected_artifact_path") or "")
     if expected and expected not in artifacts:
         observations.append({"code": "EXPECTED_DELIVERY_MISSING", "path": expected})
-    for relative in artifacts:
+    file_artifact_found = False
+    for relative, item in artifacts.items():
+        if _is_skill_artifact(item):
+            observations.append({"code": "SKILL_ARTIFACT", "path": relative})
+            continue
         path = _resolve_manifest_artifact_path(workspace, relative)
         if path is None or not path.is_file():
             failures.append({"code": "ARTIFACT_PATH_INVALID", "path": relative}); continue
+        file_artifact_found = True
         # Only the primary campaign delivery must embed NONCE; companion html/png
         # under deliverables/ are allowed without the marker.
         if expected and relative == expected and _is_primary_delivery(relative) and ledger["nonce"] not in path.read_text(encoding="utf-8", errors="replace"):
@@ -1086,7 +1102,7 @@ def evaluate_alignment(session: dict, manifest: dict, ledger: dict, workspace: P
                 other_paths = {str(a.get("path") or "") for a in other.get("artifacts", [])}
                 if other.get("turn_key") != actual_key and relative in other_paths:
                     failures.append({"code": "ARTIFACT_MULTI_TURN_OWNER", "path": relative, "other_turn": other.get("turn_key")})
-    if not artifacts:
+    if not file_artifact_found:
         failures.append({"code": "MODEL_NO_ARTIFACT"})
     return failures, observations, hashes
 

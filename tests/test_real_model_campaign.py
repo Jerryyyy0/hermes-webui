@@ -1039,6 +1039,45 @@ def test_missing_artifact_is_an_alignment_failure(tmp_path):
     assert not observations
 
 
+def test_skill_artifact_is_normal_when_turn_also_creates_a_workspace_file(tmp_path):
+    delivered = tmp_path / "data/derived.csv"
+    delivered.parent.mkdir(parents=True)
+    delivered.write_text("id,value\n1,ok\n", encoding="utf-8")
+    session = {"messages": [{"role": "user", "content": "nonce", "_turn_key": "turn:1"}]}
+    manifest = {
+        "turns": [{
+            "turn_key": "turn:1",
+            "artifacts": [
+                {"path": "general/campaign-turn-delivery", "preview": "skill", "source_tool": "skill_manage"},
+                {"path": "data/derived.csv", "preview": "file", "source_tool": "write_file"},
+            ],
+        }],
+        "diagnostics": {"orphan_turn_keys": []},
+    }
+
+    failures, observations, hashes = evaluate_alignment(session, manifest, {"nonce": "nonce"}, tmp_path)
+
+    assert failures == []
+    assert observations == [{"code": "SKILL_ARTIFACT", "path": "general/campaign-turn-delivery"}]
+    assert set(hashes) == {"data/derived.csv"}
+
+
+def test_skill_artifact_does_not_satisfy_campaign_file_delivery(tmp_path):
+    session = {"messages": [{"role": "user", "content": "nonce", "_turn_key": "turn:1"}]}
+    manifest = {
+        "turns": [{
+            "turn_key": "turn:1",
+            "artifacts": [{"path": "general/campaign-turn-delivery", "source_tool": "skill_manage"}],
+        }],
+        "diagnostics": {"orphan_turn_keys": []},
+    }
+
+    failures, observations, _ = evaluate_alignment(session, manifest, {"nonce": "nonce"}, tmp_path)
+
+    assert failures == [{"code": "MODEL_NO_ARTIFACT"}]
+    assert observations == [{"code": "SKILL_ARTIFACT", "path": "general/campaign-turn-delivery"}]
+
+
 def test_turn_key_ignores_nonce_echo_in_tool_messages(tmp_path):
     delivery = tmp_path / "deliverables/turn-01/delivery.md"
     delivery.parent.mkdir(parents=True)
