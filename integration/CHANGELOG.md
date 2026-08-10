@@ -8,6 +8,8 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Fixed
 
+- **Cron job delete latency** — `POST /api/integration/crons/delete` 的同步历史清理改为按 Profile 批量删除：每个 `state.db` 只获取一次清理锁、打开一次连接并执行一次事务，不再对每条 Cron session 重复扫描 manifest 和建立数据库事务；WebUI sidecar 与输出目录清理语义保持不变。
+
 - **Cron session transcript and turn keys** — 非终态 Cron 会话物化时以 Agent `state.db` 的 active transcript 替换旧的无边界 sidecar 快照，避免上下文压缩后重复追加 user/assistant/tool 消息；首次物化即为真实 Cron prompt 持久化 `turn:1`，并跳过 `context_anchor` 等语义控制行，避免新会话退化显示 `turn:0` 或 turn 编号错位。fallback 消息与已有 WebUI follow-up 后缀保持原有合并语义。
 
 - **Chat apperror Packy `Content Exists Risk`** — PackyAPI / 兼容网关返回的 `HTTP 400: Content Exists Risk`（`packy_invalid_request_error`）此前落到通用 `error`；现归入既有 `content_filtered`，展示「内容被审核拦截」与「审核详情」。匹配短语：`content exists risk` / `content_exists_risk`。

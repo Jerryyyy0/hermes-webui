@@ -9459,6 +9459,10 @@ def delete_cli_session(sid) -> bool:
 
 
 def _delete_cli_session_locked(sid, hermes_home) -> bool:
+    return _delete_cli_sessions_locked([sid], hermes_home)
+
+
+def _delete_cli_sessions_locked(session_ids, hermes_home) -> bool:
     """Delete a CLI session from state.db using Hermes' session semantics.
 
     A scoped transaction implements the Agent invariant while giving branch and
@@ -9469,6 +9473,14 @@ def _delete_cli_session_locked(sid, hermes_home) -> bool:
     Returns True when the requested state is absent after cleanup, False on an
     operational error.
     """
+    requested_ids = {
+        str(session_id).strip()
+        for session_id in session_ids
+        if str(session_id).strip()
+    }
+    if not requested_ids:
+        return True
+
     try:
         import sqlite3
     except ImportError:
@@ -9497,15 +9509,36 @@ def _delete_cli_session_locked(sid, hermes_home) -> bool:
             columns = {
                 row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()
             }
-            if not {"id", "parent_session_id"}.issubset(columns):
+            if "id" not in columns:
                 return False
 
-            selected = ["id", "parent_session_id"]
+            has_parent_session_id = "parent_session_id" in columns
+            if not has_parent_session_id:
+                if "source" not in columns:
+                    return False
+
+            selected = [
+                "id",
+                "parent_session_id" if has_parent_session_id else "NULL AS parent_session_id",
+            ]
             for column in (
                 "model_config", "source", "end_reason", "started_at", "ended_at"
             ):
                 selected.append(column if column in columns else f"NULL AS {column}")
             rows = conn.execute(f"SELECT {', '.join(selected)} FROM sessions").fetchall()
+            if not has_parent_session_id:
+                requested_rows = [row for row in rows if str(row["id"]) in requested_ids]
+                if not requested_rows or any(
+                    str(row["source"] or "") != "cron" for row in requested_rows
+                ):
+                    return False
+
+            table_names = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
 
             # _delegate_from is authoritative. source=subagent is the legacy
             # compatibility signal for rows created before that marker existed,
@@ -9605,14 +9638,14 @@ def _delete_cli_session_locked(sid, hermes_home) -> bool:
             preserved_ids = {
                 record["id"]
                 for record in records
-                if record["id"] != sid
+                if record["id"] not in requested_ids
                 and _must_preserve(record, _lineage_parent(record))
             }
             while True:
                 descendants = {
                     record["id"]
                     for record in records
-                    if record["id"] != sid
+                    if record["id"] not in requested_ids
                     and record["parent_id"] in preserved_ids
                 }
                 new_ids = descendants - preserved_ids
@@ -9620,8 +9653,8 @@ def _delete_cli_session_locked(sid, hermes_home) -> bool:
                     break
                 preserved_ids.update(new_ids)
 
-            found = {sid}
-            frontier = {sid}
+            found = set(requested_ids)
+            frontier = set(requested_ids)
             while frontier:
                 next_frontier = set()
                 for record in records:
@@ -9658,30 +9691,32 @@ def _delete_cli_session_locked(sid, hermes_home) -> bool:
                 found.update(next_frontier)
                 frontier = next_frontier
 
-            delegate_ids = sorted(found - {sid})
-            all_removed_ids = [sid, *delegate_ids]
-            placeholders = ",".join("?" * len(all_removed_ids))
+            all_removed_ids = sorted(found)
 
-            # Delete delegate children first (messages, then orphan their
-            # children, then the rows themselves).
-            for child_id in delegate_ids:
-                conn.execute("DELETE FROM messages WHERE session_id = ?", (child_id,))
-            for child_id in delegate_ids:
-                conn.execute(
-                    "UPDATE sessions SET parent_session_id = NULL WHERE parent_session_id = ?",
-                    (child_id,),
-                )
-            for child_id in delegate_ids:
-                conn.execute("DELETE FROM sessions WHERE id = ?", (child_id,))
+            def _id_batches(values, size=500):
+                for offset in range(0, len(values), size):
+                    batch = values[offset:offset + size]
+                    yield batch, ",".join("?" * len(batch))
 
             # Preserve every remaining child as an independent row, matching
-            # current SessionDB.delete_session().
-            conn.execute(
-                "UPDATE sessions SET parent_session_id = NULL WHERE parent_session_id = ?",
-                (sid,),
-            )
-            conn.execute("DELETE FROM messages WHERE session_id = ?", (sid,))
-            conn.execute("DELETE FROM sessions WHERE id = ?", (sid,))
+            # current SessionDB.delete_session(), then remove all requested
+            # roots and their deletable delegate descendants in one transaction.
+            for batch, placeholders in _id_batches(all_removed_ids):
+                if has_parent_session_id:
+                    conn.execute(
+                        f"UPDATE sessions SET parent_session_id = NULL "
+                        f"WHERE parent_session_id IN ({placeholders})",
+                        batch,
+                    )
+                if "messages" in table_names:
+                    conn.execute(
+                        f"DELETE FROM messages WHERE session_id IN ({placeholders})",
+                        batch,
+                    )
+                conn.execute(
+                    f"DELETE FROM sessions WHERE id IN ({placeholders})",
+                    batch,
+                )
 
             # Referential-integrity cleanup for session-owned rows that are
             # not covered by ON DELETE CASCADE.  session_model_usage and
@@ -9689,30 +9724,25 @@ def _delete_cli_session_locked(sid, hermes_home) -> bool:
             # PRAGMA foreign_keys = ON above), but compression_locks has no
             # foreign key, so stale rows would survive.  Gate each table
             # on existence so this works on older schemas too.
-            table_names = {
-                row[0]
-                for row in conn.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table'"
-                ).fetchall()
-            }
-            if "compression_locks" in table_names:
-                conn.execute(
-                    f"DELETE FROM compression_locks WHERE session_id IN ({placeholders})",
-                    all_removed_ids,
-                )
             # Belt-and-suspenders: also explicitly clear FK tables in case
             # PRAGMA foreign_keys is OFF on an older SQLite build or a
             # future schema drops the CASCADE clause.
-            if "session_model_usage" in table_names:
-                conn.execute(
-                    f"DELETE FROM session_model_usage WHERE session_id IN ({placeholders})",
-                    all_removed_ids,
-                )
-            if "telegram_dm_topic_bindings" in table_names:
-                conn.execute(
-                    f"DELETE FROM telegram_dm_topic_bindings WHERE session_id IN ({placeholders})",
-                    all_removed_ids,
-                )
+            for batch, placeholders in _id_batches(all_removed_ids):
+                if "compression_locks" in table_names:
+                    conn.execute(
+                        f"DELETE FROM compression_locks WHERE session_id IN ({placeholders})",
+                        batch,
+                    )
+                if "session_model_usage" in table_names:
+                    conn.execute(
+                        f"DELETE FROM session_model_usage WHERE session_id IN ({placeholders})",
+                        batch,
+                    )
+                if "telegram_dm_topic_bindings" in table_names:
+                    conn.execute(
+                        f"DELETE FROM telegram_dm_topic_bindings WHERE session_id IN ({placeholders})",
+                        batch,
+                    )
 
             # Persist a cleanup manifest BEFORE the commit so artifact
             # removal is idempotent and retryable.  Each call uses a unique
@@ -9853,7 +9883,11 @@ def _delete_cli_session_locked(sid, hermes_home) -> bool:
 
             return stale_cleanup_complete and not artifact_cleanup_failed
     except Exception:
-        logger.warning("Failed to delete CLI session %s from state.db", sid, exc_info=True)
+        logger.warning(
+            "Failed to delete CLI sessions %s from state.db",
+            sorted(requested_ids),
+            exc_info=True,
+        )
         return False
 
 
@@ -9888,6 +9922,40 @@ def _delete_state_db_session_rows(db_path: Path, sid: str) -> bool:
         logger.warning(
             "Failed to delete CLI session %s via state.db helper",
             sid,
+            exc_info=True,
+        )
+        return False
+
+
+def _delete_state_db_session_rows_many(db_path: Path, session_ids) -> bool:
+    """Delete multiple sessions through one profile lock and DB transaction."""
+    db_path = Path(db_path)
+    requested_ids = {
+        str(session_id).strip()
+        for session_id in session_ids
+        if str(session_id).strip()
+    }
+    if not requested_ids:
+        return True
+    try:
+        hermes_home = db_path.resolve().parent
+        expected = (hermes_home / "state.db").resolve()
+        if db_path.resolve() != expected:
+            logger.warning(
+                "Rejecting state.db batch delete helper for non-canonical path %s",
+                db_path,
+            )
+            return False
+    except OSError:
+        logger.warning("Failed to resolve state.db path for batch session delete", exc_info=True)
+        return False
+    try:
+        with _cleanup_manifest_thread_lock(hermes_home):
+            with _cleanup_manifest_process_lock(hermes_home):
+                return _delete_cli_sessions_locked(requested_ids, hermes_home)
+    except Exception:
+        logger.warning(
+            "Failed to batch delete CLI sessions via state.db helper",
             exc_info=True,
         )
         return False

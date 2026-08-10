@@ -1225,20 +1225,28 @@ def test_delete_cron_job_history_removes_all_job_runs_and_preserves_other_jobs(c
     def _profile_home(name):
         return cron_env["home"]
 
+    from api import models
+
     with patch("integration.crons.session_bridge._profile_home_for_name", _profile_home):
         with patch(
             "api.profiles.list_profiles_api",
             return_value=[{"name": owner, "path": str(cron_env["home"])}],
         ):
-            from integration.crons.session_bridge import delete_cron_job_history
+            with patch(
+                "api.models._delete_state_db_session_rows_many",
+                wraps=models._delete_state_db_session_rows_many,
+            ) as batch_delete:
+                from integration.crons.session_bridge import delete_cron_job_history
 
-            result = delete_cron_job_history(
-                job_id,
-                owner_profile=owner,
-                job={"id": job_id, "profile": ""},
-            )
+                result = delete_cron_job_history(
+                    job_id,
+                    owner_profile=owner,
+                    job={"id": job_id, "profile": ""},
+                )
 
     assert result.get("deleted") is True
+    batch_delete.assert_called_once()
+    assert set(batch_delete.call_args.args[1]) == {job1_sid_1, job1_sid_2}
     assert not job1_out.exists()
     assert other_output.exists()
     assert not (sessions_dir / f"{job1_sid_1}.json").exists()

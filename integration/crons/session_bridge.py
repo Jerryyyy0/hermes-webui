@@ -735,7 +735,12 @@ def delete_cron_job_history(
         owner_profile=owner_profile,
         job=job or {},
     )
-    session_ids = _cron_session_ids_for_job(state_db_profiles, job_id)
+    session_ids_by_profile = _cron_session_ids_by_profile(state_db_profiles, job_id)
+    session_ids = {
+        sid
+        for profile_session_ids in session_ids_by_profile.values()
+        for sid in profile_session_ids
+    }
     session_ids.update(_webui_cron_session_ids_for_job(job_id))
 
     deleted_sidecars: list[str] = []
@@ -744,21 +749,24 @@ def delete_cron_job_history(
     deleted_output_files = 0
 
     try:
-        from api.models import _delete_state_db_session_rows
+        from api.models import _delete_state_db_session_rows_many
     except Exception:
-        _delete_state_db_session_rows = None
+        _delete_state_db_session_rows_many = None
 
     for sid in sorted(session_ids):
         if _delete_webui_cron_session_sidecar(sid):
             deleted_sidecars.append(sid)
-        if _delete_state_db_session_rows is None:
-            continue
-        for profile_name in state_db_profiles:
+
+    if _delete_state_db_session_rows_many is not None:
+        for profile_name, profile_session_ids in session_ids_by_profile.items():
+            if not profile_session_ids:
+                continue
             try:
                 db_path = Path(_profile_home_for_name(profile_name)) / "state.db"
-                if _delete_state_db_session_rows(db_path, sid):
-                    marker = f"{profile_name}:{sid}"
-                    deleted_profiles.append(marker)
+                if _delete_state_db_session_rows_many(db_path, profile_session_ids):
+                    deleted_profiles.extend(
+                        f"{profile_name}:{sid}" for sid in sorted(profile_session_ids)
+                    )
             except Exception:
                 continue
 
@@ -835,7 +843,31 @@ def _cron_state_db_profiles_for_job_delete(
 
 
 def _cron_session_ids_for_job(profile_names: list[str], job_id: str) -> set[str]:
-    return {str(row[0]) for row in _cron_session_candidates_for_profiles(profile_names, job_id)}
+    return {
+        sid
+        for profile_session_ids in _cron_session_ids_by_profile(profile_names, job_id).values()
+        for sid in profile_session_ids
+    }
+
+
+def _cron_session_ids_by_profile(
+    profile_names: list[str],
+    job_id: str,
+) -> dict[str, set[str]]:
+    session_ids_by_profile: dict[str, set[str]] = {}
+    for profile_name in profile_names:
+        session_ids: set[str] = set()
+        try:
+            db_path = Path(_profile_home_for_name(profile_name)) / "state.db"
+            if db_path.is_file():
+                with closing(sqlite3.connect(str(db_path))) as conn:
+                    session_ids = {str(row[0]) for row in _cron_session_candidates(conn, job_id)}
+        except (OSError, sqlite3.Error):
+            pass
+        except Exception:
+            pass
+        session_ids_by_profile[profile_name] = session_ids
+    return session_ids_by_profile
 
 
 def _webui_cron_session_ids_for_job(job_id: str) -> set[str]:
