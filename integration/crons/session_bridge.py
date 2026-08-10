@@ -1732,7 +1732,7 @@ def reconcile_cron_session_transcript(
     fallback_output: str | None = None,
     run_mtime: float | int | None = None,
 ) -> bool:
-    """Append only the completed cron prefix without touching WebUI follow-ups."""
+    """Reconcile the Agent-owned cron prefix without touching WebUI follow-ups."""
     if session is None or str(getattr(session, "source_tag", "") or "") != "cron":
         return False
     from api.models import (
@@ -1771,17 +1771,35 @@ def reconcile_cron_session_transcript(
         sidecar_prefix,
         db_messages,
     )
-    merged_prefix = merge_session_messages_append_only(
-        sidecar_prefix,
-        db_messages,
-        truncation_watermark=getattr(session, "truncation_watermark", None),
+    agent_snapshot_is_authoritative = bool(
+        split is None
+        and db_messages
+        and not any(
+            isinstance(message, dict) and str(message.get("source") or "").strip()
+            for message in sidecar_prefix
+        )
     )
-    known = {_session_message_dedup_key(message) for message in merged_prefix if isinstance(message, dict)}
-    for message in db_messages:
-        key = _session_message_dedup_key(message)
-        if key not in known:
-            merged_prefix.append(message)
-            known.add(key)
+    if agent_snapshot_is_authoritative:
+        # While no terminal boundary exists, WebUI follow-ups are blocked. The
+        # active state.db rows are therefore the whole current Agent snapshot;
+        # compression may have replaced it and rewritten its timestamps.
+        merged_prefix = list(db_messages)
+    else:
+        merged_prefix = merge_session_messages_append_only(
+            sidecar_prefix,
+            db_messages,
+            truncation_watermark=getattr(session, "truncation_watermark", None),
+        )
+        known = {
+            _session_message_dedup_key(message)
+            for message in merged_prefix
+            if isinstance(message, dict)
+        }
+        for message in db_messages:
+            key = _session_message_dedup_key(message)
+            if key not in known:
+                merged_prefix.append(message)
+                known.add(key)
     changed = merged_prefix != sidecar_prefix
     if fallback_output and job is not None and not any(
         isinstance(message, dict) and message.get("role") == "user"
@@ -1808,6 +1826,15 @@ def reconcile_cron_session_transcript(
             fallback_output,
             timestamp=run_mtime or getattr(session, "created_at", None),
         ) or changed
+    from integration.crons.hooks import (
+        _stamp_cron_manifest_turn_keys,
+        normalize_cron_manifest_messages,
+    )
+
+    merged_prefix = _stamp_cron_manifest_turn_keys(
+        normalize_cron_manifest_messages(merged_prefix)
+    )
+    changed = merged_prefix != sidecar_prefix
     if changed:
         session.messages = [*merged_prefix, *suffix]
     return changed
@@ -1990,6 +2017,12 @@ def _materialize_cron_session_found(
         cron_error_message,
         legacy_no_agent_detail=legacy_no_agent_detail,
     )
+    from integration.crons.hooks import (
+        _stamp_cron_manifest_turn_keys,
+        normalize_cron_manifest_messages,
+    )
+
+    msgs = _stamp_cron_manifest_turn_keys(normalize_cron_manifest_messages(msgs))
 
     title = (job or {}).get("name") or cli_title or f"Cron {str((job or {}).get('id') or '').strip()}"
     s = import_cli_session(

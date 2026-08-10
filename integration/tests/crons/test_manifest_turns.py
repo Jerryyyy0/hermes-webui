@@ -154,6 +154,33 @@ def test_normalized_cron_artifact_stays_on_real_turn(tmp_path):
     ]
 
 
+def test_cron_turn_stamping_skips_context_anchor():
+    from api.session_manifest import _message_turns
+    from integration.crons.hooks import (
+        _stamp_cron_manifest_turn_keys,
+        _validate_contiguous_turn_keys,
+    )
+
+    messages = [
+        {
+            "role": "user",
+            "content": "compressed context",
+            "_hermes_message_class": "context_anchor",
+            "_hermes_scaffold_kind": "compaction_summary",
+            "_turn_key": "turn:47",
+        },
+        {"role": "user", "content": "cron prompt"},
+        {"role": "assistant", "content": "answer"},
+    ]
+
+    stamped = _stamp_cron_manifest_turn_keys(messages)
+
+    assert stamped[0].get("_turn_key") is None
+    assert stamped[1]["_turn_key"] == "turn:1"
+    assert _validate_contiguous_turn_keys(stamped) == (True, "turn:2")
+    assert [turn["turn_key"] for turn in _message_turns(stamped)] == ["turn:1"]
+
+
 def test_cron_manifest_store_artifact_aligns_with_real_turn(tmp_path, monkeypatch):
     import api.models as models
     import api.session_manifest_store as manifest_store

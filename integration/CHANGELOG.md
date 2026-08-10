@@ -8,6 +8,8 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Fixed
 
+- **Cron session transcript and turn keys** — 非终态 Cron 会话物化时以 Agent `state.db` 的 active transcript 替换旧的无边界 sidecar 快照，避免上下文压缩后重复追加 user/assistant/tool 消息；首次物化即为真实 Cron prompt 持久化 `turn:1`，并跳过 `context_anchor` 等语义控制行，避免新会话退化显示 `turn:0` 或 turn 编号错位。fallback 消息与已有 WebUI follow-up 后缀保持原有合并语义。
+
 - **Chat apperror Packy `Content Exists Risk`** — PackyAPI / 兼容网关返回的 `HTTP 400: Content Exists Risk`（`packy_invalid_request_error`）此前落到通用 `error`；现归入既有 `content_filtered`，展示「内容被审核拦截」与「审核详情」。匹配短语：`content exists risk` / `content_exists_risk`。
 
 - **`GET /api/session/manifest` skill-scan amplification** — `skill_view` reference dedupe no longer runs `_canonical_skill_manifest_path` / `_find_skill` over file artifact keys (previously O(views × files × skills) full-directory frontmatter scans). `_find_skill` skips file-like miss scans without a process-wide lookup cache.

@@ -207,6 +207,7 @@ def test_materialize_imports_session(cron_env, monkeypatch):
     assert meta.profile == owner or getattr(meta, "profile", None) in (owner, None)
     assert meta.is_cli_session is False
     assert meta.source_tag == "cron"
+    assert Session.load(sid).messages[0]["_turn_key"] == "turn:1"
 
 
 def test_materialize_persists_execution_boundary_from_state_db(cron_env, monkeypatch):
@@ -1355,6 +1356,53 @@ def test_reconcile_cron_transcript_does_not_duplicate_followup_replay(cron_env, 
         "skill ok",
         "Word 文档已生成",
     ]
+
+
+def test_reconcile_unkeyed_agent_snapshot_replaces_stale_compressed_sidecar(
+    cron_env, monkeypatch
+):
+    """An active Agent snapshot supersedes an unkeyed pre-compression sidecar."""
+    from api.models import Session
+    from integration.crons.session_bridge import reconcile_cron_session_transcript
+
+    stale_snapshot = [
+        {"role": "user", "content": "cron prompt", "timestamp": 100.0},
+        {"role": "assistant", "content": "old tool plan", "timestamp": 101.0},
+        {"role": "tool", "content": "old result", "timestamp": 102.0},
+    ]
+    active_snapshot = [
+        {
+            "role": "user",
+            "content": "compressed context",
+            "timestamp": 200.0,
+            "_hermes_message_class": "context_anchor",
+            "_hermes_scaffold_kind": "compaction_summary",
+        },
+        {"role": "user", "content": "cron prompt", "timestamp": 201.0},
+        {"role": "assistant", "content": "final answer", "timestamp": 202.0},
+    ]
+    session = Session(
+        session_id="cron_job1_1700000675",
+        profile="default",
+        source_tag="cron",
+        cron_execution_profile=str(cron_env["home"]),
+        cron_execution_ended_at=None,
+        messages=stale_snapshot,
+    )
+    monkeypatch.setattr(
+        "api.models.get_state_db_session_messages",
+        lambda *_args, **_kwargs: active_snapshot,
+    )
+
+    assert reconcile_cron_session_transcript(session) is True
+    assert [message["content"] for message in session.messages] == [
+        "compressed context",
+        "cron prompt",
+        "final answer",
+    ]
+    assert session.messages[0].get("_turn_key") is None
+    assert session.messages[1]["_turn_key"] == "turn:1"
+    assert reconcile_cron_session_transcript(session) is False
 
 
 def test_reconcile_cron_transcript_uses_output_when_database_reply_missing(cron_env, monkeypatch):
