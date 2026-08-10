@@ -7,9 +7,6 @@ import logging
 import time
 from typing import Any
 
-from integration.agent_message_semantics.audit import _log_content_preview
-
-
 logger = logging.getLogger(__name__)
 
 
@@ -65,13 +62,12 @@ def record_async_delegation_dispatch(
     records[delegation_id] = record
     session.async_delegation_origins = records
     _save(session)
-    logger.info(
+    logger.debug(
         "hermes_message_semantics action=async_delegation_origin_recorded "
         "class=context_anchor kind=async_delegation_completion role=user "
-        "content=%r session_id=%s turn_key=%s delegation_id=%s",
-        _log_content_preview(function_result),
+        "session_id=%s turn_key_present=%s delegation_id=%s",
         getattr(session, "session_id", ""),
-        origin_turn_key,
+        bool(origin_turn_key),
         delegation_id,
     )
     return dict(record)
@@ -105,13 +101,12 @@ def mark_async_delegation_completion(
     records[delegation_id] = record
     session.async_delegation_origins = records
     _save(session)
-    logger.info(
+    logger.debug(
         "hermes_message_semantics action=background_task_status "
         "class=context_anchor kind=async_delegation_completion role=user "
-        "content=%r session_id=%s turn_key=%s delegation_id=%s wakeup_state=%s",
-        _log_content_preview(content),
+        "session_id=%s turn_key_present=%s delegation_id=%s wakeup_state=%s",
         getattr(session, "session_id", ""),
-        record.get("turn_key") or "",
+        bool(record.get("turn_key")),
         delegation_id,
         wakeup_state,
     )
@@ -136,13 +131,12 @@ def mark_async_delegation_wakeup(
     records[delegation_id] = record
     session.async_delegation_origins = records
     _save(session)
-    logger.info(
+    logger.debug(
         "hermes_message_semantics action=background_task_status "
         "class=context_anchor kind=async_delegation_completion role=user "
-        "content=%r session_id=%s turn_key=%s delegation_id=%s wakeup_state=%s",
-        _log_content_preview(content),
+        "session_id=%s turn_key_present=%s delegation_id=%s wakeup_state=%s",
         getattr(session, "session_id", ""),
-        record.get("turn_key") or "",
+        bool(record.get("turn_key")),
         delegation_id,
         wakeup_state,
     )

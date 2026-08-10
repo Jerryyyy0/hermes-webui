@@ -43,7 +43,7 @@ def test_unknown_message_class_is_preserved():
     assert is_non_anchor_control_message(message) is False
 
 
-def test_control_audit_log_includes_message_content(caplog):
+def test_control_audit_log_excludes_message_content_and_turn_key_value(caplog):
     control_message = {
         "role": "user",
         "content": "[System: run verification]",
@@ -52,16 +52,17 @@ def test_control_audit_log_includes_message_content(caplog):
         "_turn_key": "turn:8",
     }
 
-    with caplog.at_level("INFO"):
+    with caplog.at_level("DEBUG"):
         log_control_message("display_drop", control_message, session_id="session-1")
 
     assert "verification_stop" in caplog.text
-    assert "content='[System: run verification]'" in caplog.text
     assert "session_id=session-1" in caplog.text
-    assert "turn_key=turn:8" in caplog.text
+    assert "turn_key_present=True" in caplog.text
+    assert "[System: run verification]" not in caplog.text
+    assert "turn:8" not in caplog.text
 
 
-def test_context_anchor_audit_log_includes_original_model_content(caplog):
+def test_context_anchor_audit_log_excludes_original_model_content(caplog):
     context_anchor = {
         "role": "user",
         "content": "[Todo snapshot with model-only details]",
@@ -69,14 +70,15 @@ def test_context_anchor_audit_log_includes_original_model_content(caplog):
         "_hermes_scaffold_kind": "todo_snapshot",
     }
 
-    with caplog.at_level("INFO"):
+    with caplog.at_level("DEBUG"):
         log_control_message("manifest_turn_skip", context_anchor)
 
-    assert "content='[Todo snapshot with model-only details]'" in caplog.text
+    assert "kind=todo_snapshot" in caplog.text
+    assert "[Todo snapshot with model-only details]" not in caplog.text
 
 
 def test_legacy_control_audit_log_resolves_its_specific_kind(caplog):
-    with caplog.at_level("INFO"):
+    with caplog.at_level("DEBUG"):
         log_control_message("display_drop", {
             "role": "user",
             "content": "private legacy nudge",
@@ -85,11 +87,10 @@ def test_legacy_control_audit_log_resolves_its_specific_kind(caplog):
 
     assert "class=internal_scaffold" in caplog.text
     assert "kind=pre_verify" in caplog.text
-    assert "content='private legacy nudge'" in caplog.text
+    assert "private legacy nudge" not in caplog.text
 
 
-def test_control_audit_log_truncates_long_content(caplog, monkeypatch):
-    monkeypatch.setenv("HERMES_MESSAGE_SEMANTICS_LOG_MAX_CHARS", "500")
+def test_control_audit_log_never_contains_long_content(caplog):
     long_content = "y" * 650
     context_anchor = {
         "role": "user",
@@ -98,8 +99,9 @@ def test_control_audit_log_truncates_long_content(caplog, monkeypatch):
         "_hermes_scaffold_kind": "async_delegation_completion",
     }
 
-    with caplog.at_level("INFO"):
+    with caplog.at_level("DEBUG"):
         log_control_message("manifest_turn_skip", context_anchor)
 
-    assert "content='" + ("y" * 500) + "…(+150 chars)'" in caplog.text
+    assert "kind=async_delegation_completion" in caplog.text
     assert ("y" * 650) not in caplog.text
+    assert "content=" not in caplog.text

@@ -10,6 +10,10 @@
 本文只覆盖 **Agent 代码显式追加、插入或修复到 `messages` 的消息**。
 不讨论模型天然返回的正常回复，也不讨论 WebUI 额外生成的前端展示层消息。
 
+本文以 Hermes Agent 上游契约作为 canonical / durable 基线，并额外定义 WebUI 的
+一问一答展示契约。若本地 fork 尚未符合目标，会在对应小节标成“待修复”，
+不把目标状态误写成当前已实现状态。
+
 ## 总览
 
 Hermes Agent 的“补消息”大致分成六类：
@@ -39,14 +43,26 @@ Hermes Agent 的“补消息”大致分成六类：
 - `_empty_recovery_synthetic`
 - `_empty_terminal_sentinel`
 - `_thinking_prefill`
-- `_verification_stop_synthetic`
-- `_pre_verify_synthetic`
+- 带 `_verification_stop_synthetic` 的 verification user nudge
+- 带 `_pre_verify_synthetic` 的 pre_verify user nudge
 - `_kanban_stop_synthetic`
 - `_todo_snapshot_synthetic`
 
 ### durable transcript
 
 指最终会被持久化、在后续恢复时继续作为上下文使用的消息历史。某些 synthetic message 只存在于运行时，不应进入 durable transcript。
+
+### context anchor
+
+指需要写入 durable transcript、供模型恢复或继续执行，但不代表真实用户发言或
+最终助手回答的上下文材料。WebUI 应隐藏它，Agent 不应像处理
+`internal_scaffold` 一样从持久化中删除它。
+
+### 一问一答展示
+
+指 WebUI 将一个真实 user turn 收口为一个最终 assistant 回答区域。Agent durable
+可以保留候选、partial、恢复提示和工具轨迹；WebUI 通过投影隐藏控制行、合并续写，
+而不是反向修改 Agent canonical transcript。
 
 ### 完整轮次示例约定
 
@@ -74,10 +90,14 @@ token / reasoning / interim_assistant / tool / tool_complete / done / stream_end
 3. **Agent durable**：Agent SQLite 是否保存该行。`internal_scaffold` 不保存；`context_anchor` 可以保存，但带语义标记。
 4. **WebUI 收口与历史**：`done.session.messages` 和之后的 `GET /api/session` 都会过滤 `internal_scaffold` 与 `context_anchor`。因此它们不会成为用户气泡。
 
-有一个重要例外：模型的候选 assistant 文本可能已经以 `token` 流出，之后 Agent 才把
-对应 assistant 行标成 `internal_scaffold` 并继续循环。Agent durable 只保留后续最终回答；
-当前 WebUI 会过滤带标记的终态行，但已流出的未标记候选仍可能留在显示合并结果中。
-verify-on-stop、pre_verify、Codex intermediate ack 和 kanban stop guard 都要按这个例外理解。
+模型准备结束一轮时产生的 assistant 候选不能仅凭“后面又补了 user nudge”就统一
+归为 `internal_scaffold`。真实候选和 partial 按上游语义持久化，WebUI 再在同一
+回答区域内更新、替换或合并。只有上游本来就不持久化的临时行才使用
+`internal_scaffold`。
+
+需要保留给模型、但不应显示成用户气泡的控制提示，目标语义是
+`context_anchor`。不得为了实现一问一答而删除 durable 内容、修改
+`repair_message_sequence`，或只按 `finish_reason="stop"` 过滤回答。
 
 ## 1. 验证继续类
 
@@ -89,16 +109,16 @@ verify-on-stop、pre_verify、Codex intermediate ack 和 kanban stop guard 都�
 
 当本轮修改了代码、但没有 fresh passing verification evidence 时，Agent 会：
 
-1. 把模型原本准备给出的 assistant 候选标成 `internal_scaffold`
-2. 再补一条同类的 synthetic `user` nudge
+1. 保留模型原本准备给出的 assistant 候选，作为真实 assistant 内容提前展示并持久化
+2. 再补一条带 `internal_scaffold` 的 synthetic `user` nudge
 3. 继续下一轮循环，让模型先去验证
 
 特点：
 
-- assistant 候选答案在模型语义上是真实候选，但当前实现也带
-  `internal_scaffold`，不会写入 durable transcript
-- synthetic 的是后补的 `user` nudge；两条消息共享同一 scaffold kind
-- 标记位：`_verification_stop_synthetic`
+- assistant 候选答案是真实内容，不带 `internal_scaffold`，会写入 durable transcript
+- synthetic 的只有后补的 `user` nudge
+- user nudge 的标记位：`_verification_stop_synthetic`，统一语义为
+  `class=internal_scaffold`、`kind=verification_stop`
 
 具体文案形态：
 
@@ -132,12 +152,13 @@ Run the relevant verification command now (...). If verification is not possible
 ```text
 Agent 运行时消息：
   用户：「把登录接口的超时问题修好。」
-  助手（内部候选）：「登录接口已修复。」
+  助手（待验证候选）：「登录接口已修复。」
   用户（内部控制）：「你修改了代码，但还没有新的验证结果。请立即运行相关测试。」
   助手：「测试通过，登录接口的超时问题已修复。」
 
 Agent 持久化后：
   用户：「把登录接口的超时问题修好。」
+  助手（待验证候选）：「登录接口已修复。」
   助手：「测试通过，登录接口的超时问题已修复。」
 
 WebUI 合并后展示：
@@ -149,13 +170,15 @@ WebUI 合并后展示：
 
 ```text
 SSE 实时：
-  候选「登录接口已修复」若已从模型流出，会先以 token 出现在当前助手区域。
-  Agent 随后把候选和验证 nudge 标成 internal_scaffold；nudge 不会产生 user SSE 事件，
-  候选也不会产生普通 interim_assistant 事件。
+  候选「登录接口已修复」若已从模型流出，会先以 token 出现在当前助手区域；
+  Agent 仍通过 interim assistant callback 结算该候选，并用 already_streamed 避免重复正文。
+  WebUI 更新当前回答区域，不为候选追加第二个永久气泡。
+  验证 nudge 带 internal_scaffold，不会产生普通 user SSE 事件。
   验证工具仍照常产生 tool / tool_complete；验证后的回答继续以 token 流出。
 
 done / 历史：
-  done 用验证后的完整 session 覆盖临时画面；候选与 nudge 被过滤，只剩最终回答。
+  Agent durable 保留候选与验证后的最终回答，只过滤 verification nudge。
+  WebUI 若发现后续最终回答，则只展示最终回答；若没有后续回答，则展示候选兜底。
 ```
 
 ### 1.2 pre_verify hook：插件要求继续验证
@@ -165,12 +188,13 @@ done / 历史：
 ```text
 Agent 运行时消息：
   用户：「把接口改成支持批量上传。」
-  助手（内部候选）：「批量上传接口已经完成。」
+  助手（待验证候选）：「批量上传接口已经完成。」
   用户（插件内部控制）：「请先运行批量上传兼容性检查，再结束本轮。」
   助手：「批量上传已经完成，兼容性检查也通过了。」
 
 Agent 持久化后：
   用户：「把接口改成支持批量上传。」
+  助手（待验证候选）：「批量上传接口已经完成。」
   助手：「批量上传已经完成，兼容性检查也通过了。」
 
 WebUI 合并后展示：
@@ -182,12 +206,12 @@ WebUI 合并后展示：
 
 ```text
 SSE 实时：
-  插件 nudge 没有 user SSE 事件。候选回答如果已经逐字输出，用户可能先看到
-  「批量上传接口已经完成」；插件检查和后续最终回答继续以 tool/token 事件呈现。
+  插件 nudge 没有 user SSE 事件。候选回答通过 token / interim callback 提前展示；
+  插件检查和后续最终回答继续以 tool/token 事件呈现。WebUI 复用同一回答区域。
 
 done / 历史：
-  当前 Agent fork 把候选和插件 nudge 都当 internal_scaffold；done 和历史只展示
-  「批量上传已经完成，兼容性检查也通过了」。
+  Agent durable 保留候选和验证后的最终回答，只过滤插件 nudge。
+  WebUI 有最终回答时隐藏候选；没有最终回答时以候选兜底。
 ```
 
 实现位置：`hermes-agent/agent/conversation_loop.py`
@@ -196,9 +220,10 @@ done / 历史：
 
 特点：
 
-- 同样先保留 assistant 候选答案
-- 再补 synthetic `user` nudge
-- 标记位：`_pre_verify_synthetic`
+- 同样把 assistant 候选作为真实内容提前展示并持久化
+- 再补带 `internal_scaffold` 的 synthetic `user` nudge
+- user nudge 的标记位：`_pre_verify_synthetic`，统一语义为
+  `class=internal_scaffold`、`kind=pre_verify`
 
 具体文案形态：
 
@@ -211,29 +236,31 @@ done / 历史：
 
 实现位置：`hermes-agent/agent/turn_finalizer.py`
 
-finalizer 会把 verification continuation 的 scaffold 从 live history / durable flush 中剔除；候选 assistant 只作为运行时临时 fallback，不能假定会持久化。
+finalizer 只把 verification continuation 的 synthetic user nudge 从 live history /
+durable flush 中剔除；真实 assistant 候选必须保留并持久化。
 
 这意味着：
 
 - `user` nudge 是内部控制消息
-- assistant 候选答案也是当前实现的内部控制消息；真正最终答案由后续验证轮产生
+- assistant 候选答案是真实模型输出；后续验证轮还会产生新的最终答案
 
-因此从当前实现说，verify-on-stop / pre_verify 是“一对都带 scaffold”：
+因此 verify-on-stop / pre_verify 不是“一对都带 scaffold”：
 
-- `user` 是 synthetic nudge
-- `assistant` 是待验证的临时候选
+- `user` 是带 scaffold 标记的 synthetic nudge
+- `assistant` 是不带 scaffold 标记的真实待验证候选
 
 **完整轮次示例**
 
 ```text
 Agent 运行时消息：
   用户：「修复配置解析器读取空值时崩溃的问题。」
-  助手（内部候选）：「解析器已经修好。」
+  助手（待验证候选）：「解析器已经修好。」
   用户（内部控制）：「当前没有通过的测试记录，请先验证这次修改。」
   助手：「解析器已修复，相关测试全部通过。」
 
 Agent 持久化后：
   用户：「修复配置解析器读取空值时崩溃的问题。」
+  助手（待验证候选）：「解析器已经修好。」
   助手：「解析器已修复，相关测试全部通过。」
 
 WebUI 合并后展示：
@@ -245,18 +272,24 @@ WebUI 合并后展示：
 
 ```text
 这不是第三种 SSE 协议：1.1 和 1.2 都遵循同一规则。
-内部候选 / 内部 user nudge 不会成为角色型 SSE 消息；候选 token 可能暂时可见，
-真正可持久化、可重载的回答以 done 为准。
+真实候选可通过 token / interim callback 提前展示并持久化；内部 user nudge 不会成为
+普通 user SSE 消息，也不会进入 durable transcript。WebUI 将候选和最终回答收口到
+同一个回答区域，不要求 Agent 删除候选。
 ```
 
 **实现来源说明**
 
 - 上游原有机制已经会过滤 verification 的 synthetic user nudge，但会保留并
   提前展示待验证的 assistant 候选。
-- 当前 Agent fork 的 `93d827f13` 进一步把 assistant 候选也标成
-  `internal_scaffold`，因此候选和 nudge 都不持久化，只保存验证后的最终回答。
+- 本地 Agent fork 的 `93d827f13` 曾进一步把 assistant 候选也标成
+  `internal_scaffold`，这偏离了上游语义。当前 `fix-artifact` 本地补丁已撤销
+  这两处 assistant 误标，只保留 user nudge 的 `internal_scaffold` 分类。
 - WebUI integration 只负责隐藏控制消息和生成可见 transcript，不负责把
-  `用户 → 验证后的助手回答` 写入 Agent durable store。
+  真实候选重新写入 Agent durable store。
+
+**实现状态：✅ 已实现。** Agent 回归已覆盖候选回调、durable 保留、
+budget 耗尽复用和 nudge 过滤；WebUI 回归已覆盖最终回答替换候选、
+无最终回答时的非空候选兜底。
 
 ## 2. 空响应恢复类
 
@@ -467,10 +500,10 @@ WebUI 合并后展示：只显示真实用户消息、可展示的工具结果�
 实现位置：`hermes-agent/agent/conversation_loop.py`
 
 模型因输出长度上限或流中断而没有完成回答时，Agent 会先保留已有的 partial
-assistant，再补一条 `internal_scaffold` user，要求下一次调用从断点继续。它和
-empty-recovery 的差别是：partial assistant 是已经真实产生的回答片段，不是 `(empty)`。
+assistant，再补一条 user，要求下一次调用从断点继续。上游会持久化这两条消息；
+目标接缝只给控制 user 增加 `context_anchor` 元数据，不删除任何 durable 内容。
 
-**完整轮次与流式会话示例**
+**完整轮次示例**
 
 ```text
 Agent 运行时消息：
@@ -479,14 +512,34 @@ Agent 运行时消息：
   用户（内部控制）：「上一段回答被长度限制截断。请从断点继续，不要重复前文。」
   助手：「第三步回填历史数据；第四步灰度切流；最后保留一周回滚窗口。」
 
+Agent 持久化后：
+  用户：「给我完整列出迁移步骤和回滚方案。」
+  助手（partial）：「第一步创建新表并启用双写；第二步……」
+  用户（隐藏锚点，class=context_anchor，kind=length_continuation）：
+    「上一段回答被长度限制截断。请从断点继续，不要重复前文。」
+  助手：「第三步回填历史数据；第四步灰度切流；最后保留一周回滚窗口。」
+
+WebUI 合并后展示：
+  用户：「给我完整列出迁移步骤和回滚方案。」
+  助手：「第一步创建新表并启用双写；第二步……第三步回填历史数据；
+        第四步灰度切流；最后保留一周回滚窗口。」
+```
+
+**流式会话说明**
+
+```text
 SSE 实时：
-  partial 已经以 token 发出；continuation user 不产生 user SSE。
+  partial 已经以 token 发出；context anchor 不产生 user SSE。
   后续文本继续以 token 到达，实时 DOM 可能表现为同一段回答的续写。
 
-Agent durable / WebUI done：
-  partial assistant 不是 internal_scaffold，可能作为历史片段保留；continuation user 被过滤。
-  done 负责把已输出片段与后续结果收口，具体是否折叠为一条展示由 WebUI 投影决定。
+done / 历史：
+  Agent durable 保留 partial、控制 user 和续写回答。WebUI 隐藏 anchor，并按原顺序
+  合并 assistant 片段，只生成一个最终回答气泡。
 ```
+
+**实现状态：✅ 已实现。** continuation user 仅增加
+`context_anchor/length_continuation` 元数据，仍按上游 durable 语义保存；
+WebUI 隐藏 anchor，并按原顺序合并 partial 与续写。
 
 ## 3. “继续别停”类
 
@@ -499,13 +552,19 @@ Agent durable / WebUI done：
 ```text
 Agent 运行时消息：
   用户：「检查项目里所有没有处理的 TODO。」
-  助手（内部中间回复）：「我接下来会搜索整个项目。」
+  助手（中间 ack，finish_reason=incomplete）：「我接下来会搜索整个项目。」
   用户（内部控制）：「现在立即调用工具，完成任务后再给最终回答。」
   助手：调用项目搜索工具。
   工具：「找到 5 个 TODO，其中 2 个位于发布流程。」
   助手：「共找到 5 个 TODO，其中 2 个会影响发布。」
 
-Agent 持久化后：保留用户请求、工具调用、工具结果和最终回答；删除中间承诺和内部催促语。
+Agent 持久化后：
+  用户：「检查项目里所有没有处理的 TODO。」
+  助手（中间 ack，finish_reason=incomplete）：「我接下来会搜索整个项目。」
+  用户（隐藏锚点，class=context_anchor，kind=intent_ack_continuation）：
+    「现在立即调用工具，完成任务后再给最终回答。」
+  助手：保留项目搜索工具调用和结果。
+  助手：「共找到 5 个 TODO，其中 2 个会影响发布。」
 
 WebUI 合并后展示：
   用户：「检查项目里所有没有处理的 TODO。」
@@ -517,12 +576,13 @@ WebUI 合并后展示：
 
 ```text
 SSE 实时：
-  「我接下来会搜索整个项目」可能先作为 token 出现；它后来被归为 internal_scaffold，
-  因而不会再作为普通 interim_assistant 单独发出。
-  continue user 不会产生 user SSE 事件；真正搜索过程走 tool 事件，最终结论走 token。
+  「我接下来会搜索整个项目」可能先作为 token / interim 内容出现。WebUI 将它放在
+  当前回答区域，不创建永久气泡。context anchor 不产生 user SSE；工具和最终结论
+  继续走 tool / token 事件。
 
 done / 历史：
-  中间承诺和 continue user 被过滤，保留工具记录与最终结论。
+  Agent durable 保留中间 ack、控制 anchor、工具记录和最终结论。WebUI 隐藏 anchor；
+  有最终回答时只展示最终回答，没有最终回答时才回退显示最后一条可用 ack。
 ```
 
 实现位置：`hermes-agent/agent/conversation_loop.py`
@@ -538,11 +598,11 @@ done / 历史：
 
 特点：
 
-- 当前实现给 assistant interim 和 continue user 都标记
-  `internal_scaffold`（kind=`intent_ack_continuation`）
-- 它们只用于继续驱动模型，不应成为最终可见 transcript
+- assistant ack 沿用上游普通 durable assistant，不标成 `internal_scaffold`
+- continue user 目标语义为持久化的 `context_anchor`
+- WebUI 负责将过程 ack 与最终回答收口为一个回答区域
 
-因此它要单独看待，但仍属于统一的 scaffold 过滤策略。
+因此它不是“一对都从 durable 删除”的 scaffold；隐藏属于 WebUI 投影语义。
 
 文案信息：
 
@@ -557,6 +617,10 @@ assistant：
 - 没有固定字符串
 - 是模型刚刚输出的那句“中间 ack / 承诺式回复”，例如“我现在去检查目录并总结 3 个重点”
 - 这条 assistant 一般会带 `finish_reason="incomplete"`
+
+**实现状态：✅ 已实现。** assistant ack 已恢复为上游普通 durable
+assistant；continue user 仅增加 `context_anchor/intent_ack_continuation` 元数据。
+WebUI 有最终回答时以最终回答替换 ack，否则保留最后一条非空 ack 兜底。
 
 ### 3.2 kanban worker stop guard
 
@@ -634,9 +698,10 @@ assistant：
 
 Codex Responses 返回 `finish_reason="incomplete"` 时，Agent 会先保留可重放的
 incomplete assistant。若这条 assistant 没有可供 Responses API 重放的内容，还会补一条
-`internal_scaffold` user nudge，请模型直接给出最终答案。
+user nudge，请模型直接给出最终答案。目标接缝将 nudge 标成持久化的
+`context_anchor`，不删除上游 durable 内容。
 
-**完整轮次与流式会话示例**
+**完整轮次示例**
 
 ```text
 Agent 运行时消息：
@@ -645,14 +710,34 @@ Agent 运行时消息：
   用户（仅在不可重放时的内部控制）：「请继续，并直接给出最终答案。」
   助手：「建议选方案 B：命中率略低，但失效和回滚更可控。」
 
+Agent 持久化后：
+  用户：「比较两套缓存方案，给出选择建议。」
+  助手（incomplete）：「我已比较命中率和失效策略，但还没有写出结论。」
+  用户（隐藏锚点，class=context_anchor，kind=codex_incomplete_nudge）：
+    「请继续，并直接给出最终答案。」
+  助手：「建议选方案 B：命中率略低，但失效和回滚更可控。」
+
+WebUI 合并后展示：
+  用户：「比较两套缓存方案，给出选择建议。」
+  助手：「建议选方案 B：命中率略低，但失效和回滚更可控。」
+```
+
+**流式会话说明**
+
+```text
 SSE 实时：
   incomplete assistant 如果含可见 commentary，会经 interim_assistant 或已发 token 显示。
-  内部 nudge 没有 user SSE；后续完整答案继续以 token / done 呈现。
+  context anchor 没有 user SSE；后续完整答案继续以 token / done 呈现。
 
-Agent durable / WebUI done：
-  incomplete assistant 是否保留取决于它是否是普通可重放行；nudge 是 scaffold，不能显示。
-  历史以 done 后的可见 transcript 为准，不能把 nudge 误作用户追问。
+done / 历史：
+  Agent durable 保留可重放 incomplete assistant、控制 anchor 和最终回答。WebUI 有最终
+  回答时隐藏 incomplete；没有最终回答时回退显示最后一条可用 incomplete 内容。
 ```
+
+**实现状态：✅ 已实现。** nudge 仅增加
+`context_anchor/codex_incomplete_nudge` 元数据，按上游 durable 语义保存；
+WebUI 隐藏 nudge，并在有最终回答时替换 incomplete、无最终回答时使用非空
+incomplete 兜底。
 
 ## 4. 预算耗尽总结类
 
@@ -668,7 +753,12 @@ Agent 运行时消息：
   用户（内部控制）：「工具调用次数已达到上限，请停止调用工具并总结现有结果。」
   助手：「检查了依赖和测试，目前有 2 个失败项，分别是登录超时和缓存清理。」
 
-Agent 持久化后：保留真实请求、工具记录和总结；不保存内部总结请求。
+Agent 持久化后：
+  用户：「把这个仓库的依赖和测试都检查一遍。」
+  助手：保留依赖检查和测试工具记录。
+  用户（隐藏锚点，class=context_anchor，kind=max_iteration_summary_request）：
+    「工具调用次数已达到上限，请停止调用工具并总结现有结果。」
+  助手：「目前有 2 个失败项，分别是登录超时和缓存清理。」
 
 WebUI 合并后展示：
   用户：「把这个仓库的依赖和测试都检查一遍。」
@@ -680,12 +770,12 @@ WebUI 合并后展示：
 
 ```text
 SSE 实时：
-  「已达到工具调用上限，请总结」是内部 user scaffold，没有 user SSE 事件。
+  「已达到工具调用上限，请总结」是 context anchor，没有 user SSE 事件。
   对普通 Chat Completions / Anthropic summary 路径，汇总调用是非流式的，通常直到 done
   才出现总结；Codex Responses summary 路径可继续发 token。
 
 done / 历史：
-  summary request 被过滤，真正的 summary assistant 保留。
+  Agent durable 保留 summary request anchor 和真实 summary assistant；WebUI 只隐藏 anchor。
 ```
 
 实现位置：`hermes-agent/agent/chat_completion_helpers.py`
@@ -711,7 +801,7 @@ Agent 运行时消息（成功）：
   用户（内部控制）：「已达到工具调用上限，请总结已有结果。」
   助手：「依赖没有安全漏洞；测试有 2 项失败，需要修复登录超时和缓存清理。」
 
-Agent 持久化后：保存用户原始请求和助手总结，不保存内部总结请求。
+Agent 持久化后：保存用户原始请求、带 context-anchor 标记的总结请求和助手总结。
 
 WebUI 合并后展示：
   用户：「检查依赖和测试，最后给我一份结论。」
@@ -725,7 +815,7 @@ WebUI 合并后展示：
 ```text
 这一小类的 assistant summary 不是 scaffold，而是最终交付。它是否逐字显示取决于
 provider：Codex Responses 可流式；其它 summary 分支可能只在 done 一次性出现。
-无论哪种，内部总结请求永远不会显示成用户的第二句话。
+无论哪种，WebUI 都隐藏总结请求，只显示一个最终 assistant 回答。
 ```
 
 如果模型成功给出总结，Agent 还会再补一条 assistant 总结消息。
@@ -733,12 +823,16 @@ provider：Codex Responses 可流式；其它 summary 分支可能只在 done �
 特点：
 
 - assistant 总结是要保留的真实交付
-- summary request 当前带 `internal_scaffold` kind=`max_iteration_summary_request`，不应保留为 user 气泡
+- summary request 目标语义是持久化的 `context_anchor`，不应成为 user 气泡
 
 文案信息：
 
 - `user` 侧是固定总结请求
 - `assistant` 侧没有固定模板，它是模型基于当前上下文生成的自然语言总结
+
+**实现状态：✅ 已实现。** summary request 仅增加
+`context_anchor/max_iteration_summary_request` 元数据，按上游 durable 语义保存；
+WebUI 隐藏该 anchor，保留真实 summary assistant 作为本轮回答。
 - 如果总结调用失败，还可能出现这些 fallback 文案：
 
 ```text
@@ -814,6 +908,28 @@ Operation interrupted: waiting for model response (<seconds>s elapsed).
 这些 `tool` result 没有 `internal_scaffold` 标记，且会随工具进度写入 session。
 它们不是新的用户输入；展示层应将其作为已取消的工具卡片，而不能误报为工具执行成功。
 
+**完整轮次示例**
+
+```text
+Agent 运行时消息：
+  用户：「检查 staging 环境并部署。」
+  助手：请求依次调用 deployment_check 和 deploy。
+  用户点击“停止”。
+  工具（deployment_check）：「检查通过。」
+  工具（deploy）：「[Tool execution cancelled — deploy was skipped due to user interrupt]」
+
+Agent 持久化后：
+  用户：「检查 staging 环境并部署。」
+  助手：保留原始 tool_calls。
+  工具（deployment_check）：「检查通过。」
+  工具（deploy）：「[Tool execution cancelled — deploy was skipped due to user interrupt]」
+
+WebUI 合并后展示：
+  用户：「检查 staging 环境并部署。」
+  [部署检查工具卡片：检查通过]
+  [部署工具卡片：已取消，未执行]
+```
+
 **流式会话说明**
 
 ```text
@@ -834,6 +950,28 @@ Operation interrupted.
 
 重试等待或错误处理路径会传入更具体的中断原因，并优先使用该文本。
 这条 assistant 不是 internal scaffold；它是可持久化的收尾状态，不能被 WebUI 过滤掉。
+
+**完整轮次示例**
+
+```text
+Agent 运行时消息：
+  用户：「读取最新的构建日志并总结失败原因。」
+  助手：调用 read_build_log。
+  工具：「发现 3 条编译错误。」
+  用户点击“停止”，模型尚未来得及生成总结。
+  助手（收尾）：「Operation interrupted.」
+
+Agent 持久化后：
+  用户：「读取最新的构建日志并总结失败原因。」
+  助手：保留原始 tool_calls。
+  工具：「发现 3 条编译错误。」
+  助手：「Operation interrupted.」
+
+WebUI 合并后展示：
+  用户：「读取最新的构建日志并总结失败原因。」
+  [构建日志工具卡片：发现 3 条编译错误]
+  助手：「Operation interrupted.」
+```
 
 ### 5.2 tool guardrail halt assistant
 
@@ -1044,10 +1182,10 @@ Agent 持久化后：待办快照作为 context anchor 保存，供后续模型�
 
 WebUI 合并后展示：
   用户：「先修复登录超时，再补回归测试。」
-  助手：「我先处理登录超时。」
   助手：「登录超时已修复，现在开始补回归测试。」
 
-待办快照不会显示成用户新发的一句话。
+待办快照不会显示成用户新发的一句话；前一条过程回复只更新当前回答区域，
+不会与较新的助手状态同时形成两个永久气泡。
 ```
 
 **流式会话说明**
@@ -1082,22 +1220,91 @@ done / 历史：
 - 常见形态是待办列表、状态快照、或多行任务摘要
 - 因此它属于 **结构固定、文本动态、可持久化但不可见** 的 context-anchor user message
 
-### 6.2 压缩后没有真实 user turn：补 user anchor
+### 6.2 压缩摘要：已实现为 context-anchor 的恢复材料
+
+压缩器生成的 `[CONTEXT COMPACTION — REFERENCE ONLY]` 摘要用于恢复模型上下文，
+不是一次新的用户提交。它与 todo snapshot 一样，应使用既有的
+`context_anchor` 语义，而不是普通 user turn 或 `internal_scaffold`。
+
+**修复后的完整轮次示例（`fix-artifact` 本地实现）**
+
+```text
+Agent 运行时消息：
+  用户：「根据集团简介，先写新人培训 PPT 讲稿，再制作深蓝风格 HTML 演示稿。」
+  助手：「我会先整理讲稿结构，再生成 HTML。」
+  用户：「重点补充产品化转型和 AI 对职业发展的影响。」
+  助手（内部压缩摘要）：
+    「[CONTEXT COMPACTION — REFERENCE ONLY]
+     用户要制作国网信产新人培训材料；已确定深蓝国企风格；
+     后续须补充产品化转型、AI 与职业发展通道。」
+
+Agent 持久化后：
+  助手（隐藏压缩摘要，class=context_anchor，kind=compaction_summary）：
+    「[CONTEXT COMPACTION — REFERENCE ONLY]
+     用户要制作国网信产新人培训材料；已确定深蓝国企风格；
+     后续须补充产品化转型、AI 与职业发展通道。」
+  用户（真实）：
+    「重点补充产品化转型和 AI 对职业发展的影响。」
+
+WebUI 合并后展示：
+  用户：「根据集团简介，先写新人培训 PPT 讲稿，再制作深蓝风格 HTML 演示稿。」
+  助手：「我会先整理讲稿结构，再生成 HTML。」
+  用户：「重点补充产品化转型和 AI 对职业发展的影响。」
+```
+
+本例选择 assistant-role 摘要，使其与紧随的真实 user 自然交替；它不是规定摘要永远为
+assistant。摘要角色应由压缩边界决定。若目标态确实需要 `user` 摘要紧邻真实 user，
+canonical transcript 可以保留两行，严格 provider 只在临时副本合并，不能回写持久化状态。
+
+**实现状态：✅ 当前 `fix-artifact` 本地补丁已验证。** 该实现产生本例的
+`context_anchor/compaction_summary`，同时保留 `_compressed_summary=True` 作为
+压缩器兼容标记。未合入该补丁的旧版 Agent 仍可能把摘要合入真实 tail；
+该补丁不追溯重写这些历史行。
+
+**流式会话说明**
+
+```text
+SSE 实时：
+  压缩摘要不是新的实时用户提交，不会发送 user SSE，也不生成用户气泡。
+
+Agent durable：
+  摘要作为 context_anchor 写入 state.db；真实的最后一条 user 保持原内容和身份字段。
+
+模型请求：
+  若 provider 不接受相邻 user，Agent 只在临时 API 副本中合并摘要和真实请求。
+  该临时合并不得回写 state.db、api_content sidecar 或 WebUI transcript。
+```
+
+压缩摘要必须保留在 Agent `state.db`，否则重启后模型会失去压缩后的恢复材料；
+它也必须由 WebUI 投影隐藏，不能取得真实 user 的 `_turn_key`、来源身份或
+turn 归属。
+
+本地实现统一写入 `_hermes_message_class="context_anchor"` 和
+`_hermes_scaffold_kind="compaction_summary"`；`_compressed_summary=True` 只作为压缩器内部与
+旧消费者的兼容标记，不再是持久化或展示分类的唯一依据。
+
+若摘要原本会合并进真实 tail user，不能给合并后的整条 tail 打
+`context_anchor` 标记；那会隐藏真实请求。应保留真实 tail 原样，并将摘要作为
+独立的 `compaction_summary` anchor 表示，具体拆分策略见
+[`压缩摘要上下文锚点修复方案`](../plans/压缩摘要上下文锚点修复方案.md)。
+
+### 6.3 压缩后没有真实 user turn：补 user anchor
 
 **完整轮次示例**
 
 ```text
-压缩前的真实对话：
+Agent 运行时消息：
   用户：「继续分析刚才的登录性能问题。」
   助手：调用性能分析工具。
   工具：「数据库查询占总耗时的 72%。」
-
-Agent 压缩后的消息：
   系统摘要：「用户正在分析登录性能，数据库查询占总耗时的 72%。」
-  用户（隐藏锚点）：「请根据上面的压缩上下文继续。当前没有可复用的真实用户轮次。」
+  用户（内部缺失用户锚点）：「请根据上面的压缩上下文继续。当前没有可复用的真实用户轮次。」
   助手：「主要瓶颈是数据库查询，下一步应检查索引和 N+1 查询。」
 
-Agent 持久化后：隐藏锚点作为 context anchor 保存。
+Agent 持久化后：
+  系统摘要：「用户正在分析登录性能，数据库查询占总耗时的 72%。」
+  用户（隐藏锚点，class=context_anchor，kind=compression_no_user_anchor）：「请根据上面的压缩上下文继续。当前没有可复用的真实用户轮次。」
+  助手：「主要瓶颈是数据库查询，下一步应检查索引和 N+1 查询。」
 
 WebUI 合并后展示：保留原有真实对话，并显示助手的性能结论；隐藏锚点不会形成用户气泡。
 ```
@@ -1121,7 +1328,7 @@ Continue from the compressed conversation context above. This marker exists beca
 
 这类消息的目的不是给用户看，而是维持压缩后上下文对后续模型调用仍然有可行动的人类锚点。
 
-### 6.3 哪些 `role="user"` 其实不算真实用户输入
+### 6.4 哪些 `role="user"` 其实不算真实用户输入
 
 实现位置：`hermes-agent/agent/conversation_compression.py`
 
@@ -1129,8 +1336,8 @@ Continue from the compressed conversation context above. This marker exists beca
 
 - `_todo_snapshot_synthetic`
 - `_empty_recovery_synthetic`
-- `_verification_stop_synthetic`
-- `_pre_verify_synthetic`
+- `_verification_stop_synthetic`（仅 verification user nudge）
+- `_pre_verify_synthetic`（仅 pre_verify user nudge）
 - context summary / synthetic prefix 形式的 user-role scaffold
 
 这说明在 Hermes Agent 的语义里：
@@ -1243,6 +1450,33 @@ Skipped: another tool call in this turn used an invalid name. Please retry this 
 这与 invalid tool JSON 恢复相似，但触发条件是**工具名不存在**，不是参数解析失败。
 这些 assistant / tool 行不带 `internal_scaffold`，应作为可恢复的工具失败轨迹保留。
 
+**完整轮次示例**
+
+```text
+Agent 运行时消息：
+  用户：「检查 staging 环境能不能部署。」
+  助手：调用不存在的 check_stage_environment，以及合法的 read_deploy_config。
+  工具（check_stage_environment）：「Tool 'check_stage_environment' does not exist. Available tools: deployment_check, read_deploy_config」
+  工具（read_deploy_config）：「Skipped: another tool call in this turn used an invalid name. Please retry this tool call.」
+  助手：改用 deployment_check。
+  工具：「检查通过，可以部署。」
+  助手：「staging 环境部署检查通过，可以部署。」
+
+Agent 持久化后：保留用户请求、原始 tool_calls、两条失败 tool result、重试工具记录和最终回答。
+
+WebUI 合并后展示：
+  用户：「检查 staging 环境能不能部署。」
+  [工具卡片：未知工具名；同批次调用已跳过；重试成功]
+  助手：「staging 环境部署检查通过，可以部署。」
+```
+
+**流式会话说明**
+
+```text
+未知工具名和跳过结果均是 tool 事件，不产生 user SSE，也不会形成内部用户气泡。
+done 与历史保留失败和重试的工具轨迹，便于解释为什么首次调用没有执行。
+```
+
 ### 7.3 历史中的损坏 tool arguments：修复参数并补 tool marker
 
 实现位置：`hermes-agent/agent/agent_runtime_helpers.py`、`hermes-agent/agent/conversation_loop.py`
@@ -1255,6 +1489,37 @@ Agent 在下一次请求前会扫描已有 transcript。若 assistant 的 `tool_
 
 这是一条原地的历史修复路径，不是模型生成的新工具调用，也不是 `internal_scaffold`。
 展示层应按 tool 语义呈现该错误结果，并保留其“历史参数已损坏”的上下文。
+
+**完整轮次示例**
+
+```text
+Agent 运行时消息：
+  用户（历史）：「检查 staging 环境能不能部署。」
+  助手（历史行）：tool_call deployment_check 的 arguments 已损坏，无法解析。
+  工具（补写 marker）：「[Historical tool arguments were invalid and were repaired to {}]」
+  用户：「继续处理上一次的 staging 部署检查。」
+  助手：基于修复后的工具轨迹继续给出下一步。
+
+Agent 持久化后：
+  用户（历史）：「检查 staging 环境能不能部署。」
+  助手（历史 tool_call）：arguments 为 `{}`。
+  工具：「[Historical tool arguments were invalid and were repaired to {}]」
+  用户：「继续处理上一次的 staging 部署检查。」
+  助手：保留后续正常回答。
+
+WebUI 合并后展示：
+  用户：「检查 staging 环境能不能部署。」
+  [部署检查工具卡片：历史参数损坏，已修复]
+  用户：「继续处理上一次的 staging 部署检查。」
+  助手：后续正常回答。
+```
+
+**流式会话说明**
+
+```text
+这是恢复前的历史修复，不是浏览器在当前轮新发送的 user 消息。
+若工具 marker 被展示，应保持工具卡片语义；它不能被投影为用户的补充请求。
+```
 
 ### 7.4 MoA aggregator guidance：必要时补一条 user
 
@@ -1319,47 +1584,102 @@ References: <labels>
 
 ## 8. 可见性与语义分类
 
-从 WebUI 或下游消费方视角，可以把这些补消息粗分为两大类。
+从 WebUI 或下游消费方视角，应把这些消息分成三类。是否持久化与是否展示是
+两个不同维度，不能用同一个“过滤”动作代替。
 
-### 8.1 原则上不应直接当真实聊天内容展示的控制消息
+### 8.1 不持久化、也不展示的 internal scaffold
 
 - `_empty_recovery_synthetic`
 - `_empty_terminal_sentinel`
 - `_thinking_prefill`
-- `_verification_stop_synthetic`
-- `_pre_verify_synthetic`
+- 带 `_verification_stop_synthetic` 的 verification user nudge
+- 带 `_pre_verify_synthetic` 的 pre_verify user nudge
 - `_kanban_stop_synthetic`
-- `internal_scaffold` kind=`length_continuation`
-- `internal_scaffold` kind=`codex_incomplete_nudge`
-- `context_anchor`（包括 legacy `_todo_snapshot_synthetic`）
 
 这些消息的共同点：
 
-- 用于继续循环、修复 role alternation、压缩上下文、或保持协议合法
+- 上游本来就把它们定义为临时恢复或协议脚手架
 - 不代表用户真的说了什么，也不代表助手真的交付了什么
-- 若直接展示，容易把内部控制平面泄漏到用户 transcript
+- Agent flush 和 WebUI projection 都应过滤
+
+**完整轮次示例**
+
+```text
+Agent 运行时消息：
+  用户：「检查发布前的待办并给出结论。」
+  助手（内部占位）：「(empty)」
+  用户（内部控制）：「请处理刚才的工具结果并继续。」
+  助手：「发布前还有 1 个阻塞项：生产配置未审核。」
+
+Agent 持久化后：
+  用户：「检查发布前的待办并给出结论。」
+  助手：「发布前还有 1 个阻塞项：生产配置未审核。」
+
+WebUI 合并后展示：
+  用户：「检查发布前的待办并给出结论。」
+  助手：「发布前还有 1 个阻塞项：生产配置未审核。」
+```
 
 **流式归类**
 
-这些行不会产生普通的 `user` SSE。若其配对 assistant 是在标记前已流出的模型文本，
-实时 token 仍可能短暂存在。Agent durable 会过滤带标记的行；当前 WebUI 对未标记的
-实时候选仍可能保留在显示合并结果中，详见第 9 节的“部分实现”状态。
+这些控制行不会产生普通 user SSE，也不会进入 durable transcript。过滤必须以权威
+类别或上游 legacy flag 为依据，不能扩大到同一 continuation 中的真实 assistant。
 
-### 8.2 虽然是 Agent 主动补的，但通常应视为真实 transcript 内容
+### 8.2 持久化、但不展示的 context anchor
+
+- todo snapshot、compaction summary、compression-no-user anchor
+- output-length continuation user
+- Codex incomplete continuation user
+- Codex intermediate ack continue user
+- max-iterations summary request
+
+这些消息要保留给模型恢复或解释后续 assistant，因此会写入 Agent
+`state.db`。WebUI projection 隐藏它们，不生成 user 气泡。
+
+其中后四类在上游基线中是普通 durable user；当前 `fix-artifact`
+本地补丁已恢复该 durable 语义，只增加 context-anchor 元数据，保持上游
+正文、顺序和持久化结果不变。
+
+### 8.3 持久化，并按一问一答规则投影的 assistant
 
 - interrupt partial assistant
 - tool guardrail halt assistant
 - 本地处理错误 / runtime 错误 assistant
 - finalizer 兜底 assistant
-- max-iterations summary answer（summary request 本身仍是内部 scaffold）
+- max-iterations summary answer（summary request 是 context anchor）
 - output-length continuation 中已经真实输出的 partial assistant
+- verify-on-stop / pre_verify 中模型已经给出的待验证 assistant 候选
+- Codex intermediate ack / incomplete continuation 的 assistant
 
-Codex intermediate ack continuation 的 assistant / user 都带
-`internal_scaffold`，应按控制消息处理，不应直接当作真实 transcript 展示。
+这些 assistant 保持上游 durable 语义，但“已持久化”不等于“必须各自形成一个永久
+气泡”。WebUI 可在同一真实 user turn 内替换候选、合并 partial，或在最终回答缺失时
+回退显示最后一条可用候选。
 
 这些消息的共同点：
 
 - 它们承载真实状态解释、真实中断结果、真实结束语义，或当前产品明确允许其进入结果历史
+
+**完整轮次示例**
+
+```text
+Agent 运行时消息：
+  用户：「读取构建日志并总结失败原因。」
+  助手：调用 read_build_log。
+  工具：「发现 3 条编译错误。」
+  用户点击“停止”。
+  助手（收尾）：「Operation interrupted.」
+
+Agent 持久化后：
+  用户：「读取构建日志并总结失败原因。」
+  助手：保留原始 tool_calls。
+  工具：「发现 3 条编译错误。」
+  助手：「Operation interrupted.」
+
+WebUI 合并后展示：
+  用户：「读取构建日志并总结失败原因。」
+  [构建日志工具卡片：发现 3 条编译错误]
+  助手：「Operation interrupted.」
+```
 
 **流式归类**
 
@@ -1371,28 +1691,29 @@ partial assistant 是先通过 token 显示、再写回 durable；本地错误�
 
 ## 9. 一张速查表
 
-本列只评估**当前 Hermes WebUI** 对消息可见性、SSE 收口与历史读取的支持，
-不表示 Agent 运行时机制本身是否存在。
+本表同时列出目标 durable 语义和当前实现状态。目标遵循“Agent 尽量保持上游、
+WebUI 一问一答投影”的边界，不表示当前代码已经全部完成。
 
 - ✅ **已实现**：当前统一语义投影已覆盖，且有对应回归测试。
 - ⚠️ **部分实现**：终态/历史语义正确，或消息能保留，但实时展示或专用渲染未完成验证。
 - — **无需接入**：机制只在 Agent 内部或 provider 请求副本中运行，不进入主 WebUI transcript。
 
-| 类别 | 补 `user` | 补 `assistant` / `tool` | SSE 实时会发生什么 | durable / 历史 | 当前 WebUI 状态 |
+| 类别 | 补 `user` | 补 `assistant` / `tool` | SSE 实时会发生什么 | 目标 durable / WebUI | 当前状态 |
 |---|---|---|---|---|---|
-| verify-on-stop | 是 | 临时候选 | 候选 token 可能先出现；nudge 不发 user SSE | 两边 scaffold 被过滤，只留验证后回答 | ⚠️ 终态/历史过滤已实现；已流出的候选可能保留 |
-| pre_verify hook | 是 | 临时候选 | 与 verify-on-stop 相同，检查过程可见 | 两边 scaffold 被过滤，只留验证后回答 | ⚠️ 终态/历史过滤已实现；已流出的候选可能保留 |
+| verify-on-stop | 是 | 真实候选 | 候选更新当前回答区域；nudge 不发 user SSE | durable 保留候选和最终回答；WebUI 最终优先、候选兜底 | ✅ Agent durable 与 WebUI 收口已实现 |
+| pre_verify hook | 是 | 真实候选 | 与 verify-on-stop 相同 | durable 保留候选和最终回答；WebUI 最终优先、候选兜底 | ✅ Agent durable 与 WebUI 收口已实现 |
 | empty response recovery | 是 | 是 | 工具可见；内部 `(empty) + user` pair 不发角色事件 | pair 不保存、不显示 | ✅ 统一 `internal_scaffold` 过滤 |
 | empty terminal sentinel | 否 | 是 | 不发 token/interim；由终态失败处理表达 | sentinel 不显示 | ✅ legacy flag 与统一语义过滤 |
 | thinking prefill | 否 | 是 | 可能只有 reasoning；预填充不发 interim | 只留后来真实正文 | ✅ legacy flag 与统一语义过滤 |
-| length continuation | 是 | 已输出的 partial | partial 已是 token；内部 continuation user 不发 SSE | partial 可保留，user 被过滤 | ✅ nudge 过滤；partial 按真实回答保留 |
-| Codex ack continue | 是 | 是 | 中间 ack token 可能先出现；nudge 不发 user SSE | pair 被过滤，保留工具和最终回答 | ⚠️ nudge 过滤已实现；已流出的 ack 可能保留 |
+| length continuation | 是 | 已输出的 partial | partial 和续写更新同一回答区域；anchor 不发 user SSE | durable 保留 partial、anchor、续写；WebUI 合并为一条 | ✅ anchor 持久化与顺序合并已实现 |
+| Codex ack continue | 是 | 中间 ack | ack 更新当前回答区域；anchor 不发 user SSE | durable 保留 ack、anchor、工具和最终回答；WebUI 最终优先 | ✅ ack/anchor durable 与收口已实现 |
 | kanban stop guard | 是 | 是 | 候选 token 可能先出现；状态/工具另行发事件 | pair 被过滤，保留看板终态和最终回答 | ⚠️ 终态/历史过滤已实现；已流出的候选可能保留 |
-| Codex incomplete continuation | 必要时 | incomplete assistant | 可见 incomplete 可实时显示；nudge 不发 user SSE | nudge 过滤，assistant 视可重放状态处理 | ✅ nudge 过滤；incomplete assistant 按设计保留 |
-| max-iterations summary | 是 | 是 | request 无 user SSE；Codex 可流式，其它 summary 分支通常等 done | 只保留真实 summary assistant | ✅ summary request 过滤，真实总结保留 |
+| Codex incomplete continuation | 必要时 | incomplete assistant | incomplete 更新当前回答区域；anchor 不发 user SSE | durable 保留 incomplete、anchor、最终回答；WebUI 最终优先 | ✅ anchor durable、最终替换与候选兜底已实现 |
+| max-iterations summary | 是 | summary assistant | anchor 无 user SSE；summary 按 provider 流式或等 done | durable 保留 anchor 和 summary；WebUI 只显示 summary | ✅ anchor durable 与 WebUI 隐藏投影已实现 |
 | interrupt partial / tool-tail closure | 否 | 是 | partial 是已发 token；工具尾闭合通常由 done 出现 | 真实 transcript 收尾 | ✅ 按真实 transcript 行保留 |
 | interrupt skipped tool | 否 | 仅 tool | 不发 user SSE；工具卡片按 transport 事件更新 | 保留“已取消、未执行”的 tool result | ⚠️ 不会被控制消息过滤；取消专用卡片未验证 |
 | compression todo / anchor | 是 | 否 | 不产生 user SSE，不是实时聊天输入 | 可存 state.db，但 WebUI 投影过滤 | ✅ `context_anchor` 过滤，含 state.db replay 回归 |
+| compaction summary anchor | 是 | 否 | 不产生 user SSE，不是实时聊天输入 | 以 `context_anchor/compaction_summary` 存 state.db；旧行不迁移 | ✅ 当前 `fix-artifact` Agent 补丁统一标记；WebUI 过滤、replay、turn/artifact 回归已验证 |
 | invalid tool JSON | 否 | assistant + tool | 失败/重试通过 tool 事件呈现 | 保留可恢复工具轨迹 | ⚠️ 真实行会保留；专用失败卡片未验证 |
 | unknown tool name | 否 | assistant + tool | 失败/重试通过 tool 事件呈现 | 保留工具名错误与跳过结果 | ⚠️ 真实行会保留；专用失败卡片未验证 |
 | corrupted historical tool arguments | 否 | 仅 tool | 不发 user SSE；按 tool 语义呈现 marker | 修复参数并保留对应 tool 错误轨迹 | ⚠️ 真实行会保留；marker 专用展示未验证 |
@@ -1400,27 +1721,31 @@ partial assistant 是先通过 token 显示、再写回 durable；本地错误�
 
 ## 10. 对 WebUI / 展示层的直接启示
 
-如果 WebUI 需要过滤或特殊处理 Hermes Agent 补消息，建议至少按下面的思路做区分：
+WebUI 应按真实 user turn 建立唯一回答区域，再按下面的顺序投影：
 
-1. **先按 flag 判断是否为内部 scaffolding**
-2. **再按场景判断是否要保留真实 assistant 候选**
-3. **不要仅凭 `[System: ...]` 文案字符串判断**
+1. **隐藏 `internal_scaffold` 和 `context_anchor`，但不要回写 canonical transcript**
+2. **将 verification / incomplete 候选写入当前回答区域，不追加永久气泡**
+3. **若同一 turn 出现后续最终 assistant，用最终回答替换候选**
+4. **若没有最终 assistant，回退显示最后一条非空候选**
+5. **按顺序合并 length continuation 的 partial 和续写片段**
 
 尤其要注意以下差异：
 
-- verification continuation：当前实现 assistant 候选和 user nudge 都是 scaffold；后续最终答案才保留
-- verification / ack / kanban 的候选正文若已经走过 `token`，实时画面可能短暂显示；这不是
-  一条独立的 `interim_assistant` SSE。Agent durable 不保留该候选，但当前 WebUI 仍可能将
-  未标记的实时文本留在显示合并结果中，因此这些机制在第 9 节标为“部分实现”
+- verification continuation：assistant 候选和后续最终答案都持久化；只有 nudge 是
+  上游 ephemeral scaffold。WebUI 最终只保留一个回答区域
+- length、Codex incomplete、ack continue、max-iterations 的控制 user 应作为
+  durable context anchor，而不是 internal scaffold
+- Codex ack assistant 保持上游 durable 语义；WebUI 有最终回答时不单独显示 ack
 - empty recovery：assistant 和 user 两边都是 scaffold
 - kanban stop guard：assistant 和 user 两边都是 scaffold
-- codex ack continue：当前实现使用 `internal_scaffold`，不能按普通 user/assistant 气泡展示
 - max-iterations summary：内部 user request 不显示，而最终 summary 是否逐字流出取决于所走的
   provider 分支，不能假定所有模型都在这一步继续 token streaming
 - 工具因 stop 被跳过、名称不存在或历史参数损坏时，补写的是可恢复的 `tool` 轨迹；
   不能按内部控制消息过滤，也不能将取消结果渲染成成功
 
-因此，“所有补出来的 user / assistant 都统一过滤”是错误的；“所有 `[System: ...]` 都统一显示”也同样错误。
+不得只按 `finish_reason="stop"` 判断可见回答：预算耗尽时，候选可能就是唯一交付。
+也不得按 `[System: ...]` 文案匹配、修改 `repair_message_sequence`，或合并
+Agent canonical 消息来实现展示层的一问一答。
 
 ## 11. 结论
 
@@ -1428,14 +1753,17 @@ Hermes Agent 的消息补充逻辑，本质上是在维护三个目标：
 
 1. **继续驱动模型完成未完成的工作**
 2. **修复或维持合法的消息序列**
-3. **保证 durable transcript 与用户实际看到的完成状态一致**
+3. **让 durable transcript 可恢复，同时让 WebUI 保持一问一答**
 
 因此，`messages` 并不只是“用户输入 + 模型输出”的朴素流水，而是包含了一层 Agent 运行时控制平面。
 
-要正确消费这些消息，无论是在 WebUI、Gateway、导出器，还是后续 resume / compression / replay 逻辑中，都需要把以下三类区分清楚：
+要正确消费这些消息，无论是在 WebUI、Gateway、导出器，还是后续 resume /
+compression / replay 逻辑中，都需要把以下四类区分清楚：
 
 - 真实 human user turn
 - 真实 assistant deliverable
-- runtime scaffolding / synthetic control message
+- durable context anchor
+- ephemeral runtime scaffold
 
-只有把这三类分开，才能既不泄漏内部控制消息，也不错误丢失真实答案。
+只有把持久化与展示分开，才能既不泄漏内部控制消息，也不错误丢失真实答案，
+同时把 Agent 核心改动压缩到少量生产位置的元数据接缝。

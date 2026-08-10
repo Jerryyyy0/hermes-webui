@@ -56,7 +56,6 @@ from api.process_event_utils import (
     requeue_async_delegation_event,
     schedule_async_delegation_claim_retry,
 )
-from integration.agent_message_semantics.audit import _log_content_preview
 from integration.project_logging import get_logger
 
 logger = get_logger(__name__)
@@ -998,14 +997,13 @@ def _emit_async_delegation_status(
             session_id,
             exc_info=True,
         )
-    logger.info(
+    logger.debug(
         "hermes_message_semantics action=background_task_status "
         "class=context_anchor kind=async_delegation_completion role=user "
-        "content=%r session_id=%s turn_key=%s delegation_id=%s "
+        "session_id=%s turn_key_present=%s delegation_id=%s "
         "status=%s wakeup_state=%s",
-        _log_content_preview(content),
         session_id,
-        payload["origin_turn_key"],
+        bool(payload["origin_turn_key"]),
         delegation_id,
         status,
         wakeup_state,
@@ -1193,10 +1191,10 @@ def _process_async_delegation_event(
             _retry_unmapped_async_delegation_event(process_registry, evt)
             logger.warning(
                 "async_delegation_origin_unresolved session_id=%s "
-                "delegation_id=%s content=%r",
+                "delegation_id=%s event_type=%s",
                 session_id,
                 delegation_id,
-                evt,
+                type(evt).__name__,
             )
             return
         if origin is None:

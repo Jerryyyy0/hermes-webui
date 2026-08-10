@@ -22,6 +22,11 @@ _DISPLAY_METADATA_KEYS = (
     "_anchor_stream_id",
     "_anchor_activity_scene",
 )
+_REPLACED_ASSISTANT_FINISH_REASONS = {
+    "verification_required",
+    "verify_hook_continue",
+    "incomplete",
+}
 
 
 def _turn_key(message: Any) -> str:
@@ -151,6 +156,114 @@ def _attach_background_task_ids(
     return projected
 
 
+def _is_text_assistant(message: Any) -> bool:
+    return (
+        isinstance(message, dict)
+        and str(message.get("role") or "").lower() == "assistant"
+        and not message.get("tool_calls")
+    )
+
+
+def _has_display_content(message: dict) -> bool:
+    content = message.get("content")
+    if isinstance(content, str):
+        return bool(content.strip())
+    if isinstance(content, (list, dict)):
+        return bool(content)
+    return content is not None
+
+
+def _merge_assistant_messages(partial: dict, continuation: dict) -> dict | None:
+    partial_content = partial.get("content", "")
+    continuation_content = continuation.get("content", "")
+    merged = copy.deepcopy(continuation)
+    if isinstance(partial_content, str) and isinstance(continuation_content, str):
+        merged["content"] = partial_content + continuation_content
+    elif isinstance(partial_content, list) and isinstance(continuation_content, list):
+        merged["content"] = copy.deepcopy(partial_content) + copy.deepcopy(continuation_content)
+    elif isinstance(partial_content, list) and isinstance(continuation_content, str):
+        merged["content"] = copy.deepcopy(partial_content)
+        if continuation_content:
+            merged["content"].append({"type": "text", "text": continuation_content})
+    elif isinstance(partial_content, str) and isinstance(continuation_content, list):
+        blocks = []
+        if partial_content:
+            blocks.append({"type": "text", "text": partial_content})
+        blocks.extend(copy.deepcopy(continuation_content))
+        merged["content"] = blocks
+    else:
+        return None
+    return merged
+
+
+def _project_one_answer_messages(
+    messages: Any,
+    *,
+    action: str,
+    session_id: str | None,
+) -> list:
+    retained: list = []
+    pending_answer_index: int | None = None
+    pending_answer_mode = ""
+
+    for message in list(messages or []):
+        if is_non_anchor_control_message(message):
+            log_control_message(action, message, session_id=session_id)
+            continue
+
+        role = str(message.get("role") or "").lower() if isinstance(message, dict) else ""
+        if role == "user":
+            pending_answer_index = None
+            pending_answer_mode = ""
+            retained.append(message)
+            continue
+
+        if _is_text_assistant(message):
+            finish_reason = str(message.get("finish_reason") or "").strip()
+            if finish_reason == "length":
+                projected_message = message
+                if pending_answer_index is not None:
+                    previous = retained[pending_answer_index]
+                    if pending_answer_mode == "append":
+                        merged = _merge_assistant_messages(previous, message)
+                        if merged is not None:
+                            projected_message = merged
+                    retained.pop(pending_answer_index)
+                retained.append(projected_message)
+                pending_answer_index = len(retained) - 1
+                pending_answer_mode = "append"
+                continue
+            if finish_reason in _REPLACED_ASSISTANT_FINISH_REASONS:
+                if not _has_display_content(message):
+                    continue
+                if pending_answer_index is not None:
+                    retained.pop(pending_answer_index)
+                retained.append(message)
+                pending_answer_index = len(retained) - 1
+                pending_answer_mode = "replace"
+                continue
+            projected_message = message
+            if pending_answer_index is not None:
+                previous = retained[pending_answer_index]
+                if pending_answer_mode == "append":
+                    merged = _merge_assistant_messages(previous, message)
+                    if merged is None:
+                        pending_answer_index = None
+                        pending_answer_mode = ""
+                        retained.append(message)
+                        continue
+                    projected_message = merged
+                retained.pop(pending_answer_index)
+                pending_answer_index = None
+                pending_answer_mode = ""
+            retained.append(projected_message)
+            continue
+
+        retained.append(message)
+
+    return retained
+
+
 def drop_non_display_messages(
     messages: Any,
     *,
@@ -159,12 +272,11 @@ def drop_non_display_messages(
     background_task_origins: Any = None,
 ) -> list:
     """Return a display projection without Agent-only rows or replay users."""
-    retained = []
-    for message in list(messages or []):
-        if is_non_anchor_control_message(message):
-            log_control_message(action, message, session_id=session_id)
-            continue
-        retained.append(message)
+    retained = _project_one_answer_messages(
+        messages,
+        action=action,
+        session_id=session_id,
+    )
     retained = _dedupe_replayed_users(retained, session_id=session_id)
     return _attach_background_task_ids(
         retained,
