@@ -1425,18 +1425,17 @@
     "/api/integration/knowledge_base/show_pdf": {
       "post": {
         "tags": ["IntegrationKnowledgeBase"],
-        "summary": "预览 PDF / 文档",
-        "description": "代理 `POST {KNOWLEDGE_BASE_URL}/knowledge_base/show_pdf`。必填：`kbName`、`fileName`。可选 `flag`（如 docx 转 PDF 预览）。BFF 内部向下游注入空 `aes_key`/`aes_nonce`。成功且下游返回 PDF 时，BFF 透传 `application/pdf` 二进制；业务错误仍为 JSON。",
-        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseShowPdfRequest" } } } },
+        "summary": "预览或下载知识库文档",
+        "description": "透传代理 `POST {KNOWLEDGE_BASE_URL}/knowledge_base/show_pdf`。JSON 请求体原样转发，不做字段校验、字段过滤或默认字段注入。典型字段：`kbName`、`fileName`、`flag`、`doc_id`。成功且下游返回文件时透传二进制；业务错误仍为 JSON。",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughRequest" } } } },
         "responses": {
           "200": {
-            "description": "PDF 二进制（application/pdf）或 JSON data",
+            "description": "文件二进制或 JSON 错误",
             "content": {
-              "application/pdf": { "schema": { "type": "string", "format": "binary" } },
-              "application/json": { "schema": { "type": "object" } }
+              "application/octet-stream": { "schema": { "type": "string", "format": "binary" } },
+              "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughResponse" } }
             }
           },
-          "400": { "description": "缺参或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
           "502": { "description": "下游不可达", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
         }
       }
@@ -6209,15 +6208,6 @@
         "type": "object",
         "required": ["kbName"],
         "properties": { "kbName": { "type": "string" } }
-      },
-      "KnowledgeBaseShowPdfRequest": {
-        "type": "object",
-        "required": ["kbName", "fileName"],
-        "properties": {
-          "kbName": { "type": "string" },
-          "fileName": { "type": "string" },
-          "flag": { "type": "boolean" }
-        }
       },
       "KnowledgeBaseSearchDocsRequest": {
         "type": "object",

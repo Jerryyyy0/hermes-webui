@@ -141,28 +141,6 @@ def test_build_search_docs_xcore_payload_overrides():
     assert payload["score_threshold"] == 0.5
 
 
-def test_build_show_pdf_payload_without_flag():
-    body = {"kbName": "share54", "fileName": "1656号附件-电力中长期市场基本规则.pdf"}
-    payload = client.build_show_pdf_payload(body)
-    assert payload == {
-        "kbName": "share54",
-        "fileName": "1656号附件-电力中长期市场基本规则.pdf",
-        "aes_key": "",
-        "aes_nonce": "",
-    }
-
-
-def test_build_show_pdf_payload_with_flag():
-    body = {
-        "kbName": "share54",
-        "fileName": "关于促进电网高质量发展的指导意见(发改能源〔2025〕1710 号).docx",
-        "flag": True,
-    }
-    payload = client.build_show_pdf_payload(body)
-    assert payload["kbName"] == "share54"
-    assert payload["flag"] is True
-
-
 def test_post_show_pdf_json_error():
     resp = MagicMock(spec=httpx.Response)
     resp.status_code = 200

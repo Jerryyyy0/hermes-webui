@@ -41,10 +41,12 @@ PASSTHROUGH_ROUTES: set[str] = {
     "user_exit_shkb",
     "remove_from_myshkb",
     "delete_readed_message",
+    "show_pdf",
     "download_doc",
 }
 
 BINARY_PASSTHROUGH_ROUTES: set[str] = {
+    "show_pdf",
     "download_doc",
 }
 

@@ -380,7 +380,7 @@ export KNOWLEDGE_BASE_URL=http://192.168.1.132:17861
 | POST | `/api/integration/knowledge_base/upload_artifacts` | `upload_docs`（编排；单文件最大 50 MiB、最多 20 个文件，不限制单次同步总大小） | `uuid`, `kbName`, `fileProperties`, `paths` |
 | POST | `/api/integration/knowledge_base/update_docs` | `update_docs` | `kbName`, `fileNames`, `fileProperties` |
 | POST | `/api/integration/knowledge_base/delete_docs` | `delete_docs` | `kbName`, `fileNames` |
-| POST | `/api/integration/knowledge_base/show_pdf` | `show_pdf` | `kbName`, `fileName`（可选 `flag`） |
+| POST | `/api/integration/knowledge_base/show_pdf` | `show_pdf` | 透传，无字段校验（二进制或 JSON） |
 | POST | `/api/integration/knowledge_base/search_docs` | `search_docs` | `query`, `kbName`（可选 `topK`, `scoreThreshold`） |
 | POST | `/api/integration/knowledge_base/search_docs_xcore` | `search_docs_xcore` | `query`, `kbNames`（非空数组；可选 `topK`, `scoreThreshold`） |
 | POST | `/api/integration/knowledge_base/creater_handle_application` | `creater_handle_application` | 透传，无字段校验 |
@@ -392,7 +392,7 @@ export KNOWLEDGE_BASE_URL=http://192.168.1.132:17861
 | POST | `/api/integration/knowledge_base/delete_readed_message` | `delete_readed_message` | 透传，无字段校验 |
 | POST | `/api/integration/knowledge_base/download_doc` | `download_doc` | 透传，无字段校验（二进制或 JSON） |
 
-成功时 HTTP 状态码与 JSON body **原样透传**下游响应（含 `code` / `msg` / `data` 包装）。`show_pdf` 与 `download_doc` 的下游请求超时为 180 秒；二者在下游返回文件时透传二进制。文档列表筛选请使用 `/documents`（下游同为 `list_knowledge_bases_details`）。BFF 自身错误：请求校验失败 HTTP 400；下游不可达 HTTP 502。
+成功时 HTTP 状态码与 JSON body **原样透传**下游响应（含 `code` / `msg` / `data` 包装）。`show_pdf` 与 `download_doc` 均原样转发 JSON 请求体，不做字段校验或默认字段注入；二者的下游请求超时均为 180 秒，且在下游返回文件时透传二进制。文档列表筛选请使用 `/documents`（下游同为 `list_knowledge_bases_details`）。下游不可达时返回 HTTP 502。
 
 文档上传须两步串联：`upload_docs` 成功后再 `update_docs`。
 

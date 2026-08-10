@@ -315,19 +315,6 @@ def build_search_docs_xcore_payload(body: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
-def build_show_pdf_payload(body: dict[str, Any]) -> dict[str, Any]:
-    payload: dict[str, Any] = {
-        "kbName": body["kbName"],
-        "fileName": body["fileName"],
-        # Downstream schema requires these keys; callers do not supply them.
-        "aes_key": "",
-        "aes_nonce": "",
-    }
-    if "flag" in body and body["flag"] is not None:
-        payload["flag"] = body["flag"]
-    return payload
-
-
 def parse_file_properties_json(raw: str) -> list[dict[str, Any]]:
     if not raw:
         return []
