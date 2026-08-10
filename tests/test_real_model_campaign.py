@@ -188,7 +188,7 @@ def test_model_prompt_pool_calls_auxiliary_model_without_creating_session(monkey
     assert call["api_key"] == "test-inline-api-key"
     assert call["api_mode"] == "chat_completions"
     assert call["temperature"] == 0.4
-    assert call["max_tokens"] == 320
+    assert call["max_tokens"] == 600
     assert call["timeout"] == 60
     assert call["messages"][0] == {
         "role": "system",
@@ -197,6 +197,52 @@ def test_model_prompt_pool_calls_auxiliary_model_without_creating_session(monkey
     assert "生成 2 条" in call["messages"][1]["content"]
     assert "连续多轮" in call["messages"][1]["content"]
     assert "跨格式" in call["messages"][1]["content"]
+
+
+def test_model_prompt_pool_backfills_a_short_first_response(monkeypatch):
+    from api import profiles as profiles_api
+    from integration.assistant_bubbles import collectors
+
+    calls = []
+    responses = iter([
+        '["场景一：生成 CSV 文件", "场景二：创建 Markdown 文件", "场景三：生成 HTML 文件"]',
+        '["场景四：创建 CSV 文件", "场景五：生成 Markdown 文件"]',
+    ])
+    auxiliary = types.ModuleType("agent.auxiliary_client")
+
+    def call_llm(**kwargs):
+        calls.append(kwargs)
+        content = next(responses)
+        return types.SimpleNamespace(choices=[types.SimpleNamespace(message=types.SimpleNamespace(content=content))])
+
+    auxiliary.call_llm = call_llm
+    monkeypatch.setattr(profiles_api, "get_active_profile_name", lambda: "default")
+    monkeypatch.setattr(profiles_api, "get_hermes_home_for_profile", lambda _profile: "/tmp/profile")
+    monkeypatch.setattr(
+        profiles_api,
+        "profile_env_for_background_worker",
+        lambda *_args, **_kwargs: nullcontext(),
+    )
+    monkeypatch.setattr(
+        collectors,
+        "model_route",
+        lambda _path: {"provider": "test-provider", "model": "routed-model", "base_url": "http://model.test"},
+    )
+    monkeypatch.setitem(sys.modules, "agent.auxiliary_client", auxiliary)
+    monkeypatch.setattr("scripts.real_model_campaign.importlib.import_module", lambda name: auxiliary)
+
+    prompts = generate_model_prompt_pool("test-model", 5, model_config={"default": "test-model"})
+
+    assert [item.prompt for item in prompts] == [
+        "场景一：生成 CSV 文件",
+        "场景二：创建 Markdown 文件",
+        "场景三：生成 HTML 文件",
+        "场景四：创建 CSV 文件",
+        "场景五：生成 Markdown 文件",
+    ]
+    assert len(calls) == 2
+    assert "生成 5 条" in calls[0]["messages"][1]["content"]
+    assert "生成 2 条" in calls[1]["messages"][1]["content"]
 
 
 def test_model_prompt_parser_rejects_requests_without_explicit_file_generation():

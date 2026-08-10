@@ -8,6 +8,10 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Fixed
 
+- **Cron job delete latency** — `POST /api/integration/crons/delete` 的同步历史清理改为按 Profile 批量删除：每个 `state.db` 只获取一次清理锁、打开一次连接并执行一次事务，不再对每条 Cron session 重复扫描 manifest 和建立数据库事务；WebUI sidecar 与输出目录清理语义保持不变。
+
+- **Cron session transcript and turn keys** — 非终态 Cron 会话物化时以 Agent `state.db` 的 active transcript 替换旧的无边界 sidecar 快照，避免上下文压缩后重复追加 user/assistant/tool 消息；首次物化即为真实 Cron prompt 持久化 `turn:1`，并跳过 `context_anchor` 等语义控制行，避免新会话退化显示 `turn:0` 或 turn 编号错位。fallback 消息与已有 WebUI follow-up 后缀保持原有合并语义。
+
 - **Chat apperror Packy `Content Exists Risk`** — PackyAPI / 兼容网关返回的 `HTTP 400: Content Exists Risk`（`packy_invalid_request_error`）此前落到通用 `error`；现归入既有 `content_filtered`，展示「内容被审核拦截」与「审核详情」。匹配短语：`content exists risk` / `content_exists_risk`。
 
 - **`GET /api/session/manifest` skill-scan amplification** — `skill_view` reference dedupe no longer runs `_canonical_skill_manifest_path` / `_find_skill` over file artifact keys (previously O(views × files × skills) full-directory frontmatter scans). `_find_skill` skips file-like miss scans without a process-wide lookup cache.
@@ -15,6 +19,8 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 - **Managed session manifest file preview paths** — When a session workspace is a child of `HERMES_WEBUI_DEFAULT_WORKSPACE`, `GET /api/session/manifest` and SSE `manifest_delta` now project `preview=file` paths relative to that integration root (e.g. `<session_id>/report.md`), matching left-rail `/api/integration/workspace/files`. Inspector preview via `/api/integration/workspace/file` no longer 404s on bare session-relative names. Shared-root and out-of-base workspaces keep prior relative paths; skill and absolute MEDIA paths are unchanged. DB rows remain session-relative.
 
 ### Changed
+
+- **Knowledge base show_pdf passthrough** — `POST /api/integration/knowledge_base/show_pdf` 现原样转发 JSON 请求体，不再校验或筛选字段，也不再注入空 `aes_key` / `aes_nonce`；下游可直接接收 `doc_id` 及后续扩展字段。二进制和 JSON 响应的透传、180 秒下游超时保持不变。
 
 - **Managed session workspace artifacts** — `POST /api/session/new` without an explicit `workspace` now creates a persisted `<HERMES_WEBUI_DEFAULT_WORKSPACE>/<session_id>` root on local terminal profiles. The managed root is immutable for that session across chat, Gateway, streaming and goal execution; existing browser requests that send a workspace, worktree sessions, legacy sessions and remote terminal profiles keep their prior behavior. Manifest records now carry the canonical workspace root, so `GET /api/integration/workspace/files` treats `A/report.md` and `B/report.md` as distinct artifacts instead of merging their bare relative paths.
 
@@ -95,6 +101,8 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 - **Chat apperror `content_filtered` type** — Provider 内容审核拦截（如 `data_inspection_failed`、`content_filter`、`content_policy_violation`、`moderation`）不再落到通用 `error` 兜底文案，新增 `content_filtered` 分类，中文文案「内容被审核拦截 / 输入内容被模型服务的内容审核策略拦截」，`details_label` 为「审核详情」。分类与文案集中在 `integration/chat_provider_errors/`（`classify.py`、`messages.py`），`api/streaming.py` 接缝不动。分类顺序：`content_filtered` / `compression_exhausted` 等 provider 专有 code 优先于 `404`/`401`/`429` 弱状态码匹配，避免 chatcmpl ID 子串误判（见下条 Fixed）。
 
 ### Fixed
+
+- **Cron 空 sidecar fallback 顺序** — 当 cron output 先于 Agent transcript 到达时，既有空 sidecar 会同时补回 user anchor 和 assistant fallback，不再让 assistant 消息排在后续 WebUI user 之前。
 
 - **No-agent cron error classification** — 脚本任务失败现在持久化为 `cron_script_error`，展示「脚本执行失败」及「脚本错误详情」，不再因 `Script not found` 等文本被错误标注为 `model_not_found`。重新 materialize 时会替换可由同一脚本输出严格确认的旧 Provider 错误记录。
 

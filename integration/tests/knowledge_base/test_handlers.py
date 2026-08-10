@@ -115,6 +115,8 @@ def test_show_pdf_success():
     body = {
         "kbName": "share54",
         "fileName": "1656号附件-电力中长期市场基本规则.pdf",
+        "doc_id": "1961438302427021314",
+        "downstream_option": {"prefer_cache": True},
     }
     upstream_data = {"url": "http://kb.test/preview/abc.pdf"}
     with patch("integration.knowledge_base.handlers.knowledge_base_enabled", return_value=True):
@@ -130,12 +132,7 @@ def test_show_pdf_success():
     mock_post.assert_called_once()
     route_key, upstream_body = mock_post.call_args.args
     assert route_key == "show_pdf"
-    assert upstream_body == {
-        "kbName": "share54",
-        "fileName": "1656号附件-电力中长期市场基本规则.pdf",
-        "aes_key": "",
-        "aes_nonce": "",
-    }
+    assert upstream_body == body
 
 
 def test_show_pdf_binary():

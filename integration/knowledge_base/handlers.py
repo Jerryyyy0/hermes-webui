@@ -29,7 +29,6 @@ _ROUTE_BUILDERS: dict[str, str] = {
     "documents": "build_documents_payload",
     "update_docs": "build_update_docs_payload",
     "delete_docs": "build_delete_docs_payload",
-    "show_pdf": "build_show_pdf_payload",
     "search_docs": "build_search_docs_payload",
     "search_docs_xcore": "build_search_docs_xcore_payload",
 }
@@ -47,7 +46,6 @@ _REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
     "documents": ("kbName", "page", "size"),
     "update_docs": ("kbName", "fileNames", "fileProperties"),
     "delete_docs": ("kbName", "fileNames"),
-    "show_pdf": ("kbName", "fileName"),
     "search_docs": ("query", "kbName"),
     "search_docs_xcore": ("query", "kbNames"),
     "upload_artifacts": ("uuid", "kbName", "fileProperties", "paths"),
@@ -202,10 +200,6 @@ def _handle_binary_passthrough(handler, route_key: str, upstream_body: dict[str,
     return _respond(handler, result.payload, status=result.status)
 
 
-def _handle_show_pdf(handler, upstream_body: dict[str, Any]) -> bool:
-    return _handle_binary_passthrough(handler, "show_pdf", upstream_body)
-
-
 def try_handle_post_early(handler, parsed) -> bool:
     if not knowledge_base_enabled():
         return False
@@ -272,8 +266,6 @@ def try_handle_post(handler, parsed, body) -> bool:
         return _handle_upload_artifacts(handler, payload_body)
 
     upstream_body = _build_upstream_payload(route_key, payload_body)
-    if route_key == "show_pdf":
-        return _handle_show_pdf(handler, upstream_body)
     return _handle_upstream(handler, route_key, upstream_body)
 
 

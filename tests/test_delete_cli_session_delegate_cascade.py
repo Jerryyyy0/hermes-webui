@@ -104,6 +104,61 @@ def test_delete_state_db_session_rows_bridges_to_locked_cleanup(tmp_path):
     assert not list(sessions_dir.glob(".cleanup_manifest_*.json"))
 
 
+@pytest.mark.requires_agent_modules
+def test_delete_state_db_session_rows_many_uses_one_cleanup_transaction(tmp_path, monkeypatch):
+    """Batch bridge deletes multiple roots while preserving unrelated state."""
+    hermes_state = pytest.importorskip("hermes_state")
+    SessionDB = hermes_state.SessionDB
+
+    state_db = tmp_path / "state.db"
+    db = SessionDB(db_path=state_db)
+    db.close()
+
+    conn = sqlite3.connect(state_db)
+    try:
+        for sid in ("cron-job-run-1", "cron-job-run-2", "unrelated"):
+            _seed_session(conn, sid)
+        conn.commit()
+    finally:
+        conn.close()
+
+    sessions_dir = _seed_transcript_artifacts(
+        tmp_path,
+        {"cron-job-run-1", "cron-job-run-2", "unrelated"},
+    )
+    from api import models
+
+    connect_calls = 0
+    real_connect = sqlite3.connect
+
+    def tracked_connect(*args, **kwargs):
+        nonlocal connect_calls
+        connect_calls += 1
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", tracked_connect)
+    assert models._delete_state_db_session_rows_many(
+        state_db,
+        {"cron-job-run-1", "cron-job-run-2"},
+    ) is True
+    assert connect_calls == 1
+
+    conn = real_connect(state_db)
+    try:
+        remaining = {
+            row[0] for row in conn.execute("SELECT id FROM sessions").fetchall()
+        }
+        remaining_messages = {
+            row[0] for row in conn.execute("SELECT session_id FROM messages").fetchall()
+        }
+    finally:
+        conn.close()
+    assert remaining == {"unrelated"}
+    assert remaining_messages == {"unrelated"}
+    assert _remaining_artifact_session_ids(sessions_dir) == {"unrelated"}
+    assert not list(sessions_dir.glob(".cleanup_manifest_*.json"))
+
+
 def test_delete_state_db_session_rows_rejects_non_canonical_db_path(tmp_path):
     """Bridge fails closed when path is not <hermes_home>/state.db."""
     from api.models import _delete_state_db_session_rows

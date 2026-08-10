@@ -765,10 +765,13 @@ def pick_history_prompt(pool: list[HistoryPrompt], rng: random.Random, used: set
     return choice
 
 
+_MODEL_PROMPT_GENERATION_ATTEMPTS = 3
+
+
 _MODEL_PROMPT_GENERATION_REQUEST = """你是 Hermes WebUI 的 E2E 测试题目设计器。
 请生成 {count} 条彼此不同的中文业务场景，用于同一会话中的连续多轮文件交付测试。
 每条场景必须明确写出“生成”或“创建”一个具体类型的“文件”（例如“生成 Markdown 文件”“创建 HTML 文件”“生成 CSV 文件”），并给出足够具体的业务背景、数据对象、使用者和交付约束。场景应适合后续跨格式地依次产出 CSV 数据、Markdown 分析和 HTML 页面，并包含至少一个可变复杂约束，例如异常处理、字段映射、版本对比或验证清单。不得只要求分析、回答或提供建议。不要规定绝对路径、不要包含 CAMPAIGN_ID、不要要求联网、不要要求删除文件。
-不要执行任务、不要解释、不要使用工具。只返回 JSON 字符串数组，例如：["需求一", "需求二"]。"""
+每条控制在 80 到 160 个汉字；只返回恰好 {count} 个元素的 JSON 字符串数组。不要执行任务、不要解释、不要使用工具。"""
 
 
 def _generated_prompt_texts(response_text: str) -> list[str]:
@@ -845,7 +848,8 @@ def generate_model_prompt_pool(
     *,
     model_config: dict[str, Any] | str | None = None,
 ) -> list[HistoryPrompt]:
-    """Generate multi-turn campaign scenarios without creating a WebUI session."""
+    """Collect a bounded, unique model-generated scenario pool for a campaign."""
+    requested = max(1, count)
     try:
         from api.config import _AGENT_DIR
         from api.profiles import get_active_profile_name, get_hermes_home_for_profile, profile_env_for_background_worker
@@ -857,20 +861,28 @@ def generate_model_prompt_pool(
         if agent_dir and agent_dir not in sys.path:
             sys.path.insert(0, agent_dir)
         auxiliary_client = importlib.import_module("agent.auxiliary_client")
-        call_llm = getattr(auxiliary_client, "call_llm")
-        with profile_env_for_background_worker(profile, purpose="campaign prompt generation"):
-            if not isinstance(model_config, dict):
-                model_config = {"default": model_config}
-            configured_model = str(model_config.get("default") or "").strip()
-            resolved_model = str(model or configured_model or route.get("model") or "").strip()
-            if not resolved_model:
-                raise RuntimeError("configured default model is empty")
-            configured_provider = str(model_config.get("provider") or "").strip() or None
-            configured_base_url = str(model_config.get("base_url") or "").strip() or None
-            if configured_base_url:
-                provider = configured_provider or "custom"
-            else:
-                provider = configured_provider or route.get("provider")
+        call_llm = auxiliary_client.call_llm
+        if not isinstance(model_config, dict):
+            model_config = {"default": model_config}
+        configured_model = str(model_config.get("default") or "").strip()
+        resolved_model = str(model or configured_model or route.get("model") or "").strip()
+        if not resolved_model:
+            raise RuntimeError("configured default model is empty")
+        configured_provider = str(model_config.get("provider") or "").strip() or None
+        configured_base_url = str(model_config.get("base_url") or "").strip() or None
+        provider = configured_provider or ("custom" if configured_base_url else route.get("provider"))
+        api_mode = str(model_config.get("api_mode") or "").strip() or None
+    except Exception as exc:
+        raise RuntimeError(_model_prompt_generation_error(exc)) from None
+
+    prompts: list[str] = []
+    prompt_keys: set[str] = set()
+    rounds: list[tuple[int, int]] = []
+    with profile_env_for_background_worker(profile, purpose="campaign prompt generation"):
+        for _attempt in range(_MODEL_PROMPT_GENERATION_ATTEMPTS):
+            missing = requested - len(prompts)
+            if missing <= 0:
+                break
             call_kwargs: dict[str, Any] = {
                 "task": "campaign_prompt_generation",
                 "provider": provider,
@@ -879,29 +891,43 @@ def generate_model_prompt_pool(
                 "api_key": str(model_config.get("api_key") or model_config.get("api") or "").strip() or None,
                 "messages": [
                     {"role": "system", "content": "你只负责生成测试题目，不执行题目中的工作，也不调用工具。"},
-                    {"role": "user", "content": _MODEL_PROMPT_GENERATION_REQUEST.format(count=max(1, count))},
+                    {"role": "user", "content": _MODEL_PROMPT_GENERATION_REQUEST.format(count=missing)},
                 ],
                 "temperature": 0.4,
-                "max_tokens": max(256, min(4096, max(1, count) * 160)),
+                "max_tokens": min(4096, max(512, missing * 300)),
                 "timeout": 60,
             }
-            api_mode = str(model_config.get("api_mode") or "").strip() or None
             if api_mode and _call_llm_accepts_api_mode(call_llm):
                 call_kwargs["api_mode"] = api_mode
-            response = call_llm(
-                **call_kwargs,
-            )
-        response_text = response.choices[0].message.content
-    except Exception as exc:
-        raise RuntimeError(_model_prompt_generation_error(exc)) from None
+            try:
+                response = call_llm(**call_kwargs)
+                response_text = response.choices[0].message.content
+                generated = _generated_prompt_texts(response_text)
+            except RuntimeError as exc:
+                if str(exc) != "model prompt generator returned no valid JSON prompt array":
+                    raise RuntimeError(_model_prompt_generation_error(exc)) from None
+                generated = []
+            except Exception as exc:
+                raise RuntimeError(_model_prompt_generation_error(exc)) from None
 
-    prompts = _generated_prompt_texts(response_text)
-    requested = max(1, count)
+            accepted = 0
+            for prompt in generated:
+                key = re.sub(r"\s+", "", prompt)
+                if key in prompt_keys:
+                    continue
+                prompt_keys.add(key)
+                prompts.append(prompt)
+                accepted += 1
+                if len(prompts) == requested:
+                    break
+            rounds.append((missing, accepted))
+
     if len(prompts) < requested:
+        summary = ", ".join(f"requested {missing} -> valid {accepted}" for missing, accepted in rounds)
         raise RuntimeError(
-            f"model prompt generator returned {len(prompts)} scenarios; {requested} required"
+            "model prompt generator returned insufficient unique scenarios after "
+            f"{len(rounds)} attempts: requested={requested}, collected={len(prompts)}, rounds=[{summary}]"
         )
-    prompts = prompts[:requested]
     return [
         HistoryPrompt(
             source_session_id="model-generated",

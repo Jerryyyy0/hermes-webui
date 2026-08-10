@@ -264,6 +264,7 @@ def test_delete_cli_session_still_opens_writable_connection():
         (
             inspect.getsource(models.delete_cli_session),
             inspect.getsource(models._delete_cli_session_locked),
+            inspect.getsource(models._delete_cli_sessions_locked),
         )
     )
     assert "sqlite3.connect(str(db_path))" in src, (

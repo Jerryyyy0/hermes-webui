@@ -735,7 +735,12 @@ def delete_cron_job_history(
         owner_profile=owner_profile,
         job=job or {},
     )
-    session_ids = _cron_session_ids_for_job(state_db_profiles, job_id)
+    session_ids_by_profile = _cron_session_ids_by_profile(state_db_profiles, job_id)
+    session_ids = {
+        sid
+        for profile_session_ids in session_ids_by_profile.values()
+        for sid in profile_session_ids
+    }
     session_ids.update(_webui_cron_session_ids_for_job(job_id))
 
     deleted_sidecars: list[str] = []
@@ -744,21 +749,24 @@ def delete_cron_job_history(
     deleted_output_files = 0
 
     try:
-        from api.models import _delete_state_db_session_rows
+        from api.models import _delete_state_db_session_rows_many
     except Exception:
-        _delete_state_db_session_rows = None
+        _delete_state_db_session_rows_many = None
 
     for sid in sorted(session_ids):
         if _delete_webui_cron_session_sidecar(sid):
             deleted_sidecars.append(sid)
-        if _delete_state_db_session_rows is None:
-            continue
-        for profile_name in state_db_profiles:
+
+    if _delete_state_db_session_rows_many is not None:
+        for profile_name, profile_session_ids in session_ids_by_profile.items():
+            if not profile_session_ids:
+                continue
             try:
                 db_path = Path(_profile_home_for_name(profile_name)) / "state.db"
-                if _delete_state_db_session_rows(db_path, sid):
-                    marker = f"{profile_name}:{sid}"
-                    deleted_profiles.append(marker)
+                if _delete_state_db_session_rows_many(db_path, profile_session_ids):
+                    deleted_profiles.extend(
+                        f"{profile_name}:{sid}" for sid in sorted(profile_session_ids)
+                    )
             except Exception:
                 continue
 
@@ -835,7 +843,31 @@ def _cron_state_db_profiles_for_job_delete(
 
 
 def _cron_session_ids_for_job(profile_names: list[str], job_id: str) -> set[str]:
-    return {str(row[0]) for row in _cron_session_candidates_for_profiles(profile_names, job_id)}
+    return {
+        sid
+        for profile_session_ids in _cron_session_ids_by_profile(profile_names, job_id).values()
+        for sid in profile_session_ids
+    }
+
+
+def _cron_session_ids_by_profile(
+    profile_names: list[str],
+    job_id: str,
+) -> dict[str, set[str]]:
+    session_ids_by_profile: dict[str, set[str]] = {}
+    for profile_name in profile_names:
+        session_ids: set[str] = set()
+        try:
+            db_path = Path(_profile_home_for_name(profile_name)) / "state.db"
+            if db_path.is_file():
+                with closing(sqlite3.connect(str(db_path))) as conn:
+                    session_ids = {str(row[0]) for row in _cron_session_candidates(conn, job_id)}
+        except (OSError, sqlite3.Error):
+            pass
+        except Exception:
+            pass
+        session_ids_by_profile[profile_name] = session_ids
+    return session_ids_by_profile
 
 
 def _webui_cron_session_ids_for_job(job_id: str) -> set[str]:
@@ -1728,10 +1760,11 @@ def _consume_matching_cron_fallback_state_user(
 def reconcile_cron_session_transcript(
     session,
     *,
+    job: dict | None = None,
     fallback_output: str | None = None,
     run_mtime: float | int | None = None,
 ) -> bool:
-    """Append only the completed cron prefix without touching WebUI follow-ups."""
+    """Reconcile the Agent-owned cron prefix without touching WebUI follow-ups."""
     if session is None or str(getattr(session, "source_tag", "") or "") != "cron":
         return False
     from api.models import (
@@ -1770,18 +1803,52 @@ def reconcile_cron_session_transcript(
         sidecar_prefix,
         db_messages,
     )
-    merged_prefix = merge_session_messages_append_only(
-        sidecar_prefix,
-        db_messages,
-        truncation_watermark=getattr(session, "truncation_watermark", None),
+    agent_snapshot_is_authoritative = bool(
+        split is None
+        and db_messages
+        and not any(
+            isinstance(message, dict) and str(message.get("source") or "").strip()
+            for message in sidecar_prefix
+        )
     )
-    known = {_session_message_dedup_key(message) for message in merged_prefix if isinstance(message, dict)}
-    for message in db_messages:
-        key = _session_message_dedup_key(message)
-        if key not in known:
-            merged_prefix.append(message)
-            known.add(key)
+    if agent_snapshot_is_authoritative:
+        # While no terminal boundary exists, WebUI follow-ups are blocked. The
+        # active state.db rows are therefore the whole current Agent snapshot;
+        # compression may have replaced it and rewritten its timestamps.
+        merged_prefix = list(db_messages)
+    else:
+        merged_prefix = merge_session_messages_append_only(
+            sidecar_prefix,
+            db_messages,
+            truncation_watermark=getattr(session, "truncation_watermark", None),
+        )
+        known = {
+            _session_message_dedup_key(message)
+            for message in merged_prefix
+            if isinstance(message, dict)
+        }
+        for message in db_messages:
+            key = _session_message_dedup_key(message)
+            if key not in known:
+                merged_prefix.append(message)
+                known.add(key)
     changed = merged_prefix != sidecar_prefix
+    if fallback_output and job is not None and not any(
+        isinstance(message, dict) and message.get("role") == "user"
+        for message in merged_prefix
+    ):
+        # Output can arrive after an empty sidecar was materialized but before
+        # the Agent commits its execution prompt to state.db. Restore the
+        # synthetic user anchor so the fallback assistant cannot become the
+        # first visible message in the cron session.
+        fallback_user = build_cron_fallback_messages(
+            job,
+            fallback_output,
+            run_mtime=run_mtime,
+        )[0]
+        merged_prefix.append(fallback_user)
+        merged_prefix.sort(key=lambda message: _cron_error_timestamp(message.get("timestamp")))
+        changed = True
     if fallback_output and not any(
         isinstance(message, dict) and message.get("role") == "assistant"
         for message in db_messages
@@ -1791,6 +1858,15 @@ def reconcile_cron_session_transcript(
             fallback_output,
             timestamp=run_mtime or getattr(session, "created_at", None),
         ) or changed
+    from integration.crons.hooks import (
+        _stamp_cron_manifest_turn_keys,
+        normalize_cron_manifest_messages,
+    )
+
+    merged_prefix = _stamp_cron_manifest_turn_keys(
+        normalize_cron_manifest_messages(merged_prefix)
+    )
+    changed = merged_prefix != sidecar_prefix
     if changed:
         session.messages = [*merged_prefix, *suffix]
     return changed
@@ -1928,6 +2004,7 @@ def _materialize_cron_session_found(
                 changed = True
             if reconcile_cron_session_transcript(
                 full,
+                job=job,
                 fallback_output=fallback_output,
                 run_mtime=run_mtime,
             ):
@@ -1972,6 +2049,12 @@ def _materialize_cron_session_found(
         cron_error_message,
         legacy_no_agent_detail=legacy_no_agent_detail,
     )
+    from integration.crons.hooks import (
+        _stamp_cron_manifest_turn_keys,
+        normalize_cron_manifest_messages,
+    )
+
+    msgs = _stamp_cron_manifest_turn_keys(normalize_cron_manifest_messages(msgs))
 
     title = (job or {}).get("name") or cli_title or f"Cron {str((job or {}).get('id') or '').strip()}"
     s = import_cli_session(

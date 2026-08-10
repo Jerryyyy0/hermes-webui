@@ -207,6 +207,7 @@ def test_materialize_imports_session(cron_env, monkeypatch):
     assert meta.profile == owner or getattr(meta, "profile", None) in (owner, None)
     assert meta.is_cli_session is False
     assert meta.source_tag == "cron"
+    assert Session.load(sid).messages[0]["_turn_key"] == "turn:1"
 
 
 def test_materialize_persists_execution_boundary_from_state_db(cron_env, monkeypatch):
@@ -376,6 +377,42 @@ def test_materialize_uses_fallback_when_state_db_messages_empty(cron_env, monkey
     assert full.messages[0]["content"] == "run nightly"
     assert full.messages[1]["content"] == "Hello from cron"
     assert full.messages[0].get("source") == "cron_fallback"
+
+
+def test_materialize_existing_empty_sidecar_restores_fallback_user_anchor(cron_env, monkeypatch):
+    from api.models import Session
+    from integration.crons.session_bridge import materialize_cron_session
+
+    sid = "cron_job1_1700000000"
+    sidecar = Session(
+        session_id=sid,
+        title="Nightly",
+        profile="default",
+        messages=[],
+    )
+    sidecar.source_tag = "cron"
+    sidecar.cron_execution_profile = str(cron_env["home"])
+    sidecar.save()
+
+    job = {"id": "job1", "name": "Nightly", "profile": "", "prompt": "run nightly"}
+    with patch("api.models.get_state_db_session_messages", return_value=[]):
+        with patch(
+            "api.profiles.list_profiles_api",
+            return_value=[{"name": "default", "path": str(cron_env["home"])}],
+        ):
+            materialize_cron_session(
+                job,
+                owner_profile="default",
+                execution_home=cron_env["home"],
+                fallback_output="## Response\n\nHello from cron",
+                run_mtime=1700000001.0,
+            )
+
+    full = Session.load(sid)
+    assert full is not None
+    assert [message["role"] for message in full.messages] == ["user", "assistant"]
+    assert full.messages[0]["content"] == "run nightly"
+    assert full.messages[1]["content"] == "Hello from cron"
 
 
 def test_materialize_no_agent_output_creates_stable_session(cron_env):
@@ -1188,20 +1225,28 @@ def test_delete_cron_job_history_removes_all_job_runs_and_preserves_other_jobs(c
     def _profile_home(name):
         return cron_env["home"]
 
+    from api import models
+
     with patch("integration.crons.session_bridge._profile_home_for_name", _profile_home):
         with patch(
             "api.profiles.list_profiles_api",
             return_value=[{"name": owner, "path": str(cron_env["home"])}],
         ):
-            from integration.crons.session_bridge import delete_cron_job_history
+            with patch(
+                "api.models._delete_state_db_session_rows_many",
+                wraps=models._delete_state_db_session_rows_many,
+            ) as batch_delete:
+                from integration.crons.session_bridge import delete_cron_job_history
 
-            result = delete_cron_job_history(
-                job_id,
-                owner_profile=owner,
-                job={"id": job_id, "profile": ""},
-            )
+                result = delete_cron_job_history(
+                    job_id,
+                    owner_profile=owner,
+                    job={"id": job_id, "profile": ""},
+                )
 
     assert result.get("deleted") is True
+    batch_delete.assert_called_once()
+    assert set(batch_delete.call_args.args[1]) == {job1_sid_1, job1_sid_2}
     assert not job1_out.exists()
     assert other_output.exists()
     assert not (sessions_dir / f"{job1_sid_1}.json").exists()
@@ -1319,6 +1364,53 @@ def test_reconcile_cron_transcript_does_not_duplicate_followup_replay(cron_env, 
         "skill ok",
         "Word 文档已生成",
     ]
+
+
+def test_reconcile_unkeyed_agent_snapshot_replaces_stale_compressed_sidecar(
+    cron_env, monkeypatch
+):
+    """An active Agent snapshot supersedes an unkeyed pre-compression sidecar."""
+    from api.models import Session
+    from integration.crons.session_bridge import reconcile_cron_session_transcript
+
+    stale_snapshot = [
+        {"role": "user", "content": "cron prompt", "timestamp": 100.0},
+        {"role": "assistant", "content": "old tool plan", "timestamp": 101.0},
+        {"role": "tool", "content": "old result", "timestamp": 102.0},
+    ]
+    active_snapshot = [
+        {
+            "role": "user",
+            "content": "compressed context",
+            "timestamp": 200.0,
+            "_hermes_message_class": "context_anchor",
+            "_hermes_scaffold_kind": "compaction_summary",
+        },
+        {"role": "user", "content": "cron prompt", "timestamp": 201.0},
+        {"role": "assistant", "content": "final answer", "timestamp": 202.0},
+    ]
+    session = Session(
+        session_id="cron_job1_1700000675",
+        profile="default",
+        source_tag="cron",
+        cron_execution_profile=str(cron_env["home"]),
+        cron_execution_ended_at=None,
+        messages=stale_snapshot,
+    )
+    monkeypatch.setattr(
+        "api.models.get_state_db_session_messages",
+        lambda *_args, **_kwargs: active_snapshot,
+    )
+
+    assert reconcile_cron_session_transcript(session) is True
+    assert [message["content"] for message in session.messages] == [
+        "compressed context",
+        "cron prompt",
+        "final answer",
+    ]
+    assert session.messages[0].get("_turn_key") is None
+    assert session.messages[1]["_turn_key"] == "turn:1"
+    assert reconcile_cron_session_transcript(session) is False
 
 
 def test_reconcile_cron_transcript_uses_output_when_database_reply_missing(cron_env, monkeypatch):

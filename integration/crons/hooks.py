@@ -7,6 +7,7 @@ import logging
 import time
 from dataclasses import dataclass
 
+from integration.agent_message_semantics.classifier import is_non_anchor_control_message
 from integration.crons.session_bridge import resolve_cron_execution_ended_at
 
 logger = logging.getLogger(__name__)
@@ -18,6 +19,14 @@ _MAX_ITERATION_SUMMARY_REQUEST = (
     "Please provide a final response summarizing what you've found and accomplished so far, "
     "without calling any more tools."
 )
+
+
+def _is_real_user_message(message) -> bool:
+    return bool(
+        isinstance(message, dict)
+        and message.get("role") == "user"
+        and not is_non_anchor_control_message(message)
+    )
 
 
 def _normalized_message_text(message: dict) -> str:
@@ -114,9 +123,17 @@ def normalize_cron_manifest_messages(
 def _stamp_cron_manifest_turn_keys(messages: list) -> list:
     """Stamp missing real cron user rows with stable sequential turn keys."""
     stamped = list(messages or [])
+    for message in stamped:
+        if (
+            isinstance(message, dict)
+            and message.get("role") == "user"
+            and is_non_anchor_control_message(message)
+        ):
+            message.pop("_turn_key", None)
+
     max_turn = 0
     for message in stamped:
-        if not isinstance(message, dict) or message.get("role") != "user":
+        if not _is_real_user_message(message):
             continue
         key = str(message.get("_turn_key") or "").strip()
         if not key.startswith("turn:"):
@@ -128,7 +145,7 @@ def _stamp_cron_manifest_turn_keys(messages: list) -> list:
 
     next_turn = max_turn + 1
     for message in stamped:
-        if not isinstance(message, dict) or message.get("role") != "user":
+        if not _is_real_user_message(message):
             continue
         if str(message.get("_turn_key") or "").strip():
             continue
@@ -147,7 +164,7 @@ class CronReplyPreparation:
 def _validate_contiguous_turn_keys(messages: list) -> tuple[bool, str]:
     expected = 1
     for message in messages or []:
-        if not isinstance(message, dict) or message.get("role") != "user":
+        if not _is_real_user_message(message):
             continue
         key = str(message.get("_turn_key") or "").strip()
         if key != f"turn:{expected}":

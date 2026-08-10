@@ -172,8 +172,11 @@ other active WebUI streams or runs.
   auxiliary call path as assistant bubbles) for a JSON string array of business
   scenarios; it does not create a generator session. It prioritizes the current
   profile's full `model` route, including custom endpoint, credential, and API
-  mode. One scenario is reused across all turns in its campaign session. This
-  mode supports only `--context-mode first` and requires `--turns >= 3`.
+  mode. If one model response is short or repeats a scenario, it requests only
+  the remaining unique scenarios for up to three total attempts; an exhausted
+  retry budget fails with per-attempt counts rather than silently using a fixed
+  prompt pool. One scenario is reused across all turns in its campaign session.
+  This mode supports only `--context-mode first` and requires `--turns >= 3`.
 
 Model-mode turns are progressive: the first three request a source CSV, a
 Markdown analysis, and an HTML page; later turns cycle through independent
