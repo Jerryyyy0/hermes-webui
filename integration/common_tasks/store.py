@@ -235,6 +235,80 @@ def write_seed_placeholder(
             _set_state(conn, profile_norm, "seed_generated_at", "")
 
 
+def write_seed_rows_only(
+    profile: str,
+    tasks: list[dict[str, Any]],
+    *,
+    db_path: Path | str | None = None,
+) -> None:
+    """Write seed rows without touching mining_state.
+
+    Used by mine failure paths to immediately provide fallback seed data so
+    the API can return ``cache_status="seed"`` instead of ``"empty"`` while
+    waiting for the next mine retry. Preserves mine failure state
+    (``last_error`` / ``retry_after`` / ``last_attempt_at``) so ``_should_mine``
+    cooldown logic stays intact. Does NOT stamp ``seed_generated_at`` so a
+    later seed generation can still overwrite these rows.
+    """
+    profile_norm = _normalize_profile(profile)
+    if not profile_norm:
+        return
+    now = time.time()
+    with closing(_connect(db_path)) as conn:
+        with conn:
+            conn.execute(
+                "DELETE FROM common_tasks WHERE profile = ? AND source = ?",
+                (profile_norm, _SOURCE_SEED),
+            )
+            for task in tasks:
+                conn.execute(
+                    """
+                    INSERT INTO common_tasks (
+                        profile, title, description, trigger_language,
+                        query_count, source, members_json,
+                        fingerprint, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+                    """,
+                    (
+                        profile_norm,
+                        str(task.get("title") or "")[:15],
+                        str(task.get("description") or "")[:50],
+                        str(task.get("trigger_language") or "")[:30],
+                        int(task.get("query_count") or 0),
+                        _SOURCE_SEED,
+                        "[]",
+                        now,
+                        now,
+                    ),
+                )
+
+
+def delete_seed_rows(
+    profile: str,
+    *,
+    db_path: Path | str | None = None,
+) -> None:
+    """Delete all seed rows for this profile without touching mining_state.
+
+    Used after mine success to clear fallback seed rows written by
+    ``_ensure_seed_fallback``. Real LLM-generated seed (with
+    ``seed_generated_at`` set) is preserved by the caller's state check
+    before invoking this.
+    """
+    profile_norm = _normalize_profile(profile)
+    if not profile_norm:
+        return
+    path = _db_path(db_path)
+    if not path.exists():
+        return
+    with closing(_connect(db_path)) as conn:
+        with conn:
+            conn.execute(
+                "DELETE FROM common_tasks WHERE profile = ? AND source = ?",
+                (profile_norm, _SOURCE_SEED),
+            )
+
+
 def replace_mined_tasks(
     profile: str,
     tasks: list[dict[str, Any]],

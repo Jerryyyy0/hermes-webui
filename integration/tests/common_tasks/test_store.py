@@ -124,6 +124,112 @@ def test_write_seed_placeholder_clears_existing_seed_generated_at(tmp_path):
     assert state_after["last_error"] == "model_call_failed"
 
 
+def test_write_seed_rows_only_writes_seed_rows_without_touching_state(tmp_path):
+    """write_seed_rows_only 只写 seed 行,不更新 mining_state,
+    用于 mine 失败时立即提供 fallback 占位,保留 mine 失败的 state."""
+    db = _db(tmp_path)
+    store.replace_mined_tasks(
+        "alice",
+        [],
+        "fp-1",
+        success=False,
+        last_error="cluster_no_valid_cluster",
+        db_path=db,
+    )
+    _, state_before = store.read_all("alice", db_path=db)
+    assert state_before["last_error"] == "cluster_no_valid_cluster"
+    assert state_before["retry_after"]
+    assert state_before["last_attempt_at"]
+
+    store.write_seed_rows_only(
+        "alice",
+        [{"title": "兜底", "trigger_language": "兜底触发"}],
+        db_path=db,
+    )
+
+    tasks, state_after = store.read_all("alice", db_path=db)
+    assert len(tasks) == 1
+    assert tasks[0]["title"] == "兜底"
+    assert tasks[0]["source"] == "seed"
+    # state 保留 mine 失败的原始值
+    assert state_after["last_error"] == "cluster_no_valid_cluster"
+    assert state_after["retry_after"] == state_before["retry_after"]
+    assert state_after["last_attempt_at"] == state_before["last_attempt_at"]
+    # 不设置 seed_generated_at,允许后续 seed 生成覆盖
+    assert state_after.get("seed_generated_at", "") == ""
+
+
+def test_write_seed_rows_only_replaces_existing_seed_rows(tmp_path):
+    db = _db(tmp_path)
+    store.write_seed_rows_only(
+        "alice",
+        [{"title": "旧占位", "trigger_language": "旧触发"}],
+        db_path=db,
+    )
+    store.write_seed_rows_only(
+        "alice",
+        [{"title": "新占位", "trigger_language": "新触发"}],
+        db_path=db,
+    )
+    tasks, _ = store.read_all("alice", db_path=db)
+    seed_titles = [t["title"] for t in tasks if t["source"] == "seed"]
+    assert seed_titles == ["新占位"]
+
+
+def test_delete_seed_rows_removes_only_seed_rows(tmp_path):
+    """delete_seed_rows 只删 seed 行,保留 mined 行与 mining_state."""
+    db = _db(tmp_path)
+    store.write_seed_rows_only(
+        "alice",
+        [{"title": "占位seed", "trigger_language": "t"}],
+        db_path=db,
+    )
+    store.replace_mined_tasks(
+        "alice",
+        [{"title": "挖掘A", "trigger_language": "tA", "members_json": "[]"}],
+        "fp-1",
+        success=True,
+        db_path=db,
+    )
+
+    store.delete_seed_rows("alice", db_path=db)
+
+    tasks, state = store.read_all("alice", db_path=db)
+    seed_titles = [t["title"] for t in tasks if t["source"] == "seed"]
+    mined_titles = [t["title"] for t in tasks if t["source"] == "mined"]
+    assert seed_titles == []
+    assert mined_titles == ["挖掘A"]
+    # mining_state preserved
+    assert state["last_fingerprint"] == "fp-1"
+    assert state.get("last_success_at")
+
+
+def test_delete_seed_rows_no_op_when_db_missing(tmp_path):
+    store.delete_seed_rows("alice", db_path=_db(tmp_path))
+    assert not (tmp_path / "session_manifest.db").exists()
+
+
+def test_delete_seed_rows_isolates_profiles(tmp_path):
+    db = _db(tmp_path)
+    store.write_seed_rows_only(
+        "alice",
+        [{"title": "alice-seed", "trigger_language": "t"}],
+        db_path=db,
+    )
+    store.write_seed_rows_only(
+        "bob",
+        [{"title": "bob-seed", "trigger_language": "t"}],
+        db_path=db,
+    )
+
+    store.delete_seed_rows("alice", db_path=db)
+
+    alice_tasks, _ = store.read_all("alice", db_path=db)
+    bob_tasks, _ = store.read_all("bob", db_path=db)
+    assert [t["title"] for t in alice_tasks if t["source"] == "seed"] == []
+    assert [t["title"] for t in bob_tasks if t["source"] == "seed"] == ["bob-seed"]
+
+
 def test_replace_mined_tasks_success_clears_retry_after_and_stamps_fingerprint(tmp_path):
     tasks = [
         {
