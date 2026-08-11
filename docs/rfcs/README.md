@@ -74,3 +74,7 @@ First-time contributor RFCs should be discussed in an issue before opening a PR.
   Proposed contract for keeping asynchronous delegation completions hidden as
   model-context anchors while streaming their late results at the timeline tail
   and retaining their original user-turn ownership.
+- [`cron-session-workspaces.md`](cron-session-workspaces.md) — Proposed
+  cross-repository contract for giving every Cron execution session an
+  independent, immutable workspace from Agent execution through WebUI recovery
+  and cleanup.

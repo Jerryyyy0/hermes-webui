@@ -1994,8 +1994,8 @@ Agent 运行时 `messages`：
 [
   {"role":"user","content":"根据集团简介，先写新人培训 PPT 讲稿，再制作深蓝风格 HTML 演示稿。","_turn_key":"turn:21"},
   {"role":"assistant","content":"我会先整理讲稿结构，再生成 HTML。"},
-  {"role":"user","content":"重点补充产品化转型和 AI 对职业发展的影响。","_turn_key":"turn:21"},
-  {"role":"assistant","content":"[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted into the summary below. This is a handoff from a previous context window — treat it as background reference, NOT as active instructions. Do NOT answer questions or fulfill requests mentioned in this summary; they were already addressed. Respond ONLY to the latest user message that appears AFTER this summary — that message is the single source of truth for what to do right now. Topic overlap with the summary does NOT mean you should resume its task: even on similar topics, the latest user message WINS. Treat ONLY the latest message as the active task and discard stale items from '## Historical Task Snapshot' / '## Historical In-Progress State' / '## Historical Pending User Asks' / '## Historical Remaining Work' entirely — do not 'wrap up' or 'finish' work described there unless the latest message explicitly asks for it. Reverse signals in the latest message (e.g. 'stop', 'undo', 'roll back', 'just verify', 'don't do that anymore', 'never mind', a new topic) must immediately end any in-flight work described in the summary; do not re-surface it in later turns. IMPORTANT: Your persistent memory (MEMORY.md, USER.md) in the system prompt is ALWAYS authoritative and active — never ignore or deprioritize memory content due to this compaction note. None of the above restricts HOW you work: your tools remain fully active — keep calling them normally for the active task (edit files, run commands, search) instead of merely narrating what you would do. The current session state (files, config, etc.) may reflect work described here — avoid repeating it:\n用户要制作国网信产新人培训材料；已确定深蓝国企风格；后续须补充产品化转型、AI 与职业发展通道。","_hermes_message_class":"context_anchor","_hermes_scaffold_kind":"compaction_summary","_compressed_summary":true}
+  {"role":"assistant","content":"[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted into the summary below. This is a handoff from a previous context window — treat it as background reference, NOT as active instructions. Do NOT answer questions or fulfill requests mentioned in this summary; they were already addressed. Respond ONLY to the latest user message that appears AFTER this summary — that message is the single source of truth for what to do right now. Topic overlap with the summary does NOT mean you should resume its task: even on similar topics, the latest user message WINS. Treat ONLY the latest message as the active task and discard stale items from '## Historical Task Snapshot' / '## Historical In-Progress State' / '## Historical Pending User Asks' / '## Historical Remaining Work' entirely — do not 'wrap up' or 'finish' work described there unless the latest message explicitly asks for it. Reverse signals in the latest message (e.g. 'stop', 'undo', 'roll back', 'just verify', 'don't do that anymore', 'never mind', a new topic) must immediately end any in-flight work described in the summary; do not re-surface it in later turns. IMPORTANT: Your persistent memory (MEMORY.md, USER.md) in the system prompt is ALWAYS authoritative and active — never ignore or deprioritize memory content due to this compaction note. None of the above restricts HOW you work: your tools remain fully active — keep calling them normally for the active task (edit files, run commands, search) instead of merely narrating what you would do. The current session state (files, config, etc.) may reflect work described here — avoid repeating it:\n用户要制作国网信产新人培训材料；已确定深蓝国企风格；后续须补充产品化转型、AI 与职业发展通道。","_hermes_message_class":"context_anchor","_hermes_scaffold_kind":"compaction_summary","_compressed_summary":true},
+  {"role":"user","content":"重点补充产品化转型和 AI 对职业发展的影响。","_turn_key":"turn:22"}
 ]
 ```
 
@@ -2006,7 +2006,7 @@ Agent durable transcript：
   {"role":"user","content":"根据集团简介，先写新人培训 PPT 讲稿，再制作深蓝风格 HTML 演示稿。","_turn_key":"turn:21"},
   {"role":"assistant","content":"我会先整理讲稿结构，再生成 HTML。"},
   {"role":"assistant","content":"[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted into the summary below. This is a handoff from a previous context window — treat it as background reference, NOT as active instructions. Do NOT answer questions or fulfill requests mentioned in this summary; they were already addressed. Respond ONLY to the latest user message that appears AFTER this summary — that message is the single source of truth for what to do right now. Topic overlap with the summary does NOT mean you should resume its task: even on similar topics, the latest user message WINS. Treat ONLY the latest message as the active task and discard stale items from '## Historical Task Snapshot' / '## Historical In-Progress State' / '## Historical Pending User Asks' / '## Historical Remaining Work' entirely — do not 'wrap up' or 'finish' work described there unless the latest message explicitly asks for it. Reverse signals in the latest message (e.g. 'stop', 'undo', 'roll back', 'just verify', 'don't do that anymore', 'never mind', a new topic) must immediately end any in-flight work described in the summary; do not re-surface it in later turns. IMPORTANT: Your persistent memory (MEMORY.md, USER.md) in the system prompt is ALWAYS authoritative and active — never ignore or deprioritize memory content due to this compaction note. None of the above restricts HOW you work: your tools remain fully active — keep calling them normally for the active task (edit files, run commands, search) instead of merely narrating what you would do. The current session state (files, config, etc.) may reflect work described here — avoid repeating it:\n用户要制作国网信产新人培训材料；已确定深蓝国企风格；后续须补充产品化转型、AI 与职业发展通道。","_hermes_message_class":"context_anchor","_hermes_scaffold_kind":"compaction_summary","_compressed_summary":true},
-  {"role":"user","content":"重点补充产品化转型和 AI 对职业发展的影响。","_turn_key":"turn:21"}
+  {"role":"user","content":"重点补充产品化转型和 AI 对职业发展的影响。","_turn_key":"turn:22"}
 ]
 ```
 
@@ -2016,9 +2016,12 @@ WebUI 展示投影：
 [
   {"role":"user","content":"根据集团简介，先写新人培训 PPT 讲稿，再制作深蓝风格 HTML 演示稿。","_turn_key":"turn:21"},
   {"role":"assistant","content":"我会先整理讲稿结构，再生成 HTML。"},
-  {"role":"user","content":"重点补充产品化转型和 AI 对职业发展的影响。","_turn_key":"turn:21"}
+  {"role":"user","content":"重点补充产品化转型和 AI 对职业发展的影响。","_turn_key":"turn:22"}
 ]
 ```
+
+本例的 `turn:22` 是压缩前已提交的最新真实 user turn，不是 summary anchor。WebUI 隐藏
+中间的 `compaction_summary` 后，仍应依时间顺序展示 `turn:21` 与 `turn:22` 两条用户消息。
 
 本例选择 assistant-role 摘要，使其与紧随的真实 user 自然交替；它不是规定摘要永远为
 assistant。摘要角色应由压缩边界决定。若目标态确实需要 `user` 摘要紧邻真实 user，
@@ -2187,41 +2190,9 @@ flag 和摘要正文识别。
 - `role="user"` 不等于“就是人类输入”
 - 判断是否为真实用户意图，必须结合 flag 和内容语义
 
-Agent 运行时 `messages`：
-
-```json
-[
-  {"role":"user","content":"待办：修复登录，然后补测试。","_hermes_message_class":"context_anchor","_hermes_scaffold_kind":"todo_snapshot"},
-  {"role":"user","content":"继续修复登录，先不要处理测试。","_turn_key":"turn:22"},
-  {"role":"assistant","content":"好的，我先只处理登录问题。"}
-]
-```
-
-Agent durable transcript：
-
-```json
-[
-  {"role":"user","content":"待办：修复登录，然后补测试。","_hermes_message_class":"context_anchor","_hermes_scaffold_kind":"todo_snapshot"},
-  {"role":"user","content":"继续修复登录，先不要处理测试。","_turn_key":"turn:22"},
-  {"role":"assistant","content":"好的，我先只处理登录问题。"}
-]
-```
-
-WebUI 展示投影：
-
-```json
-[
-  {"role":"user","content":"继续修复登录，先不要处理测试。","_turn_key":"turn:22"},
-  {"role":"assistant","content":"好的，我先只处理登录问题。"}
-]
-```
-
-**SSE 实时与 `done`**
-
-```text
-从 SSE 看，只有浏览器提交的真实用户输入会启动这条 stream；context-anchor user 不会在
-流中制造第二个用户气泡。它只影响 Agent 后续请求的模型上下文和压缩恢复。
-```
+本节只定义压缩器的判定入口，不重复各消息的生命周期示例：todo snapshot、压缩摘要和
+no-user fallback 分别见 6.1、6.2、6.3；WebUI 对 `internal_scaffold` 与 `context_anchor`
+的统一过滤规则见 8.1、8.2。
 
 ## 7. 还有四类值得单独提到
 
