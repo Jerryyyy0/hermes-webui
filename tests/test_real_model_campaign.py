@@ -379,7 +379,6 @@ def test_model_prompt_source_skips_history_database(tmp_path, monkeypatch):
         context_mode="first",
         cancel_verify_session=True,
         prompt_source="model",
-        allow_concurrent=True,
     ) == 0
 
 
@@ -445,7 +444,27 @@ def test_model_prompt_source_reuses_one_scenario_for_every_turn_in_a_batch(tmp_p
     assert first_batch[0] != second_batch[0]
 
 
-def test_campaign_rejects_busy_webui_without_allow_concurrent(monkeypatch):
+def test_campaign_allows_busy_webui_by_default(monkeypatch):
+    class _BusyApi:
+        def request(self, method, path, body=None, timeout=20):
+            assert (method, path) == ("GET", "/health")
+            return {"status": "ok", "active_streams": ["other-session"], "active_runs": []}
+
+    class _StopAfterHealth(Exception):
+        pass
+
+    monkeypatch.setattr("scripts.real_model_campaign.Api", lambda _base_url: _BusyApi())
+    monkeypatch.setattr("api.config.get_config", lambda: {"model": {"default": "test-model"}})
+    monkeypatch.setattr(
+        "scripts.real_model_campaign.generate_model_prompt_pool",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(_StopAfterHealth()),
+    )
+
+    with pytest.raises(_StopAfterHealth):
+        run_campaign(1, 3, "http://test", prompt_source="model")
+
+
+def test_campaign_can_still_require_an_idle_webui(monkeypatch):
     class _BusyApi:
         def request(self, method, path, body=None, timeout=20):
             assert (method, path) == ("GET", "/health")
@@ -454,7 +473,7 @@ def test_campaign_rejects_busy_webui_without_allow_concurrent(monkeypatch):
     monkeypatch.setattr("scripts.real_model_campaign.Api", lambda _base_url: _BusyApi())
 
     with pytest.raises(RuntimeError, match="active streams or runs"):
-        run_campaign(1, 5, "http://test")
+        run_campaign(1, 5, "http://test", allow_concurrent=False)
 
 
 def test_manifest_integration_prefix_resolves_inside_session_workspace(tmp_path, monkeypatch):
@@ -1018,6 +1037,45 @@ def test_missing_artifact_is_an_alignment_failure(tmp_path):
     failures, observations, _ = evaluate_alignment(session, manifest, {"nonce": "nonce", "turn_key": "turn:1"}, tmp_path)
     assert failures == [{"code": "MODEL_NO_ARTIFACT"}]
     assert not observations
+
+
+def test_skill_artifact_is_normal_when_turn_also_creates_a_workspace_file(tmp_path):
+    delivered = tmp_path / "data/derived.csv"
+    delivered.parent.mkdir(parents=True)
+    delivered.write_text("id,value\n1,ok\n", encoding="utf-8")
+    session = {"messages": [{"role": "user", "content": "nonce", "_turn_key": "turn:1"}]}
+    manifest = {
+        "turns": [{
+            "turn_key": "turn:1",
+            "artifacts": [
+                {"path": "general/campaign-turn-delivery", "preview": "skill", "source_tool": "skill_manage"},
+                {"path": "data/derived.csv", "preview": "file", "source_tool": "write_file"},
+            ],
+        }],
+        "diagnostics": {"orphan_turn_keys": []},
+    }
+
+    failures, observations, hashes = evaluate_alignment(session, manifest, {"nonce": "nonce"}, tmp_path)
+
+    assert failures == []
+    assert observations == [{"code": "SKILL_ARTIFACT", "path": "general/campaign-turn-delivery"}]
+    assert set(hashes) == {"data/derived.csv"}
+
+
+def test_skill_artifact_does_not_satisfy_campaign_file_delivery(tmp_path):
+    session = {"messages": [{"role": "user", "content": "nonce", "_turn_key": "turn:1"}]}
+    manifest = {
+        "turns": [{
+            "turn_key": "turn:1",
+            "artifacts": [{"path": "general/campaign-turn-delivery", "source_tool": "skill_manage"}],
+        }],
+        "diagnostics": {"orphan_turn_keys": []},
+    }
+
+    failures, observations, _ = evaluate_alignment(session, manifest, {"nonce": "nonce"}, tmp_path)
+
+    assert failures == [{"code": "MODEL_NO_ARTIFACT"}]
+    assert observations == [{"code": "SKILL_ARTIFACT", "path": "general/campaign-turn-delivery"}]
 
 
 def test_turn_key_ignores_nonce_echo_in_tool_messages(tmp_path):

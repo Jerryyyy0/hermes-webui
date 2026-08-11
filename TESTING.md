@@ -151,15 +151,15 @@ python scripts/real_model_campaign.py --sessions 1 --turns 5 --context-mode firs
 python scripts/real_model_campaign.py --sessions 1 --turns 3 --prompt-source model
 # optional bool: first session is cancel-only (every turn cancels; trigger chosen randomly)
 python scripts/real_model_campaign.py --sessions 2 --turns 5 --cancel-verify true --seed 42
-# allow campaign sessions while other WebUI sessions are actively running
-python scripts/real_model_campaign.py --sessions 1 --turns 5 --prompt-source model --allow-concurrent
+# campaign sessions may run while other WebUI sessions are actively running
+python scripts/real_model_campaign.py --sessions 1 --turns 5 --prompt-source model
 # delete campaign test sessions and their campaign-owned workspaces
 python scripts/real_model_campaign.py --cleanup
 ```
 
 The campaign runs one stream at a time and uses the configured default model.
-It requires an idle WebUI by default; pass `--allow-concurrent` to run alongside
-other active WebUI streams or runs.
+It permits other active WebUI streams or runs by default; `--allow-concurrent`
+remains accepted for compatibility.
 `--prompt-source` controls where trial questions come from:
 
 - `database` — samples historical WebUI sessions under
@@ -182,13 +182,16 @@ Model-mode turns are progressive: the first three request a source CSV, a
 Markdown analysis, and an HTML page; later turns cycle through independent
 review Markdown, derived CSV, and HTML iteration files. A later turn may repair
 missing prerequisites after a cancelled earlier turn. The named files steer the
-task but are not exact-path assertions: the campaign accepts any real Artifact
-that the Session Manifest attributes to the current turn. A normal (non-cancel)
-turn with no Manifest Artifact is an alignment failure and makes the campaign
-exit non-zero. Intentionally cancelled normal turns skip Artifact alignment but
-retain their cancellation observations. Provider/SSE failures are recorded as
-safe `MODEL_STREAM_ERROR` observations. It does not validate References or
-require a content-hash change.
+task but are not exact-path assertions: the campaign accepts any real file
+Artifact that the Session Manifest attributes to the current turn. A normal
+(non-cancel) turn with no Manifest file Artifact is an alignment failure and
+makes the campaign exit non-zero. Intentionally cancelled normal turns skip
+Artifact alignment but retain their cancellation observations. Provider/SSE
+failures are recorded as
+safe `MODEL_STREAM_ERROR` observations. Skill Artifacts are valid Manifest
+records but do not need to exist in the session workspace; they do not by
+themselves satisfy the campaign's required file delivery. It does not validate
+References or require a content-hash change.
 
 `--context-mode` controls how history context is applied:
 

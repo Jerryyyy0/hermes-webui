@@ -10711,6 +10711,9 @@ def handle_get(handler, parsed) -> bool:
         import time as _time
         _t0 = _time.monotonic()
         _debug_slow = os.environ.get("HERMES_DEBUG_SLOW", "")
+        _debug_session_timing = str(
+            os.environ.get("HERMES_DEBUG_SESSION_TIMING", "")
+        ).strip().lower() in {"1", "true", "yes", "on"}
         # perf(webui/session-load-latency) tier2c: per-stage breakdown via
         # RequestDiagnostics. maybe_start() returns None for paths not in
         # the allowlist, in which case the existing _tN-driven [SLOW] log
@@ -10769,13 +10772,15 @@ def handle_get(handler, parsed) -> bool:
         turn_align = str(_turn_align or "").strip().lower() in ("1", "true")
         try:
             _t1 = _time.monotonic()
-            if _diag: _diag.stage("t1_after_get_session_check")
+            if _diag: _diag.stage("session.resolve")
             s = get_session(sid, metadata_only=(not load_messages))
             if load_messages and is_cron_session(sid, getattr(s, "source_tag", None)):
                 from integration.crons.session_bridge import reconcile_cron_session_transcript
 
                 if reconcile_cron_session_transcript(s):
                     s.save(touch_updated_at=False)
+            _t_session_resolved = _time.monotonic()
+            if _diag: _diag.stage("session.message_source")
             _session_profile = getattr(s, 'profile', None) or None
             # Temporarily disabled at the request of the local deployment owner:
             # allow session loads across Profile boundaries.
@@ -10835,7 +10840,7 @@ def handle_get(handler, parsed) -> bool:
                 # honor #2827's TLS-vs-thread fix.
                 metadata_summary = _metadata_only_message_summary(sid, profile=_session_profile)
             _t2 = _time.monotonic()
-            if _diag: _diag.stage("t2_after_state_db_load")
+            if _diag: _diag.stage("session.model_resolve")
             effective_model = (
                 _resolve_effective_session_model_for_display(s)
                 if resolve_model
@@ -10847,7 +10852,7 @@ def handle_get(handler, parsed) -> bool:
                 else None
             )
             _t3 = _time.monotonic()
-            if _diag: _diag.stage("t3_after_model_resolve")
+            if _diag: _diag.stage("session.message_projection")
             if load_messages:
                 if is_messaging_session and cli_messages:
                     # Recovery/aggregate sidecars can intentionally contain a
@@ -10922,21 +10927,17 @@ def handle_get(handler, parsed) -> bool:
                 and msg_limit is not None
                 and (msg_before is not None or len(_truncated_msgs) < len(_all_msgs))
             )
-            # Resolve effective context_length with model-metadata fallback so
-            # older sessions (pre-#1318) that have context_length=0 persisted
-            # still render a meaningful indicator on load.  Mirrors the
-            # SSE-path fallback in api/streaming.py:2333-2342.  Fixes #1436.
+            # #1436: Only the deferred resolve_model=1 pass may refresh context
+            # metadata. The primary transcript load uses resolve_model=0 and
+            # must not turn a missing persisted value into a blocking external
+            # model metadata request; 0 means the context window is unknown.
             #
-            # #1896: pass config_context_length, provider, and custom_providers
-            # so explicit config overrides win over the 256K default fallback.
-            # Without these, an old session loaded after a user upgraded to a
-            # 1M-context model with `model.context_length: 1048576` in
-            # config.yaml gets a 256K window in the initial UI indicator and
-            # /api/session/get response — the same wrong-window display this
-            # fix addresses on the streaming side.
+            # #1896: the deferred lookup passes config_context_length, provider,
+            # and custom_providers so explicit config overrides win over the
+            # 256K default fallback.
             _persisted_cl = getattr(s, "context_length", 0) or 0
             _threshold_tokens = getattr(s, "threshold_tokens", 0) or 0
-            if (not _persisted_cl) or resolve_model:
+            if resolve_model:
                 _model_for_lookup = (
                     effective_model or getattr(s, "model", "") or ""
                 ).strip()
@@ -11045,22 +11046,22 @@ def handle_get(handler, parsed) -> bool:
             raw["_messages_offset"] = _messages_offset
             raw["_msg_limit_max"] = _MAX_MSG_LIMIT
             _t4 = _time.monotonic()
-            if _diag: _diag.stage("t4_after_compact_and_merge")
+            if _diag: _diag.stage("session.redact")
             if effective_model:
                 raw["model"] = effective_model
             if effective_provider:
                 raw["model_provider"] = effective_provider
             redact = redact_session_data(raw)
             _t5 = _time.monotonic()
-            if _diag: _diag.stage("t5_after_redact")
+            if _diag: _diag.stage("session.response_write")
             resp = j(handler, {"session": redact})
             _t6 = _time.monotonic()
-            if _diag: _diag.stage("t6_after_json_write")
+            if _diag: _diag.stage("session.complete")
             _total_ms = (_t6 - _t0) * 1000
             # Always log when slow (>2s) so we don't need HERMES_DEBUG_SLOW env var
             # to diagnose latency regressions. Opt-in env var still forces
             # logging on every request for development.
-            if _debug_slow or _total_ms >= 2000:
+            if _debug_slow or _debug_session_timing or _total_ms >= 2000:
                 # perf(webui/session-load-latency) tier2c: route the [SLOW] line
                 # through handler._safe_webui_print() rather than logger.warning().
                 # The WebUI process starts the root logger without any handler, so
@@ -11071,11 +11072,16 @@ def handle_get(handler, parsed) -> bool:
                 # same as the per-request ms line — which is why THAT line keeps
                 # working.
                 handler._safe_webui_print(
-                    "[SLOW] session_id=%s get_session=%.1fms model_resolve=%.1fms "
-                    "compact=%.1fms redact=%.1fms json_write=%.1fms total=%.1fms" % (
+                    "%s session_id=%s get_session=%.1fms model_resolve=%.1fms "
+                    "compact=%.1fms redact=%.1fms json_write=%.1fms total=%.1fms "
+                    "session_resolve=%.1fms message_source=%.1fms stages=%s" % (
+                        "[SESSION_TIMING]" if _debug_session_timing and _total_ms < 2000 else "[SLOW]",
                         sid,
                         (_t2-_t1)*1000, (_t3-_t2)*1000, (_t4-_t3)*1000,
                         (_t5-_t4)*1000, (_t6-_t5)*1000, _total_ms,
+                        (_t_session_resolved-_t1)*1000,
+                        (_t2-_t_session_resolved)*1000,
+                        _diag.stage_summary() if _diag else "unavailable",
                     )
                 )
             if _diag: _diag.finish()

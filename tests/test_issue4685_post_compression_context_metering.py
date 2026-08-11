@@ -24,7 +24,7 @@ global._fmtTokens = value => String(value);
 global.t = key => key;
 {indicator}
 _syncCtxIndicator({json.dumps(usage)});
-console.log(JSON.stringify({{percent: nodes.ctxPercent.textContent, label: nodes.ctxIndicator['aria-label'], usage: nodes.ctxTooltipUsage.textContent, tokens: nodes.ctxTooltipTokens.textContent}}));
+console.log(JSON.stringify({{percent: nodes.ctxPercent.textContent, label: nodes.ctxIndicator['aria-label'], usage: nodes.ctxTooltipUsage.textContent, tokens: nodes.ctxTooltipTokens.textContent, compressVisible: nodes.ctxTooltipCompress.style.display}}));
 """
     result = subprocess.run(
         ["node", "-e", script],
@@ -155,10 +155,16 @@ def test_estimate_lineage_matrix(tmp_path, monkeypatch):
 def test_context_indicator_without_estimate_preserves_current_behavior():
     historical = _run_context_indicator({"last_prompt_tokens": 100_000, "context_length": 128_000})
     no_data = _run_context_indicator({"input_tokens": 100_000, "output_tokens": 1})
+    unknown_window = _run_context_indicator(
+        {"last_prompt_tokens": 1_200_000, "context_length": 0}
+    )
 
     assert historical["percent"] == "78"
     assert historical["label"].startswith("Context window 78% used")
     assert no_data["percent"] == "\N{MIDDLE DOT}"
+    assert unknown_window["percent"] == "\N{MIDDLE DOT}"
+    assert "128K" not in unknown_window["label"]
+    assert unknown_window["compressVisible"] == "none"
 
 
 def test_reload_hydration_passes_post_compression_estimate_to_context_indicator():

@@ -180,6 +180,14 @@ class RequestDiagnostics:
             self._current_stage = clean
             self._current_stage_started = now
 
+    def stage_summary(self) -> str:
+        with self._lock:
+            record = self._build_record_locked(include_stacks=False)
+        return " ".join(
+            f"{stage['name']}={stage['ms']:.1f}ms"
+            for stage in record["stages"]
+        )
+
     def _emit_slow(self, prefix: str, record: dict) -> None:
         payload = json.dumps(record, sort_keys=True)
         log_msg = f"{prefix} %s"
