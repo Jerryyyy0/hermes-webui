@@ -2543,6 +2543,19 @@ def test_paths_from_last_assistant_message_accepts_unicode_filename_without_deli
     assert paths == ['AI热点top10-2026-06.docx']
 
 
+def test_paths_from_last_assistant_message_accepts_interpunct_filename(tmp_path):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    docx = workspace / '智灵·晨报.docx'
+    docx.write_bytes(b'fake-docx')
+
+    paths = _paths_from_last_assistant_message(
+        f'Word 文档已生成：`{docx.as_posix()}`', workspace,
+    )
+
+    assert paths == ['智灵·晨报.docx']
+
+
 def test_only_final_assistant_prose_contributes_artifacts(tmp_path, monkeypatch):
     workspace = tmp_path / 'ws'
     workspace.mkdir()
