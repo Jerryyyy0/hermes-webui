@@ -45,7 +45,7 @@ GENERATION_ORDER = ("assistant_intro", "memory", "skill", "emotion")
 SUCCESS_REGEN_COOLDOWN_SECONDS = 300
 FAILURE_RETRY_SECONDS = 3
 EMOTION_REFRESH_SECONDS = 5 * 60
-USER_PROMPT_LOG_MAX_CHARS = 1000
+USER_PROMPT_LOG_MAX_CHARS = 500
 
 
 def _log_line(event: str, fields: dict[str, Any] | None = None) -> str:

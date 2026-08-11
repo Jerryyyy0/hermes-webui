@@ -147,6 +147,7 @@ def test_system_prompt_for_emotion_requires_json_array():
 def test_truncate_for_log_limits_user_prompt_display():
     text = "x" * 1200
     truncated = generation._truncate_for_log(text, generation.USER_PROMPT_LOG_MAX_CHARS)
+    assert generation.USER_PROMPT_LOG_MAX_CHARS == 500
     assert truncated.startswith("x" * generation.USER_PROMPT_LOG_MAX_CHARS)
     assert truncated.endswith("(truncated, total 1200 chars)")
     assert generation._truncate_for_log("short", generation.USER_PROMPT_LOG_MAX_CHARS) == "short"
