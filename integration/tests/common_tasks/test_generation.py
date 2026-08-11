@@ -250,7 +250,7 @@ def test_validate_cluster_response_returns_top_n_sorted_by_count():
     assert tasks[0]["query_count"] == 4
     assert tasks[0]["source"] == "mined"
     assert tasks[0]["members_json"] == json.dumps(["q1", "q2", "q3", "q4"], ensure_ascii=False)
-    # 簇D was filtered out (count < 3) so only 3 clusters remain, exactly TOP_N.
+    # 簇D count=2 通过校验但排第 4,被 TOP_N 截断
     assert {t["title"] for t in tasks} == {"簇A", "簇B", "簇C"}
 
 
@@ -274,8 +274,22 @@ def test_validate_cluster_response_filters_members_not_in_original():
     assert tasks[0]["query_count"] == 3
 
 
-def test_validate_cluster_response_skips_clusters_with_fewer_than_three_members():
+def test_validate_cluster_response_skips_clusters_with_fewer_than_two_members():
     questions = {"q1", "q2", "q3", "q4", "q5"}
+    payload = json.dumps(
+        [
+            {"title": "簇A", "trigger_language": "tA", "members": ["q1"], "count": 1},
+        ],
+        ensure_ascii=False,
+    )
+
+    tasks, reason = generation.validate_cluster_response(payload, questions)
+    assert tasks is None
+    assert reason == "no_valid_cluster"
+
+
+def test_validate_cluster_response_accepts_cluster_with_two_members():
+    questions = {"q1", "q2"}
     payload = json.dumps(
         [
             {"title": "簇A", "trigger_language": "tA", "members": ["q1", "q2"], "count": 2},
@@ -284,8 +298,9 @@ def test_validate_cluster_response_skips_clusters_with_fewer_than_three_members(
     )
 
     tasks, reason = generation.validate_cluster_response(payload, questions)
-    assert tasks is None
-    assert reason == "no_valid_cluster"
+    assert reason == "ok"
+    assert len(tasks) == 1
+    assert tasks[0]["query_count"] == 2
 
 
 def test_validate_cluster_response_skips_non_string_members():
@@ -391,10 +406,94 @@ def test_should_mine_allows_same_fingerprint_after_cooldown_with_no_success():
     now = time.time()
     state = {
         "last_fingerprint": "fp",
-        "last_attempt_at": str(now - 100),
+        "last_attempt_at": str(now - generation.MINE_FAILURE_COOLDOWN_SECONDS - 1),
         "last_success_at": "",
         "retry_after": "",
     }
+    assert generation._should_mine("fp", state) is True
+
+
+def test_should_mine_blocks_same_fingerprint_within_failure_cooldown_no_success():
+    """fp 不变且从未成功:last_attempt 在 MINE_FAILURE_COOLDOWN_SECONDS 内返回 False,
+    避免 mine 持续失败时 hammer LLM,期间由 enqueue_missing_or_stale 入队 seed 兜底."""
+    now = time.time()
+    state = {
+        "last_fingerprint": "fp",
+        "last_attempt_at": str(now - 10),
+        "last_success_at": "",
+        "retry_after": "",
+        "last_error": "cluster_no_valid_cluster",
+    }
+    assert generation._should_mine("fp", state) is False
+
+    state["last_attempt_at"] = str(now - generation.MINE_FAILURE_COOLDOWN_SECONDS - 1)
+    assert generation._should_mine("fp", state) is True
+
+
+def test_should_mine_blocks_longer_when_last_error_is_model_call_failed():
+    """LLM 调用失败(model_call_failed)冷却 MINE_LLM_FAILURE_COOLDOWN_SECONDS(600s),
+    期间不再重试 mine,由 seed 兜底;超过后才允许重试."""
+    now = time.time()
+    state = {
+        "last_fingerprint": "fp",
+        "last_attempt_at": str(now - generation.MINE_FAILURE_COOLDOWN_SECONDS - 1),
+        "last_success_at": "",
+        "retry_after": "",
+        "last_error": "model_call_failed",
+    }
+    # 30 秒已过但 600 秒未到:LLM 失败冷却仍然阻断
+    assert generation._should_mine("fp", state) is False
+
+    state["last_attempt_at"] = str(now - generation.MINE_LLM_FAILURE_COOLDOWN_SECONDS - 1)
+    assert generation._should_mine("fp", state) is True
+
+
+def test_should_mine_blocks_longer_when_last_error_is_seed_model_call_failed():
+    """seed 失败会覆盖 mine 的 last_error(变成 seed_model_call_failed),
+    也要走 600s 冷却,避免 mine 被 seed 失败污染后频繁 hammer LLM."""
+    now = time.time()
+    state = {
+        "last_fingerprint": "fp",
+        "last_attempt_at": str(now - generation.MINE_FAILURE_COOLDOWN_SECONDS - 1),
+        "last_success_at": "",
+        "retry_after": "",
+        "last_error": "seed_model_call_failed",
+    }
+    assert generation._should_mine("fp", state) is False
+
+    state["last_attempt_at"] = str(now - generation.MINE_LLM_FAILURE_COOLDOWN_SECONDS - 1)
+    assert generation._should_mine("fp", state) is True
+
+
+def test_should_mine_blocks_longer_when_last_error_is_missing_model():
+    """missing_model 是配置问题,短时间不会自愈,走 600s 冷却."""
+    now = time.time()
+    state = {
+        "last_fingerprint": "fp",
+        "last_attempt_at": str(now - generation.MINE_FAILURE_COOLDOWN_SECONDS - 1),
+        "last_success_at": "",
+        "retry_after": "",
+        "last_error": "missing_model",
+    }
+    assert generation._should_mine("fp", state) is False
+
+    state["last_attempt_at"] = str(now - generation.MINE_LLM_FAILURE_COOLDOWN_SECONDS - 1)
+    assert generation._should_mine("fp", state) is True
+
+
+def test_should_mine_uses_short_cooldown_for_cluster_validation_error():
+    """cluster 校验失败(cluster_no_valid_cluster)走 30s 冷却,可能是 prompt 偶发问题."""
+    now = time.time()
+    state = {
+        "last_fingerprint": "fp",
+        "last_attempt_at": str(now - 10),
+        "last_success_at": "",
+        "retry_after": "",
+        "last_error": "cluster_no_valid_cluster",
+    }
+    assert generation._should_mine("fp", state) is False
+
+    state["last_attempt_at"] = str(now - generation.MINE_FAILURE_COOLDOWN_SECONDS - 1)
     assert generation._should_mine("fp", state) is True
 
 
@@ -548,6 +647,189 @@ def test_enqueue_missing_or_stale_skips_mine_when_within_success_cooldown(tmp_pa
     assert enqueued == []
 
 
+def test_enqueue_missing_or_stale_enqueues_seed_when_mine_in_failure_cooldown_and_no_cache(tmp_path):
+    """mine 持续失败冷却中(_should_mine 返回 False)且无 mined/seed 数据时,入队 seed 兜底,
+    避免 dedup_count >= 5 时接口长期返回空(items=[], cache_status='empty')."""
+    questions = [{"text": f"q{i}"} for i in range(10)]
+    fp = collectors.fingerprint_for_cluster(questions)
+    store.replace_mined_tasks(
+        "alice",
+        [],
+        fp,
+        success=False,
+        last_error="cluster_no_valid_cluster",
+    )
+    store.update_state("alice", "retry_after", str(time.time() - 1))
+    enqueued = []
+
+    with patch(
+        "integration.common_tasks.collectors.collect_recent_user_questions",
+        return_value=questions,
+    ), patch("integration.common_tasks.generation.enqueue", lambda *args: enqueued.append(args)):
+        generation.enqueue_missing_or_stale("alice", tmp_path)
+
+    assert len(enqueued) == 1
+    assert enqueued[0][0] == "alice"
+    assert enqueued[0][2] == "seed"
+
+
+def test_enqueue_missing_or_stale_skips_seed_when_mine_in_failure_cooldown_but_cache_present(tmp_path):
+    """mine 持续失败冷却中但已有 seed 数据时,不再重复入队 seed(已有兜底)."""
+    questions = [{"text": f"q{i}"} for i in range(10)]
+    fp = collectors.fingerprint_for_cluster(questions)
+    store.write_seed_tasks("alice", [{"title": "种子", "trigger_language": "t"}])
+    store.replace_mined_tasks(
+        "alice",
+        [],
+        fp,
+        success=False,
+        last_error="cluster_no_valid_cluster",
+    )
+    store.update_state("alice", "retry_after", str(time.time() - 1))
+    enqueued = []
+
+    with patch(
+        "integration.common_tasks.collectors.collect_recent_user_questions",
+        return_value=questions,
+    ), patch("integration.common_tasks.generation.enqueue", lambda *args: enqueued.append(args)):
+        generation.enqueue_missing_or_stale("alice", tmp_path)
+
+    assert enqueued == []
+
+
+def test_enqueue_missing_or_stale_repairs_stale_seed_stamp_on_the_fly(tmp_path, capsys):
+    """运行期发现 seed_generated_at 已设但表无 seed 行 -> 清空 stamp 并入队 seed."""
+    # Create stale state: stamp set but seed rows deleted
+    store.write_seed_tasks("alice", [{"title": "真种子", "trigger_language": "t"}])
+    store.delete_seed_rows("alice")
+    # Too few questions to trigger mine, so seed path is the only route
+    questions = [{"text": "q1"}, {"text": "q2"}]
+
+    enqueued = []
+    with patch(
+        "integration.common_tasks.collectors.collect_recent_user_questions",
+        return_value=questions,
+    ), patch("integration.common_tasks.generation.enqueue", lambda *args: enqueued.append(args)):
+        generation.enqueue_missing_or_stale("alice", tmp_path)
+
+    # Stamp cleared
+    _, state = store.read_all("alice")
+    assert state.get("seed_generated_at", "") == ""
+    # Seed enqueued because stamp is now empty
+    assert len(enqueued) == 1
+    assert enqueued[0][2] == "seed"
+    err = capsys.readouterr().err
+    assert "[webui][common_tasks][seed_integrity_repaired]" in err
+
+
+def test_enqueue_missing_or_stale_noop_repair_when_seed_rows_present(tmp_path, capsys):
+    """seed_generated_at 已设且表有 seed 行 -> 不触发修复."""
+    store.write_seed_tasks("alice", [{"title": "真种子", "trigger_language": "t"}])
+    questions = [{"text": f"q{i}"} for i in range(10)]
+
+    enqueued = []
+    with patch(
+        "integration.common_tasks.collectors.collect_recent_user_questions",
+        return_value=questions,
+    ), patch("integration.common_tasks.generation.enqueue", lambda *args: enqueued.append(args)):
+        generation.enqueue_missing_or_stale("alice", tmp_path)
+
+    err = capsys.readouterr().err
+    assert "[webui][common_tasks][seed_integrity_repaired]" not in err
+    # stamp preserved
+    _, state = store.read_all("alice")
+    assert state.get("seed_generated_at")
+
+
+# ---------- _repair_stale_seed_stamp ----------
+
+
+def test_repair_stale_seed_stamp_clears_stamp_when_no_seed_rows(tmp_path, capsys):
+    """seed_generated_at 已设置但表里无 seed 行 -> 清空 stamp 并 emit warning."""
+    store.write_seed_tasks("alice", [{"title": "真种子", "trigger_language": "t"}])
+    # Simulate seed rows being lost (manual delete / DB issue)
+    store.delete_seed_rows("alice")
+    _, state_before = store.read_all("alice")
+    assert state_before.get("seed_generated_at")
+
+    generation._repair_stale_seed_stamp("alice")
+
+    _, state_after = store.read_all("alice")
+    assert state_after.get("seed_generated_at", "") == ""
+    err = capsys.readouterr().err
+    assert "[webui][common_tasks][seed_integrity_repaired]" in err
+    assert "seed_generated_at_without_seed_rows" in err
+
+
+def test_repair_stale_seed_stamp_noop_when_seed_rows_present(tmp_path, capsys):
+    """seed_generated_at 已设置且表里有 seed 行 -> 不动."""
+    store.write_seed_tasks("alice", [{"title": "真种子", "trigger_language": "t"}])
+    stamp_before = store.read_all("alice")[1].get("seed_generated_at")
+
+    generation._repair_stale_seed_stamp("alice")
+
+    _, state_after = store.read_all("alice")
+    assert state_after.get("seed_generated_at") == stamp_before
+    err = capsys.readouterr().err
+    assert "[webui][common_tasks][seed_integrity_repaired]" not in err
+
+
+def test_repair_stale_seed_stamp_noop_when_stamp_empty(tmp_path, capsys):
+    """seed_generated_at 为空(未生成或 fallback 占位) -> 不动."""
+    # Fallback seed rows: write_seed_rows_only does NOT stamp seed_generated_at
+    store.write_seed_rows_only("alice", [{"title": "占位", "trigger_language": "t"}])
+
+    generation._repair_stale_seed_stamp("alice")
+
+    tasks, state = store.read_all("alice")
+    assert state.get("seed_generated_at", "") == ""
+    assert len(tasks) == 1  # fallback rows preserved
+    err = capsys.readouterr().err
+    assert "[webui][common_tasks][seed_integrity_repaired]" not in err
+
+
+def test_repair_stale_seed_stamp_noop_when_db_missing(tmp_path, capsys):
+    """DB 不存在 -> 不创建 DB,不报错."""
+    generation._repair_stale_seed_stamp("alice")
+    assert not (tmp_path / "session_manifest.db").exists()
+    err = capsys.readouterr().err
+    assert "[webui][common_tasks][seed_integrity_repaired]" not in err
+
+
+def test_start_pregeneration_calls_repair_then_enqueue_for_each_profile(tmp_path, capsys):
+    """start_pregeneration 对每个 profile 先 _repair_stale_seed_stamp 再 enqueue_missing_or_stale,
+    且 repair 实际清掉 stale stamp."""
+    store.write_seed_tasks("alice", [{"title": "真种子", "trigger_language": "t"}])
+    store.delete_seed_rows("alice")  # create stale stamp
+    profile_rows = [{"name": "alice", "path": str(tmp_path)}]
+
+    call_order = []
+    real_repair = generation._repair_stale_seed_stamp
+
+    def _spy_repair(profile):
+        call_order.append(("repair", profile))
+        real_repair(profile)
+
+    def _spy_enqueue(profile, path):
+        call_order.append(("enqueue", profile, str(path)))
+
+    import threading
+
+    with patch("integration.common_tasks.generation._repair_stale_seed_stamp", side_effect=_spy_repair), patch(
+        "integration.common_tasks.generation.enqueue_missing_or_stale", side_effect=_spy_enqueue
+    ), patch("api.profiles.list_profiles_api", return_value=profile_rows):
+        generation.start_pregeneration()
+        # Join the daemon thread INSIDE the patch context so spies are still active
+        for t in threading.enumerate():
+            if t.name == "common-tasks-pregeneration":
+                t.join(timeout=2.0)
+                break
+
+    assert call_order == [("repair", "alice"), ("enqueue", "alice", str(tmp_path))]
+    _, state = store.read_all("alice")
+    assert state.get("seed_generated_at", "") == ""
+
+
 # ---------- _run_seed ----------
 
 
@@ -665,10 +947,84 @@ def test_run_mine_fingerprint_mismatch_re_arms_with_fresh_fingerprint(tmp_path):
     assert enqueued[0][3] == fresh_fp
 
 
+def test_run_mine_fingerprint_mismatch_skips_rearm_when_retry_after_in_future(tmp_path, capsys):
+    """retry_after 在未来时,fingerprint 不匹配也不 re-arm,避免 hammer 宕机的 LLM."""
+    job = _make_job(tmp_path, kind="mine", fingerprint="stale-fp")
+    questions = [{"text": f"q{i}"} for i in range(10)]
+    # Create DB then set retry_after 200s into the future (simulating recent LLM failure)
+    store.write_seed_tasks("alice", [{"title": "x", "trigger_language": "y"}])
+    store.update_state("alice", "retry_after", str(time.time() + 200))
+
+    enqueued = []
+    with patch(
+        "integration.common_tasks.collectors.collect_recent_user_questions",
+        return_value=questions,
+    ), patch("integration.common_tasks.generation.enqueue", lambda *args: enqueued.append(args)):
+        generation._run_mine(job, tmp_path)
+
+    assert enqueued == []
+    err = capsys.readouterr().err
+    assert "[webui][common_tasks][mine_rearm_skipped]" in err
+    assert "reason=retry_after_in_future" in err
+
+
+def test_run_mine_fingerprint_mismatch_rearms_when_retry_after_expired(tmp_path, capsys):
+    """retry_after 已过期时,fingerprint 不匹配仍正常 re-arm."""
+    job = _make_job(tmp_path, kind="mine", fingerprint="stale-fp")
+    questions = [{"text": f"q{i}"} for i in range(10)]
+    # Create DB then set retry_after in the past
+    store.write_seed_tasks("alice", [{"title": "x", "trigger_language": "y"}])
+    store.update_state("alice", "retry_after", str(time.time() - 10))
+
+    enqueued = []
+    with patch(
+        "integration.common_tasks.collectors.collect_recent_user_questions",
+        return_value=questions,
+    ), patch("integration.common_tasks.generation.enqueue", lambda *args: enqueued.append(args)):
+        generation._run_mine(job, tmp_path)
+
+    fresh_fp = collectors.fingerprint_for_cluster(questions)
+    assert len(enqueued) == 1
+    assert enqueued[0][2] == "mine"
+    assert enqueued[0][3] == fresh_fp
+    err = capsys.readouterr().err
+    assert "[webui][common_tasks][mine_rearm_skipped]" not in err
+
+
 def test_run_mine_missing_model_records_failure(tmp_path, capsys):
     questions = [{"text": f"q{i}"} for i in range(10)]
     fp = collectors.fingerprint_for_cluster(questions)
     job = _make_job(tmp_path, kind="mine", fingerprint=fp, provider=None, model=None)
+    context = {"display_name": "小助", "description": "通用助手", "skills": []}
+
+    with patch(
+        "integration.common_tasks.collectors.collect_recent_user_questions",
+        return_value=questions,
+    ), patch(
+        "integration.common_tasks.collectors.collect_seed_context", return_value=context
+    ):
+        generation._run_mine(job, tmp_path)
+
+    rows, state = store.read_all("alice")
+    mined_rows = [r for r in rows if r["source"] == "mined"]
+    seed_rows = [r for r in rows if r["source"] == "seed"]
+    assert mined_rows == []
+    assert len(seed_rows) > 0
+    assert state.get("last_attempt_at")
+    assert float(state["retry_after"]) >= time.time()
+    assert state["last_error"] == "missing_model"
+    err = capsys.readouterr().err
+    assert "[webui][common_tasks][mine_skipped]" in err
+    assert "reason=missing_profile_default_model" in err
+    assert "[webui][common_tasks][seed_fallback_written]" in err
+
+
+def test_run_mine_missing_model_skips_seed_fallback_when_seed_present(tmp_path, capsys):
+    """mine_skipped 时若已有 seed 数据,不再重写 fallback 占位."""
+    questions = [{"text": f"q{i}"} for i in range(10)]
+    fp = collectors.fingerprint_for_cluster(questions)
+    job = _make_job(tmp_path, kind="mine", fingerprint=fp, provider=None, model=None)
+    store.write_seed_tasks("alice", [{"title": "已有种子", "trigger_language": "t"}])
 
     with patch(
         "integration.common_tasks.collectors.collect_recent_user_questions",
@@ -677,16 +1033,15 @@ def test_run_mine_missing_model_records_failure(tmp_path, capsys):
         generation._run_mine(job, tmp_path)
 
     rows, state = store.read_all("alice")
-    assert rows == []
-    assert state.get("last_attempt_at")
-    assert float(state["retry_after"]) >= time.time()
+    seed_rows = [r for r in rows if r["source"] == "seed"]
+    assert len(seed_rows) == 1
+    assert seed_rows[0]["title"] == "已有种子"
     assert state["last_error"] == "missing_model"
     err = capsys.readouterr().err
-    assert "[webui][common_tasks][mine_skipped]" in err
-    assert "reason=missing_profile_default_model" in err
+    assert "[webui][common_tasks][seed_fallback_written]" not in err
 
 
-def test_run_mine_too_few_unique_questions_skips_without_writing(tmp_path):
+def test_run_mine_too_few_unique_questions_skips_without_writing(tmp_path, capsys):
     questions = [{"text": "q1"}, {"text": "q1"}, {"text": "q1"}, {"text": "q2"}]
     fp = collectors.fingerprint_for_cluster(questions)
     job = _make_job(tmp_path, kind="mine", fingerprint=fp)
@@ -701,6 +1056,10 @@ def test_run_mine_too_few_unique_questions_skips_without_writing(tmp_path):
     rows, state = store.read_all("alice")
     assert rows == []
     assert state == {}
+    err = capsys.readouterr().err
+    assert "[webui][common_tasks][mine_skipped]" in err
+    assert "reason=too_few_unique_questions" in err
+    assert "dedup_count=2" in err
 
 
 def test_run_mine_truncates_long_questions_before_prompting(tmp_path):
@@ -750,6 +1109,7 @@ def test_run_mine_failure_records_error(tmp_path, capsys):
     questions = [{"text": f"q{i}"} for i in range(10)]
     fp = collectors.fingerprint_for_cluster(questions)
     job = _make_job(tmp_path, kind="mine", fingerprint=fp)
+    context = {"display_name": "小助", "description": "通用助手", "skills": []}
 
     with patch(
         "integration.common_tasks.collectors.collect_recent_user_questions",
@@ -757,11 +1117,16 @@ def test_run_mine_failure_records_error(tmp_path, capsys):
     ), patch(
         "integration.common_tasks.generation._call_llm",
         return_value=(None, "model_call_failed"),
+    ), patch(
+        "integration.common_tasks.collectors.collect_seed_context", return_value=context
     ):
         generation._run_mine(job, tmp_path)
 
     rows, state = store.read_all("alice")
-    assert rows == []
+    mined_rows = [r for r in rows if r["source"] == "mined"]
+    seed_rows = [r for r in rows if r["source"] == "seed"]
+    assert mined_rows == []
+    assert len(seed_rows) > 0  # mine 失败后写入 fallback seed 占位
     assert state["last_error"] == "model_call_failed"
     assert float(state["retry_after"]) >= time.time()
     err = capsys.readouterr().err
@@ -786,6 +1151,86 @@ def test_run_mine_rejected_response_records_cluster_reason(tmp_path, capsys):
     assert state["last_error"].startswith("cluster_")
     err = capsys.readouterr().err
     assert "[webui][common_tasks][mine_rejected]" in err
+
+
+def test_run_mine_rejected_writes_seed_fallback_when_no_seed(tmp_path, capsys):
+    """mine_rejected 后立即写 fallback seed 占位,避免接口返回 empty."""
+    questions = [{"text": f"q{i}"} for i in range(10)]
+    fp = collectors.fingerprint_for_cluster(questions)
+    job = _make_job(tmp_path, kind="mine", fingerprint=fp)
+    context = {"display_name": "小助", "description": "通用助手", "skills": []}
+
+    with patch(
+        "integration.common_tasks.collectors.collect_recent_user_questions",
+        return_value=questions,
+    ), patch(
+        "integration.common_tasks.generation._call_llm",
+        return_value=("not json", "ok"),
+    ), patch(
+        "integration.common_tasks.collectors.collect_seed_context", return_value=context
+    ):
+        generation._run_mine(job, tmp_path)
+
+    rows, state = store.read_all("alice")
+    seed_rows = [r for r in rows if r["source"] == "seed"]
+    assert len(seed_rows) > 0
+    assert state["last_error"].startswith("cluster_")
+    err = capsys.readouterr().err
+    assert "[webui][common_tasks][seed_fallback_written]" in err
+
+
+def test_run_mine_failed_writes_seed_fallback_when_no_seed(tmp_path, capsys):
+    """mine_failed (LLM 调用失败) 后立即写 fallback seed 占位."""
+    questions = [{"text": f"q{i}"} for i in range(10)]
+    fp = collectors.fingerprint_for_cluster(questions)
+    job = _make_job(tmp_path, kind="mine", fingerprint=fp)
+    context = {"display_name": "小助", "description": "通用助手", "skills": []}
+
+    with patch(
+        "integration.common_tasks.collectors.collect_recent_user_questions",
+        return_value=questions,
+    ), patch(
+        "integration.common_tasks.generation._call_llm",
+        return_value=(None, "model_call_failed"),
+    ), patch(
+        "integration.common_tasks.collectors.collect_seed_context", return_value=context
+    ):
+        generation._run_mine(job, tmp_path)
+
+    rows, state = store.read_all("alice")
+    seed_rows = [r for r in rows if r["source"] == "seed"]
+    assert len(seed_rows) > 0
+    assert state["last_error"] == "model_call_failed"
+    err = capsys.readouterr().err
+    assert "[webui][common_tasks][mine_failed]" in err
+    assert "[webui][common_tasks][seed_fallback_written]" in err
+
+
+def test_run_mine_skips_seed_fallback_when_seed_already_present(tmp_path, capsys):
+    """已有 seed 数据时,mine 失败不重写 seed 行."""
+    questions = [{"text": f"q{i}"} for i in range(10)]
+    fp = collectors.fingerprint_for_cluster(questions)
+    job = _make_job(tmp_path, kind="mine", fingerprint=fp)
+    store.write_seed_tasks("alice", [{"title": "已有种子", "trigger_language": "t"}])
+    context = {"display_name": "小助", "description": "通用助手", "skills": []}
+
+    with patch(
+        "integration.common_tasks.collectors.collect_recent_user_questions",
+        return_value=questions,
+    ), patch(
+        "integration.common_tasks.generation._call_llm",
+        return_value=("not json", "ok"),
+    ), patch(
+        "integration.common_tasks.collectors.collect_seed_context", return_value=context
+    ):
+        generation._run_mine(job, tmp_path)
+
+    rows, _ = store.read_all("alice")
+    seed_rows = [r for r in rows if r["source"] == "seed"]
+    assert len(seed_rows) == 1
+    assert seed_rows[0]["title"] == "已有种子"
+    err = capsys.readouterr().err
+    assert "[webui][common_tasks][seed_fallback_written]" not in err
 
 
 def test_run_mine_success_replaces_mined_tasks(tmp_path, capsys):
@@ -839,6 +1284,99 @@ def test_run_mine_success_replaces_mined_tasks(tmp_path, capsys):
     err = capsys.readouterr().err
     assert "[webui][common_tasks][mine_succeeded]" in err
     assert "count=3" in err
+
+
+def test_run_mine_success_clears_fallback_seed_rows(tmp_path, capsys):
+    """mine 成功后清理 _ensure_seed_fallback 写入的占位 seed 行,避免污染 pick_top3."""
+    questions = [{"text": f"q{i}"} for i in range(10)]
+    fp = collectors.fingerprint_for_cluster(questions)
+    job = _make_job(tmp_path, kind="mine", fingerprint=fp)
+    # Pre-write fallback seed rows (no seed_generated_at) like _ensure_seed_fallback does
+    store.write_seed_rows_only("alice", [{"title": "占位seed", "trigger_language": "t"}])
+    payload = json.dumps(
+        [
+            {
+                "title": "簇A",
+                "description": "A描述",
+                "trigger_language": "tA",
+                "members": [f"q{i}" for i in range(4)],
+                "count": 4,
+            },
+            {
+                "title": "簇B",
+                "description": "B描述",
+                "trigger_language": "tB",
+                "members": [f"q{i}" for i in range(4, 8)],
+                "count": 4,
+            },
+            {
+                "title": "簇C",
+                "description": "C描述",
+                "trigger_language": "tC",
+                "members": ["q8", "q9", "q0"],
+                "count": 3,
+            },
+        ],
+        ensure_ascii=False,
+    )
+
+    with patch(
+        "integration.common_tasks.collectors.collect_recent_user_questions",
+        return_value=questions,
+    ), patch(
+        "integration.common_tasks.generation._call_llm",
+        return_value=(payload, "ok"),
+    ):
+        generation._run_mine(job, tmp_path)
+
+    rows, state = store.read_all("alice")
+    seed_rows = [r for r in rows if r["source"] == "seed"]
+    mined_rows = [r for r in rows if r["source"] == "mined"]
+    assert seed_rows == []
+    assert len(mined_rows) == 3
+    assert state.get("seed_generated_at", "") == ""
+    err = capsys.readouterr().err
+    assert "[webui][common_tasks][seed_fallback_cleared]" in err
+
+
+def test_run_mine_success_preserves_llm_generated_seed_rows(tmp_path, capsys):
+    """mine 成功后保留 LLM 生成的 seed 行(seed_generated_at 已设置),用于补足 top3."""
+    questions = [{"text": f"q{i}"} for i in range(10)]
+    fp = collectors.fingerprint_for_cluster(questions)
+    job = _make_job(tmp_path, kind="mine", fingerprint=fp)
+    # Pre-write LLM-generated seed rows (stamps seed_generated_at)
+    store.write_seed_tasks("alice", [{"title": "真种子", "trigger_language": "t"}])
+    payload = json.dumps(
+        [
+            {
+                "title": "簇A",
+                "description": "A描述",
+                "trigger_language": "tA",
+                "members": [f"q{i}" for i in range(4)],
+                "count": 4,
+            },
+        ],
+        ensure_ascii=False,
+    )
+
+    with patch(
+        "integration.common_tasks.collectors.collect_recent_user_questions",
+        return_value=questions,
+    ), patch(
+        "integration.common_tasks.generation._call_llm",
+        return_value=(payload, "ok"),
+    ):
+        generation._run_mine(job, tmp_path)
+
+    rows, state = store.read_all("alice")
+    seed_rows = [r for r in rows if r["source"] == "seed"]
+    mined_rows = [r for r in rows if r["source"] == "mined"]
+    assert len(seed_rows) == 1
+    assert seed_rows[0]["title"] == "真种子"
+    assert len(mined_rows) == 1
+    assert state.get("seed_generated_at")
+    err = capsys.readouterr().err
+    assert "[webui][common_tasks][seed_fallback_cleared]" not in err
 
 
 # ---------- _call_llm ----------

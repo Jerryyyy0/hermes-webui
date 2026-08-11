@@ -40,11 +40,14 @@ CLUSTER_SYSTEM_PROMPT = """你是用户问题聚类器。
 2. 只输出一个 JSON 数组,每个元素含 title/description/trigger_language/members/count 字段。
 3. title ≤ 15 字;description ≤ 50 字;trigger_language ≤ 30 字;members 是归入该簇的原始问题文本列表,最多保留 5 个最具代表性的成员(若簇内成员多于 5 个,挑选最典型的 5 条);count 是 members 数组的长度。
 4. 同一问题只能归入一个簇;语义相近的应合并(如「写周报」「生成周报」「本周报」归一类)。
-5. 单条独成簇的也要输出(count=1);不得编造问题中没有的能力。
-6. 不得输出 Markdown、代码块、标题、编号、解释或前后缀。"""
+5. 每个簇至少包含 2 条语义相近的问题,单条问题不要输出;不得编造问题中没有的能力。
+6. members 必须原样复制上下文中的问题文本,不得改写、截断或增删标点。
+7. 不得输出 Markdown、代码块、标题、编号、解释或前后缀。"""
 
 SUCCESS_COOLDOWN_SECONDS = 600
 FAILURE_RETRY_SECONDS = 3
+MINE_FAILURE_COOLDOWN_SECONDS = 60
+MINE_LLM_FAILURE_COOLDOWN_SECONDS = 600
 MIN_QUESTIONS_FOR_MINING = 5
 TOP_N = 3
 USER_PROMPT_LOG_MAX_CHARS = 2000
@@ -174,17 +177,31 @@ def enqueue_missing_or_stale(profile: str, profile_path: Path) -> None:
     ``retry_after`` in the future blocks both enqueues so a failing LLM is
     not hammered on every call.
     """
-    _tasks, state = store.read_all(profile)
+    tasks, state = store.read_all(profile)
     now = time.time()
     retry_after = _float(state.get("retry_after"))
     if retry_after and retry_after > now:
         return
+    # On-the-fly repair: if seed_generated_at is set but the table has no
+    # seed rows (e.g. rows lost to DB corruption or manual deletion between
+    # restarts), clear the stale stamp so seed can be re-generated. Without
+    # this, the ``elif not seed_generated_at`` gate below would skip seed
+    # forever. Mirrors the startup repair in ``_repair_stale_seed_stamp``.
+    if state.get("seed_generated_at") and not store.has_seed(tasks):
+        store.update_state(profile, "seed_generated_at", "")
+        state["seed_generated_at"] = ""
+        _emit_warning(
+            "seed_integrity_repaired",
+            {"profile": profile, "reason": "seed_generated_at_without_seed_rows"},
+        )
     questions = collectors.collect_recent_user_questions(profile)
     dedup_count = len({q["text"] for q in questions})
     if dedup_count >= MIN_QUESTIONS_FOR_MINING:
         fp = collectors.fingerprint_for_cluster(questions)
         if _should_mine(fp, state):
             enqueue(profile, profile_path, "mine", fp)
+        elif not state.get("seed_generated_at"):
+            enqueue(profile, profile_path, "seed")
         return
     if not state.get("seed_generated_at"):
         enqueue(profile, profile_path, "seed")
@@ -197,6 +214,12 @@ def start_pregeneration() -> None:
     Runs the scan in a daemon thread so server boot is not blocked; each
     profile's enqueue decision happens inline (cheap: just reads db + scans
     session JSONs).
+
+    Before enqueuing, repairs stale ``seed_generated_at`` stamps: if the
+    stamp is set but the ``common_tasks`` table has no seed rows for this
+    profile (e.g. rows were manually deleted or lost), the stamp is cleared
+    so ``enqueue_missing_or_stale`` can re-trigger seed generation instead
+    of silently skipping it forever.
     """
 
     def _scan() -> None:
@@ -207,12 +230,36 @@ def start_pregeneration() -> None:
                 profile = str(row.get("name") or "").strip()
                 path = row.get("path")
                 if profile and path:
+                    _repair_stale_seed_stamp(profile)
                     enqueue_missing_or_stale(profile, Path(path))
         except Exception:
             logger.debug(_log_line("pregeneration_scan_failed"), exc_info=True)
 
     _ensure_worker()
     threading.Thread(target=_scan, name="common-tasks-pregeneration", daemon=True).start()
+
+
+def _repair_stale_seed_stamp(profile: str) -> None:
+    """Clear ``seed_generated_at`` if it is set but no seed rows exist.
+
+    A stale stamp (set while the table has no seed rows) would make
+    ``enqueue_missing_or_stale`` skip seed re-generation forever via the
+    ``elif not seed_generated_at`` gate, leaving the profile with empty or
+    mined-only data. This is repaired here so the next boot re-triggers
+    seed generation. Only ``seed_generated_at`` is touched; other state
+    keys (``last_attempt_at`` / ``retry_after`` / ``last_error``) are left
+    to the existing cooldown logic.
+    """
+    tasks, state = store.read_all(profile)
+    if not state.get("seed_generated_at"):
+        return
+    if store.has_seed(tasks):
+        return
+    store.update_state(profile, "seed_generated_at", "")
+    _emit_warning(
+        "seed_integrity_repaired",
+        {"profile": profile, "reason": "seed_generated_at_without_seed_rows"},
+    )
 
 
 def _float(value: Any) -> float:
@@ -234,7 +281,28 @@ def _should_mine(fp: str, state: dict[str, str]) -> bool:
         return False
     if last_fp != fp and last_attempt and now - last_attempt < FAILURE_RETRY_SECONDS:
         return False
+    if (
+        last_fp == fp
+        and not last_success
+        and last_attempt
+        and now - last_attempt < _mine_failure_cooldown(state)
+    ):
+        return False
     return True
+
+
+def _mine_failure_cooldown(state: dict[str, str]) -> int:
+    """LLM 调用失败(model_call_failed / seed_model_call_failed / missing_model)
+    通常短时间不会自愈,冷却 10 分钟,期间由 enqueue_missing_or_stale 入队 seed 兜底;
+    cluster/seed 校验失败冷却 30 秒.
+
+    seed 失败会覆盖 mine 的 last_error(变成 seed_ 前缀),所以这里也要识别
+    seed_model_call_failed,避免 mine 冷却被错误缩短到 30 秒后频繁 hammer LLM.
+    """
+    last_error = (state.get("last_error") or "").strip()
+    if "model_call_failed" in last_error or last_error == "missing_model":
+        return MINE_LLM_FAILURE_COOLDOWN_SECONDS
+    return MINE_FAILURE_COOLDOWN_SECONDS
 
 
 def _worker_loop() -> None:
@@ -363,23 +431,92 @@ def _write_seed_failure(
     )
 
 
+def _ensure_seed_fallback(task: CommonTaskJob, profile_path: Path) -> None:
+    """mine 失败时立即写入 fallback seed 占位,避免接口在下次 mine 重试前返回空。
+
+    只在 DB 无 seed 数据时写入,已有 seed(成功生成的或之前的占位)则跳过。
+    使用 ``write_seed_rows_only`` 不触碰 mining_state,保留 mine 失败的
+    ``last_error``/``retry_after``/``last_attempt_at`` 让 ``_should_mine``
+    冷却逻辑正常工作。
+    """
+    tasks, _state = store.read_all(task.profile)
+    if store.has_seed(tasks):
+        return
+    context = collectors.collect_seed_context(task.profile, profile_path)
+    store.write_seed_rows_only(task.profile, _fallback_seed_tasks(context))
+    _emit_info(
+        "seed_fallback_written",
+        {
+            "profile": task.profile,
+            "reason": "mine_failure_seed_fallback",
+            "provider": task.provider,
+            "model": task.model,
+        },
+    )
+
+
+def _clear_fallback_seed_rows(task: CommonTaskJob) -> None:
+    """mine 成功后清理 fallback seed 占位行,避免污染 ``pick_top3`` 结果。
+
+    只在 ``seed_generated_at`` 为空时清理(说明 seed 行是 ``_ensure_seed_fallback``
+    写入的占位)。LLM 真正生成的 seed(``seed_generated_at`` 已设置)予以保留,
+    以便在 mined 不足 3 条时由 ``pick_top3`` 补足。
+    """
+    _tasks, state = store.read_all(task.profile)
+    if state.get("seed_generated_at"):
+        return
+    store.delete_seed_rows(task.profile)
+    _emit_info(
+        "seed_fallback_cleared",
+        {
+            "profile": task.profile,
+            "reason": "mine_success_cleared_fallback",
+        },
+    )
+
+
 def _run_mine(task: CommonTaskJob, profile_path: Path) -> None:
     questions = collectors.collect_recent_user_questions(task.profile)
     current_fp = collectors.fingerprint_for_cluster(questions)
     if current_fp != task.fingerprint:
-        # Question set changed between enqueue and run; re-arm with fresh fingerprint.
-        enqueue(task.profile, profile_path, "mine", current_fp)
+        # Question set changed between enqueue and run; re-arm with fresh
+        # fingerprint. But respect ``retry_after`` so a failing LLM is not
+        # hammered when fingerprints keep shifting (each new question batch
+        # would otherwise bypass the cooldown and trigger an LLM call).
+        _tasks, state = store.read_all(task.profile)
+        retry_after = _float(state.get("retry_after"))
+        if not (retry_after and retry_after > time.time()):
+            enqueue(task.profile, profile_path, "mine", current_fp)
+        else:
+            _emit_info(
+                "mine_rearm_skipped",
+                {
+                    "profile": task.profile,
+                    "reason": "retry_after_in_future",
+                    "fingerprint": current_fp[:12],
+                },
+            )
         return
     if not task.model:
         store.replace_mined_tasks(
             task.profile, [], current_fp, success=False, last_error="missing_model"
         )
+        _ensure_seed_fallback(task, profile_path)
         _emit_warning(
             "mine_skipped",
             {"profile": task.profile, "reason": "missing_profile_default_model"},
         )
         return
     if len({q["text"] for q in questions}) < MIN_QUESTIONS_FOR_MINING:
+        _emit_warning(
+            "mine_skipped",
+            {
+                "profile": task.profile,
+                "reason": "too_few_unique_questions",
+                "dedup_count": len({q["text"] for q in questions}),
+                "fingerprint": current_fp[:12],
+            },
+        )
         return
     truncated: list[dict[str, Any]] = []
     for q in questions:
@@ -414,6 +551,7 @@ def _run_mine(task: CommonTaskJob, profile_path: Path) -> None:
         store.replace_mined_tasks(
             task.profile, [], current_fp, success=False, last_error=str(error)[:200]
         )
+        _ensure_seed_fallback(task, profile_path)
         _emit_warning(
             "mine_failed",
             {
@@ -441,6 +579,7 @@ def _run_mine(task: CommonTaskJob, profile_path: Path) -> None:
         store.replace_mined_tasks(
             task.profile, [], current_fp, success=False, last_error=f"cluster_{reason}"[:200]
         )
+        _ensure_seed_fallback(task, profile_path)
         _emit_warning(
             "mine_rejected",
             {
@@ -453,6 +592,7 @@ def _run_mine(task: CommonTaskJob, profile_path: Path) -> None:
         )
         return
     store.replace_mined_tasks(task.profile, tasks, current_fp, success=True)
+    _clear_fallback_seed_rows(task)
     _emit_info(
         "mine_succeeded",
         {
@@ -720,7 +860,7 @@ def validate_cluster_response(
         if len(valid_members) > MAX_MEMBERS_PER_CLUSTER:
             valid_members = valid_members[:MAX_MEMBERS_PER_CLUSTER]
         count = len(valid_members)
-        if count < 3:
+        if count < 2:
             continue
         if title in seen:
             continue
