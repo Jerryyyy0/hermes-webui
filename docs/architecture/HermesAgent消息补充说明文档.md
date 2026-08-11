@@ -819,8 +819,11 @@ WebUI 投影过滤。
 实现位置：`hermes-agent/agent/conversation_loop.py`
 
 模型因输出长度上限或流中断而没有完成回答时，Agent 会先保留已有的 partial
-assistant，再补一条 user，要求下一次调用从断点继续。上游会持久化这两条消息；
-目标接缝只给控制 user 增加 `context_anchor` 元数据，不删除任何 durable 内容。
+assistant，再补一条 user，要求下一次调用从断点继续。在续写最终成功的路径中，上游会
+在本轮收尾时持久化已经产生的 partial assistant、continuation user 和最终 assistant；
+这些消息不会在每次重试发生时立即单独写入数据库。若连续 4 次仍未完成，上游会先清理
+partial/nudge，再只持久化合并后的 `finish_reason="length"` assistant。Fork 则保留
+这些中间 durable 行，并只给 continuation user 增加 `context_anchor` 元数据。
 
 #### 触发条件与三种文案
 
@@ -905,7 +908,7 @@ Agent 运行时 `messages`：
 [
   {"role": "user", "content": "给我完整列出迁移步骤和回滚方案。", "_turn_key": "turn:7"},
   {"role": "assistant", "content": "第一步创建新表并启用双写；第二步……", "finish_reason": "length"},
-  {"role": "user", "content": "[System: Your previous response was truncated by the output length limit. Continue exactly where you left off. Do not restart or repeat prior text. Finish the answer directly.]"},
+  {"role": "user", "content": "[System: Your previous response was truncated by the output length limit. Continue exactly where you left off. Do not restart or repeat prior text. Finish the answer directly.]", "_hermes_message_class": "context_anchor", "_hermes_scaffold_kind": "length_continuation"},
   {"role": "assistant", "content": "第三步回填历史数据；第四步灰度切流；最后保留一周回滚窗口。", "finish_reason": "stop"}
 ]
 ```
@@ -2573,7 +2576,7 @@ Agent 运行时 `messages`：
 [
   {"role":"user","content":"原始请求。","_turn_key":"turn:29"},
   {"role":"assistant","content":"已输出但被截断的真实正文。","finish_reason":"length"},
-  {"role":"user","content":"[System: Your previous response was truncated by the output length limit. Continue exactly where you left off. Do not restart or repeat prior text. Finish the answer directly.]"},
+  {"role":"user","content":"[System: Your previous response was truncated by the output length limit. Continue exactly where you left off. Do not restart or repeat prior text. Finish the answer directly.]","_hermes_message_class":"context_anchor","_hermes_scaffold_kind":"length_continuation"},
   {"role":"assistant","content":"续写后的真实正文。"}
 ]
 ```
