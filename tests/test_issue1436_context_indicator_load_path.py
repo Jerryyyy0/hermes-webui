@@ -1,4 +1,4 @@
-"""Regression test for #1436 — context-window indicator broken on load path.
+"""Regression tests for #1436 — context-window indicator load paths.
 
 #1356 (closed Apr 30 2026) fixed the indicator on the **live SSE path** by adding
 a model-metadata fallback when `agent.context_compressor` didn't provide
@@ -16,13 +16,12 @@ because:
     (often 1M+ on long sessions)
   - 1.2M / 131K = ~890% → ring caps at 100, tooltip shows "890% used"
 
-Two-layer fix:
-  1. Backend (api/routes.py:1295-1305) — add model_metadata fallback so
-     loaded sessions get a sane `context_length` even when persisted as 0.
-  2. Frontend (static/ui.js:1269) — drop the `input_tokens` fallback for
-     `promptTok`.  Cumulative input is fundamentally wrong for "context window
-     % used"; better to render "·" + "tokens used" (honest no-data) than a
-     misleading >100% percentage.
+The deferred `resolve_model=1` load may refresh model metadata. The primary
+`resolve_model=0` transcript load must return persisted context metadata only:
+it cannot block on an external model endpoint when `context_length` is unknown.
+
+The frontend treats `context_length=0` as unknown and renders token usage
+without inventing a 128K context window or a percentage.
 
 Reported by @AvidFuturist in Discord (May 1 2026, "the 100 comes up way too
 often").  Confirmed live on the dev server: 23 of 75 sessions had
@@ -43,8 +42,7 @@ UI_JS = Path(__file__).resolve().parent.parent / "static" / "ui.js"
 
 
 class TestIssue1436BackendFallback:
-    """The /api/session GET handler must resolve context_length via
-    agent.model_metadata.get_model_context_length when the persisted value is 0."""
+    """The deferred /api/session load may refresh context metadata."""
 
     def _stub_session(self, *, context_length, model, last_prompt_tokens=0,
                       input_tokens=0):
@@ -84,7 +82,7 @@ class TestIssue1436BackendFallback:
         }
         return s
 
-    def _invoke_get_session(self, session_obj, *, fallback_returns=0):
+    def _invoke_get_session(self, session_obj, *, fallback_returns=0, resolve_model=False):
         """Hit handle_get(/api/session?session_id=...) and capture the JSON response."""
         import api.routes as routes
 
@@ -100,7 +98,10 @@ class TestIssue1436BackendFallback:
         fake_module.get_model_context_length = MagicMock(return_value=fallback_returns)
 
         handler = MagicMock()
-        parsed = urlparse("/api/session?session_id=test-1436&messages=0")
+        parsed = urlparse(
+            "/api/session?session_id=test-1436&messages=0"
+            f"&resolve_model={int(resolve_model)}"
+        )
 
         # Patch import so `from agent.model_metadata import ...` resolves to our fake.
         with patch("api.routes.get_session", return_value=session_obj), \
@@ -207,11 +208,27 @@ class TestIssue1436BackendFallback:
         s.save.assert_called_once()
         assert captured["data"]["session"]["context_length"] == 1_000_000
 
-    def test_zero_context_length_falls_back_to_model_metadata(self):
-        """Pre-#1318 sessions with context_length=0 must resolve via model_metadata."""
+    def test_fast_load_with_unknown_context_length_skips_model_metadata(self):
+        """`resolve_model=0` must not let a cold session block on `/models`."""
+        s = self._stub_session(context_length=0, model="claude-opus-4-7")
+        with patch(
+            "api.routes._resolve_context_length_for_session_model",
+            return_value=1_000_000,
+        ) as resolver:
+            result = self._invoke_get_session(s, resolve_model=False)
+
+        assert result["data"]["session"]["context_length"] == 0
+        resolver.assert_not_called()
+
+    def test_deferred_load_with_unknown_context_length_falls_back_to_model_metadata(self):
+        """`resolve_model=1` retains the metadata refresh behavior."""
         s = self._stub_session(context_length=0, model="claude-opus-4-7",
                                input_tokens=1_200_000)
-        result = self._invoke_get_session(s, fallback_returns=1_000_000)
+        result = self._invoke_get_session(
+            s,
+            fallback_returns=1_000_000,
+            resolve_model=True,
+        )
         body = result["data"]["session"]
         assert body["context_length"] == 1_000_000, (
             f"context_length=0 must resolve to model's 1M window via fallback, "
@@ -232,7 +249,9 @@ class TestIssue1436BackendFallback:
 
         s = self._stub_session(context_length=0, model="gpt-5-mini")
         handler = MagicMock()
-        parsed = urlparse("/api/session?session_id=test-1436&messages=0")
+        parsed = urlparse(
+            "/api/session?session_id=test-1436&messages=0&resolve_model=1"
+        )
 
         with patch("api.routes.get_session", return_value=s), \
              patch("api.routes.j", side_effect=fake_j), \
@@ -250,7 +269,6 @@ class TestIssue1436BackendFallback:
         """If Session.model is empty AND no effective_model is available, skip
         the fallback rather than calling get_model_context_length('')."""
         s = self._stub_session(context_length=0, model="")
-        # resolve_model=0 to skip _resolve_effective_session_model_for_display
         import api.routes as routes
         captured = {}
 
@@ -262,7 +280,7 @@ class TestIssue1436BackendFallback:
 
         handler = MagicMock()
         parsed = urlparse(
-            "/api/session?session_id=test-1436&messages=0&resolve_model=0"
+            "/api/session?session_id=test-1436&messages=0&resolve_model=1"
         )
 
         with patch("api.routes.get_session", return_value=s), \
@@ -295,7 +313,9 @@ class TestIssue1436BackendFallback:
 
         s = self._stub_session(context_length=0, model="claude-opus-4-7")
         handler = MagicMock()
-        parsed = urlparse("/api/session?session_id=test-1436&messages=0")
+        parsed = urlparse(
+            "/api/session?session_id=test-1436&messages=0&resolve_model=1"
+        )
 
         with patch("api.routes.get_session", return_value=s), \
              patch("api.routes.j", side_effect=fake_j), \
@@ -345,18 +365,15 @@ class TestIssue1436FrontendDefense:
             "`promptTok = usage.last_prompt_tokens || 0` (no input_tokens fallback)"
         )
 
-    def test_no_data_branch_renders_dot(self):
-        """When promptTok is 0 (no last-prompt data), the `!hasPromptTok` branch
-        must render '·' (U+00B7) on the ring instead of computing a percentage.
-        This is the existing behavior; the test pins it so a future refactor
-        doesn't accidentally re-introduce a numeric fallback."""
+    def test_unknown_context_branch_renders_dot(self):
+        """Unknown context windows must not render a percentage or 128K estimate."""
         src = UI_JS.read_text(encoding="utf-8")
-        assert "hasPromptTok=!!promptTok" in src.replace(" ", ""), (
-            "hasPromptTok must be a boolean of promptTok"
+        normalized = "".join(src.split())
+        assert "consthasContextUsage=hasPromptTok&&hasExplicitCtx" in normalized, (
+            "context percentages require both prompt tokens and a known context window"
         )
-        # The ring center text uses '·' when !hasPromptTok
-        assert "hasPromptTok?String(pct):'\\u00b7'" in src.replace(" ", ""), (
-            "ring center must show '·' (\\u00b7) when no last-prompt data"
+        assert "hasContextUsage?String(pct):'\\u00b7'" in normalized, (
+            "ring center must show '·' (\\u00b7) when the context window is unknown"
         )
 
 

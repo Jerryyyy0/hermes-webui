@@ -1325,9 +1325,9 @@ def test_context_details_live_in_mobile_overflow_panel():
     sync_end = ui_js.index("// ── Touch support", sync_start)
     sync_body = ui_js[sync_start:sync_end]
     for expected in (
-        "DEFAULT_CTX=128*1024",
         "hasExplicitCtx",
         "hasPromptTok",
+        "hasContextUsage",
         "rawPct",
         "overflowed",
         "composerMobileContextUsage",

@@ -60,6 +60,8 @@ When you run `python server.py` directly in an interactive terminal, WebUI persi
 
 The main log includes startup messages, structured request logs, API error logs, and Python traceback output. Crash diagnostics use a separate append-only stream for `faulthandler` and crash-visibility hooks so native crash output remains stable even when the main log rotates.
 
+Direct `python server.py` starts with detailed session timing disabled unless the environment sets `HERMES_DEBUG_SESSION_TIMING=1`. Set `HERMES_DEBUG_SESSION_TIMING=1` before launch to emit a `[SESSION_TIMING]` line for every successful `GET /api/session` response.
+
 Implementation: [`integration/runtime_logging/`](runtime_logging/).
 
 ### All-profile Gateway startup

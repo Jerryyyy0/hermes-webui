@@ -1,6 +1,8 @@
 import json
 import re
+from io import BytesIO
 from pathlib import Path
+from urllib.parse import urlparse
 
 import pytest
 
@@ -34,6 +36,28 @@ class _StageRecorder:
         self.stages.append(name)
 
 
+class _TimingHandler:
+    def __init__(self, path):
+        self.path = path
+        self.headers = {}
+        self.client_address = ("127.0.0.1", 12345)
+        self.status = None
+        self.wfile = BytesIO()
+        self.timing_lines = []
+
+    def send_response(self, status):
+        self.status = status
+
+    def send_header(self, *_args):
+        pass
+
+    def end_headers(self):
+        pass
+
+    def _safe_webui_print(self, message):
+        self.timing_lines.append(message)
+
+
 def test_request_diagnostics_timeout_record_includes_stage_without_thread_stacks_by_default(capsys):
     diag = RequestDiagnostics(
         "GET",
@@ -52,6 +76,62 @@ def test_request_diagnostics_timeout_record_includes_stage_without_thread_stacks
     assert "all_sessions.read_index:" in line
     assert "elapsed=" in line
     assert "thread_stacks=yes" not in line
+
+
+def test_request_diagnostics_stage_summary_reports_each_completed_stage():
+    diag = RequestDiagnostics(
+        "GET",
+        "/api/session",
+        timeout_seconds=0,
+        auto_start=False,
+    )
+    diag.stage("session.resolve")
+    diag.stage("session.message_source")
+
+    summary = diag.stage_summary()
+
+    assert "start=" in summary
+    assert "session.resolve=" in summary
+    assert "session.message_source=" in summary
+
+
+def test_session_route_emits_detailed_timing_when_enabled(monkeypatch, tmp_path):
+    import api.routes as routes
+
+    sid = "timing-session"
+    session = Session(
+        session_id=sid,
+        workspace=str(tmp_path),
+        messages=[{"role": "user", "content": "hello", "timestamp": 1.0}],
+    )
+    handler = _TimingHandler(
+        f"/api/session?session_id={sid}&messages=1&resolve_model=0&msg_limit=50&turn_align=1"
+    )
+    monkeypatch.setenv("HERMES_DEBUG_SESSION_TIMING", "1")
+    monkeypatch.setattr(routes, "get_session", lambda *_args, **_kwargs: session)
+    monkeypatch.setattr(routes, "get_state_db_session_messages", lambda *_args, **_kwargs: [])
+
+    routes.handle_get(handler, urlparse(handler.path))
+    assert handler.status == 200
+    assert len(handler.timing_lines) == 1
+    line = handler.timing_lines[0]
+    assert line.startswith("[SESSION_TIMING] session_id=timing-session")
+    for field in (
+        "session_resolve=",
+        "message_source=",
+        "stages=start=",
+        "session.resolve=",
+        "session.message_source=",
+        "session.message_projection=",
+        "session.response_write=",
+    ):
+        assert field in line
+
+
+def test_server_defaults_session_timing_to_disabled():
+    source = Path("server.py").read_text(encoding="utf-8")
+
+    assert '"HERMES_DEBUG_SESSION_TIMING", "0"' in source
 
 
 def test_request_diagnostics_timeout_record_includes_thread_stacks_when_enabled(capsys, monkeypatch):
@@ -131,6 +211,12 @@ def test_issue1855_target_routes_are_wired_to_diagnostics():
     assert 'RequestDiagnostics.maybe_start("POST", parsed.path' in src
     assert "_handle_chat_start(handler, body, diag=diag)" in src
     for stage in (
+        "session.resolve",
+        "session.message_source",
+        "session.model_resolve",
+        "session.message_projection",
+        "session.redact",
+        "session.response_write",
         "read_body",
         "resolve_model_provider",
         "session_lock_wait",

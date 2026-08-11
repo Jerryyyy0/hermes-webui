@@ -190,25 +190,18 @@ def test_cfg_custom_providers_resolved_from_cfg_dict():
 ROUTES_PY = (REPO / "api" / "routes.py").read_text(encoding="utf-8")
 
 
-def test_routes_session_load_fallback_passes_config_overrides():
-    """The session-load fallback at api/routes.py (around 'older sessions
-    (pre-#1318) that have context_length=0 persisted') has the SAME bug shape
-    as the streaming.py fallbacks: it called `_get_cl(model, "")` with no
-    config overrides, so `/api/session/get` returned 256K for old sessions
-    even when the user had `model.context_length: 1048576` set.
+def test_routes_deferred_session_load_fallback_passes_config_overrides():
+    """The deferred `resolve_model=1` load may refresh context metadata with
+    the same config overrides as the streaming fallbacks.
 
-    The fix mirrors streaming.py's: pass config_context_length, provider,
-    and custom_providers, with a TypeError fallback to the legacy 2-arg
-    form. Without this, the very first paint of a reloaded old session shows
-    the wrong window until a turn is sent.
+    Fast `resolve_model=0` requests intentionally return persisted metadata
+    without a model probe. When the deferred refresh runs, it must pass
+    config_context_length, provider, and custom_providers, with a TypeError
+    fallback to the legacy 2-arg form.
     """
-    # Anchor: find the comment that pins this fallback's purpose.
-    anchor = "older sessions (pre-#1318) that have context_length=0 persisted"
+    anchor = "#1436: Only the deferred resolve_model=1 pass"
     idx = ROUTES_PY.find(anchor)
-    assert idx != -1, "session-load fallback comment moved/removed"
-    # The route block may delegate the resolver details to a helper, but the
-    # session-load path must still call the helper and that helper must preserve
-    # the same kwargs as the streaming.py fix.
+    assert idx != -1, "deferred session-load fallback comment moved/removed"
     block_end = ROUTES_PY.find("_session_tool_calls =", idx)
     assert block_end != -1, "session-load fallback block end not found after fallback comment"
     block = ROUTES_PY[idx:block_end]
@@ -217,9 +210,8 @@ def test_routes_session_load_fallback_passes_config_overrides():
     helper_end = ROUTES_PY.find("\ndef ", helper_start + 1)
     helper = ROUTES_PY[helper_start:helper_end if helper_end != -1 else len(ROUTES_PY)]
     assert "_resolve_context_length_for_session_model" in block
-    assert "_should_accept_session_context_length_refresh" in block, (
-        "session-load fallback must gate lower-confidence recomputes before "
-        "replacing persisted context metadata. See #4248."
+    assert "if resolve_model:" in block, (
+        "fast resolve_model=0 session loads must not synchronously probe model metadata"
     )
     # Same kwargs as the streaming.py fix.
     assert "config_context_length=" in helper, (

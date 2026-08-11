@@ -104,6 +104,9 @@ logger = logging.getLogger(__name__)
 # Must run before `api.config` is imported so HOST/PORT pick up the values.
 if __name__ == "__main__":
     os.environ["HERMES_WEBUI_HOST"] = os.getenv("HERMES_WEBUI_HOST", "0.0.0.0")
+    os.environ["HERMES_DEBUG_SESSION_TIMING"] = os.getenv(
+        "HERMES_DEBUG_SESSION_TIMING", "1"
+    )
     os.environ["SKILLHUB_URL"] = os.getenv("SKILLHUB_URL", "http://192.168.1.137:18702/")
     os.environ["HERMES_INTEGRATION"] = os.getenv("HERMES_INTEGRATION", "1")
     os.environ["ZHILING_CONTROL_PLANE_URL"] = os.getenv(

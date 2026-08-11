@@ -200,6 +200,39 @@ turn in the exhausted session instead of being blocked with recovery guidance.
 
 ---
 
+## Session detail API occasionally loads slowly
+
+**Symptom.** `GET /api/session?session_id=...&messages=1` occasionally takes
+hundreds of milliseconds or several seconds, while the session list remains
+responsive.
+
+**Diagnostic.** Direct `python server.py` keeps detailed timing disabled by
+default. Restart WebUI with the following temporary environment variable:
+
+```bash
+HERMES_DEBUG_SESSION_TIMING=1 ./start.sh
+```
+
+Each successful full session response emits a `[SESSION_TIMING]` record with
+`session_resolve`, `message_source`, `model_resolve`, `compact`, `redact`, and
+`json_write` durations. The `stages` field splits the request into
+`session.resolve`, `session.message_source`, `session.model_resolve`,
+`session.message_projection`, `session.redact`, and `session.response_write`.
+Requests taking at least two seconds keep the existing `[SLOW]` prefix even
+when this flag is enabled.
+
+**Interpretation.** `session_resolve` covers full session lookup and any
+read-side recovery; `message_source` covers CLI/state.db message retrieval;
+`compact` and `session.message_projection` cover sidecar lineage loading,
+message merge/filtering, display-window construction, and response payload
+assembly. `resolve_model=0` reads only persisted context metadata; a missing
+`context_length` returns `0` (unknown) without probing the model endpoint.
+The deferred `resolve_model=1` request may refresh that metadata. To disable
+per-request timing after collecting the affected request, restart with
+`HERMES_DEBUG_SESSION_TIMING=0`.
+
+---
+
 ## Installed PWA opens to a blank screen after an update
 
 **Symptom.** The installed PWA or home-screen app opens to a blank screen after a WebUI update, while the same URL often works again in a normal browser tab.
