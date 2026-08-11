@@ -453,6 +453,7 @@ def test_agent_status_callback_emits_compressing_and_warning_events():
     assert "'session_id': session_id" in block
     assert "'message': 'Compressing context'" in block
     assert "_is_agent_compression_start_status(_kind, _message)" in block
+    assert "auto-compression preflight" in block
     assert "or 'compressing' in _lower" not in block
     assert "or 'preflight compression' in _lower" not in block
 
@@ -473,7 +474,7 @@ def test_agent_status_callback_emits_compressing_and_warning_events():
 
 def test_agent_compression_start_status_matches_real_emitters_only():
     # Real start notices from hermes-agent emitters
-    assert _is_agent_compression_start_status(
+    assert not _is_agent_compression_start_status(
         "lifecycle",
         "📦 Preflight compression: ~101,000 tokens >= 96,000 threshold. This may take a moment.",
     )
