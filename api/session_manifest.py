@@ -79,7 +79,7 @@ ASSISTANT_PROSE_ARTIFACT_SOURCE = 'assistant_prose'
 TURN_RECONCILE_SOURCE = 'reconcile'
 _MEDIA_TOKEN_RE = re.compile(r'MEDIA:([^\s\]]+)')
 _BROAD_FILENAME_EXT_RE = re.compile(
-    r'([\w\u4e00-\u9fff/._\-\(\)（）]{1,240}\.[A-Za-z0-9]{2,8})'
+    r'([\w\u00b7\u4e00-\u9fff/._\-\(\)（）]{1,240}\.[A-Za-z0-9]{2,8})'
 )
 _LAST_ASSISTANT_TILDE_PATH_RE = re.compile(
     r'(~/[^\s`\'"<>|，,；;。：)\]]{1,240}\.[A-Za-z0-9]{2,8})'
