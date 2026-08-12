@@ -20,6 +20,10 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Changed
 
+- **Knowledge base validation copy** — 知识库 BFF 的参数缺失、数组为空或数量不一致等 WebUI 自身校验错误统一改为中文提示。
+
+- **Knowledge base upstream failure copy** — 知识库下游未返回有效响应时统一返回 HTTP `500`，`error` 为「知识库服务异常」，`message` 为「知识库服务异常，请稍后重试」；下游已返回的 HTTP 状态码和业务响应仍原样透传。
+
 - **Knowledge base show_pdf passthrough** — `POST /api/integration/knowledge_base/show_pdf` 现原样转发 JSON 请求体，不再校验或筛选字段，也不再注入空 `aes_key` / `aes_nonce`；下游可直接接收 `doc_id` 及后续扩展字段。二进制和 JSON 响应的透传、180 秒下游超时保持不变。
 
 - **Managed session workspace artifacts** — `POST /api/session/new` without an explicit `workspace` now creates a persisted `<HERMES_WEBUI_DEFAULT_WORKSPACE>/<session_id>` root on local terminal profiles. The managed root is immutable for that session across chat, Gateway, streaming and goal execution; existing browser requests that send a workspace, worktree sessions, legacy sessions and remote terminal profiles keep their prior behavior. Manifest records now carry the canonical workspace root, so `GET /api/integration/workspace/files` treats `A/report.md` and `B/report.md` as distinct artifacts instead of merging their bare relative paths.

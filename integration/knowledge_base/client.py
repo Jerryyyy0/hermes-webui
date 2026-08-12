@@ -29,10 +29,15 @@ _TIMEOUT = 30.0
 _SHOW_PDF_TIMEOUT = 180.0
 _UPLOAD_TIMEOUT = 180.0
 _LONG_BINARY_TIMEOUT_ROUTES = frozenset({"show_pdf", "download_doc"})
+UPSTREAM_FAILURE_MESSAGE = "知识库服务异常，请稍后重试"
 
 
 class KnowledgeBaseUpstreamError(Exception):
-    """Downstream unreachable or misconfigured."""
+    """Downstream did not provide a usable response.
+
+    The exception text is retained for server-side traceback logging. Handlers
+    must use ``UPSTREAM_FAILURE_MESSAGE`` for the client-facing message.
+    """
 
 
 @dataclass(frozen=True)
@@ -67,11 +72,10 @@ def parse_upstream_response(resp: httpx.Response) -> tuple[int, Any]:
     """Return downstream HTTP status and JSON body unchanged."""
     try:
         payload = resp.json()
-    except Exception:
-        return resp.status_code, {
-            "error": "knowledge_base_upstream_failed",
-            "message": f"invalid JSON from upstream (HTTP {resp.status_code})",
-        }
+    except Exception as exc:
+        raise KnowledgeBaseUpstreamError(
+            f"invalid JSON from upstream (HTTP {resp.status_code})"
+        ) from exc
     return resp.status_code, payload
 
 
@@ -103,6 +107,11 @@ def post_binary_or_json(route_key: str, body: dict[str, Any]) -> KnowledgeBaseSh
     if _is_json_upstream_response(resp):
         status, payload = parse_upstream_response(resp)
         return KnowledgeBaseShowPdfResult(kind="json", status=status, payload=payload)
+
+    if resp.status_code >= 400:
+        raise KnowledgeBaseUpstreamError(
+            f"non-JSON upstream error response (HTTP {resp.status_code})"
+        )
 
     content_type = _content_type_base(resp) or "application/octet-stream"
     extra_headers: dict[str, str] = {}

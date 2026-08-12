@@ -68,9 +68,8 @@ def test_parse_upstream_response_invalid_json():
     resp = MagicMock(spec=httpx.Response)
     resp.status_code = 502
     resp.json.side_effect = ValueError("not json")
-    status, body = client.parse_upstream_response(resp)
-    assert status == 502
-    assert body["error"] == "knowledge_base_upstream_failed"
+    with pytest.raises(client.KnowledgeBaseUpstreamError, match="invalid JSON"):
+        client.parse_upstream_response(resp)
 
 
 def test_build_create_payload_fixed_values():

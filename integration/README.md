@@ -396,7 +396,7 @@ export KNOWLEDGE_BASE_URL=http://192.168.1.132:17861
 | POST | `/api/integration/knowledge_base/delete_readed_message` | `delete_readed_message` | 透传，无字段校验 |
 | POST | `/api/integration/knowledge_base/download_doc` | `download_doc` | 透传，无字段校验（二进制或 JSON） |
 
-成功时 HTTP 状态码与 JSON body **原样透传**下游响应（含 `code` / `msg` / `data` 包装）。`show_pdf` 与 `download_doc` 均原样转发 JSON 请求体，不做字段校验或默认字段注入；二者的下游请求超时均为 180 秒，且在下游返回文件时透传二进制。文档列表筛选请使用 `/documents`（下游同为 `list_knowledge_bases_details`）。下游不可达时返回 HTTP 502。
+下游已返回 HTTP 响应时，HTTP 状态码与 JSON body **原样透传**（包括下游 HTTP `200` 但业务 `code` 失败的情况）。`show_pdf` 与 `download_doc` 均原样转发 JSON 请求体，不做字段校验或默认字段注入；二者的下游请求超时均为 180 秒，且在下游返回文件时透传二进制。文档列表筛选请使用 `/documents`（下游同为 `list_knowledge_bases_details`）。下游不可达、未配置、超时或未返回有效 JSON 时，WebUI 返回 HTTP `500`，响应为 `{"error":"知识库服务异常","message":"知识库服务异常，请稍后重试"}`；WebUI 自身的参数校验错误也统一使用中文；原始异常仅记录在服务端日志中。
 
 文档上传须两步串联：`upload_docs` 成功后再 `update_docs`。
 

@@ -1242,7 +1242,7 @@
         "responses": {
           "200": { "description": "知识库数组（下游 data）", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/KnowledgeBaseEntry" } } } } },
           "400": { "description": "缺参或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
-          "502": { "description": "下游不可达", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
+          "500": { "description": "下游未返回有效响应", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
         }
       }
     },
@@ -1254,7 +1254,7 @@
         "responses": {
           "200": { "description": "知识库数组", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/KnowledgeBaseEntry" } } } } },
           "400": { "description": "缺参或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
-          "502": { "description": "下游不可达", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
+          "500": { "description": "下游未返回有效响应", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
         }
       }
     },
@@ -1266,7 +1266,7 @@
         "responses": {
           "200": { "description": "下游原始 JSON 响应（含 code/msg/data 包装）" },
           "400": { "description": "缺参或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
-          "502": { "description": "下游不可达", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
+          "500": { "description": "下游未返回有效响应", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
         }
       }
     },
@@ -1278,7 +1278,7 @@
         "responses": {
           "200": { "description": "知识库对象", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseEntry" } } } },
           "400": { "description": "缺参或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
-          "502": { "description": "下游不可达", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
+          "500": { "description": "下游未返回有效响应", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
         }
       }
     },
@@ -1290,7 +1290,7 @@
         "responses": {
           "200": { "description": "编辑成功" },
           "400": { "description": "缺参或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
-          "502": { "description": "下游不可达", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
+          "500": { "description": "下游未返回有效响应", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
         }
       }
     },
@@ -1302,7 +1302,7 @@
         "responses": {
           "200": { "description": "删除成功" },
           "400": { "description": "缺参或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
-          "502": { "description": "下游不可达", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
+          "500": { "description": "下游未返回有效响应", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
         }
       }
     },
@@ -1314,7 +1314,7 @@
         "responses": {
           "200": { "description": "分页结果", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseAvailableResponse" } } } },
           "400": { "description": "缺参或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
-          "502": { "description": "下游不可达", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
+          "500": { "description": "下游未返回有效响应", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
         }
       }
     },
@@ -1326,7 +1326,7 @@
         "responses": {
           "200": { "description": "申请成功" },
           "400": { "description": "缺参或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
-          "502": { "description": "下游不可达", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
+          "500": { "description": "下游未返回有效响应", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
         }
       }
     },
@@ -1338,7 +1338,7 @@
         "responses": {
           "200": { "description": "成员分页", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseMembersResponse" } } } },
           "400": { "description": "缺参或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
-          "502": { "description": "下游不可达", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
+          "500": { "description": "下游未返回有效响应", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
         }
       }
     },
@@ -1350,7 +1350,7 @@
         "responses": {
           "200": { "description": "文档分页", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseDocumentsResponse" } } } },
           "400": { "description": "缺参或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
-          "502": { "description": "下游不可达", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
+          "500": { "description": "下游未返回有效响应", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
         }
       }
     },
@@ -1381,7 +1381,7 @@
         "responses": {
           "200": { "description": "下游原始 JSON 响应" },
           "400": { "description": "Content-Length 无效、请求体不完整或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
-          "502": { "description": "下游不可达", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
+          "500": { "description": "下游未返回有效响应", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
         }
       }
     },
@@ -1394,7 +1394,7 @@
         "responses": {
           "200": { "description": "下游 upload_docs 原始 JSON 响应" },
           "400": { "description": "缺参、路径校验失败或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
-          "502": { "description": "下游不可达", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
+          "500": { "description": "下游未返回有效响应", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
         }
       }
     },
@@ -1406,7 +1406,7 @@
         "responses": {
           "200": { "description": "更新成功" },
           "400": { "description": "缺参或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
-          "502": { "description": "下游不可达", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
+          "500": { "description": "下游未返回有效响应", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
         }
       }
     },
@@ -1418,7 +1418,7 @@
         "responses": {
           "200": { "description": "删除成功" },
           "400": { "description": "缺参或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
-          "502": { "description": "下游不可达", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
+          "500": { "description": "下游未返回有效响应", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
         }
       }
     },
@@ -1436,7 +1436,7 @@
               "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughResponse" } }
             }
           },
-          "502": { "description": "下游不可达", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
+          "500": { "description": "下游未返回有效响应", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
         }
       }
     },
@@ -1459,7 +1459,7 @@
             }
           },
           "400": { "description": "缺参或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
-          "502": { "description": "下游不可达", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
+          "500": { "description": "下游未返回有效响应", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
         }
       }
     },
@@ -1479,7 +1479,7 @@
             }
           },
           "400": { "description": "缺参或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
-          "502": { "description": "下游不可达", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
+          "500": { "description": "下游未返回有效响应", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
         }
       }
     },
@@ -1491,7 +1491,7 @@
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughRequest" } } } },
         "responses": {
           "200": { "description": "下游原始 JSON 响应（如 `{code, msg}`）", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughResponse" } } } },
-          "502": { "description": "下游不可达", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
+          "500": { "description": "下游未返回有效响应", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
         }
       }
     },
@@ -1503,7 +1503,7 @@
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughRequest" } } } },
         "responses": {
           "200": { "description": "下游原始 JSON 响应（如 `{code, msg, data}`）", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughResponse" } } } },
-          "502": { "description": "下游不可达", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
+          "500": { "description": "下游未返回有效响应", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
         }
       }
     },
@@ -1515,7 +1515,7 @@
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughRequest" } } } },
         "responses": {
           "200": { "description": "下游原始 JSON 响应（如 `{code, msg, data}`）", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughResponse" } } } },
-          "502": { "description": "下游不可达", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
+          "500": { "description": "下游未返回有效响应", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
         }
       }
     },
@@ -1527,7 +1527,7 @@
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughRequest" } } } },
         "responses": {
           "200": { "description": "下游原始 JSON 响应（如 `{code, msg, data}`）", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughResponse" } } } },
-          "502": { "description": "下游不可达", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
+          "500": { "description": "下游未返回有效响应", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
         }
       }
     },
@@ -1539,7 +1539,7 @@
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughRequest" } } } },
         "responses": {
           "200": { "description": "下游原始 JSON 响应（如 `{code, msg, data}`）", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughResponse" } } } },
-          "502": { "description": "下游不可达", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
+          "500": { "description": "下游未返回有效响应", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
         }
       }
     },
@@ -1551,7 +1551,7 @@
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughRequest" } } } },
         "responses": {
           "200": { "description": "下游原始 JSON 响应（如 `{code, msg, data}`）", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughResponse" } } } },
-          "502": { "description": "下游不可达", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
+          "500": { "description": "下游未返回有效响应", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
         }
       }
     },
@@ -1563,7 +1563,7 @@
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughRequest" } } } },
         "responses": {
           "200": { "description": "下游原始 JSON 响应（如 `{code, msg, data}`）", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughResponse" } } } },
-          "502": { "description": "下游不可达", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
+          "500": { "description": "下游未返回有效响应", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
         }
       }
     },
@@ -1581,7 +1581,7 @@
               "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughResponse" } }
             }
           },
-          "502": { "description": "下游不可达", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
+          "500": { "description": "下游未返回有效响应", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
         }
       }
     },
@@ -6156,8 +6156,8 @@
         "type": "object",
         "required": ["error"],
         "properties": {
-          "error": { "type": "string", "enum": ["knowledge_base_upstream_failed"] },
-          "message": { "type": "string" }
+          "error": { "type": "string", "enum": ["知识库服务异常"] },
+          "message": { "type": "string", "enum": ["知识库服务异常，请稍后重试"] }
         }
       },
       "KnowledgeBasePassthroughRequest": {
