@@ -28,7 +28,7 @@ def test_list_missing_account():
     with patch("integration.knowledge_base.handlers.knowledge_base_enabled", return_value=True):
         assert try_handle_post(handler, parsed, body) is True
     handler.send_response.assert_called_with(400)
-    assert _json_payload(handler)["error"] == "missing_account"
+    assert _json_payload(handler)["error"] == "缺少用户账号"
 
 
 def test_list_missing_uuid():
@@ -38,7 +38,7 @@ def test_list_missing_uuid():
     with patch("integration.knowledge_base.handlers.knowledge_base_enabled", return_value=True):
         assert try_handle_post(handler, parsed, body) is True
     handler.send_response.assert_called_with(400)
-    assert _json_payload(handler)["error"] == "missing_uuid"
+    assert _json_payload(handler)["error"] == "缺少用户 UUID"
 
 
 def test_list_success():
@@ -107,6 +107,36 @@ def test_upstream_business_error():
             assert try_handle_post(handler, parsed, body) is True
     handler.send_response.assert_called_with(500)
     assert _json_payload(handler) == upstream
+
+
+def test_upstream_http_200_business_error_is_returned_unchanged():
+    handler = MagicMock()
+    parsed = urlparse("/api/integration/knowledge_base/info")
+    upstream = {"code": 500, "msg": "知识库不存在", "data": None}
+    with patch("integration.knowledge_base.handlers.knowledge_base_enabled", return_value=True):
+        with patch(
+            "integration.knowledge_base.handlers.client.post_json",
+            return_value=(200, upstream),
+        ):
+            assert try_handle_post(handler, parsed, {"kbName": "kb_missing"}) is True
+    handler.send_response.assert_called_with(200)
+    assert _json_payload(handler) == upstream
+
+
+def test_upstream_missing_response_returns_500_with_chinese_message():
+    handler = MagicMock()
+    parsed = urlparse("/api/integration/knowledge_base/info")
+    with patch("integration.knowledge_base.handlers.knowledge_base_enabled", return_value=True):
+        with patch(
+            "integration.knowledge_base.handlers.client.post_json",
+            side_effect=KnowledgeBaseUpstreamError("Connection refused"),
+        ):
+            assert try_handle_post(handler, parsed, {"kbName": "kb1"}) is True
+    handler.send_response.assert_called_with(500)
+    assert _json_payload(handler) == {
+        "error": "知识库服务异常",
+        "message": "知识库服务异常，请稍后重试",
+    }
 
 
 def test_show_pdf_success():
@@ -183,7 +213,7 @@ def test_search_docs_missing_query():
     with patch("integration.knowledge_base.handlers.knowledge_base_enabled", return_value=True):
         assert try_handle_post(handler, parsed, body) is True
     handler.send_response.assert_called_with(400)
-    assert _json_payload(handler)["error"] == "missing_query"
+    assert _json_payload(handler)["error"] == "缺少查询内容"
 
 
 def test_search_docs_success():
@@ -230,7 +260,7 @@ def test_search_docs_xcore_missing_kb_names():
     with patch("integration.knowledge_base.handlers.knowledge_base_enabled", return_value=True):
         assert try_handle_post(handler, parsed, body) is True
     handler.send_response.assert_called_with(400)
-    assert _json_payload(handler)["error"] == "missing_kbNames"
+    assert _json_payload(handler)["error"] == "缺少知识库名称列表"
 
 
 def test_search_docs_xcore_empty_kb_names():
@@ -240,7 +270,7 @@ def test_search_docs_xcore_empty_kb_names():
     with patch("integration.knowledge_base.handlers.knowledge_base_enabled", return_value=True):
         assert try_handle_post(handler, parsed, body) is True
     handler.send_response.assert_called_with(400)
-    assert _json_payload(handler)["error"] == "missing_kbNames"
+    assert _json_payload(handler)["error"] == "缺少知识库名称列表"
 
 
 def test_search_docs_xcore_success():
@@ -703,5 +733,8 @@ def test_upload_artifacts_upstream_error(tmp_path):
                     side_effect=KnowledgeBaseUpstreamError("connection refused"),
                 ):
                     assert try_handle_post(handler, parsed, body) is True
-    handler.send_response.assert_called_with(502)
-    assert _json_payload(handler)["error"] == "知识库服务不可用"
+    handler.send_response.assert_called_with(500)
+    assert _json_payload(handler) == {
+        "error": "知识库服务异常",
+        "message": "知识库服务异常，请稍后重试",
+    }

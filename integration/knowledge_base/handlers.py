@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from api.helpers import _sanitize_error, bad, j
+from api.helpers import bad, j
 
 from integration.config import knowledge_base_enabled
 from integration.knowledge_base.constants import (
@@ -51,17 +51,25 @@ _REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
     "upload_artifacts": ("uuid", "kbName", "fileProperties", "paths"),
 }
 
-_UPLOAD_ARTIFACTS_ERROR_CN: dict[str, str] = {
+_VALIDATION_ERROR_CN: dict[str, str] = {
+    "missing_account": "缺少用户账号",
     "missing_uuid": "缺少用户 UUID",
     "missing_kbName": "缺少知识库名称",
+    "missing_isPersonal": "缺少个人/团队标识",
+    "missing_showName": "缺少知识库显示名称",
+    "missing_page": "缺少页码",
+    "missing_size": "缺少分页大小",
+    "missing_query": "缺少查询内容",
+    "missing_kbNames": "缺少知识库名称列表",
+    "missing_fileNames": "缺少文件名列表",
     "missing_fileProperties": "缺少文件属性",
     "missing_paths": "缺少路径",
     "count_mismatch": "文件属性与路径数量不一致",
 }
 
 
-def _upload_artifacts_error_cn(code: str) -> str:
-    return _UPLOAD_ARTIFACTS_ERROR_CN.get(code, code)
+def _validation_error_cn(code: str) -> str:
+    return _VALIDATION_ERROR_CN.get(code, "请求参数无效")
 
 
 def _route_key(parsed) -> str | None:
@@ -102,6 +110,13 @@ def _respond_binary(
 def _respond_bad(handler, msg: str, status: int = 400, *, exc_info=None) -> bool:
     bad(handler, msg, status=status, exc_info=exc_info)
     return True
+
+
+def _upstream_failure_payload() -> dict[str, str]:
+    return {
+        "error": "知识库服务异常",
+        "message": client.UPSTREAM_FAILURE_MESSAGE,
+    }
 
 
 def _body_dict(body) -> dict[str, Any]:
@@ -166,11 +181,8 @@ def _handle_upstream(handler, route_key: str, upstream_body: dict[str, Any]) -> 
     except client.KnowledgeBaseUpstreamError as exc:
         return _respond(
             handler,
-            {
-                "error": "knowledge_base_upstream_failed",
-                "message": _sanitize_error(exc),
-            },
-            status=502,
+            _upstream_failure_payload(),
+            status=500,
             exc_info=(type(exc), exc, exc.__traceback__),
         )
     return _respond(handler, payload, status=status)
@@ -182,11 +194,8 @@ def _handle_binary_passthrough(handler, route_key: str, upstream_body: dict[str,
     except client.KnowledgeBaseUpstreamError as exc:
         return _respond(
             handler,
-            {
-                "error": "knowledge_base_upstream_failed",
-                "message": _sanitize_error(exc),
-            },
-            status=502,
+            _upstream_failure_payload(),
+            status=500,
             exc_info=(type(exc), exc, exc.__traceback__),
         )
     if result.kind == "binary":
@@ -231,11 +240,8 @@ def _handle_upload_docs(handler) -> bool:
     except client.KnowledgeBaseUpstreamError as exc:
         return _respond(
             handler,
-            {
-                "error": "knowledge_base_upstream_failed",
-                "message": _sanitize_error(exc),
-            },
-            status=502,
+            _upstream_failure_payload(),
+            status=500,
             exc_info=(type(exc), exc, exc.__traceback__),
         )
 
@@ -258,9 +264,7 @@ def try_handle_post(handler, parsed, body) -> bool:
 
     missing = _validate_required(payload_body, route_key)
     if missing:
-        if route_key == "upload_artifacts":
-            missing = _upload_artifacts_error_cn(missing)
-        return _respond_bad(handler, missing, 400)
+        return _respond_bad(handler, _validation_error_cn(missing), 400)
 
     if route_key == "upload_artifacts":
         return _handle_upload_artifacts(handler, payload_body)
@@ -318,8 +322,8 @@ def _handle_upload_artifacts(handler, body: dict[str, Any]) -> bool:
     except client.KnowledgeBaseUpstreamError as exc:
         return _respond(
             handler,
-            {"error": "知识库服务不可用", "message": _sanitize_error(exc)},
-            status=502,
+            _upstream_failure_payload(),
+            status=500,
             exc_info=(type(exc), exc, exc.__traceback__),
         )
     return _respond(handler, payload, status=status)

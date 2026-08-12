@@ -9,6 +9,12 @@
 
 本文只覆盖 **Agent 代码显式追加、插入或修复到 `messages` 的消息**。
 不讨论模型天然返回的正常回复，也不讨论 WebUI 额外生成的前端展示层消息。
+异步后台子任务是唯一需要补充说明的跨层例外：WebUI scheduler 负责唤醒，Agent 随后把
+完成通知作为当前调用的控制 user 写入 `messages`；它不是前端凭空生成的展示消息。
+
+下文“机制启用状态”按当前 Agent 的默认配置和运行时 gate 描述：
+“默认具备”表示代码路径可用，不代表每轮都会触发；“条件启用”表示还要满足
+模型、工作面、配置或异常状态等条件；本地 `config.yaml` 的显式配置可以覆盖默认值。
 
 本文以 Hermes Agent 上游契约作为 canonical / durable 基线，并额外定义 WebUI 的
 一问一答展示契约。若本地 fork 尚未符合目标，会在对应小节标成“待修复”，
@@ -24,6 +30,10 @@ Hermes Agent 的“补消息”大致分成六类：
 4. 预算耗尽总结类
 5. 错误 / 中断 / 收尾闭合类
 6. 压缩上下文类
+
+其中第 3 类还包含一条容易漏记的跨轮机制：`delegate_task` 将子任务放到后台执行，
+子任务完成后由 WebUI 在会话空闲时启动一次专用唤醒轮次。它不是普通的“补一条 user”，
+而是“后台完成事件 → 隐藏 context anchor → 原用户轮次归属的 assistant 结果”。
 
 理解这些逻辑时，最重要的是分清两件事：
 
@@ -118,6 +128,8 @@ token / reasoning / interim_assistant / tool / tool_complete / done / stream_end
 这类逻辑发生在模型“准备结束本轮”时，但 Agent 判断它还不能安全结束。
 
 ### 1.1 verify-on-stop：改了代码但缺少验证证据
+
+**机制启用状态：⚠️ 条件启用（默认 `auto`）。** 交互式编码或程序化工作面中，本轮修改代码且没有新的通过验证证据时触发；显式 `false` 或消息类工作面不触发。环境变量 `HERMES_VERIFY_ON_STOP` 优先于 `agent.verify_on_stop`；已迁移配置可能已被写成 `false`。
 
 **WebUI 对齐状态：✅ 已对齐。** 控制 nudge 被隐藏；候选与后续最终回答收口到同一回答区域，并保留候选兜底。
 
@@ -252,6 +264,8 @@ done / 历史：
 
 ### 1.2 pre_verify hook：插件要求继续验证
 
+**机制启用状态：⚠️ 条件启用。** 只有本轮有文件变更、已注册 `pre_verify` hook/plugin 且它返回继续验证文案时触发；没有变更、没有 hook 或 hook 返回空结果时不触发。单轮 nudge 数量受 `max_verify_nudges` 限制，默认最多 3 次。
+
 **WebUI 对齐状态：✅ 已对齐。** WebUI 以与 verify-on-stop 相同的规则隐藏插件 nudge，并处理候选替换与兜底。
 
 **上游持久化规则：✅ 一致。** assistant 候选保留；插件注入的 synthetic user nudge 不进入 durable transcript。Fork 仅补充语义标记。
@@ -325,6 +339,8 @@ done / 历史：
 - 常见形态仍然是 `[System: ...]` 风格的继续验证提示，但不能假定文本固定
 
 ### 1.3 这两类消息的持久化策略
+
+**机制启用状态：ℹ️ 非独立开关。** 本节不是新的运行机制；它随 1.1 或 1.2 实际触发后决定候选和 nudge 的持久化边界。
 
 **WebUI 对齐状态：✅ 已对齐。** 本节定义的“nudge 隐藏、真实候选保留”已由 WebUI 的统一投影实现。
 
@@ -423,6 +439,8 @@ budget 耗尽复用和 nudge 过滤；WebUI 回归已覆盖最终回答替换候
 这类逻辑用于处理“模型刚执行完工具，却没有给出可见文本”的情况。
 
 ### 2.1 工具执行后模型返回空内容：补一对 synthetic `assistant + user`
+
+**机制启用状态：✅ 默认具备（条件触发）。** 工具结果已返回、模型却没有可见内容时进入空响应恢复；正常回答不会追加这对脚手架。
 
 **WebUI 对齐状态：✅ 已对齐。** `internal_scaffold` pair 在实时收口与历史投影中都被过滤。
 
@@ -574,6 +592,8 @@ You just executed tool calls but returned an empty response. Please process the 
 
 ### 2.2 最终空响应 sentinel：补一个 `assistant("(empty)")`
 
+**机制启用状态：✅ 默认具备（条件触发）。** 空响应重试耗尽且没有可用 fallback 时补 terminal sentinel；只要得到有效回答或 fallback 成功，就不会走该出口。
+
 **WebUI 对齐状态：✅ 已对齐。** terminal sentinel 不会被渲染为真实 assistant 气泡。
 
 **上游持久化规则：✅ 一致。** terminal `(empty)` sentinel 不进入 durable transcript；Fork 仅统一其语义分类。
@@ -645,6 +665,8 @@ done / 历史：
 
 ### 2.3 thinking-only prefill：只补一条 assistant
 
+**机制启用状态：✅ 默认具备（条件触发）。** Provider 只返回 reasoning/thinking、没有可见正文时用于下一次重试；普通的可见回答不会触发。
+
 **WebUI 对齐状态：✅ 已对齐。** thinking prefill 不形成 assistant 气泡；后续真实正文正常收口。
 
 **上游持久化规则：✅ 一致。** thinking-only prefill 不进入 durable transcript；Fork 仅统一其语义分类。
@@ -708,6 +730,8 @@ done / 历史：
 
 ### 2.4 这类消息的清理策略
 
+**机制启用状态：✅ 默认执行（分两处收口）。** 主循环在生成真实回答或验证 nudge 前会移除 thinking prefill；持久化出口会跳过所有 `internal_scaffold`，并在空响应 sentinel 被移除后回退悬空的 tool/assistant(tool_calls) 尾部。没有这些消息时为空操作。
+
 **WebUI 对齐状态：✅ 已对齐。** Agent durable 过滤之外，WebUI 仍在展示边界过滤 internal scaffold。
 
 **上游持久化规则：✅ 一致。** 上游尾部清理和 durable 写入跳过规则保留；Fork 仅将分类判定统一为 `internal_scaffold`。
@@ -759,6 +783,8 @@ WebUI 展示投影：
 ```
 
 ### 2.5 上游 dropped tool-call recovery：补一对不持久化的 assistant + user
+
+**机制启用状态：⛔ 当前 Fork 未接入。** 上游仅在流中断或工具调用内容被丢弃、需要提示模型拆分工具参数时触发；当前 Fork 没有生产、分类或持久化过滤这条路径。
 
 **WebUI 对齐状态：⚠️ 未接入。** 当前 Fork 未生产或分类 `_dropped_toolcall_nudge`，因此不存在可验证的 WebUI 对齐路径。
 
@@ -812,6 +838,8 @@ WebUI 投影过滤。
 
 ### 2.6 输出截断 continuation：保留 partial assistant，再补内部 user
 
+**机制启用状态：✅ 默认具备（条件触发）。** Provider 返回 `finish_reason="length"` 或 partial-stream stub 且能构造截断 assistant 时触发；最多进行 3 次 continuation，随后进入第 4 次耗尽出口。
+
 **WebUI 对齐状态：✅ 已与当前 Fork 对齐。** WebUI 隐藏 `length_continuation` anchor 并合并 assistant 片段；第 4 次耗尽出口仍保留 Fork 与上游的 durable 形状差异。
 
 **上游持久化规则：⚠️ 部分一致。** 前三次续写均保留 partial、控制 user 与后续回答；第 4 次耗尽时 Fork 保留既有片段和 anchor，上游改写为单条合并后的 length assistant。
@@ -819,8 +847,11 @@ WebUI 投影过滤。
 实现位置：`hermes-agent/agent/conversation_loop.py`
 
 模型因输出长度上限或流中断而没有完成回答时，Agent 会先保留已有的 partial
-assistant，再补一条 user，要求下一次调用从断点继续。上游会持久化这两条消息；
-目标接缝只给控制 user 增加 `context_anchor` 元数据，不删除任何 durable 内容。
+assistant，再补一条 user，要求下一次调用从断点继续。在续写最终成功的路径中，上游会
+在本轮收尾时持久化已经产生的 partial assistant、continuation user 和最终 assistant；
+这些消息不会在每次重试发生时立即单独写入数据库。若连续 4 次仍未完成，上游会先清理
+partial/nudge，再只持久化合并后的 `finish_reason="length"` assistant。Fork 则保留
+这些中间 durable 行，并只给 continuation user 增加 `context_anchor` 元数据。
 
 #### 触发条件与三种文案
 
@@ -905,7 +936,7 @@ Agent 运行时 `messages`：
 [
   {"role": "user", "content": "给我完整列出迁移步骤和回滚方案。", "_turn_key": "turn:7"},
   {"role": "assistant", "content": "第一步创建新表并启用双写；第二步……", "finish_reason": "length"},
-  {"role": "user", "content": "[System: Your previous response was truncated by the output length limit. Continue exactly where you left off. Do not restart or repeat prior text. Finish the answer directly.]"},
+  {"role": "user", "content": "[System: Your previous response was truncated by the output length limit. Continue exactly where you left off. Do not restart or repeat prior text. Finish the answer directly.]", "_hermes_message_class": "context_anchor", "_hermes_scaffold_kind": "length_continuation"},
   {"role": "assistant", "content": "第三步回填历史数据；第四步灰度切流；最后保留一周回滚窗口。", "finish_reason": "stop"}
 ]
 ```
@@ -951,6 +982,8 @@ WebUI 隐藏 anchor，并按原顺序合并 partial 与续写。
 这类逻辑用于处理模型“看起来像要结束，但实际上还没完成任务”的场景。
 
 ### 3.1 Codex intermediate ack continuation
+
+**机制启用状态：⚠️ 条件启用。** 默认 `intent_ack_continuation=auto` 时仅对 `codex_responses` 生效；还需有可用工具、尚未执行工具且候选命中 intermediate-ack 检测，每轮最多 2 次。显式 `true` 可扩展到所有 API 模式，`false` 则关闭。
 
 **WebUI 对齐状态：✅ 已对齐。** ack 留作候选，continue anchor 隐藏；最终回答优先，缺失时使用非空 ack 兜底。
 
@@ -1045,6 +1078,8 @@ WebUI 有最终回答时以最终回答替换 ack，否则保留最后一条非�
 
 ### 3.2 kanban worker stop guard
 
+**机制启用状态：⚠️ 条件启用。** 仅 Kanban worker 到达停止/交付边界时触发；普通 WebUI 对话或非 Kanban worker 不会追加这对 guard 消息。
+
 **WebUI 对齐状态：⚠️ 部分对齐。** pair 的终态/历史过滤已完成；已在流中送达的候选文本仍未完成专门验证。
 
 **上游持久化规则：✅ 一致。** assistant + user guard pair 都是 ephemeral scaffold，不进入 durable transcript；Fork 仅统一其语义分类。
@@ -1135,6 +1170,8 @@ assistant：
 
 ### 3.3 Codex Responses incomplete continuation：必要时补 assistant 和 user nudge
 
+**机制启用状态：⚠️ 条件启用。** 仅 `api_mode="codex_responses"` 且 Provider 返回未完成状态、未完成 item 或仅 reasoning/commentary 而无最终回答时触发；单轮最多 3 次。只有 interim 没有可供 Responses API 重放的正文、reasoning item 或 message item，且当前尾部是 assistant 时才追加 user nudge；可重放时直接重试，不追加 nudge。
+
 **WebUI 对齐状态：✅ 已对齐。** incomplete assistant 按候选收口，nudge anchor 隐藏，且有无最终回答均有确定投影。
 
 **上游持久化规则：✅ 一致。** incomplete assistant、控制 user 与最终回答均保留；Fork 只给控制 user 增加 `context_anchor` 元数据。
@@ -1142,8 +1179,9 @@ assistant：
 实现位置：`hermes-agent/agent/conversation_loop.py`
 
 Codex Responses 返回 `finish_reason="incomplete"` 时，Agent 会先保留可重放的
-incomplete assistant。若这条 assistant 没有可供 Responses API 重放的内容，还会补一条
-user nudge，请模型直接给出最终答案。目标接缝将 nudge 标成持久化的
+incomplete assistant。若这条 assistant 没有可供 Responses API 重放的内容，且尾部仍是
+assistant，才补一条 user nudge，请模型直接给出最终答案；若尾部不是 assistant，则为了
+避免 user→user 或 tool→user 非法序列而不追加。目标接缝将 nudge 标成持久化的
 `context_anchor`，不删除上游 durable 内容。
 
 Agent 运行时 `messages`：
@@ -1152,7 +1190,7 @@ Agent 运行时 `messages`：
 [
   {"role":"user","content":"比较两套缓存方案，给出选择建议。","_turn_key":"turn:10"},
   {"role":"assistant","content":"我已比较命中率和失效策略，但还没有写出结论。","finish_reason":"incomplete"},
-  {"role":"user","content":"[System: Your previous response contained only internal reasoning and never produced a visible answer or tool call. Do not keep thinking. Produce your final answer as plain text now (or make the tool call you were planning).]"},
+  {"role":"user","content":"[System: Your previous response contained only internal reasoning and never produced a visible answer or tool call. Do not keep thinking. Produce your final answer as plain text now (or make the tool call you were planning).]","_hermes_message_class":"context_anchor","_hermes_scaffold_kind":"codex_incomplete_nudge"},
   {"role":"assistant","content":"建议选方案 B：命中率略低，但失效和回滚更可控。"}
 ]
 ```
@@ -1194,9 +1232,207 @@ done / 历史：
 WebUI 隐藏 nudge，并在有最终回答时替换 incomplete、无最终回答时使用非空
 incomplete 兜底。
 
+### 3.4 异步后台子任务：`delegate_task` 派发与完成唤醒
+
+**机制启用状态：⚠️ 条件启用。** 交互式 CLI / Gateway 中，顶层 `delegate_task` 默认自动
+后台派发，工具会立即返回 delegation handle；不需要也不能通过 `background=false` 改回顶层
+同步模式。默认最多同时运行 3 个子任务，容量满时回退为同步执行。one-shot / stateless
+通道没有后续队列消费能力，会显式走同步路径，避免后台结果无人接收；嵌套 orchestrator
+子任务仍在当前调用内等待结果。
+
+**WebUI 对齐状态：✅ 已对齐（Fork 专用唤醒接缝）。** WebUI 为每个 delegation 保存
+`delegation_id → origin_turn_key` 侧车映射。完成事件只在会话空闲时启动专用唤醒轮次；前台
+轮次忙时先排队，不把结果插入正在进行的 tool → assistant 序列。唤醒用隐藏的
+`context_anchor/async_delegation_completion` user 承载完成通知，结果 assistant/tool 在
+展示副本中回挂原始 `turn_key`，因此不会出现第二个可见 user 气泡。
+
+**上游持久化规则：⚠️ 基线一致，Fork 扩展归属元数据。** 上游会持久化真实的
+`delegate_task` assistant/tool 派发轨迹，以及完成唤醒后模型生成的真实 assistant 结果。
+完成通知本身是控制上下文，不是新的人工请求；当前 Fork 将它作为结构化
+`context_anchor` 保存（持久化路径开启时），并把 origin turn、wakeup 状态和重试信息放在
+WebUI 侧车，而不是污染 Agent transcript。上游基础实现没有 Fork 的
+`async_delegation_origins`、显式 `turn_key_override` 和 `_background_task_ids` 展示字段。
+
+实现位置：
+`hermes-agent/tools/async_delegation.py`、`hermes-agent/tools/delegate_tool.py`、
+`hermes-agent/tools/process_registry.py`、`api/background_process.py`、
+`integration/async_delegation_turns/state.py`、`api/streaming.py`、
+`integration/agent_message_semantics/projection.py`。
+
+用户请求“请并行检查登录接口和缓存配置，完成后汇总”。父 Agent 先派发两个后台子任务，
+随后可以结束当前轮；子任务完成后，空闲会话再被唤醒。下面三个数组省略了两次调用之间
+与本机制无关的历史消息，但保留了消息顺序和控制字段。
+
+Agent 运行时 `messages`：
+
+```json
+[
+  {"role":"user","content":"请并行检查登录接口和缓存配置，完成后汇总。","_turn_key":"turn:31"},
+  {"role":"assistant","content":"","tool_calls":[{"id":"call_delegate","function":{"name":"delegate_task","arguments":"{\"tasks\":[{\"goal\":\"检查登录接口\"},{\"goal\":\"检查缓存配置\"}]}"}}]},
+  {"role":"tool","tool_call_id":"call_delegate","content":"{\"status\":\"dispatched\",\"mode\":\"background\",\"count\":2,\"delegation_id\":\"deleg_7f3a1c2b\",\"goals\":[\"检查登录接口\",\"检查缓存配置\"]}"},
+  {"role":"assistant","content":"我已派发两个后台子任务，完成后会继续汇总结果。"},
+  {"role":"user","content":"[ASYNC DELEGATION BATCH COMPLETE — deleg_7f3a1c2b]\n\n2 个后台子任务已完成。\n\n--- TASK 1: 检查登录接口 ---\n状态：completed\n摘要：未发现新的超时回归。\n\n--- TASK 2: 检查缓存配置 ---\n状态：completed\n摘要：已启用失效保护。","_hermes_message_class":"context_anchor","_hermes_scaffold_kind":"async_delegation_completion","_source":"async_delegation_wakeup","delegation_id":"deleg_7f3a1c2b"},
+  {"role":"assistant","content":"后台检查完成：登录接口未发现新的超时回归，缓存配置已启用失效保护。"}
+]
+```
+
+这不是同一时刻连续追加的普通 user→assistant 对话：前四行属于首次派发轮次，完成通知
+是在会话空闲后由 WebUI 专用 scheduler 发起的新调用。唤醒 user 行的作用是把完整、可重试
+的子任务结果交给模型；它不代表用户又输入了一句话。
+
+Agent durable transcript：
+
+```json
+[
+  {"role":"user","content":"请并行检查登录接口和缓存配置，完成后汇总。","_turn_key":"turn:31"},
+  {"role":"assistant","content":"","tool_calls":[{"id":"call_delegate","function":{"name":"delegate_task","arguments":"{\"tasks\":[{\"goal\":\"检查登录接口\"},{\"goal\":\"检查缓存配置\"}]}"}}]},
+  {"role":"tool","tool_call_id":"call_delegate","content":"{\"status\":\"dispatched\",\"mode\":\"background\",\"count\":2,\"delegation_id\":\"deleg_7f3a1c2b\",\"goals\":[\"检查登录接口\",\"检查缓存配置\"]}"},
+  {"role":"assistant","content":"我已派发两个后台子任务，完成后会继续汇总结果。"},
+  {"role":"user","content":"[ASYNC DELEGATION BATCH COMPLETE — deleg_7f3a1c2b]\n\n2 个后台子任务已完成。\n\n--- TASK 1: 检查登录接口 ---\n状态：completed\n摘要：未发现新的超时回归。\n\n--- TASK 2: 检查缓存配置 ---\n状态：completed\n摘要：已启用失效保护。","_hermes_message_class":"context_anchor","_hermes_scaffold_kind":"async_delegation_completion","_source":"async_delegation_wakeup","delegation_id":"deleg_7f3a1c2b"},
+  {"role":"assistant","content":"后台检查完成：登录接口未发现新的超时回归，缓存配置已启用失效保护。"}
+]
+```
+
+持久化的是首次派发的真实 assistant/tool 轨迹、父 Agent 已输出的真实回答，以及唤醒后
+生成的真实 assistant 结果。完成通知 anchor 即使被保存，也只是模型上下文控制行；它不应
+被当成新的人工 turn。`async_delegation_origins`、claim / retry 状态和完成时间属于 WebUI
+侧车状态，不是 durable transcript 的普通消息。
+
+WebUI 展示投影：
+
+```json
+[
+  {"role":"user","content":"请并行检查登录接口和缓存配置，完成后汇总。","_turn_key":"turn:31","_background_task_ids":["deleg_7f3a1c2b"]},
+  {"role":"assistant","content":"","tool_calls":[{"id":"call_delegate","function":{"name":"delegate_task","arguments":"{\"tasks\":[{\"goal\":\"检查登录接口\"},{\"goal\":\"检查缓存配置\"}]}"}}]},
+  {"role":"tool","tool_call_id":"call_delegate","content":"{\"status\":\"dispatched\",\"mode\":\"background\",\"count\":2,\"delegation_id\":\"deleg_7f3a1c2b\",\"goals\":[\"检查登录接口\",\"检查缓存配置\"]}"},
+  {"role":"assistant","content":"我已派发两个后台子任务，完成后会继续汇总结果。"},
+  {"role":"assistant","content":"后台检查完成：登录接口未发现新的超时回归，缓存配置已启用失效保护。","_turn_key":"turn:31","_source":"async_delegation_wakeup","delegation_id":"deleg_7f3a1c2b"}
+]
+```
+
+展示层隐藏 `async_delegation_completion` anchor，但保留派发工具卡片、父 Agent 的真实
+回答和完成后的真实 assistant 结果。完成结果在展示副本中带原始 `turn:31`，并通过
+`_background_task_ids` 给原用户行关联后台任务；这些字段不回写 Agent canonical message。
+
+**SSE 实时与 `done`**
+
+```text
+派发阶段：tool / tool_complete 正常产生；background_task_status=running 只更新后台任务状态，
+不会生成普通 user 气泡。子任务完成后，若会话空闲，专用 scheduler 领取 completion event，
+启动 source=async_delegation_wakeup 的新 stream；anchor 不推送为 user SSE，最终 assistant
+继续以 token 流出并以 done 收口。
+
+若前台轮次仍在运行：completion 保持 queued，事件释放 claim 后重新入队；不会把完成文本
+插入正在执行的 tool→assistant 中间。若进程重启：SQLite async_delegations 恢复 pending
+记录，再按 claim / ack 机制重试；origin 映射缺失时 fail closed，不猜测 transcript 顺序。
+```
+
+**可靠性边界：**
+
+- `delegate_task` 返回 `rejected` 或容量达到上限时，不能把“已派发”当成成功；Agent 会回退
+  同步执行，或将失败状态交给模型说明。
+- 完成通知依赖 `delegation_id → origin_turn_key` 侧车映射。映射缺失、重复 claim 或会话
+  被删除时，优先重试 / 标记失败，不能把结果挂到最近一条 user。
+- 完成摘要可能很长，会占用下一次模型上下文；它虽然不展示为 user，但仍需按普通输入做
+  长度和敏感信息控制。
+- `_background_task_ids` 是展示元数据，不是模型可依赖的事实；真正的完成状态以 durable
+  delegation 记录和 completion event 为准。
+
+**实现状态：✅ 已实现。** 当前 Fork 已接入专用后台唤醒、显式 origin turn 绑定、隐藏
+`context_anchor` 和恢复/重试状态管理；`one-shot / stateless` 是有意关闭异步回灌、改走
+同步执行的例外路径。
+
+### 3.5 `terminal(background=true)`：后台进程完成与 watch-pattern 唤醒（未实现）
+
+**机制启用状态：⚠️ 条件启用。** 只有 `terminal(background=true)` 同时配置
+`notify_on_complete=true`，或配置了 `watch_patterns` 时才会向 completion queue 投递事件。
+`watch_patterns` 每个进程最多约 15 秒通知一次，连续触发抑制后会自动关闭 watch 并提升为
+完成通知；普通前台 terminal 不触发这条路径。
+
+**WebUI 对齐状态：⚠️ 部分对齐。** Agent / CLI 会把完成事件格式化成
+`[IMPORTANT: Background process ...]`，WebUI 也会在空闲时启动 `source=process_wakeup`
+轮次。但当前 Fork 只对 `async_delegation_wakeup` 加 `context_anchor`；普通
+`process_wakeup` 没有结构化隐藏标记，也没有原始 turn 的显式绑定，可能展示为新的 user 气泡。
+
+**上游持久化规则：✅ 基线一致，Fork 展示语义未完全对齐。** 后台进程的真实 tool 派发
+和后续 assistant 结果属于可恢复轨迹。completion / watch 文案作为 server-side wakeup 的
+user 输入时会形成普通 durable user；如果事件恰好在下一次真实用户请求期间被消费，则只
+拼入该次 provider 请求副本，不单独持久化一条通知 user。Fork 增加 `_source=process_wakeup`
+和 `_wakeup_meta`，但尚未把它们提升为 `context_anchor`。
+
+实现位置：
+`hermes-agent/tools/process_registry.py`、`hermes-webui/api/background_process.py`、
+`hermes-webui/api/streaming.py`、`hermes-webui/api/routes.py`。
+
+接缝改造的实施顺序、跨仓库状态归属、风险与验收矩阵见
+[`background-process-notification-seam-plan.md`](background-process-notification-seam-plan.md)。
+
+用户先要求“运行登录回归测试”，Agent 通过后台 terminal 派发测试；进程结束后，WebUI
+空闲唤醒 Agent。下面的六行跨越了首次派发和后续唤醒两个时间点。
+
+Agent 运行时 `messages`：
+
+```json
+[
+  {"role":"user","content":"运行登录回归测试，完成后告诉我失败用例。","_turn_key":"turn:32"},
+  {"role":"assistant","content":"","tool_calls":[{"id":"call_terminal","function":{"name":"terminal","arguments":"{\"command\":\"pytest tests/test_login.py\",\"background\":true,\"notify_on_complete\":true}"}}]},
+  {"role":"tool","tool_call_id":"call_terminal","content":"{\"status\":\"running\",\"session_id\":\"proc_4a7c\",\"background\":true}"},
+  {"role":"assistant","content":"测试已在后台运行，完成后我会汇总失败用例。"},
+  {"role":"user","content":"[IMPORTANT: Background process proc_4a7c completed (exit_code=0).\nCommand: pytest tests/test_login.py\nOutput:\n42 passed, 1 failed: test_refresh_token_timeout]"},
+  {"role":"assistant","content":"后台测试完成：42 项通过，1 项失败，失败用例是 test_refresh_token_timeout。"}
+]
+```
+
+这条唤醒 user 不是人类新输入，但当前普通 `process_wakeup` 路径没有
+`_hermes_message_class=context_anchor`。它会获得一个新的 `_turn_key`，与
+`async_delegation_wakeup` 的“回挂原 turn”行为不同。
+
+Agent durable transcript：
+
+```json
+[
+  {"role":"user","content":"运行登录回归测试，完成后告诉我失败用例。","_turn_key":"turn:32"},
+  {"role":"assistant","content":"","tool_calls":[{"id":"call_terminal","function":{"name":"terminal","arguments":"{\"command\":\"pytest tests/test_login.py\",\"background\":true,\"notify_on_complete\":true}"}}]},
+  {"role":"tool","tool_call_id":"call_terminal","content":"{\"status\":\"running\",\"session_id\":\"proc_4a7c\",\"background\":true}"},
+  {"role":"assistant","content":"测试已在后台运行，完成后我会汇总失败用例。"},
+  {"role":"user","content":"[IMPORTANT: Background process proc_4a7c completed (exit_code=0).\nCommand: pytest tests/test_login.py\nOutput:\n42 passed, 1 failed: test_refresh_token_timeout]","_source":"process_wakeup","_wakeup_meta":{"type":"completion","task_id":"proc_4a7c","exit_code":0}},
+  {"role":"assistant","content":"后台测试完成：42 项通过，1 项失败，失败用例是 test_refresh_token_timeout。"}
+]
+```
+
+WebUI 展示投影：
+
+```json
+[
+  {"role":"user","content":"运行登录回归测试，完成后告诉我失败用例。","_turn_key":"turn:32"},
+  {"role":"assistant","content":"测试已在后台运行，完成后我会汇总失败用例。"},
+  {"role":"user","content":"[IMPORTANT: Background process proc_4a7c completed (exit_code=0).\nCommand: pytest tests/test_login.py\nOutput:\n42 passed, 1 failed: test_refresh_token_timeout]","_source":"process_wakeup","_turn_key":"turn:33","_wakeup_meta":{"type":"completion","task_id":"proc_4a7c","exit_code":0}},
+  {"role":"assistant","content":"后台测试完成：42 项通过，1 项失败，失败用例是 test_refresh_token_timeout。"}
+]
+```
+
+上面的 WebUI 投影明确展示了当前风险：`process_wakeup` 会成为新的普通 user turn。
+如果通知是在真实用户下一次发送时被消费，通知只会拼进本次模型请求，持久化仍只保存真实
+用户文本；如果会话空闲触发 server-side wakeup，则会保存并展示这条内部 user。
+
+**SSE 实时与 `done`**
+
+```text
+terminal 派发阶段产生 tool / tool_complete；后台退出或 watch 命中由 completion_queue
+承载，不直接产生普通 user SSE。空闲时 server-side process_wakeup 启动新 stream，当前
+Fork 的 user anchor 未被统一隐藏，因此可能出现第二个 user 气泡；完成后的 assistant
+仍以 token 和 done 收口。
+```
+
+**实现状态：⚠️ 机制已实现，WebUI 语义待补齐。** 需要把普通 process wakeup 与
+async delegation 一样标成可隐藏的 `context_anchor`，并决定是沿用新 turn，还是建立
+`process_id → origin_turn_key` 的显式归属；不能继续仅依赖 `_source` 或通知正文识别。
+
 ## 4. 预算耗尽总结类
 
 ### 4.1 max iterations：补一条 `user` 总结请求
+
+**机制启用状态：✅ 默认具备（条件触发）。** API 调用次数达到 `max_iterations`，或 `iteration_budget.remaining` 耗尽且 finalizer 判定本轮可走预算兜底时触发；中断、失败或已有正常最终回答时不会追加总结请求。
 
 **WebUI 对齐状态：✅ 已对齐。** summary request anchor 被隐藏，真实 summary assistant 保留为本轮结果。
 
@@ -1209,7 +1445,7 @@ Agent 运行时 `messages`：
   {"role":"user","content":"把这个仓库的依赖和测试都检查一遍。","_turn_key":"turn:11"},
   {"role":"assistant","content":"","tool_calls":[{"id":"call_tests","function":{"name":"run_tests","arguments":"{}"}}]},
   {"role":"tool","tool_call_id":"call_tests","content":"测试 126 项，通过 124 项，失败 2 项。"},
-  {"role":"user","content":"You've reached the maximum number of tool-calling iterations allowed. Please provide a final response summarizing what you've found and accomplished so far, without calling any more tools."},
+  {"role":"user","content":"You've reached the maximum number of tool-calling iterations allowed. Please provide a final response summarizing what you've found and accomplished so far, without calling any more tools.","_hermes_message_class":"context_anchor","_hermes_scaffold_kind":"max_iteration_summary_request"},
   {"role":"assistant","content":"目前有 2 个失败项，分别是登录超时和缓存清理。"}
 ]
 ```
@@ -1264,6 +1500,8 @@ You've reached the maximum number of tool-calling iterations allowed. Please pro
 
 ### 4.2 预算总结 assistant
 
+**机制启用状态：⚠️ 条件启用。** 只有预算/迭代耗尽且 finalizer 判定仍有可总结上下文、允许执行 fallback summary 时才调用模型生成；若 summary fallback 不可用，则返回本地失败说明。
+
 **WebUI 对齐状态：✅ 已对齐。** 只显示 summary assistant 或明确失败结果，不显示内部总结请求。
 
 **上游持久化规则：✅ 一致。** 预算总结 assistant 作为真实终态回答保留；Fork 未改变其 durable 规则。
@@ -1273,7 +1511,7 @@ Agent 运行时 `messages`（成功）：
 ```json
 [
   {"role":"user","content":"检查依赖和测试，最后给我一份结论。","_turn_key":"turn:12"},
-  {"role":"user","content":"You've reached the maximum number of tool-calling iterations allowed. Please provide a final response summarizing what you've found and accomplished so far, without calling any more tools."},
+  {"role":"user","content":"You've reached the maximum number of tool-calling iterations allowed. Please provide a final response summarizing what you've found and accomplished so far, without calling any more tools.","_hermes_message_class":"context_anchor","_hermes_scaffold_kind":"max_iteration_summary_request"},
   {"role":"assistant","content":"依赖没有安全漏洞；测试有 2 项失败，需要修复登录超时和缓存清理。"}
 ]
 ```
@@ -1335,6 +1573,8 @@ I reached the maximum iterations (<n>) but couldn't summarize. Error: <error>
 - 或保证 transcript 尾部以 assistant 收口，避免恢复时序列不合法
 
 ### 5.1 中断时保留 partial assistant
+
+**机制启用状态：⚠️ 条件触发。** 流被取消、中断或连接异常且已经收到可见 assistant 内容时触发；没有已收到正文时不会生成 partial assistant 行。
 
 **WebUI 对齐状态：✅ 已对齐。** 已流出的 partial 会作为真实 transcript 内容保留，而不会被误投影为新 user 输入。
 
@@ -1399,6 +1639,8 @@ Operation interrupted: waiting for model response (<seconds>s elapsed).
 
 ### 5.1.1 中断时跳过尚未执行的工具：补取消的 tool result
 
+**机制启用状态：⚠️ 条件触发。** 中断发生在 assistant 已声明多个工具、但部分工具尚未执行时，为每个未执行调用补取消结果；没有待执行工具时不触发。
+
 **WebUI 对齐状态：⚠️ 部分对齐。** 取消 tool result 不会被 scaffold 过滤；“已取消”专用工具卡片仍未完成验证。
 
 **上游持久化规则：✅ 一致。** 为未执行工具补写的取消 `tool` result 是可恢复的真实轨迹，会进入 durable transcript。
@@ -1456,6 +1698,8 @@ done 与历史中的 tool result 则必须保留“已取消、未执行”的�
 ```
 
 ### 5.1.2 中断后 transcript 以 tool 结尾：补 assistant 闭合行
+
+**机制启用状态：✅ 默认收尾修复开启（条件触发）。** finalizer 发现 durable transcript 以 tool result 结尾、缺少合法 assistant 闭合行时触发；正常以 assistant 结束的回合不触发。
 
 **WebUI 对齐状态：✅ 已对齐。** 闭合 assistant 按真实终态回答投影，不会被隐藏。
 
@@ -1515,6 +1759,8 @@ WebUI 展示投影：
 ```
 
 ### 5.2 tool guardrail halt assistant
+
+**机制启用状态：⚠️ 条件启用（默认硬停关闭）。** 工具 guardrail 默认只发 warning；只有 `tool_loop_guardrails.hard_stop_enabled=true` 且控制器返回 `block`/`halt` 时，才补 guardrail assistant。未启用硬停或决策为 allow/warn 时不会触发。
 
 **WebUI 对齐状态：✅ 已对齐。** guardrail 说明作为真实 assistant 终态保留，并与工具拦截记录一起展示。
 
@@ -1576,6 +1822,8 @@ done / 历史：
 - 因此它属于 **规则驱动的动态 assistant 文案**
 
 ### 5.3 本地处理错误 / 接近预算上限错误 assistant
+
+**机制启用状态：✅ 默认具备（条件触发）。** Agent 本地处理失败或接近预算上限、需要向用户说明退出原因时补真实 assistant；正常成功路径不触发。
 
 **WebUI 对齐状态：✅ 已对齐。** 本地错误说明按真实 assistant 终态投影，不额外制造用户气泡。
 
@@ -1650,6 +1898,8 @@ I apologize, but I encountered repeated errors: <error_msg>
 
 ### 5.4 runtime context 不足 assistant
 
+**机制启用状态：✅ 默认具备（条件触发）。** 当前源码的专用路径是“启用工具时 Ollama `ollama_num_ctx` 低于 Hermes 最低上下文要求”；此时在发起 provider 请求前补真实 assistant。其它 provider 的一般上下文超限走压缩/错误分支，不应套用本小类文案。
+
 **WebUI 对齐状态：✅ 已对齐。** runtime context 不足说明作为真实失败回答保留并可从历史重载。
 
 **上游持久化规则：✅ 一致。** runtime context 不足 assistant 是真实 durable 终态，Fork 未改变其写入规则。
@@ -1710,6 +1960,8 @@ Increase the Ollama context for this model and restart/reload the model before t
 - 其中模型名和当前 runtime context 是动态的，后面的修复建议正文基本固定
 
 ### 5.5 finalizer 统一兜底：`final_response => assistant row`
+
+**机制启用状态：✅ 默认执行（条件触发）。** 每次 turn finalizer 都会检查收尾；仅当已有 `final_response` 但消息列表没有对应真实 assistant 行时补写，已有匹配行则不重复追加。
 
 **WebUI 对齐状态：✅ 已对齐。** done 收口读取 finalizer 补写的 assistant，并避免重放已预览正文。
 
@@ -1785,6 +2037,8 @@ response_previewed / done 收口逻辑避免再显示一遍。
 这类逻辑和当前轮交付关系不大，而是服务于压缩后的上下文重建。
 
 ### 6.1 todo snapshot：Fork 固化为独立的 context-anchor user
+
+**机制启用状态：✅ 随压缩流程默认具备（条件触发）。** 压缩构造上下文且 todo store 有可注入 snapshot 时生成；没有待办内容或未发生压缩时不生成该 anchor。
 
 **WebUI 对齐状态：✅ 已与当前 Fork 对齐。** 独立 todo anchor 被隐藏；这不是上游可合并真实 user 的逐行持久化形状。
 
@@ -1920,6 +2174,8 @@ Fork 始终保留独立 anchor，避免把 model-only 待办混入真实 user �
 - 因此它属于 **结构固定、文本动态、可持久化但不可见** 的 context-anchor user message
 
 ### 6.2 压缩摘要：Fork 实现为独立 context-anchor 恢复材料
+
+**机制启用状态：✅ 默认启用（条件触发）。** `compression.enabled=true`（默认）且上下文超过阈值、或用户显式执行压缩时生成摘要；关闭压缩或未达到触发条件时不生成。摘要模型失败时，默认 `abort_on_summary_failure=false` 会改用确定性 fallback；设为 `true` 才会保留原消息并中止本次压缩。
 
 **WebUI 对齐状态：✅ 已与当前 Fork 对齐。** 独立 summary anchor 被隐藏并可 replay；这与上游冲突时合入 tail 的形状不同。
 
@@ -2060,6 +2316,8 @@ turn 归属。
 
 ### 6.3 压缩后没有真实 user turn：Fork 补 context-anchor user
 
+**机制启用状态：✅ 随压缩流程默认具备（条件触发）。** 压缩完成后如果保留下来的消息中没有真实 user turn，才补 `compression_no_user_anchor`；存在真实 user 时不补。
+
 **WebUI 对齐状态：✅ 已与当前 Fork 对齐。** fallback anchor 被隐藏；上游的同文本普通 durable user 不适用该投影。
 
 **上游持久化规则：⚠️ 内容与时机一致，元数据与展示语义不同。** 两侧都保留 fallback user；上游为普通 durable user，Fork 标记为 `context_anchor` 并由 WebUI 隐藏。
@@ -2167,6 +2425,8 @@ durable user 的默认投影会保留该行。
 
 ### 6.4 哪些 `role="user"` 其实不算真实用户输入
 
+**机制启用状态：✅ 默认分类规则。** 每次 turn 绑定、压缩、manifest 和 WebUI 投影都按结构化语义识别真实 user；没有单独的启停开关。
+
 **WebUI 对齐状态：✅ 已对齐。** WebUI 按结构化语义区分真实 user、context anchor 与 internal scaffold，不只依据 `role`。
 
 **上游持久化规则：⚠️ 基线一致，Fork 有扩展。** 上游会排除既有 synthetic user；Fork 额外以 `context_anchor` 为权威标记排除其新增的控制行。
@@ -2182,8 +2442,9 @@ durable user 的默认投影会保留该行。
 - context summary / synthetic prefix 形式的 user-role scaffold
 
 本 Fork 还会以 `_hermes_message_class` 为准，把 `internal_scaffold` 与
-`context_anchor` 排除在真实 user intent 之外。上游没有这对结构化字段，主要依赖 legacy
-flag 和摘要正文识别。
+`context_anchor` 排除在真实 user intent 之外。这里的“上游没有这对字段”特指
+`upstream/main` 基线；当前 `fix-artifact` Agent 源码已经引入同名结构化字段，不能再把
+它描述成当前运行源码缺失的能力。
 
 这说明在 Hermes Agent 的语义里：
 
@@ -2194,13 +2455,71 @@ flag 和摘要正文识别。
 no-user fallback 分别见 6.1、6.2、6.3；WebUI 对 `internal_scaffold` 与 `context_anchor`
 的统一过滤规则见 8.1、8.2。
 
-## 7. 还有四类值得单独提到
+### 6.5 手动局部压缩：head/tail seam bridge 与工具配对清理（未实现）
+
+**机制启用状态：⚠️ 条件启用。** 用户执行 `/compress here [N]` 或 Gateway 等价命令时，
+Agent 只压缩 head、原样保留最近 tail，再把两段重新拼接。若压缩边界造成相邻同角色，
+字符串内容会合并；多模态内容无法安全合并时会插入最小 bridge turn。压缩后还会清理孤立
+tool result，并从 assistant 中剥离没有结果的 tool call。
+
+**WebUI 对齐状态：⚠️ 未专门覆盖。** 这是 CLI/Gateway 的压缩操作，不是普通聊天 SSE；
+WebUI 读取压缩后的 durable transcript，但目前没有专门展示 bridge、tool-pair 清理或
+`(tool call removed)` 的投影说明。
+
+**上游持久化规则：✅ 一致。** seam 合并、bridge、孤立工具清理发生在压缩结果写入新会话
+或原地压缩前；它们属于压缩后的 canonical transcript，不是普通用户输入。Fork 当前
+未改变这条 Agent 规则。
+
+实现位置：`hermes-agent/hermes_cli/partial_compress.py`、
+`hermes-agent/agent/context_compressor.py`、`hermes-agent/cli.py`、
+`hermes-agent/gateway/slash_commands.py`。
+
+Agent 运行时 `messages`：
+
+```json
+[
+  {"role":"user","content":"先分析迁移风险。","_turn_key":"turn:34"},
+  {"role":"assistant","content":"风险主要在双写一致性。","tool_calls":[{"id":"call_old","function":{"name":"inspect_schema","arguments":"{}"}}]},
+  {"role":"tool","tool_call_id":"call_old","content":"旧工具结果未被保留。"},
+  {"role":"user","content":"继续给出回滚方案。","_turn_key":"turn:35"},
+  {"role":"assistant","content":"回滚方案需要先暂停双写。"}
+]
+```
+
+Agent durable transcript（`/compress here 1` 重新拼接后）：
+
+```json
+[
+  {"role":"user","content":"[CONTEXT COMPACTION — REFERENCE ONLY] 迁移分析已压缩。\n\n--- END OF CONTEXT SUMMARY ---","_hermes_message_class":"context_anchor","_hermes_scaffold_kind":"compaction_summary","_compressed_summary":true},
+  {"role":"assistant","content":"回滚方案需要先暂停双写。"}
+]
+```
+
+WebUI 展示投影：
+
+```json
+[
+  {"role":"assistant","content":"回滚方案需要先暂停双写。"}
+]
+```
+
+上例中，如果压缩 head 末尾与 tail 开头都是 user/assistant，Agent 会在 provider 规则需要
+时合并字符串；如果 tool result 没有 surviving assistant tool call，则删除该 tool result；
+如果 assistant 的所有 tool call 都失去结果，则移除 `tool_calls`，必要时写入
+`(tool call removed)` 保证请求仍合法。这个过程不会创建新的真实 user turn。
+
+## 7. 还有六类值得单独提到
 
 ### 7.1 invalid tool JSON 恢复：补 assistant + tool
+
+**机制启用状态：✅ 默认协议恢复路径（条件触发）。** 模型声明了工具但参数无法解析为合法 JSON 时触发；前两次普通格式错误只重试、不改写 `messages`，第 3 次才补 assistant + tool error。若参数是输出截断造成的残缺 JSON，则直接按截断 partial 失败返回，不走这条恢复 pair；参数合法或没有工具调用时不触发。
 
 **WebUI 对齐状态：⚠️ 部分对齐。** 真实 assistant/tool 轨迹会保留；参数错误专用工具卡片尚未完成验证。
 
 **上游持久化规则：✅ 一致。** invalid JSON 恢复产生的 assistant + tool 是可恢复的真实 durable 轨迹，不是 scaffold。
+
+下面的三段式示例展示的是普通 invalid-JSON 连续重试达到第 3 次后的恢复出口；前两次
+模型返回坏参数时，源码只重新请求，不会在 `messages` 中留下 assistant/tool 行。
 
 Agent 运行时 `messages`：
 
@@ -2255,12 +2574,12 @@ done / 历史：
 
 实现位置：`hermes-agent/agent/conversation_loop.py`
 
-当模型生成了坏掉的 tool call JSON，超过重试次数后，Agent 不会补 user，而是：
+当模型生成了普通格式错误的 tool call JSON，前两次只重试；第 3 次仍失败时，Agent 不会补 user，而是：
 
 1. 先补一条带坏 tool_calls 的 assistant
 2. 再补若干 tool error result
 
-这是为了让模型下一轮直接基于工具错误自我修复，而不是把恢复指令伪装成用户消息。
+这是为了让模型下一轮直接基于工具错误自我修复，而不是把恢复指令伪装成用户消息。若检测到参数是被输出长度截断，Agent 会直接返回 `Response truncated due to output length limit` 并持久化当前 partial 状态，不伪造 invalid-JSON 工具结果。
 
 文案信息：
 
@@ -2282,6 +2601,8 @@ Skipped: other tool call in this response had invalid JSON.
 ```
 
 ### 7.2 unknown tool name 恢复：补 assistant + tool error result
+
+**机制启用状态：✅ 默认协议恢复路径（条件触发）。** 模型请求的工具名不在当前有效工具集合时触发；工具名合法时不补 unknown-tool error result。
 
 **WebUI 对齐状态：⚠️ 部分对齐。** 错误与跳过结果会保留为工具轨迹；未知工具名专用卡片尚未完成验证。
 
@@ -2356,6 +2677,8 @@ done 与历史保留失败和重试的工具轨迹，便于解释为什么首次
 
 ### 7.3 历史中的损坏 tool arguments：修复参数并补 tool marker
 
+**机制启用状态：✅ 默认历史修复路径（条件触发）。** Agent 重放或继续历史消息时发现已有 tool-call 参数损坏，才修复参数并补 marker；新生成且合法的工具调用不触发。
+
 **WebUI 对齐状态：⚠️ 部分对齐。** marker 不会被当作用户消息；历史参数损坏的专用工具呈现尚未完成验证。
 
 **上游持久化规则：✅ 一致。** 修复后的 tool arguments 和补写的 marker 保留为 durable 工具轨迹。
@@ -2416,6 +2739,8 @@ WebUI 展示投影：
 
 ### 7.4 MoA aggregator guidance：必要时补一条 user
 
+**机制启用状态：⚠️ 条件启用。** 只有启用 MoA preset、实际发生 reference/aggregator 调用且聚合器需要 guidance 时才存在；`moa.save_traces` 是独立的审计开关，默认关闭，不控制 guidance 本身。
+
 **WebUI 对齐状态：— 无需接入。** guidance 只存在于聚合器请求副本，不进入主 WebUI transcript。
 
 **上游持久化规则：✅ 一致。** guidance 仅存在于聚合器的 provider 请求副本，不进入主会话 durable transcript。
@@ -2465,6 +2790,104 @@ Mixture-of-Agents 聚合器附加 guidance 时，如果最后一条不是 user�
 
 这类消息和主聊天 loop 不完全同级，但本质上也是 Agent 主动补 user message 的一种。
 
+### 7.5 API 请求前结构修复：`repair_message_sequence`
+
+**机制启用状态：✅ 默认执行（条件修复）。** 每次模型请求前都会对 live `messages` 做
+防御性扫描；没有结构问题时是空操作。它会合并相邻 assistant、删除没有对应
+`assistant.tool_calls` 的孤立 tool、删除重复 tool result，并保留 Codex Responses 可重放的
+incomplete assistant。相邻 user 不在这里合并，provider-only 副本另行处理。
+
+**WebUI 对齐状态：⚠️ 部分覆盖。** 真实工具轨迹最终会被 WebUI 读取，但 WebUI 没有单独
+记录“本次请求前 canonical messages 被原地修复”的事件；若修复删除或合并了行，展示层只能
+看到修复后的结果。
+
+**上游持久化规则：✅ 一致。** 这是 canonical `messages` 的原地结构修复，不是新 user
+输入，也不是内部 scaffold。修复后的列表会参与后续 flush；数据库游标同步重算，避免因
+列表缩短而漏持久化未刷新的 assistant/tool 行。
+
+实现位置：`hermes-agent/agent/agent_runtime_helpers.py`、
+`hermes-agent/agent/conversation_loop.py`。
+
+Agent 运行时 `messages`（请求前修复）：
+
+```json
+[
+  {"role":"user","content":"检查部署状态。","_turn_key":"turn:28"},
+  {"role":"assistant","content":"","tool_calls":[{"id":"call_status","function":{"name":"deployment_status","arguments":"{}"}}]},
+  {"role":"assistant","content":"我继续检查部署结果。"},
+  {"role":"tool","tool_call_id":"orphan_call","content":"旧会话残留结果"}
+]
+```
+
+Agent durable transcript（修复后）：
+
+```json
+[
+  {"role":"user","content":"检查部署状态。","_turn_key":"turn:28"},
+  {"role":"assistant","content":"我继续检查部署结果。"}
+]
+```
+
+WebUI 展示投影：
+
+```json
+[
+  {"role":"user","content":"检查部署状态。","_turn_key":"turn:28"},
+  {"role":"assistant","content":"我继续检查部署结果。"}
+]
+```
+
+上例中，相邻 assistant 会被合并或按验证候选规则由后者替换；孤立 tool 会被删除。该逻辑
+不应被 WebUI 当作“隐藏消息”实现，否则会把 Agent 需要的 tool 配对和 flush 游标一起破坏。
+
+### 7.6 后台 memory / skill review fork：主会话之外的辅助 Agent
+
+**机制启用状态：⚠️ 条件启用。** 默认每约 10 个用户 turn 检查一次；只有启用了 memory
+或 skill 工具、达到对应 nudge interval、且本轮有正常最终回答时才启动。它在后台创建一个
+review fork；同模型回放完整快照，切换 auxiliary 模型时回放压缩 digest。
+
+**WebUI 对齐状态：✅ 无需主会话接入。** review fork 的状态、工具调用和最终文本不会进入
+主 WebUI SSE、主 session messages 或普通回答气泡；用户最多看到后台完成摘要/状态通知。
+
+**上游持久化规则：✅ 一致。** review fork 设置 `_persist_disabled=true`，不会把 harness
+user prompt 或 review assistant 写入主 session durable transcript。它只允许 memory / skill
+工具产生外部知识库或技能文件变更；review fork 自己也关闭压缩和周期 nudge。
+
+实现位置：`hermes-agent/agent/turn_finalizer.py`、`hermes-agent/agent/background_review.py`、
+`hermes-agent/agent/agent_init.py`。
+
+Agent 运行时 `messages`（review fork，不是主会话）：
+
+```json
+[
+  {"role":"user","content":"[Earlier conversation digest — older turns summarised to bound the review's cold-write cost on the routed aux model. Recent turns follow verbatim below.]\nUSER: 用户希望答案保持三段式。"},
+  {"role":"user","content":"Review the conversation above and update the skill library. Be ACTIVE — most sessions produce at least one skill update, even if small."},
+  {"role":"assistant","content":"已更新消息投影规范技能。"}
+]
+```
+
+Agent durable transcript（主会话）：
+
+```json
+[
+  {"role":"user","content":"请检查这次消息投影是否符合文档。","_turn_key":"turn:29"},
+  {"role":"assistant","content":"消息投影已完成检查。"}
+]
+```
+
+WebUI 展示投影（主会话）：
+
+```json
+[
+  {"role":"user","content":"请检查这次消息投影是否符合文档。","_turn_key":"turn:29"},
+  {"role":"assistant","content":"消息投影已完成检查。"}
+]
+```
+
+这里的 digest 和 review prompt 只属于辅助 Agent 的请求上下文。源码中的 digest 是普通
+`role=user` 文本，但由于 review fork 禁止持久化，不应被当成主会话 user，也不应添加到主会话
+的 turn key 或 WebUI 投影中。
+
 ## Provider 请求合并与 durable transcript
 
 **WebUI 当前状态：— 无需专门实现。**
@@ -2497,6 +2920,8 @@ References: <labels>
 两个不同维度，不能用同一个“过滤”动作代替。
 
 ### 8.1 不持久化、也不展示的 internal scaffold
+
+**机制启用状态：✅ 默认过滤规则。** 只要消息被分类为 `internal_scaffold`，Agent durable 写入和 WebUI 投影都会按规则过滤；尚未接入的 2.5 legacy nudge 除外。
 
 **WebUI 对齐状态：✅ 已对齐。** 已识别的 `internal_scaffold` 在实时收口与历史投影中均被过滤；仅上游的 `_dropped_toolcall_nudge` 仍见第 2.5 节的未接入说明。
 
@@ -2552,6 +2977,8 @@ WebUI 展示投影：
 
 ### 8.2 持久化、但不展示的 context anchor
 
+**机制启用状态：✅ 默认分类与投影规则。** 已标记为 `context_anchor` 的消息可进入 durable transcript，但在 `done` 和历史加载投影中隐藏；没有单独的启停开关。
+
 **WebUI 对齐状态：✅ 已与当前 Fork 对齐。** anchor 会保留给 Agent 恢复上下文，但不会成为用户气泡；todo、压缩摘要与 no-user fallback 的 durable 形状仍与上游不同，见第 6 章。
 
 **上游持久化规则：⚠️ 部分一致。** length、ack、incomplete 和 summary-request anchor 的 durable 规则一致；todo、compaction summary 与 no-user fallback 以第 6 章的差异说明为准。
@@ -2561,6 +2988,10 @@ WebUI 展示投影：
 - Codex incomplete continuation user
 - Codex intermediate ack continue user
 - max-iterations summary request
+
+当前 Fork 的普通 `process_wakeup` 不在此列表中：它只有 `_source` / `_wakeup_meta`，没有
+`context_anchor`，因此会按普通 user 处理。这是与 async delegation wakeup 不同的已知缺口，
+见 3.5；不能把所有 server-side wakeup 都默认视为隐藏 anchor。
 
 这些消息要保留给模型恢复或解释后续 assistant，因此会写入 Agent
 `state.db`。WebUI projection 隐藏它们，不生成 user 气泡。
@@ -2573,7 +3004,7 @@ Agent 运行时 `messages`：
 [
   {"role":"user","content":"原始请求。","_turn_key":"turn:29"},
   {"role":"assistant","content":"已输出但被截断的真实正文。","finish_reason":"length"},
-  {"role":"user","content":"[System: Your previous response was truncated by the output length limit. Continue exactly where you left off. Do not restart or repeat prior text. Finish the answer directly.]"},
+  {"role":"user","content":"[System: Your previous response was truncated by the output length limit. Continue exactly where you left off. Do not restart or repeat prior text. Finish the answer directly.]","_hermes_message_class":"context_anchor","_hermes_scaffold_kind":"length_continuation"},
   {"role":"assistant","content":"续写后的真实正文。"}
 ]
 ```
@@ -2598,7 +3029,7 @@ WebUI 展示投影：
 ]
 ```
 
-上游没有通用的 `context_anchor` 字段。todo snapshot、compaction summary 与 no-user
+`upstream/main` 基线没有通用的 `context_anchor` 字段。todo snapshot、compaction summary 与 no-user
 fallback 在 Fork 中的独立行和隐藏投影，是 Fork 的持久化形状；其中 todo 与摘要还改变了
 上游可能合并进真实 tail 的行为。
 
@@ -2607,6 +3038,8 @@ fallback 在 Fork 中的独立行和隐藏投影，是 Fork 的持久化形状�
 正文、顺序和持久化结果不变。
 
 ### 8.3 持久化，并按一问一答规则投影的 assistant
+
+**机制启用状态：✅ 默认投影规则。** 真实 assistant 默认保留并展示；只有命中候选替换、length 合并或其他明确投影规则时才收口为单一回答区域。
 
 **WebUI 对齐状态：✅ 已对齐。** 真实 assistant 会按同一真实 user turn 收口；工具错误和取消结果的专用卡片覆盖范围仍以第 5、7 章的“部分对齐”说明为准。
 
@@ -2699,6 +3132,10 @@ WebUI 一问一答投影”的边界，不表示当前代码已经全部完成�
 | invalid tool JSON | 否 | assistant + tool | 失败/重试通过 tool 事件呈现 | 保留可恢复工具轨迹 | ⚠️ 真实行会保留；专用失败卡片未验证 |
 | unknown tool name | 否 | assistant + tool | 失败/重试通过 tool 事件呈现 | 保留工具名错误与跳过结果 | ⚠️ 真实行会保留；专用失败卡片未验证 |
 | corrupted historical tool arguments | 否 | 仅 tool | 不发 user SSE；按 tool 语义呈现 marker | 修复参数并保留对应 tool 错误轨迹 | ⚠️ 真实行会保留；marker 专用展示未验证 |
+| terminal background process wakeup | 空闲唤醒时是 | tool + assistant | completion_queue 后由 `process_wakeup` 新 stream；普通 wakeup 可能发 user 气泡 | 真实进程轨迹和结果可恢复；普通 wakeup 当前未统一隐藏 | ⚠️ 机制已实现；Fork anchor/原 turn 对齐待补 |
+| repair_message_sequence | 否 | 原地合并/删除 assistant/tool | 不产生额外 user SSE | 修复后的 canonical 序列参与 durable flush | ✅ Agent 已实现；WebUI 无专用修复事件 |
+| manual partial-compress seam | 可能插入 bridge user/assistant | 可能删除/改写 tool 轨迹 | `/compress here` 不是普通 chat stream | 压缩后的 canonical transcript 写入新会话或原地集合 | ⚠️ WebUI 仅消费结果，未专门标注 seam 清理 |
+| background memory/skill review | 辅助 Agent 内部 | 辅助 assistant/tool | 不进入主 chat SSE | review fork `_persist_disabled`；主会话不写入 | ✅ 主会话隔离；无需主投影 |
 | MoA guidance | 聚合器内部 | 否 | 不属于主 chat SSE | 不进入主会话 transcript | — Agent 聚合器内部，不需要 WebUI 接入 |
 
 ## 10. 对 WebUI / 展示层的直接启示
@@ -2724,6 +3161,11 @@ WebUI 应按真实 user turn 建立唯一回答区域，再按下面的顺序投
   provider 分支，不能假定所有模型都在这一步继续 token streaming
 - 工具因 stop 被跳过、名称不存在或历史参数损坏时，补写的是可恢复的 `tool` 轨迹；
   不能按内部控制消息过滤，也不能将取消结果渲染成成功
+- `terminal(background=true)` 的普通 `process_wakeup` 目前不是 `context_anchor`；不能把
+  `source` 或 `[IMPORTANT: ...]` 文案当作隐藏判据。若要避免第二个 user 气泡，应补结构化
+  anchor 和明确的 origin turn 绑定
+- `repair_message_sequence`、压缩 seam bridge 和 tool-pair sanitizer 是 Agent 的状态修复，
+  WebUI 不应自行重算或再次删除消息
 
 不得只按 `finish_reason="stop"` 判断可见回答：预算耗尽时，候选可能就是唯一交付。
 也不得按 `[System: ...]` 文案匹配、修改 `repair_message_sequence`，或合并

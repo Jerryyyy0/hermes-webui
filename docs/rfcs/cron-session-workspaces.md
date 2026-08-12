@@ -224,6 +224,58 @@ Cron Hub V1 请求建议使用下列可选字段；缺省值为 `managed` 加当
 
 路径只能由服务器通过 Profile-aware trusted-workspace 规则验证。新增 integration API 的错误可读文案必须为中文，JSON 路径段保持 snake_case。
 
+## 具体代码改动地图
+
+本节是实施入口，不以“搜索 cron 关键字后在大文件内追加逻辑”为实现方式。Cron 专属业务逻辑新增在 `integration/crons/`；`api/routes.py` 只保留已有调用点的薄接线。下表中的 **新增** 表示应创建独立模块，**修改** 表示必须调整的现有代码位置。
+
+### Hermes Agent 仓库
+
+| 优先级 | 文件与现有入口 | 改动 | 产出/不变量 |
+| --- | --- | --- | --- |
+| P0 | `cron/jobs.py`：`_normalize_workdir()`、`create_job()`、`update_job()` | **修改**：新增 `workspace_policy` 的解析、版本验证与持久化；保留 `workdir` 仅作为 legacy 字段，不能让 V1 execution root 写回 job 定义。 | `jobs.json` 保存经验证的 `{version, strategy, base_workspace}`，不保存动态 session root。 |
+| P0 | `cron/execution_workspace.py`（**新增**） | **新增**：集中实现 `resolve_workspace_policy()`、`allocate_execution_workspace()`、`validate_execution_workspace()`、`cleanup_execution_workspace()`；输入为 owner Profile、policy、cron session ID。 | 唯一能创建 `sessions/cron/<profile-key>/<session-id>`、验证命名空间和回收 root 的 Agent 侧 choke point。 |
+| P0 | `cron/scheduler.py`：`run_job()` 的 `no_agent` short-circuit、`_cron_session_id` 分配、`SessionDB.ensure_session(... cwd=...)`、`_job_workdir` / `TERMINAL_CWD` 设置 | **修改**：把 session ID + workspace 分配提到所有分支之前；`no_agent` 同样先写 `state.db`；将 allocation 返回的 root 写入 `ensure_session(cwd=...)`、脚本 `cwd` 和 Agent `TERMINAL_CWD`。删除“workdir 消失则回退调度器 cwd”的 V1 分支，改为终止该次 execution。 | 每个新 execution 在工具/脚本开始前已有 `source=cron`、稳定 ID 与 canonical `cwd`；执行失败也不写入共享 cwd。 |
+| P0 | Agent 的 session/execution metadata 写入位置（`SessionDB.ensure_session()` 的可扩展 metadata 或 cron execution ledger） | **修改或 migration**：写入 `workspace_policy_version=1`、`workspace_strategy`、owner profile 与 session ID 的可查询关联。 | WebUI 能区分 V1 root 与 legacy `cwd`，不依赖 ID 前缀、目录名或 output 文件时间。 |
+| P1 | Agent worktree helper（当前 WebUI `api/worktrees.py:create_worktree_for_workspace()` 间接调用 Agent `_setup_worktree()`） | **新增 Agent 专用接口**：支持调用方指定 execution target/metadata，并创建 detached worktree。不要直接复用普通交互式 `_setup_worktree()`，它返回 Agent 默认 worktree 位置与分支语义，不能保证位于 cron namespace。 | worktree path 属于 execution root，原 checkout 和用户分支不被改写。 |
+| P1 | `cron/scheduler.py` 的调度分池与 `_terminal_cwd_lock`（约 `sequential_jobs` / `parallel_jobs`） | **修改**：所有 V1 execution 都有独立 cwd；保留锁以保护 process-global env，但调度分类不能因为 job 未显式填写 legacy `workdir` 而将它当作无 cwd 的并行旧路径。 | 并发运行时不观察到其他 execution 的 cwd。 |
+| P1 | Agent 测试：`tests/cron/test_jobs.py`、`test_cron_workdir.py`、`test_cron_no_agent.py`、`test_scheduler.py`、`test_parallel_pool.py`、`test_cron_profile_isolation.py` | **修改/新增用例**：policy schema、两次运行不同 root、脚本 cwd、state.db cwd、并发隔离、跨 Profile、worktree 回滚与 root 创建失败。 | Agent 负责证明“实际执行 cwd”等于 state.db cwd。 |
+
+### Hermes WebUI 仓库：Cron API 与运行编排
+
+| 优先级 | 文件与现有入口 | 改动 | 产出/不变量 |
+| --- | --- | --- | --- |
+| P0 | `integration/crons/workspace_policy.py`（**新增**） | **新增**：解析来自 Cron Hub 的 policy；调用 Profile-aware trusted workspace 校验；将 Agent 提供的 `cwd`、policy metadata 解析成 `CronWorkspaceBinding`（`root`、`mode`、`state`、`strategy`）。 | WebUI 的单一 validation choke point；`cwd` 缺失/冲突/越界一律得到 `workspace_unverified`，而不是 fallback。 |
+| P0 | `integration/crons/handlers.py`：`_handle_create()`、`_handle_update()` | **修改**：白名单接收 `workspace_policy`，先调用新 policy helper，再传给 `cron.jobs.create_job()` / `update_job()`；不要让当前 `updates` comprehension 透传未验证的嵌套字段。 | `/api/integration/crons/create|update` 只持久化服务端验证后的 policy，并返回标准化结果。 |
+| P0 | `api/routes.py`：`_handle_cron_create()`、`_handle_cron_run()`、`_run_cron_tracked()`、`_cron_job_subprocess_main()` | **修改（薄接线）**：使上游单 Profile API 与 Cron Hub API 都携带相同 policy；手工 run 的内存 job copy 必须带 session ID/policy 到子进程；run 完成仍经 `materialize_after_cron_run()`。不要在此文件实现目录创建、验证或删除算法。 | 自动/手工、上游/Cron Hub 入口不会产生不同的 workspace 语义。 |
+| P0 | `integration/crons/session_bridge.py`：`_materialize_cron_session_found()`、`materialize_cron_session()`、`materialize_cron_session_run()`、批量 history 物化 | **修改**：扩展 state.db session 查询，取得 `cwd` 和 V1 metadata；调用 `CronWorkspaceBinding`；创建、已存在 reconcile、output fallback 三条路径都保存同一 root/mode/state。 | sidecar workspace 只能来自 Agent 的 authoritative record；相同 session ID 重放幂等，不同 root 不覆盖。 |
+| P0 | `api/models.py`：`import_cli_session()`；外部 session fallback `get_session_for_file_ops()` / `_ExternalSessionView` | **修改**：`import_cli_session()` 接收显式 `workspace`、`workspace_mode`、`workspace_state`；普通 CLI 调用维持当前 fallback，cron 调用必须声明 `require_workspace_binding=True`。外部 session file-op fallback 不得给 unverified cron session 返回 `get_last_workspace()`。 | 消除 cron materialization 到 `last_workspace` 的隐式回退。 |
+| P1 | `api/workspace.py`：`create_managed_workspace()`、`resolve_session_workspace()` | **修改**：抽出可复用的受锚定 root 创建/验证/删除 primitive，供 Cron helper 使用；`resolve_session_workspace()` 遇到 `workspace_state != ready` 的 cron session 拒绝请求。 | root 不可替换；路径验证与普通 managed workspace 共用安全实现。 |
+| P1 | `api/worktrees.py`：`create_worktree_for_workspace()`、`remove_worktree_for_session()` | **修改或新增 cron wrapper**：普通会话 helper 目前依赖 Agent 默认 `_setup_worktree()`，不能直接满足 cron target namespace；增加显式 cron worktree adapter，删除时校验 session ownership、stream/terminal 状态与 repo root。 | 只移除归属该 execution 的 worktree。 |
+| P1 | `integration/crons/hooks.py`：`materialize_after_cron_run()` | **修改**：将 execution session ID、workspace binding 状态和 Agent result 一起传入 materializer；不允许仅靠 output filename 生成可交互 workspace session。 | output fallback 只能是有 verified binding 的 workspace session，或只读 unverified 历史。 |
+| P1 | `integration/crons/session_bridge.py`：`delete_materialized_cron_session_source()`、`delete_cron_job_history()` | **修改**：在删除 Agent state rows 前收集并验证每个 binding；调用 managed/worktree 清理；返回 `workspace_cleanup` 的逐项结果。 | 单 session delete 不删除 root；job delete 仅删除受控 cron namespace 内、确属该 job/session 的 root。 |
+| P1 | `api/routes.py`、`api/streaming.py`、`api/gateway_chat.py`、`api/terminal.py`、`api/upload.py` | **修改**：在 Chat、Gateway、streaming、terminal、upload 的既有 `resolve_session_workspace()` / session 获取边界上统一执行 workspace-state gate；无需分别重算 policy。 | follow-up、队列、wakeup、goal、终端与文件操作只用已持久化 `Session.workspace`。 |
+
+### WebUI 前端、契约和测试
+
+| 优先级 | 文件/入口 | 改动 | 验证重点 |
+| --- | --- | --- | --- |
+| P2 | `static/hermes_integration_crons.js`（Cron Hub）及相邻 integration CSS | **修改**：新建/编辑表单传递 `workspace_policy`；渲染 `ready`、`legacy_shared`、`workspace_unverified`、`cleanup_failed`，并在 unverified 时禁用 Workspace/Terminal/继续聊天。 | 桌面、窄屏、移动端；不增加侧栏常驻控件。 |
+| P2 | `integration/swagger/openapi.json`、`integration/README.md` | **修改**：create/update request schema，job/history/session response 的 workspace strategy/state，删除的 partial cleanup response。 | API 文档和实际错误/状态码一致；错误文案为中文。 |
+| P0 | `integration/tests/crons/test_handlers.py`、`test_session_bridge.py`、`test_hooks.py`、`test_execution_model.py`、`test_manifest_turns.py` | **修改/新增**：创建/更新 policy 校验、state.db cwd → sidecar mapping、重复物化、缺失/冲突 cwd、manual run、history/output fallback、job cleanup。 | WebUI 负责证明“展示与 follow-up root”等于 Agent 记录。 |
+| P1 | `tests/test_session_managed_workspace.py`、`tests/test_session_import_workspace_validation.py`、`tests/test_cron_manual_run_persistence.py`、`tests/test_cron_history_database.py`、`tests/test_issue3975_cron_reply_materialization.py`、`tests/test_worktree_remove.py` | **修改/新增**：immutable follow-up、legacy 行为、删除范围、worktree 生命周期与 error path。 | 不能回归普通 session/import/worktree 行为。 |
+
+### 修改依赖顺序
+
+```text
+Agent policy + execution allocation + state.db metadata
+  -> WebUI CronWorkspaceBinding + session bridge
+  -> import_cli_session / resolve_session_workspace gate
+  -> delete/recovery paths
+  -> Cron Hub UI + OpenAPI + docs
+```
+
+WebUI 不应先合并“自动创建 cron workspace”的半成品：在 Agent 尚未同时提供 session ID、canonical `cwd` 与 V1 metadata 时，只能保留只读 legacy-safe 物化。这样不会让前端或 WebUI sidecar 成为 workspace 身份的猜测来源。
+
 ## UI 方案
 
 Cron Hub 的新建/编辑表单增加“执行工作区”选择：

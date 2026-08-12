@@ -492,10 +492,10 @@ def _is_agent_compression_start_status(kind: str, message: str) -> bool:
     cooldown / unrelated notices and make brand-new low-token turns look like
     auto-compression.
 
-    Positive markers below match the agent emitters in hermes-agent that mark
-    actual compression work (``conversation_loop`` pre-API / 413 / too-large,
-    ``conversation_compression`` compaction status). The ``turn_context``
-    preflight notice is intentionally excluded because the subsequent
+    Positive markers below match only the canonical compression-start emitter
+    (``conversation_compression`` compaction status). The ``turn_context``
+    preflight and ``conversation_loop`` pre-API notices are intentionally
+    excluded because they are decision/estimate messages; the subsequent
     ``_compress_context`` call emits the canonical compression-start notice.
     Explicitly reject skip / defer notices so "Skipping preflight
     compression…" never surfaces as a running compress divider.
@@ -516,12 +516,7 @@ def _is_agent_compression_start_status(kind: str, message: str) -> bool:
     if 'compressed' in m and 'compressing' not in m and 'compression attempt' not in m:
         return False
     return (
-        'pre-api compression:' in m
-        or 'compacting context' in m
-        or 'context too large' in m
-        or '— compressing (' in m
-        or '- compressing (' in m
-        or 'compression attempt' in m
+        'compacting context' in m
     )
 
 
@@ -7396,17 +7391,19 @@ def _run_agent_streaming(
             and 'http' in _lower
         ):
             _captured_terminal_error[0] = _message
-        # Preflight is a decision/estimate, not the compression operation.
-        # Keep it in the server log for diagnosis, but do not expose it as a
-        # second `compressing` lifecycle event; _compress_context emits the
-        # canonical start event immediately afterwards.
+        # Preflight and pre-API notices are decisions/estimates, not the
+        # compression operation. Keep them in the server log for diagnosis,
+        # but do not expose them as `compressing` lifecycle events.
         if (
             _kind == 'lifecycle'
-            and 'preflight compression:' in _lower
+            and (
+                'preflight compression:' in _lower
+                or 'pre-api compression:' in _lower
+            )
             and not any(marker in _lower for marker in ('skipping', 'defer', 'cooldown'))
         ):
             logger.info(
-                '[webui] auto-compression preflight: stream=%s session=%s message=%s',
+                '[webui] auto-compression decision: stream=%s session=%s message=%s',
                 stream_id,
                 session_id,
                 _message,

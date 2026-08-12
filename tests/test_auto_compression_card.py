@@ -453,7 +453,7 @@ def test_agent_status_callback_emits_compressing_and_warning_events():
     assert "'session_id': session_id" in block
     assert "'message': 'Compressing context'" in block
     assert "_is_agent_compression_start_status(_kind, _message)" in block
-    assert "auto-compression preflight" in block
+    assert "auto-compression decision" in block
     assert "or 'compressing' in _lower" not in block
     assert "or 'preflight compression' in _lower" not in block
 
@@ -478,7 +478,7 @@ def test_agent_compression_start_status_matches_real_emitters_only():
         "lifecycle",
         "📦 Preflight compression: ~101,000 tokens >= 96,000 threshold. This may take a moment.",
     )
-    assert _is_agent_compression_start_status(
+    assert not _is_agent_compression_start_status(
         "lifecycle",
         "📦 Pre-API compression: ~521,055 tokens near the context/output limit. Compacting before the next model call.",
     )
@@ -486,11 +486,11 @@ def test_agent_compression_start_status_matches_real_emitters_only():
         "lifecycle",
         "🗜️ Compacting context — summarizing earlier conversation so I can continue...",
     )
-    assert _is_agent_compression_start_status(
+    assert not _is_agent_compression_start_status(
         "lifecycle",
         "🗜️ Context too large (~120,000 tokens) — compressing (1/3)...",
     )
-    assert _is_agent_compression_start_status(
+    assert not _is_agent_compression_start_status(
         "lifecycle",
         "⚠️  Request payload too large (413) — compression attempt 1/3...",
     )
