@@ -78,3 +78,7 @@ First-time contributor RFCs should be discussed in an issue before opening a PR.
   cross-repository contract for giving every Cron execution session an
   independent, immutable workspace from Agent execution through WebUI recovery
   and cleanup.
+- [`cron-model-provider-binding.md`](cron-model-provider-binding.md) — Proposed
+  cross-repository contract that makes every fixed Cron inference selection a
+  complete Provider/model binding, blocks unsafe legacy partial bindings before
+  network execution, and defines a safe migration/audit path.
