@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import threading
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -21,9 +20,27 @@ def _on_session_saved(session) -> None:
     except (TypeError, ValueError, OSError):
         return
 
+    from integration.workspace._root import integration_workspace_root
     from integration.workspace.file_index_cache import invalidate_workspace_file_index
 
-    invalidate_workspace_file_index(workspace)
+    try:
+        integration_root = integration_workspace_root().expanduser().resolve()
+    except (TypeError, ValueError, OSError):
+        # Preserve the existing behavior if the shared integration root cannot
+        # be resolved. A session-specific cached index can still be stale.
+        invalidate_workspace_file_index(workspace)
+        return
+
+    try:
+        workspace.relative_to(integration_root)
+    except ValueError:
+        # Explicit external workspaces retain their own cache scope.
+        invalidate_workspace_file_index(workspace)
+    else:
+        # The flat integration index is keyed by its root, not by each managed
+        # session subdirectory. Invalidate the parent index so Agent-created
+        # artifacts under e.g. sessions/<id>/ are visible after Session.save().
+        invalidate_workspace_file_index(integration_root)
 
 
 def _run_profile_backfill() -> None:

@@ -325,7 +325,7 @@ auth-proxy 不可达时 WebUI 返回 `502` 且 `error` 为 `zhiling_logout_faile
 
 翻页：递增 `page` 直到响应 `has_more` 为 `false`。条目含 `ext`、`mime`、`mtime_ns`、`ctime_ns`（优先 birthtime，否则为 `st_ctime` 纳秒；`stat` 失败时为 `null`）。manifest 成果文件（会话 write 工具产出）附加可选 `profile`（`session.profile`）；非成果文件无该字段。
 
-索引与读取默认排除系统/缓存垃圾文件（如 `.DS_Store`、`Thumbs.db`、`._*`），且不进入 `.git`、`node_modules`、`__pycache__` 等目录（与右侧 Workspace 文件树 #1793 规则一致）。
+索引与读取默认排除系统/缓存垃圾文件（如 `.DS_Store`、`Thumbs.db`、`._*`），且不进入 `.git`、`node_modules`、`__pycache__` 等目录（与右侧 Workspace 文件树 #1793 规则一致）。文件索引保留进程内缓存；`refresh=1` 可强制重扫。位于该根目录内的会话工作区在 `Session.save()` 后会清除根索引，确保 Agent 生成的子目录文件在后续查询中可见。
 
 ```bash
 curl -sS 'http://127.0.0.1:8787/api/integration/workspace/files?page=1&page_size=100'
