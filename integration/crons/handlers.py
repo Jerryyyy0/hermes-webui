@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 from contextlib import contextmanager
 
-from api.helpers import bad, j, require
+from api.helpers import _sanitize_error, bad, j, require
 from api.profiles import cron_profile_context_for_home, get_hermes_home_for_profile
 from api.routes import _cron_job_for_api, _normalize_cron_profile_value, _run_cron_tracked
 
@@ -271,8 +271,18 @@ def _handle_resume(handler, body):
 
     from cron.jobs import resume_job
 
-    with _owner_cron_context(profile):
-        result = resume_job(body["job_id"])
+    try:
+        with _owner_cron_context(profile):
+            result = resume_job(body["job_id"])
+    except ValueError as exc:
+        message = str(exc)
+        if (
+            message.startswith("Cannot resume: one-shot time ")
+            and " is in the past " in message
+            and " will never fire." in message
+        ):
+            message = "执行时间是历史时间，请修改执行时间后启用"
+        return _respond_bad(handler, _sanitize_error(message))
     if result:
         return _respond(handler, {"ok": True, "job": _cron_job_for_api(result)})
     return _respond_bad(handler, "Job not found", 404)
