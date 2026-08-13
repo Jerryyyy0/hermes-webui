@@ -107,6 +107,11 @@ def fingerprint_for(category: str, context: dict[str, Any]) -> str:
 
 
 def scheduled_task_stats(profile_path: Path) -> dict[str, int]:
+    # Keep the bubble's summary aligned with the Cron API. In particular,
+    # manually triggered jobs are tracked in the WebUI process rather than by
+    # mutating jobs.json while they run.
+    from api.routes import _cron_job_for_api
+
     jobs_path = Path(profile_path) / "cron" / "jobs.json"
     try:
         payload = json.loads(jobs_path.read_text(encoding="utf-8"))
@@ -120,13 +125,10 @@ def scheduled_task_stats(profile_path: Path) -> dict[str, int]:
         if not isinstance(job, dict):
             continue
         total += 1
-        state = str(job.get("state") or "").lower()
-        last_status = str(job.get("last_status") or "").lower()
-        status = str(job.get("status") or "").lower()
-        has_error = bool(job.get("last_error") or job.get("last_delivery_error"))
-        if status in {"running", "in_progress", "executing"} or state in {"running", "in_progress", "executing"}:
+        execution_bucket = _cron_job_for_api(job).get("execution_bucket")
+        if execution_bucket == "running":
             running += 1
-        elif has_error or last_status in {"failed", "error", "errored"} or state in {"failed", "error", "errored"}:
+        elif execution_bucket == "error":
             failed += 1
         else:
             pending += 1

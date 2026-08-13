@@ -58,6 +58,27 @@ def test_emotion_refreshes_after_5_minutes():
     assert generation.should_generate("emotion", "same", cache, now=now) is True
 
 
+def test_enqueue_missing_or_stale_defers_context_collection(tmp_path, monkeypatch):
+    previous_disabled = generation._disabled
+    generation.disable_worker_for_tests(False)
+    monkeypatch.setattr(generation, "_ensure_worker", lambda: None)
+    try:
+        with generation._cv:
+            generation._pending_refreshes.clear()
+        with patch.object(
+            collectors,
+            "collect_context",
+            side_effect=AssertionError("请求线程不应同步收集气泡上下文"),
+        ):
+            generation.enqueue_missing_or_stale("alice", tmp_path)
+        with generation._cv:
+            assert set(generation._pending_refreshes) == {("alice", str(tmp_path))}
+    finally:
+        with generation._cv:
+            generation._pending_refreshes.clear()
+        generation.disable_worker_for_tests(previous_disabled)
+
+
 def test_collect_skills_maps_local_all_display_metadata():
     raw = [
         {
@@ -236,7 +257,9 @@ def test_validate_skill_rejects_ascii_slugs_but_allows_chinese_summaries():
     assert reason == "ok"
 
 
-def test_scheduled_task_stats_counts_completed_non_failed_jobs_as_pending(tmp_path):
+def test_scheduled_task_stats_matches_cron_api_manual_running_status(tmp_path):
+    import api.routes as routes
+
     cron = tmp_path / "cron"
     cron.mkdir()
     (cron / "jobs.json").write_text(
@@ -244,24 +267,57 @@ def test_scheduled_task_stats_counts_completed_non_failed_jobs_as_pending(tmp_pa
             {
                 "jobs": [
                     {
-                        "enabled": False,
-                        "state": "completed",
-                        "last_status": "ok",
-                        "next_run_at": None,
-                    },
-                    {
-                        "enabled": False,
-                        "state": "completed",
-                        "last_status": "ok",
-                        "next_run_at": None,
-                    },
-                    {
+                        "id": "manual-running",
                         "enabled": True,
                         "state": "pending",
                         "next_run_at": "2026-07-20T20:00:00+08:00",
-                    },
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    routes._mark_cron_running("manual-running")
+    try:
+        assert collectors.scheduled_task_stats(tmp_path) == {
+            "total": 1,
+            "running": 1,
+            "pending": 0,
+            "failed": 0,
+        }
+    finally:
+        routes._mark_cron_done("manual-running")
+
+
+def test_scheduled_task_stats_matches_cron_api_for_persisted_running_state(tmp_path):
+    cron = tmp_path / "cron"
+    cron.mkdir()
+    (cron / "jobs.json").write_text(
+        json.dumps({"jobs": [{"id": "not-tracked", "enabled": True, "state": "running"}]}),
+        encoding="utf-8",
+    )
+
+    assert collectors.scheduled_task_stats(tmp_path) == {
+        "total": 1,
+        "running": 0,
+        "pending": 1,
+        "failed": 0,
+    }
+
+
+def test_scheduled_task_stats_counts_completed_non_failed_jobs_as_pending(tmp_path):
+    cron = tmp_path / "cron"
+    cron.mkdir()
+    (cron / "jobs.json").write_text(
+        json.dumps(
+            {
+                "jobs": [
+                    {"enabled": False, "state": "completed", "last_status": "ok", "next_run_at": None},
+                    {"enabled": False, "state": "completed", "last_status": "ok", "next_run_at": None},
+                    {"enabled": True, "state": "pending", "next_run_at": "2026-07-20T20:00:00+08:00"},
                     {"enabled": True, "state": "running"},
-                    {"enabled": False, "state": "completed", "last_status": "failed", "last_error": "boom"},
+                    {"enabled": False, "state": "completed", "last_status": "error", "last_error": "boom"},
                 ]
             }
         ),
@@ -270,8 +326,8 @@ def test_scheduled_task_stats_counts_completed_non_failed_jobs_as_pending(tmp_pa
 
     assert collectors.scheduled_task_stats(tmp_path) == {
         "total": 5,
-        "running": 1,
-        "pending": 3,
+        "running": 0,
+        "pending": 4,
         "failed": 1,
     }
 

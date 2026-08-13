@@ -46,6 +46,9 @@ def test_handler_resolves_profile_from_list_and_returns_scheduled_task(tmp_path,
 
     with patch("api.profiles.list_profiles_api", return_value=[{"name": "alice", "path": str(profile)}]), patch(
         "integration.assistant_bubbles.handlers.j", lambda h, payload: payloads.append(payload)
+    ), patch(
+        "integration.assistant_bubbles.handlers.collectors.collect_context",
+        side_effect=AssertionError("缓存命中不应同步收集气泡上下文"),
     ):
         assert try_handle_get(DummyHandler(), _parsed("profile=alice")) is True
 
@@ -57,20 +60,18 @@ def test_handler_resolves_profile_from_list_and_returns_scheduled_task(tmp_path,
     assert "2个定时任务" in payload["items"][2]["text"]
 
 
-def test_handler_bad_cache_falls_back_and_queues(tmp_path, monkeypatch):
+def test_handler_bad_cache_falls_back_and_schedules_refresh(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_INTEGRATION", "1")
     generation.disable_worker_for_tests(True)
     profile = tmp_path / "profile"
     profile.mkdir()
     (profile / "assistant_bubbles.json").write_text("not json", encoding="utf-8")
     payloads = []
-    enqueued = []
-
     with patch("api.profiles.list_profiles_api", return_value=[{"name": "alice", "path": str(profile)}]), patch(
         "integration.assistant_bubbles.handlers.j", lambda h, payload: payloads.append(payload)
-    ), patch("integration.assistant_bubbles.generation.enqueue", lambda *args: enqueued.append(args)):
+    ), patch("integration.assistant_bubbles.generation.enqueue_missing_or_stale") as schedule_refresh:
         assert try_handle_get(DummyHandler(), _parsed("profile=alice")) is True
 
     assert payloads[0]["cache_status"] == "fallback"
     assert len(payloads[0]["items"]) == 8
-    assert {args[2] for args in enqueued} == {"assistant_intro", "memory", "skill", "emotion"}
+    schedule_refresh.assert_called_once_with("alice", profile, None)
