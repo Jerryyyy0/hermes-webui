@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -133,35 +132,40 @@ def test_start_uses_verified_runtime_and_does_not_mutate_home(monkeypatch):
     monkeypatch.setattr(agent_cli_runtime, "resolve_agent_cli_runtime", lambda: invocation)
     captured = {}
 
-    def runner(command, **kwargs):
-        captured["command"] = command
-        captured.update(kwargs)
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
+    def process_starter(profile, *, runtime):
+        captured["profile"] = profile
+        captured["runtime"] = runtime
+        return {"profile": profile["name"], "status": "started", "pid": 42}
 
-    result = startup._start_profile_gateway(profiles()[0], runner=runner)
+    result = startup._start_profile_gateway(profiles()[0], process_starter=process_starter)
 
     assert result["status"] == "started"
-    assert captured["command"] == ["/hermes", "gateway", "start"]
-    assert captured["cwd"] == str(Path.home())
-    assert captured["env"] is verified_env
+    assert captured["profile"] == profiles()[0]
+    assert captured["runtime"] is invocation
     assert os.environ.get("HERMES_HOME") == original_home
 
 
-def test_timeout_is_classified(monkeypatch):
+def test_s6_keeps_service_manager_lifecycle(monkeypatch):
     from integration.gateway_startup import runtime as agent_cli_runtime
 
-    monkeypatch.setattr(
-        agent_cli_runtime,
-        "resolve_agent_cli_runtime",
-        lambda: agent_cli_runtime.AgentCliInvocation(("/hermes",), str(Path.home()), {}, "launcher"),
+    invocation = agent_cli_runtime.AgentCliInvocation(("/hermes",), str(Path.home()), {"X": "1"}, "launcher")
+    monkeypatch.setattr(startup, "_running_in_container", lambda: True)
+    monkeypatch.setattr(startup, "_s6_service_manager_available", lambda: True)
+    captured = {}
+
+    def runner(command, **kwargs):
+        captured["command"] = command
+        captured.update(kwargs)
+        return SimpleNamespace(returncode=0)
+
+    result = startup._start_profile_gateway(
+        profiles()[0], runtime_resolver=lambda: invocation, service_runner=runner
     )
 
-    def runner(*_args, **_kwargs):
-        raise subprocess.TimeoutExpired("hermes", 1)
-
-    result = startup._start_profile_gateway(profiles()[0], runner=runner)
-
-    assert result == {"profile": "default", "status": "timed_out"}
+    assert result == {"profile": "default", "status": "started", "owner": "s6"}
+    assert captured["command"] == ["/hermes", "gateway", "start"]
+    assert captured["cwd"] == str(Path.home())
+    assert captured["env"] == {"X": "1"}
 
 
 def test_runtime_unavailable_is_classified(monkeypatch):
@@ -178,10 +182,20 @@ def test_runtime_unavailable_is_classified(monkeypatch):
     assert result["profile"] == "default"
 
 
-def test_already_running_skips_command():
+def test_ui_gateway_running_flag_is_not_an_authoritative_process_probe(monkeypatch):
     profile = profiles()[0]
     profile["gateway_running"] = True
+    from integration.gateway_startup import runtime as agent_cli_runtime
 
-    result = startup._start_profile_gateway(profile, runner=lambda *_a, **_k: pytest.fail("must not run"))
+    invocation = agent_cli_runtime.AgentCliInvocation(("/hermes",), str(Path.home()), {}, "launcher")
+    seen = []
 
-    assert result == {"profile": "default", "status": "already_running"}
+    result = startup._start_profile_gateway(
+        profile,
+        runtime_resolver=lambda: invocation,
+        process_starter=lambda got_profile, *, runtime: seen.append((got_profile, runtime))
+        or {"profile": "default", "status": "state_unknown"},
+    )
+
+    assert result == {"profile": "default", "status": "state_unknown"}
+    assert seen == [(profile, invocation)]

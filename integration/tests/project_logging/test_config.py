@@ -10,6 +10,7 @@ from integration.project_logging.config import (
     configure_logging,
     get_logger,
     is_debug_level,
+    log_gateway_line,
     log_error,
     log_info,
     log_warning,
@@ -92,3 +93,11 @@ def test_log_error_visible_at_warning_level(stderr_capture):
     configure_logging(level=logging.WARNING, force=True, stream=stderr_capture)
     log_error("visible-error")
     assert "visible-error" in stderr_capture.getvalue()
+
+
+def test_gateway_lines_bypass_webui_log_level(stderr_capture):
+    configure_logging(level=logging.WARNING, force=True, stream=stderr_capture)
+
+    log_gateway_line(logging.DEBUG, "[gateway:default] debug-visible")
+
+    assert "DEBUG [gateway:default] debug-visible" in stderr_capture.getvalue()

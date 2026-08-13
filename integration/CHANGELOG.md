@@ -6,6 +6,10 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ## [Unreleased]
 
+### Added
+
+- **WebUI-owned Gateway console forwarding** — 原生 `server.py` 启动且确认 Profile Gateway 未运行时，WebUI 现在以前台 `gateway run -vv --external-supervisor` 子进程启动并持有该 Gateway，将合并 stdout/stderr 以 `[gateway:<profile>]` 前缀写入 WebUI 控制台及同一持久化日志。转发行不受 `HERMES_WEBUI_LOG_LEVEL` 过滤，敏感字段在输出前脱敏；WebUI 退出时只终止自身创建的 Gateway。已运行、s6 或其他外部托管 Gateway 不接管、不转发。
+
 ### Fixed
 
 - **Cron job delete latency** — `POST /api/integration/crons/delete` 的同步历史清理改为按 Profile 批量删除：每个 `state.db` 只获取一次清理锁、打开一次连接并执行一次事务，不再对每条 Cron session 重复扫描 manifest 和建立数据库事务；WebUI sidecar 与输出目录清理语义保持不变。

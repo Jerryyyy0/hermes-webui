@@ -64,12 +64,15 @@ Direct `python server.py` starts with detailed session timing disabled unless th
 
 Implementation: [`integration/runtime_logging/`](runtime_logging/).
 
-### All-profile Gateway startup
+### All-profile Gateway startup and console logs
 
-WebUI startup ensures every visible Hermes Profile Gateway is running by default. The coordinator runs asynchronously, uses Hermes Agent's idempotent service lifecycle (`gateway start`), and never stops gateways when WebUI exits, so scheduled jobs remain independent of the WebUI process.
+WebUI startup asynchronously ensures every visible Hermes Profile Gateway is running by default. On a native host, when the Agent's authoritative Profile lock confirms that no Gateway is running, WebUI launches and owns a foreground child using `hermes gateway run -vv --external-supervisor`. Its combined stdout/stderr is forwarded to the same WebUI console sink and persistence destination with a `[gateway:<profile>]` prefix; direct interactive `python server.py` therefore also writes those lines to `{HERMES_WEBUI_STATE_DIR}/server-<port>.log`.
 
-- Root/default uses `hermes gateway start`; named profiles use `hermes -p <name> gateway start`.
-- Already-running gateways are skipped. Per-profile failures and timeouts are logged but never block the HTTP server.
+- Gateway forwarding is enabled by default and does not add an environment variable. `HERMES_WEBUI_LOG_LEVEL` still filters WebUI's own diagnostics, but does not suppress lines forwarded from a WebUI-owned Gateway.
+- Only the child processes created by this WebUI instance are forwarded. A running Gateway is skipped, never replaced or stopped, and no historical `gateway.log` file is tailed. Gateway lines are redacted before being sent to the WebUI console sink.
+- On WebUI shutdown, only its own Gateway child process groups are terminated; their reader threads drain the remaining pipe output. A planned Agent restart exits to WebUI and is relaunched under the same ownership. Unexpected exits are recorded but not retried.
+- s6 containers retain the existing `gateway start` service-manager lifecycle. They are externally owned, are not registered as WebUI child processes, and their logs are outside this forwarding path.
+- Per-profile failures and unavailable/unknown runtime state are logged but never block the HTTP server.
 - When the default profile enables `gateway.multiplex_profiles`, only the default Gateway is started because it serves all profiles.
 - Isolated-profile deployments only enumerate and start their pinned profile.
 - Native hosts and s6 containers enable the WebUI coordinator by default. Plain containers without s6 disable it automatically because Hermes `gateway start` is a successful no-op there; `run_container_services.sh` owns those Gateway processes instead. `HERMES_WEBUI_START_PROFILE_GATEWAYS=0` / `1` remains an explicit override when needed. Starting gateways can activate scheduled model calls and configured messaging/API platforms.
