@@ -6096,9 +6096,6 @@ def _agent_result_terminal_failure(result) -> bool:
     return False
 
 
-_TOOL_RESULT_SNIPPET_MAX = 4000
-
-
 _LIVE_TOOL_PROMPT_DELTA_MAX = 12_000
 _LIVE_TOOL_PROMPT_TURN_MAX = 24_000
 
@@ -6157,19 +6154,16 @@ def live_usage_prompt_estimate_after_tool_delta(
     }
 
 
-def _tool_result_snippet(raw, limit: int = _TOOL_RESULT_SNIPPET_MAX) -> str:
-    """Extract a bounded result preview from a stored tool message payload."""
-    if limit <= 0:
+def _tool_result_snippet(raw) -> str:
+    """Return the complete original tool result for SSE and recovery."""
+    if raw is None:
         return ''
-    text = str(raw or '')
+    if isinstance(raw, str):
+        return raw
     try:
-        data = raw if isinstance(raw, dict) else json.loads(text)
-        if isinstance(data, dict):
-            preview = data.get('output') or data.get('result') or data.get('error') or text
-            text = str(preview)
+        return json.dumps(raw, ensure_ascii=False, default=str)
     except Exception:
-        pass
-    return text[:limit]
+        return str(raw)
 
 
 def _truncate_tool_args(args, limit: int = 6) -> dict:
