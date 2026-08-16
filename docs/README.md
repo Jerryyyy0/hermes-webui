@@ -30,6 +30,7 @@
 - [`architecture/HermesAgent消息补充说明文档.md`](architecture/HermesAgent消息补充说明文档.md) - Agent 运行时消息的语义与 WebUI 展示边界。
 - [`architecture/HermesAgent上下文压缩逻辑说明.md`](architecture/HermesAgent上下文压缩逻辑说明.md) - Agent 侧上下文压缩的触发、摘要、会话持久化与故障分支。
 - [`architecture/state_db表结构说明.md`](architecture/state_db表结构说明.md) - Hermes Agent `state.db` 的 schema 和字段说明。
+- [`api/async-delegation-session-events.md`](api/async-delegation-session-events.md) - 异步子任务的会话事件、wakeup 聊天流与多会话订阅交互提案。
 - [`integration/skillhub后端接口文档约束.md`](integration/skillhub后端接口文档约束.md) - SkillHub 对外接口约束。
 - [`integration/webui-external-service-接口说明.md`](integration/webui-external-service-接口说明.md) - WebUI 与外部服务的调用关系。
 - [`integration/integration-common-tasks-api.md`](integration/integration-common-tasks-api.md) - 欢迎页常办任务接口。
