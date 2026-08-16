@@ -883,6 +883,32 @@ def resolve_trusted_workspace(path: str | Path | None = None) -> Path:
     )
 
 
+def artifact_workspace_root_for_session(session) -> Path:
+    """Return the shared root eligible for ordinary session file artifacts.
+
+    A session's own workspace remains the default directory for relative Agent
+    file operations. When that workspace is nested under the configured WebUI
+    default workspace, artifact eligibility intentionally uses the enclosing
+    default root. This lets an explicitly targeted write there be surfaced and
+    previewed without broadening the preview endpoint to arbitrary local paths.
+    Sessions rooted outside the configured default keep their own root, which
+    preserves existing external-workspace and historical-session isolation.
+    """
+    artifact_root = resolve_trusted_workspace(None)
+    raw_session_workspace = str(getattr(session, "workspace", "") or "").strip()
+    if not raw_session_workspace:
+        return artifact_root
+    try:
+        session_workspace = _resolve_path(raw_session_workspace)
+    except (OSError, RuntimeError, ValueError):
+        return artifact_root
+    try:
+        session_workspace.relative_to(artifact_root)
+    except ValueError:
+        return session_workspace
+    return artifact_root
+
+
 def resolve_session_workspace(
     session,
     requested: str | Path | None = None,

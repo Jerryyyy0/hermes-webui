@@ -641,6 +641,35 @@ def _webui_surface_context_prompt(surface_context: Optional[dict]) -> str:
     return "\n".join(lines)
 
 
+def _webui_workspace_policy_prompt(surface_context: Optional[dict]) -> str:
+    """Return the final, runtime-authoritative workspace default policy."""
+    workspace = ""
+    if isinstance(surface_context, dict):
+        workspace = str(surface_context.get("workspace") or "").strip()
+    if not workspace:
+        return ""
+    return f"""
+Workspace resolution policy — applies to this request:
+
+The current session workspace is: {workspace}
+
+This workspace is the default location for newly created files when the user
+has not specified a target path. It is not a global filesystem access boundary.
+
+Precedence for choosing a write target:
+1. An explicit path named by the user in the current request. It may be outside
+   the session workspace; honor it and do not rewrite it into the workspace.
+2. The current session workspace above.
+3. Never infer a default output directory from memory, prior conversation,
+   examples, or a hardcoded /workspace path.
+
+If the user does not name a destination, write directly under:
+{workspace}/<filename>
+
+Do not use /workspace/<filename> unless the user explicitly requests that path.
+""".strip()
+
+
 def _webui_ephemeral_system_prompt(
     personality_prompt: Optional[str],
     surface_context: Optional[dict] = None,
@@ -658,6 +687,9 @@ def _webui_ephemeral_system_prompt(
     delivery_prompt = _webui_delivery_context_prompt(config_data)
     if delivery_prompt:
         parts.append(delivery_prompt)
+    workspace_policy = _webui_workspace_policy_prompt(surface_context)
+    if workspace_policy:
+        parts.append(workspace_policy)
     return "\n\n".join(part for part in parts if part)
 
 
@@ -1665,6 +1697,7 @@ def _persist_turn_artifact_paths(
 
     try:
         from api.session_manifest import (
+            artifact_workspace_root_for_session,
             _skills_dir_for_session,
             extract_turn_artifact_entries_for_manifest,
             filter_existing_turn_artifact_entries,
@@ -1707,7 +1740,7 @@ def _persist_turn_artifact_paths(
         )
 
     try:
-        workspace = Path(str(getattr(s, 'workspace', '') or '')).expanduser().resolve()
+        workspace = artifact_workspace_root_for_session(s)
         _entries = filter_existing_turn_artifact_entries(
             workspace,
             _skills_dir_for_session(s),
@@ -7915,6 +7948,8 @@ def _run_agent_streaming(
             from api.session_manifest import _skills_dir_for_session as _manifest_skills_dir_for_session
             _manifest_skills_dir = _manifest_skills_dir_for_session(s)
             _manifest_default_profile = str(getattr(s, 'profile', None) or '').strip()
+            from api.session_manifest import artifact_workspace_root_for_session as _artifact_root_for_session
+            _manifest_workspace_root = _artifact_root_for_session(s)
 
             def _tool_args_snapshot(args):
                 args_snap = {}
@@ -7961,6 +7996,7 @@ def _run_agent_streaming(
                         source_kind=source_kind,
                         skills_dir=_manifest_skills_dir,
                         default_profile=_manifest_default_profile,
+                        artifact_workspace=_manifest_workspace_root,
                     )
                     if not (_delta.get('todos') or _delta.get('artifacts') or _delta.get('references')):
                         return
@@ -8000,6 +8036,7 @@ def _run_agent_streaming(
                         default_profile=_manifest_default_profile,
                         skills_dir=_manifest_skills_dir,
                         tool_calls=list(getattr(s, 'tool_calls', None) or []),
+                        artifact_workspace=_manifest_workspace_root,
                     )
                     if not (_delta.get('artifacts') or _delta.get('turns')):
                         return
