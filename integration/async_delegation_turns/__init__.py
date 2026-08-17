@@ -3,6 +3,7 @@
 from integration.async_delegation_turns.state import (
     mark_async_delegation_completion,
     mark_async_delegation_wakeup,
+    normalize_async_delegation_status,
     record_async_delegation_dispatch,
     resolve_async_delegation_origin,
 )
@@ -11,6 +12,7 @@ from integration.async_delegation_turns.events import idle_event, is_idle, snaps
 __all__ = [
     "mark_async_delegation_completion",
     "mark_async_delegation_wakeup",
+    "normalize_async_delegation_status",
     "record_async_delegation_dispatch",
     "resolve_async_delegation_origin",
     "idle_event",

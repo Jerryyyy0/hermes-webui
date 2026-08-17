@@ -1076,6 +1076,29 @@ def emit_async_delegation_status(
     )
 
 
+def _async_delegation_child_task_summary(evt: dict, record: dict | None) -> dict[str, int] | None:
+    """Summarize an Agent batch without leaking its result content into SSE."""
+    results = evt.get("results")
+    if not isinstance(results, list):
+        return None
+    try:
+        recorded_count = int((record or {}).get("child_task_count") or 0)
+    except (TypeError, ValueError):
+        recorded_count = 0
+    total = max(len(results), recorded_count)
+    summary = {"total": total, "completed": 0, "failed": 0, "cancelled": 0}
+    for result in results:
+        result = result if isinstance(result, dict) else {}
+        status = str(result.get("status") or "").strip().lower()
+        if status in {"completed", "success", "succeeded"}:
+            summary["completed"] += 1
+        elif status in {"cancelled", "canceled", "interrupted"}:
+            summary["cancelled"] += 1
+        else:
+            summary["failed"] += 1
+    return summary
+
+
 def _start_async_delegation_wakeup_turn(
     session_id: str,
     wakeup_prompt: str,
@@ -1130,6 +1153,7 @@ def _start_async_delegation_wakeup_turn(
                 from api.config import _get_session_agent_lock
                 from integration.async_delegation_turns import (
                     mark_async_delegation_completion,
+                    normalize_async_delegation_status,
                     resolve_async_delegation_origin,
                 )
                 with _get_session_agent_lock(session_id):
@@ -1142,12 +1166,16 @@ def _start_async_delegation_wakeup_turn(
                         delegation_id,
                         wakeup_state="queued",
                         content=wakeup_prompt,
+                        status=normalize_async_delegation_status(evt.get("status")),
+                        child_task_summary=_async_delegation_child_task_summary(
+                            evt, failed_origin
+                        ),
                     )
                 _emit_async_delegation_status(
                     session_id,
                     delegation_id,
                     failed_record or failed_origin,
-                    status="completed",
+                    status=normalize_async_delegation_status(evt.get("status")),
                     wakeup_state="queued",
                     content=wakeup_prompt,
                 )
@@ -1212,6 +1240,7 @@ def _process_async_delegation_event(
         from api.config import _get_session_agent_lock
         from integration.async_delegation_turns import (
             mark_async_delegation_completion,
+            normalize_async_delegation_status,
             resolve_async_delegation_origin,
         )
 
@@ -1241,6 +1270,8 @@ def _process_async_delegation_event(
         if origin is None:
             origin = {"turn_key": ""}
         origin_turn_key = str(origin.get("turn_key") or "").strip()
+        completion_status = normalize_async_delegation_status(evt.get("status"))
+        child_task_summary = _async_delegation_child_task_summary(evt, origin)
         wakeup_prompt_raw = format_wakeup_prompt(evt)
         wakeup_prompt = wakeup_prompt_raw.strip() if wakeup_prompt_raw else ""
         if not wakeup_prompt:
@@ -1256,12 +1287,14 @@ def _process_async_delegation_event(
                     delegation_id,
                     wakeup_state="queued",
                     content=wakeup_prompt,
+                    status=completion_status,
+                    child_task_summary=child_task_summary,
                 )
             _emit_async_delegation_status(
                 session_id,
                 delegation_id,
                 record or origin,
-                status="completed",
+                status=completion_status,
                 wakeup_state="queued",
                 content=wakeup_prompt,
             )
@@ -1275,12 +1308,14 @@ def _process_async_delegation_event(
                 delegation_id,
                 wakeup_state="running",
                 content=wakeup_prompt,
+                status=completion_status,
+                child_task_summary=child_task_summary,
             )
         _emit_async_delegation_status(
             session_id,
             delegation_id,
             record or origin,
-            status="completed",
+            status=completion_status,
             wakeup_state="running",
             content=wakeup_prompt,
         )

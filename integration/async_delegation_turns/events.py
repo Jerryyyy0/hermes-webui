@@ -25,12 +25,20 @@ def _as_int(value: Any, default: int = 0) -> int:
 
 
 def _task_payload(delegation_id: str, record: dict[str, Any], **extra: Any) -> dict[str, Any]:
+    child_task_count = max(1, _as_int(record.get("child_task_count"), 1))
+    goals = record.get("goals")
     payload = {
         "delegation_id": str(delegation_id),
+        "delegation_kind": str(record.get("delegation_kind") or "single"),
+        "child_task_count": child_task_count,
+        "goals": list(goals) if isinstance(goals, list) else [],
         "origin_turn_key": str(record.get("turn_key") or ""),
         "status": str(record.get("status") or "running"),
         "wakeup_state": str(record.get("wakeup_state") or "idle"),
     }
+    child_task_summary = record.get("child_task_summary")
+    if isinstance(child_task_summary, dict):
+        payload["child_task_summary"] = dict(child_task_summary)
     payload.update({key: value for key, value in extra.items() if value is not None})
     return payload
 
@@ -81,7 +89,16 @@ def snapshot_event(session: Any) -> dict[str, Any]:
         "session_id": str(getattr(session, "session_id", "") or ""),
         "emitted_at": time.time(),
         "background_activity_version": version,
-        "payload": {"active_task_count": len(tasks), "tasks": tasks},
+        "payload": {
+            # ``active_task_count`` is retained for schema-v1 compatibility.
+            # It counts delegation batches, not their internal child tasks.
+            "active_task_count": len(tasks),
+            "active_delegation_count": len(tasks),
+            "active_child_task_count": sum(
+                _as_int(task.get("child_task_count"), 1) for task in tasks
+            ),
+            "tasks": tasks,
+        },
     }
 
 
@@ -104,5 +121,10 @@ def idle_event(session: Any) -> dict[str, Any]:
         "session_id": str(getattr(session, "session_id", "") or ""),
         "emitted_at": now,
         "background_activity_version": version,
-        "payload": {"active_task_count": 0, "settled_at": now},
+        "payload": {
+            "active_task_count": 0,
+            "active_delegation_count": 0,
+            "active_child_task_count": 0,
+            "settled_at": now,
+        },
     }

@@ -1,12 +1,18 @@
-# 异步子任务的会话事件接口交互
+# 异步委派批次的会话事件接口交互
 
 - **状态：** 已实施
 - **范围：** `delegate_task(mode="background")` 的服务端事件契约、后台完成、wakeup 回复与会话级 SSE 资源释放；不约束任何特定 WebUI 前端实现。
 
 本文定义目标接口交互，不改变 Hermes Agent 的 `delegate_task` 工具、异步委派数据库或 completion 事件格式。
 
+一次 `delegate_task(mode="background")` 对 WebUI 来说是一个 delegation 批次：
+`delegation_id` 标识整个批次，不标识批次内的某个 child task。批次可以包含多个并行
+child task；Agent 等所有 child task 都结束后只投递一条 completion，WebUI 只为该批次
+启动一条 wakeup stream。child task 的逐项结果只通过 `child_task_summary` 汇总到生命周期
+事件，不会拆成多个 `delegation_id` 或多个 wakeup stream。
+
 外部前端的调用顺序、事件消费和重连处理，请参见
-[异步子任务：外部前端接入指南](async-delegation-external-client-guide.md)。
+[异步委派：外部前端接入指南](async-delegation-external-client-guide.md)。
 
 > 本文描述的事件均由 WebUI 服务端产生；不要求 Hermes Agent 修改 `delegate_task` 或 completion 事件格式。
 
@@ -29,23 +35,23 @@
 
 ## 1. 目标与边界
 
-一个会话可以派发多个后台子任务，用户也可以切换到其他会话继续对话。目标是：
+一个会话可以派发多个 delegation 批次；每个批次又可以包含多个后台 child task，用户也可以切换到其他会话继续对话。目标是：
 
 - 只有含未结算后台工作的会话才保持会话级 SSE；
-- 子任务完成后，服务端自行启动 parent wakeup turn；
+- delegation 批次完成后，服务端自行启动 parent wakeup turn；
 - wakeup 回复仍通过独立的聊天流发送，绝不把 token 混入会话事件流；
 - 一个会话同一时刻只运行一个 Agent turn；
 - 多个会话可各自持有后台任务订阅；切换聊天页不应使其他会话丢失完成通知；
-- 最后一个后台任务及其 wakeup 都结算后，服务端发出“可关闭”的聚合事件。
+- 最后一个 delegation 批次及其 wakeup 都结算后，服务端发出“可关闭”的聚合事件。
 
 这里的“后台任务结算”包含两层：
 
 | 层 | 字段 | 完成条件 |
 | --- | --- | --- |
-| 子任务执行 | `status` | `completed`、`failed` 或 `cancelled` |
+| delegation 批次执行 | `status` | `completed`、`failed` 或 `cancelled` |
 | 父会话处理 | `wakeup_state` | `settled` 或 `failed` |
 
-仅 `status=completed` 不能释放会话事件流：该子任务的 wakeup 可能仍在排队或生成回复。
+仅 `status=completed` 不能释放会话事件流：该 delegation 批次的 wakeup 可能仍在排队或生成回复。
 
 ## 2. 接口职责
 
@@ -80,7 +86,7 @@ sequenceDiagram
     Chat-->>Subscriber: done / stream_end (原父 turn)
 
     Agent-->>Sidecar: async_delegation completion
-    Sidecar-->>Events: background_task_status
+    Sidecar-->>Events: background_task_status（一个 batch completion）
     alt session 空闲
         Sidecar->>Chat: 服务端启动 async_delegation_wakeup
     else session 有活跃 turn
@@ -92,7 +98,7 @@ sequenceDiagram
     Subscriber->>Chat: GET /api/chat/stream?stream_id=stream_2
     Chat-->>Subscriber: token / tool / done / stream_end（后台回复）
     Sidecar-->>Events: background_task_status wakeup_state=settled
-    opt 所有后台任务均已结算
+    opt 所有 delegation 批次均已结算
         Sidecar-->>Events: background_tasks_idle
         Subscriber->>Events: close SSE connection
     end
@@ -145,7 +151,7 @@ Accept: text/event-stream
 
 这是首次建连的唯一触发条件。因为通知走的是已连接的 chat SSE，它不会出现“必须先订阅 session SSE 才能收到建立 session SSE 的通知”的循环。
 
-同一 session 的多个后台任务共用一条 SSE 连接。订阅方不能每个 `delegation_id` 建一条连接。
+同一 session 的多个 delegation 批次共用一条 SSE 连接。订阅方不能为每个 `delegation_id` 或 child task 建一条连接。
 
 为覆盖 chat SSE 重连，`background_task_dispatched` 必须遵循该聊天流的恢复/重放语义：在父 turn 结束前重连时，服务端必须再次交付尚未确认的该事件。订阅方仍不回退解析 `tool_complete`。session SSE 的第一个业务帧必须是 `background_tasks_snapshot`，以 sidecar 当前状态消除“派发通知已送达、但 session SSE 尚未连上时任务状态发生变化”的竞态。
 
@@ -196,16 +202,35 @@ data: {
 
 `delegation_id`、`origin_turn_key`、`stream_id`、`status`、`wakeup_state` 和 `active_task_count` 不放在公共顶层。它们只在语义相关的事件 `payload` 中出现，避免空字段被误解为真实状态。
 
-单任务事件（`background_task_dispatched`、`background_task_status`、`bg_task_complete`、`server_turn_started`）的 `payload` 必须共同包含以下字段：
+delegation 生命周期事件（`background_task_dispatched`、`background_task_status`、`bg_task_complete`、`server_turn_started`）的 `payload` 必须共同包含以下字段：
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `delegation_id` | string | 后台子任务唯一标识。 |
-| `origin_turn_key` | string | 派发该任务的真实 user turn。 |
-| `status` | string | 子任务执行状态：`running`、`completed`、`failed` 或 `cancelled`。 |
+| `delegation_id` | string | 后台委派批次唯一标识；批次内的 child task 共享此 ID。 |
+| `delegation_kind` | string | `single` 或 `batch`。 |
+| `child_task_count` | integer | 该批次启动的 child task 数量。 |
+| `goals` | string[] | child task 的目标列表；可能为空。 |
+| `origin_turn_key` | string | 派发该 delegation 的真实 user turn。 |
+| `status` | string | delegation 批次执行状态：`running`、`completed`、`failed` 或 `cancelled`。 |
 | `wakeup_state` | string | 父会话处理状态：`idle`、`queued`、`running`、`settled` 或 `failed`。 |
+| `child_task_summary` | object，可选 | completion 后的逐项结果计数；不包含 child 结果正文。 |
 
-`server_turn_started` 在这四个字段之外增加 `stream_id` 和 `source`；`background_tasks_snapshot.payload.tasks[]` 复用同一组任务字段。`background_tasks_idle` 是会话聚合事件，不携带某一个任务字段。
+`server_turn_started` 在这些字段之外增加 `stream_id` 和 `source`；`background_tasks_snapshot.payload.tasks[]` 复用同一组 delegation 字段。`background_tasks_idle` 是会话聚合事件，不携带某一个 delegation 字段。
+
+`child_task_summary` 的形状为：
+
+```json
+{
+  "total": 2,
+  "completed": 1,
+  "failed": 1,
+  "cancelled": 0
+}
+```
+
+Agent completion 的顶层 `status=error` 会转换为 WebUI 事件的 `status=failed`。如果批次中
+只有部分 child task 失败，仍以 Agent 给出的批次状态为准，并用 `child_task_summary` 表示
+逐项结果。订阅方不能根据某一个 child 的结果自行创建或关闭 stream。
 
 ### 5.2.1 服务端桥接
 
@@ -259,6 +284,9 @@ data: {
   "background_activity_version": 12,
   "payload": {
     "delegation_id": "deleg_123",
+    "delegation_kind": "batch",
+    "child_task_count": 2,
+    "goals": ["调研模型 A", "调研模型 B"],
     "origin_turn_key": "turn:8",
     "status": "running",
     "wakeup_state": "idle",
@@ -278,7 +306,7 @@ data: {
 ```text
 chat stream 收到 background_task_dispatched
   → 订阅方开始建立 session SSE
-  → 子任务在 HTTP 建连期间完成或进入 queued
+  → delegation 批次在 HTTP 建连期间完成或进入 queued
   → snapshot 返回当前记录，订阅方不依赖是否错过中间事件
 ```
 
@@ -294,9 +322,14 @@ data: {
   "background_activity_version": 12,
   "payload": {
     "active_task_count": 1,
+    "active_delegation_count": 1,
+    "active_child_task_count": 2,
     "tasks": [
       {
         "delegation_id": "deleg_123",
+        "delegation_kind": "batch",
+        "child_task_count": 2,
+        "goals": ["调研模型 A", "调研模型 B"],
         "origin_turn_key": "turn:8",
         "status": "running",
         "wakeup_state": "idle",
@@ -308,7 +341,7 @@ data: {
 }
 ```
 
-`tasks` 只包含未结算任务，即 `status=running` 或 `wakeup_state` 为 `idle`、`queued`、`running` 的记录。订阅方以快照完整替换该 session 的后台任务本地集合；后续只接受 `background_activity_version` 不早于该快照的增量事件。
+`tasks` 只包含未结算 delegation 批次，即 `status=running` 或 `wakeup_state` 为 `idle`、`queued`、`running` 的记录。订阅方以快照完整替换该 session 的后台委派本地集合；后续只接受 `background_activity_version` 不早于该快照的增量事件。`active_task_count` 是兼容字段，统计 delegation 批次数；新的接入方应使用 `active_delegation_count` 与 `active_child_task_count`。
 
 ### 5.5 `background_task_status`
 
@@ -326,9 +359,18 @@ data: {
   "background_activity_version": 13,
   "payload": {
     "delegation_id": "deleg_123",
+    "delegation_kind": "batch",
+    "child_task_count": 2,
+    "goals": ["调研模型 A", "调研模型 B"],
     "origin_turn_key": "turn:8",
     "status": "completed",
-    "wakeup_state": "queued"
+    "wakeup_state": "queued",
+    "child_task_summary": {
+      "total": 2,
+      "completed": 1,
+      "failed": 1,
+      "cancelled": 0
+    }
   }
 }
 ```
@@ -337,10 +379,14 @@ data: {
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `delegation_id` | string | 是 | 后台子任务唯一标识。 |
-| `origin_turn_key` | string | 是 | 成功派发该任务的真实 user turn。 |
+| `delegation_id` | string | 是 | 后台委派批次唯一标识。 |
+| `delegation_kind` | string | 是 | `single` 或 `batch`。 |
+| `child_task_count` | integer | 是 | 批次中的 child task 数量。 |
+| `goals` | string[] | 是 | 批次中各 child task 的目标；没有目标时为空数组。 |
+| `origin_turn_key` | string | 是 | 成功派发该 delegation 的真实 user turn。 |
 | `status` | string | 是 | `running`、`completed`、`failed`、`cancelled`。 |
 | `wakeup_state` | string | 是 | `idle`、`queued`、`running`、`settled`、`failed`。 |
+| `child_task_summary` | object | 否 | completion 后的 child 结果计数。 |
 
 收到 `status=completed, wakeup_state=queued` 时，订阅方必须继续保留该 session 的 SSE 连接；这不是可关闭状态。
 
@@ -360,9 +406,18 @@ data: {
   "background_activity_version": 14,
   "payload": {
     "delegation_id": "deleg_123",
+    "delegation_kind": "batch",
+    "child_task_count": 2,
+    "goals": ["调研模型 A", "调研模型 B"],
     "origin_turn_key": "turn:8",
     "status": "completed",
-    "wakeup_state": "running"
+    "wakeup_state": "running",
+    "child_task_summary": {
+      "total": 2,
+      "completed": 1,
+      "failed": 1,
+      "cancelled": 0
+    }
   }
 }
 ```
@@ -385,9 +440,18 @@ data: {
   "background_activity_version": 15,
   "payload": {
     "delegation_id": "deleg_123",
+    "delegation_kind": "batch",
+    "child_task_count": 2,
+    "goals": ["调研模型 A", "调研模型 B"],
     "origin_turn_key": "turn:8",
     "status": "completed",
     "wakeup_state": "running",
+    "child_task_summary": {
+      "total": 2,
+      "completed": 1,
+      "failed": 1,
+      "cancelled": 0
+    },
     "stream_id": "stream_wakeup_123",
     "source": "async_delegation_wakeup"
   }
@@ -418,6 +482,8 @@ data: {
   "background_activity_version": 16,
   "payload": {
     "active_task_count": 0,
+    "active_delegation_count": 0,
+    "active_child_task_count": 0,
     "settled_at": 1786004420
   }
 }
@@ -425,10 +491,12 @@ data: {
 
 | `payload` 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `active_task_count` | integer | 是 | 必须为 `0`。 |
+| `active_task_count` | integer | 是 | 兼容字段，必须为 `0`。 |
+| `active_delegation_count` | integer | 是 | 必须为 `0`。 |
+| `active_child_task_count` | integer | 是 | 必须为 `0`。 |
 | `settled_at` | number | 是 | 服务端完成聚合判断的 Unix 时间戳。 |
 
-服务端只在更新 sidecar 后判断所有记录。仅当不存在 `status=running`，且不存在 `wakeup_state` 为 `idle`、`queued` 或 `running` 的记录时，才能发送该事件。
+服务端只在更新 sidecar 后判断所有 delegation 记录。仅当不存在 `status=running`，且不存在 `wakeup_state` 为 `idle`、`queued` 或 `running` 的记录时，才能发送该事件。
 
 ### 5.9 实施验收条件
 
@@ -443,7 +511,8 @@ data: {
 | 当前会话忙碌 | completion 先报告 `wakeup_state=queued`；当前 run 终态后才启动下一条 wakeup stream。 |
 | 多会话 | session A 的事件不会写入 session B 的 SSE 连接或其订阅状态。 |
 | 重连 | 断线期间 wakeup 仍执行；重连后，活跃 run 可重新附着，已结束 run 用 snapshot/持久化 session 恢复。 |
-| 生命周期释放 | 每条 HTTP SSE 在 disconnect、错误、替换和正常关闭时均取消 `SessionChannel` 订阅；最后一个后台任务结算后才发送 `background_tasks_idle`。 |
+| 批次语义 | 一个含多个 child task 的 delegation 只产生一条 completion、一条 `server_turn_started` 和一条 wakeup stream；`child_task_summary` 正确汇总子结果。 |
+| 生命周期释放 | 每条 HTTP SSE 在 disconnect、错误、替换和正常关闭时均取消 `SessionChannel` 订阅；最后一个 delegation 批次结算后才发送 `background_tasks_idle`。 |
 | 幂等 | 同一个 completion 的重复投递不会重复启动 wakeup，也不会让订阅方重复处理同一 `event_id`。 |
 
 ## 6. 订阅方最小处理契约
@@ -455,7 +524,7 @@ background_task_dispatched
   → 使用 session_id 建立或复用 /api/sessions/{session_id}/events
 
 background_tasks_snapshot
-  → 用 payload.tasks 作为该 session 未结算后台任务的完整基线
+  → 用 payload.tasks 作为该 session 未结算 delegation 批次的完整基线
 
 background_task_status / bg_task_complete
   → 按 event_id 去重，并按 background_activity_version 应用增量
@@ -463,7 +532,7 @@ background_task_status / bg_task_complete
 server_turn_started
   → 可选地使用 stream_id 附着正常 chat stream；不得再次 POST /api/chat/start
 
-background_tasks_idle(active_task_count=0)
+background_tasks_idle(active_delegation_count=0, active_child_task_count=0)
   → 仅当 version 不早于已知 version 时，关闭该 session 的 SSE 连接
 ```
 
@@ -473,7 +542,7 @@ background_tasks_idle(active_task_count=0)
 
 ### 多任务
 
-同一 `origin_turn_key` 可以有多个 `delegation_id`。每个任务独立走 `running → completed` 与 `idle → queued/running → settled`，但只有最后一个任务结算后才发 `background_tasks_idle`。
+同一 `origin_turn_key` 可以有多个 delegation 批次，每个批次有自己的 `delegation_id`；一个批次内部的多个 child task 共享该 ID。每个批次独立走 `running → completed/failed/cancelled` 与 `idle → queued/running → settled`，但只有最后一个批次及其 wakeup 结算后才发 `background_tasks_idle`。
 
 ### 忙碌会话
 

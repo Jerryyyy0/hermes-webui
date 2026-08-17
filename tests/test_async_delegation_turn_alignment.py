@@ -101,6 +101,67 @@ def test_async_wakeup_is_queued_while_foreground_turn_is_active(monkeypatch):
     assert statuses[-1]["wakeup_state"] == "queued"
 
 
+def test_async_batch_error_is_published_as_failed(monkeypatch):
+    """An all-failed Agent batch still wakes the parent but keeps its failure state."""
+    from api import background_process as bp
+
+    session = SimpleNamespace(
+        session_id="session-1",
+        async_delegation_origins={
+            "deleg-batch": {
+                "turn_key": "turn:8",
+                "status": "running",
+                "wakeup_state": "idle",
+                "delegation_kind": "batch",
+                "child_task_count": 2,
+            }
+        },
+        save=lambda **_: None,
+    )
+    registry = SimpleNamespace(completion_queue=None)
+    claim = SimpleNamespace(durable=False)
+    statuses = []
+    wakeups = []
+
+    monkeypatch.setattr(bp, "claim_async_delegation_delivery", lambda *_: claim)
+    monkeypatch.setattr(bp, "_session_has_active_turn", lambda *_: False)
+    monkeypatch.setattr(
+        bp, "_start_async_delegation_wakeup_turn", lambda *_, **kwargs: wakeups.append(kwargs)
+    )
+    monkeypatch.setattr(
+        bp, "_emit_async_delegation_status", lambda *_, **kwargs: statuses.append(kwargs)
+    )
+    monkeypatch.setattr("api.models.get_session", lambda _sid: session)
+    monkeypatch.setattr("api.config._get_session_agent_lock", lambda _sid: _NoopLock())
+
+    bp._process_async_delegation_event(
+        {
+            "type": "async_delegation",
+            "delegation_id": "deleg-batch",
+            "status": "error",
+            "is_batch": True,
+            "goals": ["research model A", "research model B"],
+            "results": [
+                {"status": "error", "summary": "provider unavailable"},
+                {"status": "cancelled", "summary": "cancelled"},
+            ],
+        },
+        session_id="session-1",
+        delegation_id="deleg-batch",
+        process_registry=registry,
+    )
+
+    assert session.async_delegation_origins["deleg-batch"]["status"] == "failed"
+    assert session.async_delegation_origins["deleg-batch"]["child_task_summary"] == {
+        "total": 2,
+        "completed": 0,
+        "failed": 1,
+        "cancelled": 1,
+    }
+    assert statuses[-1]["status"] == "failed"
+    assert len(wakeups) == 1
+
+
 def test_async_wakeup_terminal_state_is_published_to_session_sse(monkeypatch):
     """The browser learns that the server-side wakeup has fully settled."""
     from api import background_process as bp
@@ -176,6 +237,9 @@ def test_async_wakeup_status_uses_versioned_lifecycle_envelope(monkeypatch):
     assert status[2]["background_activity_version"] == 3
     assert status[2]["payload"] == {
         "delegation_id": "deleg-1",
+        "delegation_kind": "single",
+        "child_task_count": 1,
+        "goals": [],
         "origin_turn_key": "turn:8",
         "status": "completed",
         "wakeup_state": "settled",
