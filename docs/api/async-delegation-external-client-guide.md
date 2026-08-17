@@ -6,7 +6,9 @@
 
 本文只说明外部前端如何调用和消费接口，不依赖当前 WebUI 的页面、状态管理或组件实现。
 
-一次 `delegate_task(mode="background")` 是一个 delegation 批次。
+一次 `delegate_task(mode="background")` 是一个 delegation 批次。一次父聊天 turn 如果多次
+调用该工具，就会产生多个 delegation 批次，并在父 chat stream 中收到多个
+`background_task_dispatched`。
 批次可以包含多个并行 child task，但全部 child 完成后只产生一次 completion 和一次 wakeup stream。
 `delegation_id` 标识批次，不单独标识某个 child task。
 
@@ -109,7 +111,7 @@ GET /api/sessions/session_123/events
 Accept: text/event-stream
 ```
 
-无需服务端下发 session SSE URL。不要为每个 delegation 或 child task 建连接；一个 session 的全部后台委派共用一条会话事件流。
+无需服务端下发 session SSE URL。不要为每个 delegation 或 child task 建连接；一个 session 的全部后台委派共用一条会话事件流。多个批次的事件会在这条连接中按服务端发射顺序串行到达，客户端按 `delegation_id` 分别维护状态。
 
 > 注意：此事件在聊天流的 SSE `id:` 是 run-journal 游标，不等于 JSON 的 `event_id`。业务幂等、任务状态去重必须使用 JSON `event_id`，不能用该 SSE `id:` 代替。
 
@@ -309,7 +311,7 @@ function onSessionEvent(event: Envelope) {
 
 多个会话可同时存在未结算 delegation。每个 `session_id` 独立维护一条会话 SSE；session A 的事件不可更新 session B 的委派状态。
 
-同一个 session 也可能有多个 delegation 批次。每个批次拥有自己的 `delegation_id`，但一个批次内部的多个 child task 共享该 ID，并在全部完成后只产生一个 wakeup stream。
+同一个 session 也可能有多个 delegation 批次。每个批次拥有自己的 `delegation_id`，但一个批次内部的多个 child task 共享该 ID，并在全部完成后只产生一个 wakeup stream。多个批次的 wakeup 在同一 session 内按顺序启动：后完成或后进入处理队列的批次可能先收到 `wakeup_state=queued`，必须等待当前 Agent turn 结束。
 
 仅因为用户切换到了另一个会话，不应关闭旧 session 的会话 SSE。旧会话仍可能收到 completion，并启动新的 wakeup chat stream。应在 `background_tasks_idle` 后关闭，或在整个应用销毁时关闭。
 
@@ -345,6 +347,8 @@ function onSessionEvent(event: Envelope) {
 - 所有事件按 JSON `event_id` 去重，并按 session 内 `background_activity_version` 防止旧状态回滚。
 - 一个 batch dispatch 的 `child_task_count` 与 `goals` 能在 SSE 中被正确恢复。
 - 一个 batch completion 只产生一个 `server_turn_started`，不按 child task 数量创建多个 stream。
+- 同一父 chat stream 的多个 `background_task_dispatched` 都能被正确记录；它们共用一条 session SSE，并按 `delegation_id` 分别处理。
+- 同一 session 的多个 wakeup 不并行运行；排队批次在前一个 wakeup 结束后才建立自己的 chat stream。
 - `server_turn_started` 只使用 `stream_id` 订阅聊天流，不额外发起聊天请求。
 - 仅在 `background_tasks_idle(active_delegation_count=0, active_child_task_count=0)` 后关闭会话 SSE。
 - 断线重连后，以 snapshot 和 `GET /api/session` 恢复，而非假定实时事件完整无缺。

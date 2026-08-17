@@ -35,7 +35,7 @@ child task；Agent 等所有 child task 都结束后只投递一条 completion�
 
 ## 1. 目标与边界
 
-一个会话可以派发多个 delegation 批次；每个批次又可以包含多个后台 child task，用户也可以切换到其他会话继续对话。目标是：
+一个会话可以派发多个 delegation 批次；每个批次又可以包含多个后台 child task，用户也可以切换到其他会话继续对话。一次父聊天 turn 中每调用一次 `delegate_task(mode="background")`，就会产生一个独立批次，因此同一条父 chat stream 可能连续收到多个 `background_task_dispatched`。目标是：
 
 - 只有含未结算后台工作的会话才保持会话级 SSE；
 - delegation 批次完成后，服务端自行启动 parent wakeup turn；
@@ -151,7 +151,7 @@ Accept: text/event-stream
 
 这是首次建连的唯一触发条件。因为通知走的是已连接的 chat SSE，它不会出现“必须先订阅 session SSE 才能收到建立 session SSE 的通知”的循环。
 
-同一 session 的多个 delegation 批次共用一条 SSE 连接。订阅方不能为每个 `delegation_id` 或 child task 建一条连接。
+同一 session 的多个 delegation 批次共用一条 SSE 连接。订阅方不能为每个 `delegation_id` 或 child task 建一条连接。多个批次的生命周期事件在这条连接中按服务端发射顺序串行发送，并通过 `background_activity_version` 标识 session 内的状态版本。
 
 为覆盖 chat SSE 重连，`background_task_dispatched` 必须遵循该聊天流的恢复/重放语义：在父 turn 结束前重连时，服务端必须再次交付尚未确认的该事件。订阅方仍不回退解析 `tool_complete`。session SSE 的第一个业务帧必须是 `background_tasks_snapshot`，以 sidecar 当前状态消除“派发通知已送达、但 session SSE 尚未连上时任务状态发生变化”的竞态。
 
@@ -345,7 +345,7 @@ data: {
 
 ### 5.5 `background_task_status`
 
-表示某个 `delegation_id` 的持久化生命周期变化，不创建新的聊天气泡。
+表示某个 `delegation_id` 的持久化生命周期变化，不创建新的聊天气泡。多个 delegation 批次的事件会在同一条 session SSE 中交错出现；订阅方必须按 `delegation_id` 更新对应批次，不能把它们合并成一个任务。
 
 ```text
 event: background_task_status
@@ -543,6 +543,28 @@ background_tasks_idle(active_delegation_count=0, active_child_task_count=0)
 ### 多任务
 
 同一 `origin_turn_key` 可以有多个 delegation 批次，每个批次有自己的 `delegation_id`；一个批次内部的多个 child task 共享该 ID。每个批次独立走 `running → completed/failed/cancelled` 与 `idle → queued/running → settled`，但只有最后一个批次及其 wakeup 结算后才发 `background_tasks_idle`。
+
+一次父聊天 turn 中的多个派发示例：
+
+```text
+父 chat stream
+  → background_task_dispatched(deleg_1)
+  → background_task_dispatched(deleg_2)
+
+同一条 session SSE
+  → background_task_status(deleg_1)
+  → bg_task_complete(deleg_2)
+  → server_turn_started(deleg_1, stream_wakeup_1)
+  → background_task_status(deleg_2, wakeup_state=queued)
+  → server_turn_started(deleg_2, stream_wakeup_2)
+  → background_tasks_idle
+```
+
+`background_task_dispatched` 的数量取决于父 turn 实际调用 `delegate_task` 的次数；一个调用
+内部包含多少 child task 不会增加该事件数量。`server_turn_started` 同样按 delegation 批次
+产生，但同一 session 的 Agent wakeup 按串行规则启动：前一个 wakeup 仍在运行时，后续批次
+保持 `wakeup_state=queued`，不会并行开启第二个 session Agent turn。不同的 `stream_id`
+仍分别使用 `GET /api/chat/stream?stream_id=...` 接收对应 wakeup 的 token。
 
 ### 忙碌会话
 
