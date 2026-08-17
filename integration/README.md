@@ -538,6 +538,7 @@ Response includes global `stats`: `{ hub, installed, not_installed, custom }` ac
 | `scripts/fetch_profile_logos.py` | Generate built-in logo library |
 | `assets/profile-logos/` | Logo preset PNGs + manifest |
 | `agent_message_semantics/` | Hermes Agent 内部脚手架与 model-only context anchor 的兼容分类、一问一答显示投影和无正文 DEBUG 审计；`api/streaming.py` / `api/session_manifest.py` 只保留薄调用 |
+| `async_delegation_turns/` | 后台委派的 sidecar 归属、持久化活动版本与统一 SSE 生命周期事件信封；`api/streaming.py`、`api/background_process.py`、`api/routes.py` 仅保留发射与 transport 接缝 |
 | `assets/hermes_skillhub.js` | SkillHub sidebar panel |
 | `assets/hermes_profiles.js` | Profiles panel enrich |
 | `swagger/openapi.json` | Integration API 规范（`GET /api/openapi.json` 动态 `servers`） |
@@ -549,9 +550,10 @@ Response includes global `stats`: `{ hub, installed, not_installed, custom }` ac
 ## Upstream seam files (only these should conflict on rebase)
 
 - `server.py` — starts the fork-owned all-profile Gateway coordinator asynchronously; lifecycle logic remains in `integration/gateway_startup/`
-- `api/routes.py` — integration GET/POST dispatch, profiles enrich, static mapping, `__INTEGRATION_SKILLS__`, `__SKILLHUB_ENABLED__`; `GET /api/sessions` filters cron execution rows and injects session status fields when `HERMES_INTEGRATION=1`; chat start clears old error state and advances the user's own-message read cursor
-- `api/streaming.py` — provider-error persistence records the current session error timestamp used by `integration/session_status/`; imports the Agent message-semantics classifier to keep internal control rows out of the visible transcript and turn settlement
-- `api/models.py` — Session sidecar persists the nullable `last_error_at` fact used to derive list status; state.db reader restores durable context-anchor 语义字段
+- `api/routes.py` — integration GET/POST dispatch, profiles enrich, static mapping, `__INTEGRATION_SKILLS__`, `__SKILLHUB_ENABLED__`; `GET /api/sessions` filters cron execution rows and injects session status fields when `HERMES_INTEGRATION=1`; chat start clears old error state and advances the user's own-message read cursor; per-session SSE bridges `SessionChannel` lifecycle frames
+- `api/streaming.py` — provider-error persistence records the current session error timestamp used by `integration/session_status/`; imports the Agent message-semantics classifier to keep internal control rows out of the visible transcript and turn settlement; emits the persisted async-delegation dispatch event
+- `api/background_process.py` — emits persisted async-delegation lifecycle envelopes and the aggregate idle signal through active streams and `SessionChannel`
+- `api/models.py` — Session sidecar persists the nullable `last_error_at` fact used to derive list status, the async-delegation activity version, and state.db reader restores durable context-anchor 语义字段
 - `api/profiles.py` — profile deletion best-effort removes that profile's global session read cursors
 - `api/session_manifest.py` — after sidecar/state.db merge, cron-only GET normalization delegates to `integration.crons.hooks.normalize_cron_manifest_messages`; semantic internal/context rows are skipped as turn anchors while every allocated `turn:N` remains reserved
 - `static/index.html` — integration scripts + SkillHub panel markup

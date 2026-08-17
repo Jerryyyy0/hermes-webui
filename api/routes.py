@@ -15905,7 +15905,11 @@ def _handle_session_run_journal_stream_for_session(handler, parsed, session_id):
     active_stream_id = _active_run_stream_for_session(session_id)
     subscriber = None
     subscriber_stream = None
+    session_channel = None
+    session_subscriber = None
     replay_cutoff_seq = None
+    replay_pending = False
+    background_subscription = False
     sent_event_ids: set[str] = set()
     sent_event_order = deque()
 
@@ -15929,6 +15933,20 @@ def _handle_session_run_journal_stream_for_session(handler, parsed, session_id):
             snapshot = {}
         return queue_, stream, snapshot, stream_id
 
+    def detach_active_stream():
+        nonlocal subscriber, subscriber_stream
+        if (
+            subscriber is not None
+            and subscriber is not subscriber_stream
+            and hasattr(subscriber_stream, "unsubscribe")
+        ):
+            try:
+                subscriber_stream.unsubscribe(subscriber)
+            except Exception:
+                pass
+        subscriber = None
+        subscriber_stream = None
+
     def emit_replay(events, stream_id, cutoff_seq):
         for entry in events:
             event_id = str(entry.get("event_id") or "")
@@ -15941,96 +15959,160 @@ def _handle_session_run_journal_stream_for_session(handler, parsed, session_id):
             if event_id:
                 note_sent_event_id(event_id)
 
-    def emit_session_snapshot(active_stream_id):
+    def emit_session_snapshot(stream_id):
         try:
             fresh_session = get_session(session_id, metadata_only=True)
         except KeyError:
             fresh_session = session
-        _sse(handler, "session_snapshot", _session_snapshot_payload(fresh_session, active_stream_id=active_stream_id))
+        _sse(handler, "session_snapshot", _session_snapshot_payload(fresh_session, active_stream_id=stream_id))
+
+    def emit_lifecycle_item(item):
+        nonlocal background_subscription
+        if not isinstance(item, tuple) or len(item) < 2:
+            return
+        event, data = item[0], item[1]
+        if str(event).startswith("background_task") or event == "bg_task_complete":
+            background_subscription = True
+        if not isinstance(data, dict):
+            _sse(handler, event, data)
+            return
+        event_id = str(data.get("event_id") or "")
+        if event_id and event_id in sent_event_ids:
+            return
+        if event_id:
+            _sse_with_id(handler, event, data, event_id)
+            note_sent_event_id(event_id)
+        else:
+            _sse(handler, event, data)
 
     try:
+        # Subscribe before generating the initial background snapshot. A lifecycle
+        # transition emitted after this point is either reflected in the snapshot
+        # or queued for this handler, closing the connect-time loss window.
+        from api.background_process import subscribe_to_session_channel
+        from integration.async_delegation_turns import snapshot_event
+
+        session_channel, session_subscriber = subscribe_to_session_channel(session_id)
+        background_snapshot = snapshot_event(session)
+        if background_snapshot["payload"]["active_task_count"]:
+            background_subscription = True
+            _sse_with_id(
+                handler,
+                "background_tasks_snapshot",
+                background_snapshot,
+                background_snapshot["event_id"],
+            )
+            note_sent_event_id(background_snapshot["event_id"])
+
         replay_events = []
-        replay_ok = False
         if resume_event_id:
             replay = read_session_run_events(session_id, after_event_id=resume_event_id)
             if replay.get("status") != "ok":
                 emit_session_snapshot(active_stream_id)
             else:
-                replay_ok = True
+                replay_pending = True
                 replay_events = replay.get("events") or []
-        subscriber, subscriber_stream, stream_snapshot, active_stream_id = attach_active_stream()
-        if subscriber is None:
-            if replay_ok:
-                emit_replay(replay_events, active_stream_id, None)
-            while True:
-                subscriber, subscriber_stream, stream_snapshot, active_stream_id = attach_active_stream()
-                if subscriber is not None:
-                    break
-                # Journal advanced with no live stream to attach → a run completed
-                # entirely within the wait (or the first attach). Re-sync via a
-                # snapshot boundary (the same honest-recovery contract used for a
-                # failed reconciliation), then re-baseline so we only re-sync on
-                # genuinely new advances.
-                _current_journal_fp = session_journal_fingerprint(session_id)
-                if _current_journal_fp != _idle_journal_fp:
-                    _idle_journal_fp = _current_journal_fp
-                    emit_session_snapshot(active_stream_id)
-                handler.wfile.write(b": keepalive\n\n")
-                handler.wfile.flush()
-                time.sleep(_SSE_HEARTBEAT_INTERVAL_SECONDS)
-        if subscriber is None:
-            return True
-        if replay_ok:
-            replay_cutoff_seq = _run_journal_same_run_seq(str(stream_snapshot.get("last_event_id") or ""), active_stream_id)
-            reconciled = read_session_run_events(session_id, after_event_id=resume_event_id)
-            if reconciled.get("status") == "ok":
-                emit_replay(reconciled.get("events") or [], active_stream_id, replay_cutoff_seq)
-            else:
-                emit_session_snapshot(active_stream_id)
-        try:
-            while True:
+
+        while True:
+            # Lifecycle frames must remain available even when no agent run is
+            # active. Drain them first because they are low-frequency and can
+            # announce the next server-initiated stream.
+            lifecycle_sent = False
+            while session_subscriber is not None:
                 try:
-                    item = subscriber.get(timeout=_SSE_HEARTBEAT_INTERVAL_SECONDS)
+                    lifecycle_item = session_subscriber.get_nowait()
                 except queue.Empty:
+                    break
+                emit_lifecycle_item(lifecycle_item)
+                lifecycle_sent = True
+            if lifecycle_sent:
+                continue
+
+            if subscriber is None:
+                subscriber, subscriber_stream, stream_snapshot, active_stream_id = attach_active_stream()
+                if subscriber is None:
+                    if replay_pending:
+                        emit_replay(replay_events, active_stream_id, None)
+                        replay_pending = False
+                    # Between runs, block on the lifecycle queue rather than
+                    # sleeping blindly. A background completion therefore wakes
+                    # this SSE handler immediately instead of waiting for the
+                    # heartbeat interval.
+                    try:
+                        lifecycle_item = session_subscriber.get(
+                            timeout=_SSE_HEARTBEAT_INTERVAL_SECONDS
+                        )
+                    except queue.Empty:
+                        lifecycle_item = None
+                    if lifecycle_item is not None:
+                        emit_lifecycle_item(lifecycle_item)
+                        continue
+                    # Journal advanced with no live stream to attach → a run completed
+                    # entirely within the wait. Re-sync via an honest snapshot boundary.
+                    current_journal_fp = session_journal_fingerprint(session_id)
+                    if current_journal_fp != _idle_journal_fp:
+                        _idle_journal_fp = current_journal_fp
+                        emit_session_snapshot(active_stream_id)
                     handler.wfile.write(b": keepalive\n\n")
                     handler.wfile.flush()
+                    time.sleep(0)
                     continue
-                if len(item) >= 3:
-                    event, data, queued_event_id = item[0], item[1], item[2]
-                else:
-                    event, data = item
-                    queued_event_id = STREAM_LAST_EVENT_ID.get(active_stream_id)
-                event_id = queued_event_id or STREAM_LAST_EVENT_ID.get(active_stream_id)
-                event_seq = _run_journal_same_run_seq(event_id, active_stream_id)
-                _is_terminal = event in ("stream_end", "error", "cancel")
-                _already_sent = (
-                    (replay_cutoff_seq is not None and event_seq is not None and event_seq <= replay_cutoff_seq)
-                    or (event_id and event_id in sent_event_ids)
-                )
-                if _already_sent:
-                    # Already delivered via replay/reconciliation (cutoff or dedup).
-                    # A terminal event still has to end this loop — otherwise, when
-                    # reconciliation replayed the active run's terminal at the cutoff,
-                    # the live copy would be skipped here and the handler would stay
-                    # blocked on a dead run's queue and miss subsequent session runs.
-                    if _is_terminal:
-                        break
-                    continue
+                if replay_pending:
+                    replay_cutoff_seq = _run_journal_same_run_seq(
+                        str(stream_snapshot.get("last_event_id") or ""), active_stream_id
+                    )
+                    reconciled = read_session_run_events(
+                        session_id, after_event_id=resume_event_id
+                    )
+                    if reconciled.get("status") == "ok":
+                        emit_replay(
+                            reconciled.get("events") or [],
+                            active_stream_id,
+                            replay_cutoff_seq,
+                        )
+                    else:
+                        emit_session_snapshot(active_stream_id)
+                    replay_pending = False
+
+            try:
+                item = subscriber.get(timeout=_SSE_HEARTBEAT_INTERVAL_SECONDS)
+            except queue.Empty:
+                handler.wfile.write(b": keepalive\n\n")
+                handler.wfile.flush()
+                continue
+            if len(item) >= 3:
+                event, data, queued_event_id = item[0], item[1], item[2]
+            else:
+                event, data = item
+                queued_event_id = STREAM_LAST_EVENT_ID.get(active_stream_id)
+            event_id = queued_event_id or STREAM_LAST_EVENT_ID.get(active_stream_id)
+            event_seq = _run_journal_same_run_seq(event_id, active_stream_id)
+            is_terminal = event in ("stream_end", "error", "cancel")
+            already_sent = (
+                (replay_cutoff_seq is not None and event_seq is not None and event_seq <= replay_cutoff_seq)
+                or (event_id and event_id in sent_event_ids)
+            )
+            if not already_sent:
                 if event_id:
                     _sse_with_id(handler, event, data, event_id)
                     note_sent_event_id(event_id)
                 else:
                     _sse(handler, event, data)
-                if _is_terminal:
-                    break
-        except _CLIENT_DISCONNECT_ERRORS:
-            pass
+            if is_terminal:
+                detach_active_stream()
+                replay_cutoff_seq = None
+                # Preserve the historical run-journal endpoint behavior for
+                # ordinary sessions. Only a session with active background work
+                # remains subscribed across a terminal chat run.
+                if not background_subscription:
+                    return True
     except _CLIENT_DISCONNECT_ERRORS:
         pass
     finally:
-        if subscriber is not None and subscriber is not subscriber_stream and hasattr(subscriber_stream, "unsubscribe"):
+        detach_active_stream()
+        if session_channel is not None and session_subscriber is not None:
             try:
-                subscriber_stream.unsubscribe(subscriber)
+                session_channel.unsubscribe(session_subscriber)
             except Exception:
                 pass
     return True
@@ -19769,18 +19851,36 @@ def start_session_turn(
 
             ch = get_session_channel(session_id)
             if ch is not None:
+                payload = {
+                    "session_id": str(session_id),
+                    "stream_id": str(stream_id),
+                    "pending_started_at": (resp or {}).get("pending_started_at"),
+                    "source": source,
+                    **({
+                        "delegation_id": server_turn_metadata.get("delegation_id"),
+                        "origin_turn_key": server_turn_metadata.get("origin_turn_key"),
+                    } if isinstance(server_turn_metadata, dict) else {}),
+                }
+                delegation_id = str(payload.get("delegation_id") or "")
+                if delegation_id:
+                    from integration.async_delegation_turns import (
+                        resolve_async_delegation_origin,
+                        task_event,
+                    )
+
+                    record = resolve_async_delegation_origin(s, delegation_id)
+                    if record is not None:
+                        payload = task_event(
+                            s,
+                            "server_turn_started",
+                            delegation_id,
+                            record,
+                            stream_id=str(stream_id),
+                            source=str(source or ""),
+                        )
                 ch.emit(
                     "server_turn_started",
-                    {
-                        "session_id": str(session_id),
-                        "stream_id": str(stream_id),
-                        "pending_started_at": (resp or {}).get("pending_started_at"),
-                        "source": source,
-                        **({
-                            "delegation_id": server_turn_metadata.get("delegation_id"),
-                            "origin_turn_key": server_turn_metadata.get("origin_turn_key"),
-                        } if isinstance(server_turn_metadata, dict) else {}),
-                    },
+                    payload,
                 )
     except Exception:
         logger.debug(

@@ -47,6 +47,8 @@ def _capture(monkeypatch):
 def _stop_after_first_heartbeat(monkeypatch):
     calls = {"count": 0}
 
+    monkeypatch.setattr("api.routes._SSE_HEARTBEAT_INTERVAL_SECONDS", 0.001)
+
     def _sleep(_seconds):
         calls["count"] += 1
         raise BrokenPipeError("stop after the first heartbeat")
@@ -355,6 +357,71 @@ def test_session_route_emits_snapshot_without_id_for_missing_cursor_and_keepaliv
     assert ": keepalive\n\n" in body
     assert "id: " not in body
     assert stop["count"] == 1
+
+
+def test_session_route_bridges_background_lifecycle_after_run_ends(monkeypatch):
+    """A background session stays subscribed to SessionChannel between runs."""
+    import api.routes as routes
+    from integration.async_delegation_turns import task_event
+
+    session = SimpleNamespace(
+        session_id="session_1",
+        async_delegation_activity_version=1,
+        async_delegation_origins={
+            "deleg-1": {
+                "delegation_id": "deleg-1",
+                "turn_key": "turn:8",
+                "status": "running",
+                "wakeup_state": "idle",
+                "activity_version": 1,
+                "created_at": 100.0,
+                "completed_at": None,
+            }
+        },
+        compact=lambda **_kwargs: {"session_id": "session_1"},
+    )
+    lifecycle = task_event(
+        session,
+        "background_task_status",
+        "deleg-1",
+        session.async_delegation_origins["deleg-1"],
+    )
+    lifecycle_queue = queue.Queue()
+    lifecycle_queue.put_nowait(("background_task_status", lifecycle))
+
+    class _Channel:
+        def __init__(self):
+            self.unsubscribed = False
+
+        def unsubscribe(self, subscriber):
+            self.unsubscribed = subscriber is lifecycle_queue
+
+    channel = _Channel()
+    monkeypatch.setattr(routes, "_session_id_visible_to_request_profile", lambda *_a, **_k: True)
+    monkeypatch.setattr(routes, "_SSE_HEARTBEAT_INTERVAL_SECONDS", 0.001)
+    monkeypatch.setattr(routes, "get_session", lambda *_a, **_k: session)
+    monkeypatch.setattr(routes, "_active_run_stream_for_session", lambda *_a, **_k: None)
+    monkeypatch.setattr(routes, "session_journal_fingerprint", lambda *_a, **_k: (0, 0.0, 0))
+    monkeypatch.setattr(
+        "api.background_process.subscribe_to_session_channel",
+        lambda *_a, **_k: (channel, lifecycle_queue),
+    )
+    monkeypatch.setattr(
+        routes.time,
+        "sleep",
+        lambda _seconds: (_ for _ in ()).throw(BrokenPipeError("stop")),
+    )
+
+    handler = _FakeHandler()
+    routes._handle_session_sse_stream_for_session(
+        handler, urlparse("/api/sessions/session_1/events"), "session_1"
+    )
+
+    body = handler.wfile.getvalue().decode("utf-8")
+    assert "event: background_tasks_snapshot\n" in body
+    assert "event: background_task_status\n" in body
+    assert f"id: {lifecycle['event_id']}\n" in body
+    assert channel.unsubscribed is True
 
 
 def test_session_route_resyncs_when_run_completes_inside_idle_wait(monkeypatch):

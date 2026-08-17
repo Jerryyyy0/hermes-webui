@@ -636,6 +636,18 @@ def _emit_to_session_streams(session_id: str, event: str, data: dict) -> int:
     return emitted
 
 
+def emit_session_channel_event(session_id: str, event: str, data: dict) -> int:
+    """Broadcast a lifecycle envelope only to existing session-SSE subscribers."""
+    ch = get_session_channel(session_id)
+    if ch is None:
+        return 0
+    try:
+        return ch.emit(event, data)
+    except Exception:
+        logger.debug("SessionChannel emit failed for session %s", session_id, exc_info=True)
+        return 0
+
+
 def _emit_bg_task_complete_events_now(session_id: str, payload: dict) -> int:
     """Emit the canonical bg_task_complete event and temporary legacy alias."""
     # T1 emit rename: the canonical event name is now ``bg_task_complete``
@@ -941,19 +953,17 @@ def _record_async_delegation_accepted(
     payload = _build_payload(evt, session_id)
     try:
         from api.models import get_session
-        from integration.async_delegation_turns import resolve_async_delegation_origin
+        from integration.async_delegation_turns import resolve_async_delegation_origin, task_event
 
-        origin = resolve_async_delegation_origin(
-            get_session(session_id), completion_delivery_id(evt)
-        )
+        session = get_session(session_id)
+        delegation_id = completion_delivery_id(evt)
+        origin = resolve_async_delegation_origin(session, delegation_id)
         if origin:
-            payload.update(
-                {
-                    "delegation_id": completion_delivery_id(evt),
-                    "origin_turn_key": str(origin.get("turn_key") or ""),
-                    "status": "completed",
-                    "wakeup_state": "running",
-                }
+            payload = task_event(
+                session,
+                "bg_task_complete",
+                delegation_id,
+                origin,
             )
     except Exception:
         # Legacy process-only callers retain the minimal payload contract.
@@ -982,28 +992,59 @@ def _emit_async_delegation_status(
     content: object,
 ) -> None:
     """Publish non-transcript lifecycle state for one async delegation."""
-    payload = {
-        "session_id": str(session_id),
-        "delegation_id": str(delegation_id),
-        "origin_turn_key": str((record or {}).get("turn_key") or ""),
-        "status": status,
-        "wakeup_state": wakeup_state,
-    }
+    payload = None
+    session = None
+    try:
+        from api.models import get_session
+        from integration.async_delegation_turns import idle_event, is_idle, task_event
+
+        session = get_session(session_id)
+        payload = task_event(
+            session,
+            "background_task_status",
+            delegation_id,
+            record,
+        )
+    except Exception:
+        logger.debug(
+            "async delegation status envelope build failed for session %s",
+            session_id,
+            exc_info=True,
+        )
+        payload = {
+            "session_id": str(session_id),
+            "delegation_id": str(delegation_id),
+            "origin_turn_key": str((record or {}).get("turn_key") or ""),
+            "status": status,
+            "wakeup_state": wakeup_state,
+        }
     try:
         _emit_to_session_streams(session_id, "background_task_status", payload)
+        if session is not None and is_idle(session):
+            _emit_to_session_streams(
+                session_id,
+                "background_tasks_idle",
+                idle_event(session),
+            )
     except Exception:
         logger.debug(
             "async delegation status emit failed for session %s",
             session_id,
             exc_info=True,
         )
+    logged_payload = payload.get("payload") if isinstance(payload, dict) else None
+    origin_turn_key = (
+        str(logged_payload.get("origin_turn_key") or "")
+        if isinstance(logged_payload, dict)
+        else str((payload or {}).get("origin_turn_key") or "")
+    )
     logger.debug(
         "hermes_message_semantics action=background_task_status "
         "class=context_anchor kind=async_delegation_completion role=user "
         "session_id=%s turn_key_present=%s delegation_id=%s "
         "status=%s wakeup_state=%s",
         session_id,
-        bool(payload["origin_turn_key"]),
+        bool(origin_turn_key),
         delegation_id,
         status,
         wakeup_state,

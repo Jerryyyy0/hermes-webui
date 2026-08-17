@@ -10,6 +10,19 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+def _activity_version(session: Any) -> int:
+    try:
+        return max(0, int(getattr(session, "async_delegation_activity_version", 0) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _bump_activity_version(session: Any) -> int:
+    version = _activity_version(session) + 1
+    session.async_delegation_activity_version = version
+    return version
+
+
 def _records(session: Any) -> dict[str, dict[str, Any]]:
     raw = getattr(session, "async_delegation_origins", None)
     if not isinstance(raw, dict):
@@ -50,14 +63,24 @@ def record_async_delegation_dispatch(
 
     records = _records(session)
     record = dict(records.get(delegation_id) or {})
-    record.update(
-        {
-            "turn_key": origin_turn_key,
-            "created_at": record.get("created_at") or time.time(),
-            "status": "running",
-            "wakeup_state": "idle",
-            "completed_at": None,
-        }
+    existing = bool(record)
+    if not existing:
+        record.update(
+            {
+                "delegation_id": delegation_id,
+                "turn_key": origin_turn_key,
+                "created_at": time.time(),
+                "status": "running",
+                "wakeup_state": "idle",
+                "completed_at": None,
+            }
+        )
+    else:
+        record["delegation_id"] = delegation_id
+    record["activity_version"] = (
+        int(record.get("activity_version") or _activity_version(session))
+        if existing
+        else _bump_activity_version(session)
     )
     records[delegation_id] = record
     session.async_delegation_origins = records
@@ -95,9 +118,18 @@ def mark_async_delegation_completion(
     if not isinstance(record, dict):
         return None
     record = dict(record)
+    was_status = record.get("status")
+    was_wakeup_state = record.get("wakeup_state")
     record["status"] = "completed"
     record["completed_at"] = record.get("completed_at") or time.time()
+    changed = (
+        was_status != "completed" or was_wakeup_state != wakeup_state
+    )
     record["wakeup_state"] = wakeup_state
+    if changed:
+        record["activity_version"] = _bump_activity_version(session)
+    else:
+        record["activity_version"] = int(record.get("activity_version") or _activity_version(session))
     records[delegation_id] = record
     session.async_delegation_origins = records
     _save(session)
@@ -127,7 +159,12 @@ def mark_async_delegation_wakeup(
     if not isinstance(record, dict):
         return None
     record = dict(record)
+    changed = record.get("wakeup_state") != wakeup_state
     record["wakeup_state"] = wakeup_state
+    if changed:
+        record["activity_version"] = _bump_activity_version(session)
+    else:
+        record["activity_version"] = int(record.get("activity_version") or _activity_version(session))
     records[delegation_id] = record
     session.async_delegation_origins = records
     _save(session)

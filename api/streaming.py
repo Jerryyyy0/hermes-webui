@@ -8048,13 +8048,33 @@ def _run_agent_streaming(
                 if str(name or "") != "delegate_task" or not _manifest_turn_key:
                     return
                 try:
-                    from integration.async_delegation_turns import record_async_delegation_dispatch
+                    from integration.async_delegation_turns import (
+                        record_async_delegation_dispatch,
+                        task_event,
+                    )
                     with _get_session_agent_lock(session_id):
-                        record_async_delegation_dispatch(
+                        record = record_async_delegation_dispatch(
                             s,
                             function_result,
                             turn_key=_manifest_turn_key,
                         )
+                    if record is None:
+                        return
+                    event_payload = task_event(
+                        s,
+                        "background_task_dispatched",
+                        str(record.get("delegation_id") or ""),
+                        record,
+                        dispatched_at=record.get("created_at"),
+                    )
+                    put("background_task_dispatched", event_payload)
+                    from api.background_process import emit_session_channel_event
+
+                    emit_session_channel_event(
+                        session_id,
+                        "background_task_dispatched",
+                        event_payload,
+                    )
                 except Exception:
                     logger.debug(
                         "Failed to record async delegation origin for session %s",
