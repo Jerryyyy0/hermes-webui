@@ -9,11 +9,12 @@
 
 ## 当前实现状态与缺口
 
-当前实现中，后台委派相关的三个事件已有**后端发射点**：
+当前实现中，`background_task_status`、`bg_task_complete`、`server_turn_started` 已有**后端发射点**；下表同时列出本文新增的两个建连事件：
 
 | 事件 | 发射时机 | 当前发射目标 |
 | --- | --- | --- |
-| `background_task_dispatched` | **提案**：成功记录派发归属后 | 实施后发往 `SessionChannel`；不是现有保证。 |
+| `background_task_dispatched` | **提案**：成功记录派发归属后 | 必须发往派发它的当前 chat stream；已订阅的 session 同时经 `SessionChannel` 接收。 |
+| `background_tasks_snapshot` | **提案**：session SSE 建连并完成 sidecar 读取后 | 仅发往新建立的 session SSE，用于填补建连竞态。 |
 | `background_task_status` | completion 进入 `queued` / `running`，或 wakeup 进入 `settled` / `failed` | 匹配的活跃聊天流，以及 `SessionChannel`。 |
 | `bg_task_complete` | 服务端已成功接受 completion 并启动 wakeup | 匹配的活跃聊天流，以及 `SessionChannel`。 |
 | `server_turn_started` | 服务端成功创建 wakeup run | `SessionChannel`。 |
@@ -48,7 +49,7 @@
 | --- | --- | --- |
 | `POST /api/chat/start` | 每个用户 turn 一次 | 启动正常聊天 run，返回 `stream_id`。 |
 | `GET /api/chat/stream?stream_id=…` | 每个 Agent run 一条 | 接收该 run 的 token、工具、`done`、`stream_end`。后台 wakeup 的回复也走这里。 |
-| `GET /api/sessions/{session_id}/events` | 每个存在未结算后台任务的 session 一条 | 接收后台任务生命周期及服务端启动新 run 的通知；不承载 assistant token。 |
+| `GET /api/sessions/{session_id}/events` | 每个存在未结算后台任务的 session 一条 | 接收后台任务生命周期及服务端启动新 run 的通知；新的实时 assistant token 不承载于此，仍以 chat stream 为准。 |
 | `GET /api/session?session_id=…` | 重连/切换时按需调用 | 用持久化 session 结果恢复显示，作为 SSE 缺口或已完成 run 的兜底。 |
 
 `GET /api/sessions/events` 是全局 session-list invalidation 流，不能替代按会话的 `GET /api/sessions/{session_id}/events`。
@@ -69,8 +70,9 @@ sequenceDiagram
     Chat->>Agent: run parent turn
     Agent-->>Chat: tool_complete(delegate_task, dispatched)
     Chat->>Sidecar: delegation_id -> origin_turn_key; status=running
-    UI->>Events: 仅首次成功派发时打开 session SSE
-    Sidecar-->>Events: background_task_dispatched（尽力通知）
+    Chat-->>UI: background_task_dispatched + session_events_url
+    UI->>Events: GET session_events_url
+    Events-->>UI: background_tasks_snapshot（sidecar 当前状态）
     Chat-->>UI: done / stream_end (原父 turn)
 
     Agent-->>Sidecar: async_delegation completion
@@ -126,9 +128,9 @@ Content-Type: application/json
 GET /api/chat/stream?stream_id=stream_parent_1
 ```
 
-### 4.2 识别成功派发
+### 4.2 派发通知与会话 SSE 建连
 
-浏览器在这个正常聊天流的 `tool_complete` 中识别 `delegate_task` 的成功结果：
+当前前端可在正常聊天流的 `tool_complete` 中识别 `delegate_task` 的成功结果：
 
 ```json
 {
@@ -138,16 +140,18 @@ GET /api/chat/stream?stream_id=stream_parent_1
 }
 ```
 
-只有同时满足 `status=dispatched`、`mode=background` 且 `delegation_id` 非空时，前端才把该任务加入该 `session_id` 的后台任务集合，并确保打开会话事件流：
+目标实现中，后端在校验该工具结果并成功写入 `delegation_id → origin_turn_key` sidecar 映射后，必须向**同一条仍处于连接状态的 chat SSE**发出专用 `background_task_dispatched` 事件。前端以该事件提供的地址建立会话级事件流：
 
 ```text
 GET /api/sessions/session_123/events
 Accept: text/event-stream
 ```
 
+这避免前端解析通用工具结果来决定 transport 行为。因为这个通知走的是已连接的 chat SSE，它不会出现“必须先订阅 session SSE 才能收到建立 session SSE 的通知”的循环。
+
 同一 session 的多个后台任务共用一条 EventSource。前端不能每个 `delegation_id` 建一条连接。
 
-`tool_complete` 是首次建立该 EventSource 的权威触发条件。后端可能在前端连接完成前已经发出 `background_task_dispatched`，因此前端**不得**依赖收到该事件才知道任务已派发；错过它不影响后续完成、排队和 wakeup 回复的处理。
+`tool_complete` 保留为兼容/断线兜底：若前端因 chat SSE 重连等原因错过专用事件，但仍拿到成功工具结果，应按相同 `session_id` 主动建立 session SSE。无论通过哪一种路径建立，session SSE 的第一个业务帧必须是 `background_tasks_snapshot`，以 sidecar 的当前状态消除“派发通知已送达、但 session SSE 尚未连上时任务状态发生变化”的竞态。
 
 ## 5. 会话事件流
 
@@ -166,7 +170,7 @@ Last-Event-ID: <可选，最后已处理的 event id>
 
 ### 5.2 统一事件信封（新增提案）
 
-所有后台任务生命周期事件都使用同一 JSON 顶层形状。SSE 的 `event:` 行与 `event_type` 值相同，SSE 的 `id:` 与 JSON 中的 `event_id` 值相同。
+所有后台任务生命周期及其建连快照事件都使用同一 JSON 顶层形状。SSE 的 `event:` 行与 `event_type` 值相同，SSE 的 `id:` 与 JSON 中的 `event_id` 值相同。
 
 ```text
 event: <event_type>
@@ -202,10 +206,10 @@ data: {
 
 ```text
 run journal / active StreamChannel
-  → token replay、run journal cursor、session_snapshot
+  → 保留既有恢复/回放、run journal cursor、session_snapshot；实时 assistant token 仍以 chat stream 为准
 
 SessionChannel(session_id)
-  → background_task_dispatched（实施后）
+  → background_task_dispatched（已订阅的其他标签页）
   → background_task_status
   → bg_task_complete
   → server_turn_started
@@ -222,7 +226,7 @@ SessionChannel(session_id)
 
 ### 5.3 `background_task_dispatched`（新增提案）
 
-该事件只表示后台委派已被后端接受、归属已持久化；它不是浏览器开启首次订阅的前提，也不是任务实际完成的信号。
+该事件只表示后台委派已被后端接受、归属已持久化；它通知派发该任务的浏览器建立或复用 session SSE，不是任务实际完成的信号。
 
 服务端发射顺序必须为：
 
@@ -230,7 +234,8 @@ SessionChannel(session_id)
 delegate_task 返回 dispatched
   → 校验 delegation_id
   → 持久化 delegation_id → origin_turn_key sidecar 映射
-  → 成功后才发 background_task_dispatched
+  → 成功后向当前 chat stream 发 background_task_dispatched
+  → 同时向已订阅的 SessionChannel 尽力广播
 ```
 
 sidecar 写入失败时不得发事件。这样浏览器不会显示一个服务端无法定位、恢复或结算的后台任务。
@@ -250,14 +255,56 @@ data: {
     "origin_turn_key": "turn:8",
     "status": "running",
     "wakeup_state": "idle",
-    "dispatched_at": 1786004400
+    "dispatched_at": 1786004400,
+    "session_events_url": "/api/sessions/session_123/events"
   }
 }
 ```
 
-该事件是尽力实时通知：在 EventSource 尚未建立、暂时断线或浏览器不在该会话时可以被错过。首次派发状态以正常 chat SSE 中的 `tool_complete` 为准；刷新、重连或其他标签页的状态恢复以 sidecar/session 投影为准。已订阅的其他标签页可用此事件立即更新侧栏 badge。
+发往当前 chat stream 的副本是首次建连的首选通知；`session_events_url` 是相对 WebUI 根路径，前端应通过 `new URL(value, document.baseURI)` 解析，而不是拼接 host。向 `SessionChannel` 的副本是尽力通知，供已订阅的其他标签页更新侧栏 badge。
 
-### 5.4 `background_task_status`
+若当前 chat stream 已断开，或前端在迁移期只收到旧 `tool_complete`，前端仍可从工具结果的 `session_id` / `delegation_id` 建立默认的 `/api/sessions/{session_id}/events` 连接。连接成功后的 `background_tasks_snapshot` 是最终状态依据。
+
+### 5.4 `background_tasks_snapshot`（新增提案）
+
+每次 session SSE 成功完成认证、可见性校验和 `SessionChannel` 订阅后，服务端立即从该 session 的 sidecar 构建并只向这个新订阅者发送一次快照。它解决以下竞态：
+
+```text
+chat stream 收到 background_task_dispatched
+  → 前端开始建立 session SSE
+  → 子任务在 HTTP 建连期间完成或进入 queued
+  → snapshot 返回当前记录，前端不依赖是否错过中间事件
+```
+
+```text
+event: background_tasks_snapshot
+id: background:snapshot:12
+data: {
+  "schema_version": 1,
+  "event_id": "background:snapshot:12",
+  "event_type": "background_tasks_snapshot",
+  "session_id": "session_123",
+  "emitted_at": 1786004405,
+  "background_activity_version": 12,
+  "payload": {
+    "active_task_count": 1,
+    "tasks": [
+      {
+        "delegation_id": "deleg_123",
+        "origin_turn_key": "turn:8",
+        "status": "running",
+        "wakeup_state": "idle",
+        "dispatched_at": 1786004400,
+        "completed_at": null
+      }
+    ]
+  }
+}
+```
+
+`tasks` 只包含未结算任务，即 `status=running` 或 `wakeup_state` 为 `idle`、`queued`、`running` 的记录。前端以快照完整替换该 session 的后台任务本地集合；后续只接受 `background_activity_version` 不早于该快照的增量事件。
+
+### 5.5 `background_task_status`
 
 表示某个 `delegation_id` 的持久化生命周期变化，不创建新的聊天气泡。
 
@@ -291,7 +338,7 @@ data: {
 
 收到 `status=completed, wakeup_state=queued` 时，浏览器必须继续保留该 session 的 EventSource；这不是可关闭状态。
 
-### 5.5 `bg_task_complete`
+### 5.6 `bg_task_complete`
 
 表示服务端已接受完成事件并准备/正在交给 wakeup 处理。它用于 toast、侧栏提示和兼容性消费，不用于决定会话事件流何时关闭。
 
@@ -316,7 +363,7 @@ data: {
 
 客户端以 `event_id` 去重。不能在收到这个事件后关闭 EventSource，因为 wakeup 可能尚未启动、可能处于队列中，或仍未结束。
 
-### 5.6 `server_turn_started`
+### 5.7 `server_turn_started`
 
 表示服务端已为异步完成启动一个新的 Agent run。浏览器不得再次 `POST /api/chat/start`；而是直接用响应里的 `stream_id` 接入正常聊天流。
 
@@ -347,7 +394,7 @@ GET /api/chat/stream?stream_id=stream_wakeup_123
 
 如果这不是当前聊天页，前端只记录该 session 有活跃 run；用户切回时再接入仍活跃的 stream，或者读取已经持久化的完成消息。
 
-### 5.7 `background_tasks_idle`（新增提案）
+### 5.8 `background_tasks_idle`（新增提案）
 
 该事件由服务端基于 session sidecar 聚合得出，是客户端关闭按需会话事件流的唯一正向信号。
 
@@ -375,14 +422,15 @@ data: {
 
 服务端只在更新 sidecar 后判断所有记录。仅当不存在 `status=running`，且不存在 `wakeup_state` 为 `idle`、`queued` 或 `running` 的记录时，才能发送该事件。
 
-### 5.8 实施验收条件
+### 5.9 实施验收条件
 
 实现 `SessionChannel → /api/sessions/{session_id}/events` 桥接时，至少证明以下行为：
 
 | 场景 | 必须证明的结果 |
 | --- | --- |
-| 派发事件早到或丢失 | 前端即使错过 `background_task_dispatched`，仍通过同一 turn 的 `tool_complete` 建立会话 SSE，并正确收到后续状态与 wakeup。 |
-| 统一信封 | 五类后台事件的 SSE `event:` / `id:` 与 JSON `event_type` / `event_id` 一致；公共字段齐全，事件专属字段只出现在 `payload`。 |
+| 派发通知 | 后端在 sidecar 成功写入后向当前 chat stream 发 `background_task_dispatched`；前端使用其中的 `session_events_url` 建立或复用 session SSE。 |
+| 派发事件早到或丢失 | 前端即使错过专用派发事件，仍能用兼容 `tool_complete` 建立会话 SSE；首个 `background_tasks_snapshot` 必须反映当前 sidecar 状态。 |
+| 统一信封 | 六类后台事件的 SSE `event:` / `id:` 与 JSON `event_type` / `event_id` 一致；公共字段齐全，事件专属字段只出现在 `payload`。 |
 | run 间空档完成 | 没有活跃 `STREAMS` 时，浏览器仍从按会话 SSE 收到 `background_task_status`、`bg_task_complete` 和 `server_turn_started`。 |
 | 当前会话忙碌 | completion 先报告 `wakeup_state=queued`；当前 run 终态后才启动下一条 wakeup stream。 |
 | 多会话 | session A 的事件不会写入 session B 的 EventSource 或聊天正文。 |
@@ -405,8 +453,14 @@ backgroundSessions: Map<session_id, {
 状态转换：
 
 ```text
-delegate_task 成功
+background_task_dispatched
   → ensureSessionEvents(session_id)
+
+兼容 tool_complete（专用事件未收到）
+  → ensureSessionEvents(session_id)
+
+background_tasks_snapshot
+  → 以 payload.tasks 完整替换该 session 的后台任务本地集合
 
 background_task_status / bg_task_complete
   → 更新该 session 的任务状态和侧栏
@@ -449,9 +503,9 @@ background_tasks_idle(active_task_count=0)
 | 责任方 | 责任 |
 | --- | --- |
 | Hermes Agent | 创建后台委派、执行子任务、产出 completion。 |
-| WebUI streaming callback | 在 `delegate_task` 成功后保存 `delegation_id → origin_turn_key`。 |
+| WebUI streaming callback | 在 `delegate_task` 成功后保存 `delegation_id → origin_turn_key`，再向当前 chat stream 发 `background_task_dispatched`。 |
 | WebUI background processor | 处理 completion、更新 sidecar、单 session 排队、服务端启动 wakeup。 |
-| WebUI session-event producer | 推送任务状态、`server_turn_started`，并在聚合终态时推送 `background_tasks_idle`。 |
+| WebUI session-event producer | 推送任务状态、`server_turn_started`，并在聚合终态时推送 `background_tasks_idle`；新订阅建立后发送 `background_tasks_snapshot`。 |
 | 浏览器 | 仅在需要时订阅事件流；按 session 隔离状态；用 `stream_id` 接入 wakeup 聊天流；在 `background_tasks_idle` 后释放连接。 |
 
 相关实现/契约：
