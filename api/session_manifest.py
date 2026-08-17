@@ -2846,8 +2846,55 @@ def build_session_manifest(session, source_info: dict[str, str] | None = None) -
     """Build structured todos, artifacts, and references for one session."""
     from api.compression_anchor import is_context_compression_marker
 
+    store_rows: list[dict[str, Any]] = []
+    decided_turn_keys: set[str] = set()
     if source_info is not None:
-        source_info['manifest_source'] = 'derived'
+        # The HTTP endpoint must be store-authoritative.  In particular, an
+        # older session without a decision must not regain artifacts merely by
+        # opening the Inspector and reinterpreting its transcript/tool calls.
+        source_info['manifest_source'] = 'unknown'
+        workspace = Path(str(session.workspace)).expanduser().resolve()
+        try:
+            from api.session_manifest_store import (
+                effective_manifest_workspace_root,
+                load_manifest_decided_turn_keys,
+                load_manifest_decided_turn_keys_by_root,
+                load_manifest_records,
+            )
+
+            store_rows = load_manifest_records(session, include_lineage=True)
+            current_root = effective_manifest_workspace_root(workspace)
+            decided_turn_keys = {
+                turn_key
+                for turn_key, root in load_manifest_decided_turn_keys_by_root(session, include_lineage=True)
+                if current_root is not None and root == str(current_root)
+            }
+            decided_turn_keys.update(load_manifest_decided_turn_keys(session, include_lineage=True))
+        except Exception:
+            logger.debug("failed to read session manifest store", exc_info=True)
+            return {
+                'todos': {'items': []},
+                'artifacts': [],
+                'references': [],
+                'turns': [],
+                'diagnostics': {
+                    'missing_turn_key_message_indices': [],
+                    'orphan_turn_keys': [],
+                },
+            }
+        if not store_rows and not decided_turn_keys:
+            source_info['manifest_source'] = 'none'
+            return {
+                'todos': {'items': []},
+                'artifacts': [],
+                'references': [],
+                'turns': [],
+                'diagnostics': {
+                    'missing_turn_key_message_indices': [],
+                    'orphan_turn_keys': [],
+                },
+            }
+        source_info['manifest_source'] = 'db'
     messages = _load_display_messages(session)
     messages = _ensure_turn_keys(messages)
     has_stable_turn_keys = any(
@@ -2879,43 +2926,25 @@ def build_session_manifest(session, source_info: dict[str, str] | None = None) -
         events, workspace, messages, skills_dir=skills_dir,
     )
 
-    store_rows: list[dict[str, Any]] = []
-    decided_turn_keys: set[str] = set()
-    try:
-        from api.session_manifest_store import (
-            effective_manifest_workspace_root,
-            load_manifest_decided_turn_keys,
-            load_manifest_decided_turn_keys_by_root,
-            load_manifest_records,
-        )
+    if source_info is None:
+        try:
+            from api.session_manifest_store import (
+                effective_manifest_workspace_root,
+                load_manifest_decided_turn_keys,
+                load_manifest_decided_turn_keys_by_root,
+                load_manifest_records,
+            )
 
-        # Historical artifact backfill and empty-decision repair deliberately
-        # remain disabled on manifest reads. GET must not mutate the artifact
-        # store merely because a user opens an older session.
-        # repair_empty_manifest_turns(session)
-        store_rows = load_manifest_records(session, include_lineage=True)
-        current_root = effective_manifest_workspace_root(workspace)
-        decided_turn_keys = {
-            turn_key
-            for turn_key, root in load_manifest_decided_turn_keys_by_root(session, include_lineage=True)
-            if current_root is not None and root == str(current_root)
-        }
-        # Keep the public current-root helper as the compatibility seam for
-        # callers/tests that substitute the manifest-store reader.  Its real
-        # implementation is also root-scoped, so this cannot reintroduce
-        # cross-root suppression in production.
-        decided_turn_keys.update(load_manifest_decided_turn_keys(session, include_lineage=True))
-        if store_rows or decided_turn_keys:
-            if source_info is not None:
-                source_info['manifest_source'] = 'db'
-        else:
-            # backfill_missing_manifest_records(session)
-            # Historical sessions without store decisions remain derived-only
-            # until an explicit maintenance operation performs a backfill.
-            # ``manifest_source`` stays ``derived`` as initialized above.
-            pass
-    except Exception:
-        logger.debug("failed to read session manifest store", exc_info=True)
+            store_rows = load_manifest_records(session, include_lineage=True)
+            current_root = effective_manifest_workspace_root(workspace)
+            decided_turn_keys = {
+                turn_key
+                for turn_key, root in load_manifest_decided_turn_keys_by_root(session, include_lineage=True)
+                if current_root is not None and root == str(current_root)
+            }
+            decided_turn_keys.update(load_manifest_decided_turn_keys(session, include_lineage=True))
+        except Exception:
+            logger.debug("failed to read session manifest store", exc_info=True)
 
     artifact_records = {} if decided_turn_keys else _records_by_path(artifacts)
     if decided_turn_keys:

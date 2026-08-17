@@ -64,10 +64,10 @@ GET /api/session/manifest?session_id=abc123
 | 值 | 含义 |
 | --- | --- |
 | `db` | 使用 artifact store 中的非空或 empty decision |
-| `derived` | 当前 lineage 无 store decision 时，临时从 transcript 或 legacy sidecar 派生；不写入 DB |
+| `none` | 当前 lineage 无 store decision；返回空 Manifest，不读取 transcript、tool calls 或 legacy sidecar 重建 |
 | `unknown` | 异常或无法判断 |
 
-GET 是只读的：不得执行 artifact backfill 或 empty-decision repair，不得更新 session `updated_at`、sidebar recency，也不得发布 session-list 变更事件。
+GET 是只读的：不得执行 artifact backfill 或 empty-decision repair，不得更新 session `updated_at`、sidebar recency，也不得发布 session-list 变更事件。没有 store decision 时也不重建历史 Manifest。
 
 ### 错误响应
 

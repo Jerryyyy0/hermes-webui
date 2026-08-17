@@ -36,8 +36,7 @@ flowchart TD
   loadStore --> classify{Decision 状态}
   classify -->|非空| useStore[直接使用 store rows]
   classify -->|empty| useEmpty[保留 empty decision]
-  classify -->|lineage 无 decision| derive[仅临时从 transcript 或 legacy sidecar 派生]
-  derive --> wire
+  classify -->|lineage 无 decision| empty[返回空 Manifest]
   useStore --> wire[Wire projection]
   useEmpty --> wire
 ```
@@ -50,7 +49,7 @@ flowchart TD
 
 - **非空 decision**：该 turn 至少有一条 `path != ""` 的 artifact row。
 - **Empty decision**：该 turn 只有一条 `path = ""`、`preview = "file"`、`source_tool = "assistant_prose"` 的 marker；marker 不进入 wire。
-- **无 decision**：当前 lineage/profile/逻辑 workspace root 没有任何 store row；GET 仅临时从 transcript 或 legacy sidecar 派生 wire 结果，不写入 DB。
+- **无 decision**：当前 lineage/profile/逻辑 workspace root 没有任何 store row；GET 返回空 Manifest，不读取 transcript、tool calls 或 legacy sidecar 重建，也不写入 DB。
 
 `repair_empty_manifest_turns()` 与 `backfill_missing_manifest_records()` 保留给显式维护操作；`GET /api/session/manifest` 不调用它们。前者只扫描当前逻辑 root 的 empty turns；提取到成果后，`replace_manifest_turn_records()` 按 `(lineage_key, profile, workspace_root, turn_key)` 删除旧 marker 并在同一事务写入新 rows。已有非空 turn 不参与 repair。
 
@@ -247,7 +246,7 @@ path, preview, source_tool, created_at, updated_at
 
 Profile 只来自 `session.profile`，缺失写空字符串；不从 active profile、parent、workspace 或 path 推断。
 
-Legacy `session.turn_artifacts` 不再是新会话写入目标，只在显式 backfill 操作且 lineage 完全无 decision 时作为输入。Manifest GET 可将它作为临时展示投影，但绝不将其回填至 store。Legacy 空 source 规范化为 `assistant_prose`，不伪装成写入工具。
+Legacy `session.turn_artifacts` 不再是新会话写入目标，只在显式 backfill 操作且 lineage 完全无 decision 时作为输入。Manifest GET 不读取它，也绝不将其回填至 store。Legacy 空 source 规范化为 `assistant_prose`，不伪装成写入工具。
 
 ## 7. Wire projection 与 expired
 

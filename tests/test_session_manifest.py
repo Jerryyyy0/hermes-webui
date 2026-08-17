@@ -4024,7 +4024,7 @@ def test_persist_turn_artifact_paths_keeps_same_path_across_turns(tmp_path, monk
     assert session.turn_artifacts == {}
 
 
-def test_session_get_does_not_backfill_legacy_turn_artifacts(tmp_path, monkeypatch):
+def test_session_get_without_db_decision_does_not_rebuild_legacy_manifest(tmp_path, monkeypatch):
     from urllib.parse import urlparse
 
     import api.routes as routes
@@ -4052,7 +4052,10 @@ def test_session_get_does_not_backfill_legacy_turn_artifacts(tmp_path, monkeypat
     monkeypatch.setattr(routes, '_clear_stale_stream_state', lambda _s: None)
     monkeypatch.setattr(routes, 'redact_session_data', lambda payload: payload)
     monkeypatch.setattr(routes, 'j', lambda _handler, payload, status=200, extra_headers=None: payload)
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    def _unexpected_transcript_read(_session):
+        raise AssertionError('historical manifest reads must not rebuild from the transcript')
+
+    monkeypatch.setattr('api.session_manifest._load_display_messages', _unexpected_transcript_read)
     monkeypatch.setattr('api.session_manifest._skills_dir_for_session', lambda s: tmp_path / 'skills')
     monkeypatch.setattr('api.session_manifest._skillhub_preview_available', lambda: False)
     monkeypatch.setattr('api.session_manifest_store.STATE_DIR', tmp_path / 'state')
@@ -4069,17 +4072,61 @@ def test_session_get_does_not_backfill_legacy_turn_artifacts(tmp_path, monkeypat
     from api.session_manifest_store import load_manifest_decided_turn_keys, load_manifest_records
 
     assert 'turn_artifacts' not in session_resp['session']
-    assert manifest_resp['manifest_source'] == 'derived'
-    manifest_by_turn = {
-        turn['turn_key']: turn['artifacts']
-        for turn in manifest_resp['manifest']['turns']
+    assert manifest_resp == {
+        'manifest': {
+            'todos': {'items': []},
+            'artifacts': [],
+            'references': [],
+            'turns': [],
+            'diagnostics': {
+                'missing_turn_key_message_indices': [],
+                'orphan_turn_keys': [],
+            },
+        },
+        'manifest_source': 'none',
     }
-    assert [row['path'] for row in manifest_by_turn['turn:1']] == ['missing.py', 'report.md']
-    assert manifest_by_turn['turn:1'][0]['status'] == 'expired'
-    assert [row['path'] for row in manifest_by_turn['turn:2']] == ['deliver.docx', 'make_docx.py']
-    assert manifest_by_turn['turn:2'][1]['status'] == 'expired'
     assert load_manifest_records(session) == []
     assert load_manifest_decided_turn_keys(session) == set()
+
+
+def test_session_get_with_empty_db_decision_uses_db_manifest(tmp_path, monkeypatch):
+    from urllib.parse import urlparse
+
+    import api.routes as routes
+    from api.session_manifest_store import upsert_manifest_records
+
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    session = Session(
+        session_id='http_empty_decision01',
+        workspace=str(workspace),
+        profile='default',
+        messages=[
+            {'role': 'user', 'content': 'just answer', '_turn_key': 'turn:1'},
+            {'role': 'assistant', 'content': 'No file was created.'},
+        ],
+    )
+    monkeypatch.setattr(routes, 'get_session', lambda sid, metadata_only=False: session)
+    monkeypatch.setattr(routes, 'j', lambda _handler, payload, status=200, extra_headers=None: payload)
+    monkeypatch.setattr('api.session_manifest_store.STATE_DIR', tmp_path / 'state')
+    upsert_manifest_records(
+        session,
+        'turn:1',
+        [{'path': '', 'source_tool': 'assistant_prose', 'preview': 'file'}],
+    )
+
+    manifest_resp = routes.handle_get(
+        object(),
+        urlparse('/api/session/manifest?session_id=http_empty_decision01'),
+    )
+
+    assert manifest_resp['manifest_source'] == 'db'
+    assert manifest_resp['manifest']['artifacts'] == []
+    assert manifest_resp['manifest']['turns'] == [{
+        'turn_key': 'turn:1',
+        'artifacts': [],
+        'references': [],
+    }]
 
 
 def test_manifest_read_does_not_repair_empty_artifact_decision(tmp_path, monkeypatch):
