@@ -615,6 +615,51 @@ def _resolve_manifest_path(workspace: Path, raw: str | None) -> str:
     return rel_str
 
 
+def artifact_workspace_root_for_session(session) -> Path:
+    """Return the one root used by every ordinary-file artifact stage."""
+    from api.workspace import artifact_workspace_root_for_session as _artifact_root
+
+    return _artifact_root(session)
+
+
+def _rebase_file_artifact_records(
+    rows: list[dict] | None,
+    source_workspace: Path,
+    artifact_workspace: Path,
+) -> list[dict]:
+    """Rebase source-workspace records onto the shared artifact root.
+
+    Tool arguments use the session workspace as their relative-path base, while
+    preview and store identity use the enclosing artifact root. Keep the two
+    operations separate so `write_file("report.md")` still resolves inside a
+    managed session, but an explicit absolute path at the default workspace
+    root can also be surfaced as an artifact.
+    """
+    source = source_workspace.expanduser().resolve()
+    root = artifact_workspace.expanduser().resolve()
+    out: list[dict] = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        copied = dict(row)
+        if _is_skill_manifest_row(copied) or "workspace_root" in copied:
+            out.append(copied)
+            continue
+        raw = str(copied.get("path") or "").strip()
+        if not raw:
+            out.append(copied)
+            continue
+        try:
+            candidate = Path(raw).expanduser()
+            candidate = candidate.resolve() if candidate.is_absolute() else (source / candidate).resolve()
+            copied["path"] = candidate.relative_to(root).as_posix()
+        except (OSError, RuntimeError, ValueError):
+            if str(copied.get("source_tool") or "") != MEDIA_ARTIFACT_SOURCE:
+                continue
+        out.append(copied)
+    return out
+
+
 def _paths_from_args(args: dict[str, Any], workspace: Path) -> list[str]:
     paths: list[str] = []
     seen: set[str] = set()
@@ -1894,6 +1939,7 @@ def _drop_reference_skills_in_artifacts(
 def turn_artifacts_for_wire(session) -> dict[str, list[dict[str, str]]]:
     """Return legacy turn_artifacts with only existing previewable entries."""
     workspace = Path(str(getattr(session, 'workspace', '') or '')).expanduser().resolve()
+    artifact_workspace = artifact_workspace_root_for_session(session)
     skills_dir = _skills_dir_for_session(session)
     raw = getattr(session, 'turn_artifacts', None) or {}
     if not isinstance(raw, dict):
@@ -1908,7 +1954,8 @@ def turn_artifacts_for_wire(session) -> dict[str, list[dict[str, str]]]:
             row = _normalize_persisted_turn_artifact_entry(entry)
             if row is not None:
                 normalized.append(row)
-        filtered = filter_existing_turn_artifact_entries(workspace, skills_dir, normalized)
+        rebased = _rebase_file_artifact_records(normalized, workspace, artifact_workspace)
+        filtered = filter_existing_turn_artifact_entries(artifact_workspace, skills_dir, rebased)
         if filtered:
             out[tk] = filtered
     return out
@@ -1937,6 +1984,7 @@ def extract_turn_artifact_entries_for_manifest(
         None,
     )
     workspace = Path(str(getattr(session, 'workspace', '') or '')).expanduser().resolve()
+    artifact_workspace = artifact_workspace_root_for_session(session)
     skills_dir = _skills_dir_for_session(session)
     all_tool_calls = getattr(session, 'tool_calls', None)
     accumulated_prior = list(prior_artifact_paths)
@@ -1955,7 +2003,12 @@ def extract_turn_artifact_entries_for_manifest(
             skills_dir=skills_dir,
             prior_artifact_paths=accumulated_prior,
         )
-        filtered_entries = filter_existing_turn_artifact_entries(workspace, skills_dir, current_entries)
+        rebased_entries = _rebase_file_artifact_records(
+            current_entries, workspace, artifact_workspace,
+        )
+        filtered_entries = filter_existing_turn_artifact_entries(
+            artifact_workspace, skills_dir, rebased_entries,
+        )
         if current_key == key:
             entries = filtered_entries
             break
@@ -2676,6 +2729,7 @@ def extract_manifest_delta_from_tool_event(
     source_kind: str = '',
     skills_dir: Path | None = None,
     default_profile: str = '',
+    artifact_workspace: Path | None = None,
 ) -> dict[str, Any]:
     """Build a manifest_delta SSE payload from one explicit tool event."""
     normalized_event = ToolEvent(
@@ -2694,6 +2748,8 @@ def extract_manifest_delta_from_tool_event(
         artifacts, references = _extract_artifacts_and_references(
             [normalized_event], workspace, skills_dir=skills_dir,
         )
+    artifact_root = artifact_workspace or workspace
+    artifacts = _rebase_file_artifact_records(artifacts, workspace, artifact_root)
     payload: dict[str, Any] = {
         'version': 1,
         'session_id': str(session_id or ''),
@@ -2706,7 +2762,7 @@ def extract_manifest_delta_from_tool_event(
             'status': normalized_event.status,
         },
         'artifacts': _rows_to_wire(
-            artifacts, workspace, skills_dir,
+            artifacts, artifact_root, skills_dir,
             default_profile=default_profile, collection='artifacts',
         ),
         'references': _rows_to_wire(
@@ -2734,6 +2790,7 @@ def extract_manifest_delta_from_assistant_media(
     turn_key: str = '',
     sequence: int | None = None,
     default_profile: str = '',
+    artifact_workspace: Path | None = None,
 ) -> dict[str, Any]:
     """Build a manifest_delta SSE payload from assistant MEDIA: tokens in one turn."""
     return extract_manifest_delta_from_turn_reconcile(
@@ -2744,6 +2801,7 @@ def extract_manifest_delta_from_assistant_media(
         turn_key=turn_key,
         sequence=sequence,
         default_profile=default_profile,
+        artifact_workspace=artifact_workspace,
     )
 
 
@@ -2758,6 +2816,7 @@ def extract_manifest_delta_from_turn_reconcile(
     default_profile: str = '',
     skills_dir: Path | None = None,
     tool_calls: list | None = None,
+    artifact_workspace: Path | None = None,
 ) -> dict[str, Any]:
     """Build a turn_complete manifest_delta from transcript reconcile (incl. MEDIA)."""
     turn_key = str(turn_key or '').strip()
@@ -2770,14 +2829,17 @@ def extract_manifest_delta_from_turn_reconcile(
         skills_dir=skills_dir,
         tool_calls=tool_calls,
     )
+    artifact_root = artifact_workspace or workspace
+    session_artifacts = _rebase_file_artifact_records(session_artifacts, workspace, artifact_root)
+    turn_artifacts = _rebase_file_artifact_records(turn_artifacts, workspace, artifact_root)
     wire_artifacts = _rows_to_wire(
-        session_artifacts, workspace, skills_dir,
+        session_artifacts, artifact_root, skills_dir,
         default_profile=default_profile, collection='artifacts',
     )
     if not wire_artifacts:
         return {}
     turn_wire = _rows_to_wire(
-        turn_artifacts, workspace, skills_dir,
+        turn_artifacts, artifact_root, skills_dir,
         default_profile=default_profile, collection='artifacts',
     )
     payload: dict[str, Any] = {
@@ -2868,6 +2930,7 @@ def build_session_manifest(session, source_info: dict[str, str] | None = None) -
     ]
     tool_calls = list(getattr(session, 'tool_calls', None) or [])
     workspace = Path(str(session.workspace)).expanduser().resolve()
+    artifact_workspace = artifact_workspace_root_for_session(session)
     skills_dir = _skills_dir_for_session(session)
     default_profile = str(getattr(session, 'profile', None) or '').strip()
     events = _collect_tool_events(messages, tool_calls)
@@ -2894,7 +2957,7 @@ def build_session_manifest(session, source_info: dict[str, str] | None = None) -
         # store merely because a user opens an older session.
         # repair_empty_manifest_turns(session)
         store_rows = load_manifest_records(session, include_lineage=True)
-        current_root = effective_manifest_workspace_root(workspace)
+        current_root = effective_manifest_workspace_root(artifact_workspace)
         decided_turn_keys = {
             turn_key
             for turn_key, root in load_manifest_decided_turn_keys_by_root(session, include_lineage=True)
@@ -2993,22 +3056,28 @@ def build_session_manifest(session, source_info: dict[str, str] | None = None) -
         )
 
     artifacts = sorted(
-        profiled_artifact_records.values(),
+        _rebase_file_artifact_records(
+            list(profiled_artifact_records.values()), workspace, artifact_workspace,
+        ),
         key=lambda row: (str(row.get('profile') or ''), str(row.get('path') or '')),
     )
+    for turn in turns:
+        turn['artifacts'] = _rebase_file_artifact_records(
+            list(turn.get('artifacts') or []), workspace, artifact_workspace,
+        )
     _drop_reference_skills_in_artifacts(artifacts, references, turns, skills_dir)
     _clean_record_keys(artifacts + references)
     return {
         'todos': _wire_todos(todos),
         'artifacts': _rows_to_wire(
-            artifacts, workspace, skills_dir,
+            artifacts, artifact_workspace, skills_dir,
             default_profile=default_profile, collection='artifacts',
         ),
         'references': _rows_to_wire(
             references, workspace, skills_dir, collection='references',
         ),
         'turns': [
-            _turn_to_wire(turn, workspace, skills_dir, default_profile=default_profile)
+            _turn_to_wire(turn, artifact_workspace, skills_dir, default_profile=default_profile)
             for turn in turns
         ],
         'diagnostics': {

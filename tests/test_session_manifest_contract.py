@@ -90,7 +90,7 @@ def test_session_manifest_store_lifecycle_hooks_present():
 def test_session_manifest_store_module_contract():
     src = (REPO / 'api' / 'session_manifest_store.py').read_text(encoding='utf-8')
     assert 'CREATE TABLE IF NOT EXISTS session_manifest_records' in src
-    assert 'UNIQUE(lineage_key, profile, turn_key, record_kind, path)' in src
+    assert 'UNIQUE(lineage_key, profile, turn_key, record_kind, path, workspace_root)' in src
     assert 'def resolve_manifest_lineage_key' in src
     assert 'def upsert_manifest_records' in src
     assert 'def load_manifest_records' in src
@@ -146,9 +146,9 @@ def test_completed_transcript_is_saved_before_manifest_decision_and_settlement_o
 
 
 def test_session_manifest_docs_separate_product_api_and_artifact_contracts():
-    product = (REPO / 'docs' / 'session-inspector-manifest.md').read_text(encoding='utf-8')
-    api = (REPO / 'docs' / 'session-manifest-api.md').read_text(encoding='utf-8')
-    artifacts = (REPO / 'docs' / 'session-manifest-artifacts.md').read_text(encoding='utf-8')
+    product = (REPO / 'docs' / 'architecture' / 'session-inspector-manifest.md').read_text(encoding='utf-8')
+    api = (REPO / 'docs' / 'api' / 'session-manifest-api.md').read_text(encoding='utf-8')
+    artifacts = (REPO / 'docs' / 'architecture' / 'session-manifest-artifacts.md').read_text(encoding='utf-8')
 
     assert '派生索引' in product
     assert '核心不变量' in product
