@@ -41,14 +41,16 @@ start_gateway() {
     log "starting default Gateway"
     (
       cd "${HERMES_WEBUI_AGENT_DIR}"
+      exec > >(tee -a "${log_file}") 2>&1
       exec "${HERMES_PYTHON}" -m hermes_cli.main gateway run
-    ) >>"${log_file}" 2>&1 &
+    ) &
   else
     log "starting Gateway for profile: ${name}"
     (
       cd "${HERMES_WEBUI_AGENT_DIR}"
+      exec > >(tee -a "${log_file}") 2>&1
       exec "${HERMES_PYTHON}" -m hermes_cli.main -p "${name}" gateway run
-    ) >>"${log_file}" 2>&1 &
+    ) &
   fi
 
   pid="$!"
