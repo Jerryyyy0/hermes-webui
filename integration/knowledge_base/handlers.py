@@ -10,58 +10,18 @@ from api.helpers import bad, j
 from integration.config import knowledge_base_enabled
 from integration.knowledge_base.constants import (
     BINARY_PASSTHROUGH_ROUTES,
-    DEFAULT_PAGE_SIZE,
-    PASSTHROUGH_ROUTES,
+    WEBUI_ROUTE_PREFIX,
+    WEBUI_ROUTE_TO_ROUTE_KEY,
 )
 from integration.knowledge_base import client
-from integration.knowledge_base.constants import WEBUI_ROUTE_PREFIX
-
-_ROUTE_BUILDERS: dict[str, str] = {
-    "list": "build_list_payload",
-    "joined": "build_joined_payload",
-    "create": "build_create_payload",
-    "info": "build_info_payload",
-    "edit": "build_edit_payload",
-    "delete": "build_delete_kb_payload",
-    "available": "build_available_payload",
-    "apply_join": "build_apply_join_payload",
-    "members": "build_members_payload",
-    "documents": "build_documents_payload",
-    "update_docs": "build_update_docs_payload",
-    "delete_docs": "build_delete_docs_payload",
-    "search_docs": "build_search_docs_payload",
-    "search_docs_xcore": "build_search_docs_xcore_payload",
-}
 
 _REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
-    "list": ("account", "uuid", "isPersonal"),
-    "joined": ("account", "uuid"),
-    "create": ("account", "uuid", "showName", "isPersonal"),
-    "info": ("kbName",),
-    "edit": ("kbName", "showName"),
-    "delete": ("account", "kbName"),
-    "available": ("account", "uuid", "page", "size"),
-    "apply_join": ("account", "uuid", "kbName"),
-    "members": ("uuid", "kbName", "page", "size"),
-    "documents": ("kbName", "page", "size"),
-    "update_docs": ("kbName", "fileNames", "fileProperties"),
-    "delete_docs": ("kbName", "fileNames"),
-    "search_docs": ("query", "kbName"),
-    "search_docs_xcore": ("query", "kbNames"),
     "upload_artifacts": ("uuid", "kbName", "fileProperties", "paths"),
 }
 
 _VALIDATION_ERROR_CN: dict[str, str] = {
-    "missing_account": "缺少用户账号",
     "missing_uuid": "缺少用户 UUID",
     "missing_kbName": "缺少知识库名称",
-    "missing_isPersonal": "缺少个人/团队标识",
-    "missing_showName": "缺少知识库显示名称",
-    "missing_page": "缺少页码",
-    "missing_size": "缺少分页大小",
-    "missing_query": "缺少查询内容",
-    "missing_kbNames": "缺少知识库名称列表",
-    "missing_fileNames": "缺少文件名列表",
     "missing_fileProperties": "缺少文件属性",
     "missing_paths": "缺少路径",
     "count_mismatch": "文件属性与路径数量不一致",
@@ -76,10 +36,10 @@ def _route_key(parsed) -> str | None:
     path = parsed.path
     if not path.startswith(WEBUI_ROUTE_PREFIX):
         return None
-    key = path[len(WEBUI_ROUTE_PREFIX) :]
-    if key in _ROUTE_BUILDERS or key == "upload_docs" or key == "upload_artifacts" or key in PASSTHROUGH_ROUTES:
-        return key
-    return None
+    route = path[len(WEBUI_ROUTE_PREFIX) :]
+    if route == "upload_artifacts":
+        return route
+    return WEBUI_ROUTE_TO_ROUTE_KEY.get(route)
 
 
 def _respond(handler, payload, status: int = 200, *, exc_info=None) -> bool:
@@ -140,21 +100,6 @@ def _validate_required(body: dict[str, Any], route_key: str) -> str | None:
     for field in _REQUIRED_FIELDS.get(route_key, ()):
         if _missing_field(body, field):
             return f"missing_{field}"
-    if route_key == "update_docs":
-        file_names = body.get("fileNames")
-        if not isinstance(file_names, list) or not file_names:
-            return "missing_fileNames"
-        file_properties = body.get("fileProperties")
-        if not isinstance(file_properties, list) or not file_properties:
-            return "missing_fileProperties"
-    if route_key == "delete_docs":
-        file_names = body.get("fileNames")
-        if not isinstance(file_names, list) or not file_names:
-            return "missing_fileNames"
-    if route_key == "search_docs_xcore":
-        kb_names = body.get("kbNames")
-        if not isinstance(kb_names, list) or not kb_names:
-            return "missing_kbNames"
     if route_key == "upload_artifacts":
         file_properties = body.get("fileProperties")
         if not isinstance(file_properties, list) or not file_properties:
@@ -165,14 +110,6 @@ def _validate_required(body: dict[str, Any], route_key: str) -> str | None:
         if len(file_properties) != len(paths):
             return "count_mismatch"
     return None
-
-
-def _build_upstream_payload(route_key: str, body: dict[str, Any]) -> dict[str, Any]:
-    builder_name = _ROUTE_BUILDERS[route_key]
-    builder = getattr(client, builder_name)
-    if route_key in ("available", "members", "documents"):
-        return builder(body, DEFAULT_PAGE_SIZE)
-    return builder(body)
 
 
 def _handle_upstream(handler, route_key: str, upstream_body: dict[str, Any]) -> bool:
@@ -257,20 +194,16 @@ def try_handle_post(handler, parsed, body) -> bool:
 
     payload_body = _body_dict(body)
 
-    if route_key in PASSTHROUGH_ROUTES:
-        if route_key in BINARY_PASSTHROUGH_ROUTES:
-            return _handle_binary_passthrough(handler, route_key, payload_body)
-        return _handle_upstream(handler, route_key, payload_body)
-
-    missing = _validate_required(payload_body, route_key)
-    if missing:
-        return _respond_bad(handler, _validation_error_cn(missing), 400)
+    if route_key in BINARY_PASSTHROUGH_ROUTES:
+        return _handle_binary_passthrough(handler, route_key, payload_body)
 
     if route_key == "upload_artifacts":
+        missing = _validate_required(payload_body, route_key)
+        if missing:
+            return _respond_bad(handler, _validation_error_cn(missing), 400)
         return _handle_upload_artifacts(handler, payload_body)
 
-    upstream_body = _build_upstream_payload(route_key, payload_body)
-    return _handle_upstream(handler, route_key, upstream_body)
+    return _handle_upstream(handler, route_key, payload_body)
 
 
 def _handle_upload_artifacts(handler, body: dict[str, Any]) -> bool:

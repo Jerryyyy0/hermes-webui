@@ -371,18 +371,18 @@ export HERMES_INTEGRATION=1
 export KNOWLEDGE_BASE_URL=http://192.168.1.132:17861
 ```
 
-| Method | Path | 下游 | 调用方必填 |
+| Method | Path | 下游 | 下游常用字段 |
 |--------|------|------|-----------|
-| POST | `/api/integration/knowledge_base/list` | `list_ps_knowledge_bases` | `account`, `uuid`, `isPersonal` |
-| POST | `/api/integration/knowledge_base/joined` | `user_joined_shkbs` | `account`, `uuid` |
-| POST | `/api/integration/knowledge_base/create` | `create_ps_kb` | `account`, `uuid`, `showName`, `isPersonal` |
-| POST | `/api/integration/knowledge_base/info` | `show_ps_kb_info` | `kbName` |
-| POST | `/api/integration/knowledge_base/edit` | `edit_kb_information` | `kbName`, `showName` |
-| POST | `/api/integration/knowledge_base/delete` | `delete_ps_kb` | `account`, `kbName` |
-| POST | `/api/integration/knowledge_base/available` | `available_shkbs` | `account`, `uuid`, `page`, `size` |
-| POST | `/api/integration/knowledge_base/apply_join` | `apply_join_shkb` | `account`, `uuid`, `kbName` |
-| POST | `/api/integration/knowledge_base/members` | `get_user_inshkb` | `uuid`, `kbName`, `page`, `size` |
-| POST | `/api/integration/knowledge_base/documents` | `list_knowledge_bases_details` | `kbName`, `page`, `size` |
+| POST | `/api/integration/knowledge_base/list_ps_knowledge_bases` | `list_ps_knowledge_bases` | `account`, `uuid`, `isPersonal` |
+| POST | `/api/integration/knowledge_base/user_joined_shkbs` | `user_joined_shkbs` | `account`, `uuid` |
+| POST | `/api/integration/knowledge_base/create_ps_kb` | `create_ps_kb` | `account`, `uuid`, `showName`, `isPersonal` |
+| POST | `/api/integration/knowledge_base/show_ps_kb_info` | `show_ps_kb_info` | `kbName` |
+| POST | `/api/integration/knowledge_base/edit_kb_information` | `edit_kb_information` | `kbName`, `showName` |
+| POST | `/api/integration/knowledge_base/delete_ps_kb` | `delete_ps_kb` | `account`, `kbName` |
+| POST | `/api/integration/knowledge_base/available_shkbs` | `available_shkbs` | `account`, `uuid`, `page`, `size` |
+| POST | `/api/integration/knowledge_base/apply_join_shkb` | `apply_join_shkb` | `account`, `uuid`, `kbName` |
+| POST | `/api/integration/knowledge_base/get_user_inshkb` | `get_user_inshkb` | `uuid`, `kbName`, `page`, `size` |
+| POST | `/api/integration/knowledge_base/list_knowledge_bases_details` | `list_knowledge_bases_details` | `kbName`, `page`, `size` |
 | POST | `/api/integration/knowledge_base/upload_docs` | `upload_docs` | multipart 透传，无字段校验 |
 | POST | `/api/integration/knowledge_base/upload_artifacts` | `upload_docs`（编排；单文件最大 50 MiB、最多 20 个文件，不限制单次同步总大小） | `uuid`, `kbName`, `fileProperties`, `paths` |
 | POST | `/api/integration/knowledge_base/update_docs` | `update_docs` | `kbName`, `fileNames`, `fileProperties` |
@@ -399,12 +399,12 @@ export KNOWLEDGE_BASE_URL=http://192.168.1.132:17861
 | POST | `/api/integration/knowledge_base/delete_readed_message` | `delete_readed_message` | 透传，无字段校验 |
 | POST | `/api/integration/knowledge_base/download_doc` | `download_doc` | 透传，无字段校验（二进制或 JSON） |
 
-下游已返回 HTTP 响应时，HTTP 状态码与 JSON body **原样透传**（包括下游 HTTP `200` 但业务 `code` 失败的情况）。`show_pdf` 与 `download_doc` 均原样转发 JSON 请求体，不做字段校验或默认字段注入；二者的下游请求超时均为 180 秒，且在下游返回文件时透传二进制。文档列表筛选请使用 `/documents`（下游同为 `list_knowledge_bases_details`）。下游不可达、未配置、超时或未返回有效 JSON 时，WebUI 返回 HTTP `500`，响应为 `{"error":"知识库服务异常","message":"知识库服务异常，请稍后重试"}`；WebUI 自身的参数校验错误也统一使用中文；原始异常仅记录在服务端日志中。
+除 `upload_artifacts` 外，所有 JSON 请求体均**原样透传**：WebUI 不校验、重命名、筛选字段或注入默认值。下游已返回 HTTP 响应时，HTTP 状态码与 JSON body 也**原样透传**（包括下游 HTTP `200` 但业务 `code` 失败的情况）。`show_pdf` 与 `download_doc` 的下游请求超时均为 180 秒，且在下游返回文件时透传二进制。文档列表筛选请使用 `/list_knowledge_bases_details`。下游不可达、未配置、超时或未返回有效 JSON 时，WebUI 返回 HTTP `500`，响应为 `{"error":"知识库服务异常","message":"知识库服务异常，请稍后重试"}`；`upload_docs` 请求体和 `upload_artifacts` 本地安全校验的错误文案使用中文；原始异常仅记录在服务端日志中。
 
 文档上传须两步串联：`upload_docs` 成功后再 `update_docs`。
 
 ```bash
-curl -sS -X POST http://127.0.0.1:8787/api/integration/knowledge_base/list \
+curl -sS -X POST http://127.0.0.1:8787/api/integration/knowledge_base/list_ps_knowledge_bases \
   -H "Content-Type: application/json" \
   -d '{"account":"admin","uuid":"aaaaaaaa0000aaaa0000aaaaaaaaaaaa","isPersonal":1}'
 ```

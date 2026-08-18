@@ -27,7 +27,7 @@
     { "name": "System",      "description": "系统与工具" },
     { "name": "SkillHub",    "description": "SkillHub 远程技能市场代理（需 HERMES_INTEGRATION=1；市场类接口另需 SKILLHUB_URL）。安装/卸载/custom 读写均使用 shared_skills_dir（{HERMES_HOME}/skills，与 WebUI profile 无关）。" },
     { "name": "IntegrationCrons", "description": "跨 Profile 定时任务（需 HERMES_INTEGRATION=1）。列表/轮询用 GET /api/crons?all_profiles=1；创建用一个 profile 同时作为存储与执行 Profile；编辑/运行/删除/读取历史均用 profile 定位任务。" },
-    { "name": "IntegrationKnowledgeBase", "description": "知识库下游 BFF 代理（需 HERMES_INTEGRATION=1 且 KNOWLEDGE_BASE_URL）。`account`/`uuid` 由调用方在请求体传入；成功时返回下游 `data` 字段内容。" },
+    { "name": "IntegrationKnowledgeBase", "description": "知识库下游 BFF 代理（需 HERMES_INTEGRATION=1 且 KNOWLEDGE_BASE_URL）。除 upload_artifacts 外，JSON 请求体原样转发给同名下游接口，参数契约由下游定义。" },
     { "name": "IntegrationRecordScripts", "description": "录制脚本与关联 CSV（需 HERMES_INTEGRATION=1）。`relate_name` 由前端生成，一个 relate_name 对应一份脚本 JSON 字符串和一份 CSV，存储于 {HERMES_WEBUI_STATE_DIR}/attachments/record_scripts/<relate_name>/。" },
     { "name": "IntegrationNotifications", "description": "通知系统（需 HERMES_INTEGRATION=1 且 KNOWLEDGE_BASE_URL）。知识库通知从下游 get_user_messages 实时聚合；notifications.db 表结构预留，HTTP 层当前不读写本地存储。" },
     { "name": "IntegrationMemory",   "description": "记忆统计（需 HERMES_INTEGRATION=1）。聚合展示会话天数、定时任务和记忆文件。" },
@@ -1233,12 +1233,12 @@
         }
       }
     },
-    "/api/integration/knowledge_base/list": {
+    "/api/integration/knowledge_base/list_ps_knowledge_bases": {
       "post": {
         "tags": ["IntegrationKnowledgeBase"],
         "summary": "个人/团队知识库列表",
-        "description": "代理 `POST {KNOWLEDGE_BASE_URL}/knowledge_base/list_ps_knowledge_bases`。必填：`account`、`uuid`、`isPersonal`（1=个人，0=团队）。",
-        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseListRequest" } } } },
+        "description": "代理 `POST {KNOWLEDGE_BASE_URL}/knowledge_base/list_ps_knowledge_bases`。请求体原样转发，字段契约由下游定义。",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughRequest" } } } },
         "responses": {
           "200": { "description": "知识库数组（下游 data）", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/KnowledgeBaseEntry" } } } } },
           "400": { "description": "缺参或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
@@ -1246,11 +1246,11 @@
         }
       }
     },
-    "/api/integration/knowledge_base/joined": {
+    "/api/integration/knowledge_base/user_joined_shkbs": {
       "post": {
         "tags": ["IntegrationKnowledgeBase"],
         "summary": "已加入的团队知识库",
-        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseAccountUuidRequest" } } } },
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughRequest" } } } },
         "responses": {
           "200": { "description": "知识库数组", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/KnowledgeBaseEntry" } } } } },
           "400": { "description": "缺参或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
@@ -1258,11 +1258,11 @@
         }
       }
     },
-    "/api/integration/knowledge_base/create": {
+    "/api/integration/knowledge_base/create_ps_kb": {
       "post": {
         "tags": ["IntegrationKnowledgeBase"],
         "summary": "创建知识库",
-        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseCreateRequest" } } } },
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughRequest" } } } },
         "responses": {
           "200": { "description": "下游原始 JSON 响应（含 code/msg/data 包装）" },
           "400": { "description": "缺参或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
@@ -1270,11 +1270,11 @@
         }
       }
     },
-    "/api/integration/knowledge_base/info": {
+    "/api/integration/knowledge_base/show_ps_kb_info": {
       "post": {
         "tags": ["IntegrationKnowledgeBase"],
         "summary": "知识库详情",
-        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseKbNameRequest" } } } },
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughRequest" } } } },
         "responses": {
           "200": { "description": "知识库对象", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseEntry" } } } },
           "400": { "description": "缺参或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
@@ -1282,11 +1282,11 @@
         }
       }
     },
-    "/api/integration/knowledge_base/edit": {
+    "/api/integration/knowledge_base/edit_kb_information": {
       "post": {
         "tags": ["IntegrationKnowledgeBase"],
         "summary": "编辑知识库信息",
-        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseEditRequest" } } } },
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughRequest" } } } },
         "responses": {
           "200": { "description": "编辑成功" },
           "400": { "description": "缺参或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
@@ -1294,11 +1294,11 @@
         }
       }
     },
-    "/api/integration/knowledge_base/delete": {
+    "/api/integration/knowledge_base/delete_ps_kb": {
       "post": {
         "tags": ["IntegrationKnowledgeBase"],
         "summary": "删除知识库",
-        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseDeleteKbRequest" } } } },
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughRequest" } } } },
         "responses": {
           "200": { "description": "删除成功" },
           "400": { "description": "缺参或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
@@ -1306,11 +1306,11 @@
         }
       }
     },
-    "/api/integration/knowledge_base/available": {
+    "/api/integration/knowledge_base/available_shkbs": {
       "post": {
         "tags": ["IntegrationKnowledgeBase"],
         "summary": "可加入的团队知识库（分页）",
-        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseAvailableRequest" } } } },
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughRequest" } } } },
         "responses": {
           "200": { "description": "分页结果", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseAvailableResponse" } } } },
           "400": { "description": "缺参或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
@@ -1318,11 +1318,11 @@
         }
       }
     },
-    "/api/integration/knowledge_base/apply_join": {
+    "/api/integration/knowledge_base/apply_join_shkb": {
       "post": {
         "tags": ["IntegrationKnowledgeBase"],
         "summary": "申请加入团队知识库",
-        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseApplyJoinRequest" } } } },
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughRequest" } } } },
         "responses": {
           "200": { "description": "申请成功" },
           "400": { "description": "缺参或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
@@ -1330,11 +1330,11 @@
         }
       }
     },
-    "/api/integration/knowledge_base/members": {
+    "/api/integration/knowledge_base/get_user_inshkb": {
       "post": {
         "tags": ["IntegrationKnowledgeBase"],
         "summary": "知识库成员列表（分页）",
-        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseMembersRequest" } } } },
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughRequest" } } } },
         "responses": {
           "200": { "description": "成员分页", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseMembersResponse" } } } },
           "400": { "description": "缺参或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
@@ -1342,11 +1342,11 @@
         }
       }
     },
-    "/api/integration/knowledge_base/documents": {
+    "/api/integration/knowledge_base/list_knowledge_bases_details": {
       "post": {
         "tags": ["IntegrationKnowledgeBase"],
         "summary": "知识库文档列表（分页）",
-        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseDocumentsRequest" } } } },
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughRequest" } } } },
         "responses": {
           "200": { "description": "文档分页", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseDocumentsResponse" } } } },
           "400": { "description": "缺参或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
@@ -1402,7 +1402,7 @@
       "post": {
         "tags": ["IntegrationKnowledgeBase"],
         "summary": "更新文档属性并触发解析",
-        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpdateDocsRequest" } } } },
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughRequest" } } } },
         "responses": {
           "200": { "description": "更新成功" },
           "400": { "description": "缺参或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
@@ -1414,7 +1414,7 @@
       "post": {
         "tags": ["IntegrationKnowledgeBase"],
         "summary": "删除文档",
-        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseDeleteDocsRequest" } } } },
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughRequest" } } } },
         "responses": {
           "200": { "description": "删除成功" },
           "400": { "description": "缺参或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
@@ -1444,8 +1444,8 @@
       "post": {
         "tags": ["IntegrationKnowledgeBase"],
         "summary": "检索知识库切片",
-        "description": "代理 `POST {KNOWLEDGE_BASE_URL}/knowledge_base/search_docs`。必填：`query`、`kbName`（转发为下游 `knowledge_base_name`）。可选 `topK`（默认 3）、`scoreThreshold`（默认 1.0，0–1，越小相关度越高）。成功返回匹配切片 JSON 数组。",
-        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseSearchDocsRequest" } } } },
+        "description": "代理 `POST {KNOWLEDGE_BASE_URL}/knowledge_base/search_docs`。请求体原样转发，字段契约与默认值由下游定义。成功返回匹配切片 JSON 数组。",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughRequest" } } } },
         "responses": {
           "200": {
             "description": "匹配切片数组",
@@ -1467,8 +1467,8 @@
       "post": {
         "tags": ["IntegrationKnowledgeBase"],
         "summary": "跨库检索知识库切片（xcore）",
-        "description": "代理 `POST {KNOWLEDGE_BASE_URL}/knowledge_base/search_docs_xcore`。必填：`query`、`kbNames`（非空字符串数组，原样转发为下游 `kbNames`）。可选 `topK`（默认 3）、`scoreThreshold`（默认 1.0）。成功返回 `{kbNames, docNames, context}`。",
-        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseSearchDocsXcoreRequest" } } } },
+        "description": "代理 `POST {KNOWLEDGE_BASE_URL}/knowledge_base/search_docs_xcore`。请求体原样转发，字段契约与默认值由下游定义。成功返回 `{kbNames, docNames, context}`。",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughRequest" } } } },
         "responses": {
           "200": {
             "description": "检索命中结果",

@@ -7,6 +7,7 @@ Hermes WebUI 在 integration 层暴露一组知识库 HTTP 接口，供前端或
 - **Base path：** `/api/integration/knowledge_base`
 - **方法：** 全部为 `POST`
 - **身份字段：** `account`、`uuid` 由调用方在请求体中传入；WebUI 不代为查询用户身份
+- **参数转发：** 除 `upload_artifacts` 外，JSON 请求体原样转发给同名下游接口；字段必填、默认值和字段名均由下游知识库服务定义
 
 
 
@@ -16,7 +17,7 @@ Hermes WebUI 在 integration 层暴露一组知识库 HTTP 接口，供前端或
 http://127.0.0.1:8787
 ```
 
-完整路径示例：`http://127.0.0.1:8787/api/integration/knowledge_base/list`
+完整路径示例：`http://127.0.0.1:8787/api/integration/knowledge_base/list_ps_knowledge_bases`
 
 ---
 
@@ -49,28 +50,12 @@ http://127.0.0.1:8787
 
 | HTTP | 含义 | Body 示例 |
 |------|------|-----------|
-| 400 | 请求参数校验失败 | `{"error":"缺少知识库名称"}` |
+| 400 | `upload_docs` 请求体不完整或 `upload_artifacts` 的本地安全校验失败 | 中文错误说明 |
 | 413 | 上传体超过大小限制 | 纯文本说明 |
 | 500 | 未收到知识库服务的有效响应（不可达、未配置、超时或响应不是有效 JSON） | `{"error":"知识库服务异常","message":"知识库服务异常，请稍后重试"}` |
 | 404 | 路径不存在或 integration 未启用 | `{"error":"not found"}` |
 
-参数缺失时 `error` 返回中文提示，例如 `缺少用户账号`、`缺少用户 UUID`、`缺少知识库名称列表`。
-
-### 服务端自动补全的默认值
-
-以下字段未在请求中传入时，由 WebUI 自动补全（定义于 `integration/knowledge_base/constants.py`）：
-
-| 字段 | 默认值 | 适用接口 |
-|------|--------|---------|
-| `vsType` | `"faiss"` | create |
-| `embedModel` | `"bce-base"` | create |
-| `iconType` | `1` | create / edit |
-| `location` | `"101"`（create）/ `101`（edit） | create / edit |
-| `size` | `15` | available / members / documents |
-| `deleteContent` | `true` | delete_docs |
-| `notRefreshVsCache` | `false` | delete_docs |
-| `topK` | `3` | search_docs / search_docs_xcore |
-| `scoreThreshold` | `1.0` | search_docs / search_docs_xcore |
+WebUI 不对普通知识库 JSON 接口做缺参校验，也不补全、重命名或筛选字段；下游返回的参数错误原样透传。
 
 ---
 
@@ -78,16 +63,16 @@ http://127.0.0.1:8787
 
 | # | 路径 | 说明 |
 |---|------|------|
-| 1 | `/list` | 知识库列表 |
-| 2 | `/joined` | 已加入的团队知识库 |
-| 3 | `/create` | 创建知识库 |
-| 4 | `/info` | 知识库详情 |
-| 5 | `/edit` | 编辑知识库 |
-| 6 | `/delete` | 删除知识库 |
-| 7 | `/available` | 可加入的团队知识库（分页） |
-| 8 | `/apply_join` | 申请加入团队知识库 |
-| 9 | `/members` | 知识库成员列表（分页） |
-| 10 | `/documents` | 文档列表（分页 + 筛选） |
+| 1 | `/list_ps_knowledge_bases` | 知识库列表 |
+| 2 | `/user_joined_shkbs` | 已加入的团队知识库 |
+| 3 | `/create_ps_kb` | 创建知识库 |
+| 4 | `/show_ps_kb_info` | 知识库详情 |
+| 5 | `/edit_kb_information` | 编辑知识库 |
+| 6 | `/delete_ps_kb` | 删除知识库 |
+| 7 | `/available_shkbs` | 可加入的团队知识库（分页） |
+| 8 | `/apply_join_shkb` | 申请加入团队知识库 |
+| 9 | `/get_user_inshkb` | 知识库成员列表（分页） |
+| 10 | `/list_knowledge_bases_details` | 文档列表（分页 + 筛选） |
 | 11 | `/upload_docs` | 上传文档（multipart，第一步） |
 | 12 | `/update_docs` | 更新文档元数据（第二步） |
 | 13 | `/delete_docs` | 删除文档 |
@@ -100,9 +85,11 @@ http://127.0.0.1:8787
 
 ## 接口详情
 
+下列请求字段表是已知的下游知识库契约说明；WebUI 不校验这些字段，也不改变字段名或补全默认值。
+
 ### 1. 知识库列表
 
-`POST /api/integration/knowledge_base/list`
+`POST /api/integration/knowledge_base/list_ps_knowledge_bases`
 
 **请求体**
 
@@ -124,7 +111,7 @@ http://127.0.0.1:8787
 
 ### 2. 已加入的团队知识库
 
-`POST /api/integration/knowledge_base/joined`
+`POST /api/integration/knowledge_base/user_joined_shkbs`
 
 | 字段 | 必填 |
 |------|------|
@@ -135,7 +122,7 @@ http://127.0.0.1:8787
 
 ### 3. 创建知识库
 
-`POST /api/integration/knowledge_base/create`
+`POST /api/integration/knowledge_base/create_ps_kb`
 
 | 字段 | 必填 | 说明 |
 |------|------|------|
@@ -163,7 +150,7 @@ http://127.0.0.1:8787
 
 ### 4. 知识库详情
 
-`POST /api/integration/knowledge_base/info`
+`POST /api/integration/knowledge_base/show_ps_kb_info`
 
 | 字段 | 必填 |
 |------|------|
@@ -173,7 +160,7 @@ http://127.0.0.1:8787
 
 ### 5. 编辑知识库
 
-`POST /api/integration/knowledge_base/edit`
+`POST /api/integration/knowledge_base/edit_kb_information`
 
 | 字段 | 必填 | 说明 |
 |------|------|------|
@@ -187,7 +174,7 @@ http://127.0.0.1:8787
 
 ### 6. 删除知识库
 
-`POST /api/integration/knowledge_base/delete`
+`POST /api/integration/knowledge_base/delete_ps_kb`
 
 | 字段 | 必填 |
 |------|------|
@@ -198,7 +185,7 @@ http://127.0.0.1:8787
 
 ### 7. 可加入的团队知识库（分页）
 
-`POST /api/integration/knowledge_base/available`
+`POST /api/integration/knowledge_base/available_shkbs`
 
 | 字段 | 必填 | 说明 |
 |------|------|------|
@@ -213,7 +200,7 @@ http://127.0.0.1:8787
 
 ### 8. 申请加入团队知识库
 
-`POST /api/integration/knowledge_base/apply_join`
+`POST /api/integration/knowledge_base/apply_join_shkb`
 
 | 字段 | 必填 |
 |------|------|
@@ -225,7 +212,7 @@ http://127.0.0.1:8787
 
 ### 9. 知识库成员列表（分页）
 
-`POST /api/integration/knowledge_base/members`
+`POST /api/integration/knowledge_base/get_user_inshkb`
 
 | 字段 | 必填 | 说明 |
 |------|------|------|
@@ -240,7 +227,7 @@ http://127.0.0.1:8787
 
 ### 10. 文档列表（分页 + 筛选）
 
-`POST /api/integration/knowledge_base/documents`
+`POST /api/integration/knowledge_base/list_knowledge_bases_details`
 
 | 字段 | 必填 | 说明 |
 |------|------|------|
@@ -506,17 +493,17 @@ UUID="aaaaaaaa0000aaaa0000aaaaaaaaaaaa"
 KB="share54"
 
 # 个人知识库列表
-curl -sS -X POST "$BASE/list" \
+curl -sS -X POST "$BASE/list_ps_knowledge_bases" \
   -H "Content-Type: application/json" \
   -d "{\"account\":\"$ACCOUNT\",\"uuid\":\"$UUID\",\"isPersonal\":1}"
 
 # 创建知识库
-curl -sS -X POST "$BASE/create" \
+curl -sS -X POST "$BASE/create_ps_kb" \
   -H "Content-Type: application/json" \
   -d "{\"account\":\"$ACCOUNT\",\"uuid\":\"$UUID\",\"showName\":\"我的知识库\",\"isPersonal\":1}"
 
 # 文档列表
-curl -sS -X POST "$BASE/documents" \
+curl -sS -X POST "$BASE/list_knowledge_bases_details" \
   -H "Content-Type: application/json" \
   -d "{\"kbName\":\"$KB\",\"page\":1,\"size\":15}"
 

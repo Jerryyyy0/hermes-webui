@@ -26,6 +26,8 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Changed
 
+- **Knowledge base BFF proxy contract** — 10 个公开 BFF URL 的最后一层路径现与下游知识库接口名一致，例如 `list` 改为 `list_ps_knowledge_bases`。除 `upload_artifacts` 外，JSON 请求体不再经过 WebUI 校验、字段转换或默认值注入，而是原样转发给同名下游接口；响应透传与下游调用保持不变。
+
 - **Knowledge base validation copy** — 知识库 BFF 的参数缺失、数组为空或数量不一致等 WebUI 自身校验错误统一改为中文提示。
 
 - **Knowledge base upstream failure copy** — 知识库下游未返回有效响应时统一返回 HTTP `500`，`error` 为「知识库服务异常」，`message` 为「知识库服务异常，请稍后重试」；下游已返回的 HTTP 状态码和业务响应仍原样透传。

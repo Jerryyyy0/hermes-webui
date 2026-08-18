@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -12,15 +11,6 @@ from integration.config import knowledge_base_url
 from integration.knowledge_base.constants import (
     DEFAULT_CHUNK_OVERLAP,
     DEFAULT_CHUNK_SIZE,
-    DEFAULT_LOCATION,
-    DEFAULT_PAGE_SIZE,
-    DEFAULT_SCORE_THRESHOLD,
-    DEFAULT_TOP_K,
-    DELETE_CONTENT,
-    EMBED_MODEL,
-    ICON_TYPE,
-    NOT_REFRESH_VS_CACHE,
-    VS_TYPE,
     API_PREFIX,
     DOWNSTREAM_PATHS,
 )
@@ -173,164 +163,6 @@ def post_raw_body(
     except httpx.HTTPError as exc:
         raise KnowledgeBaseUpstreamError(str(exc)) from exc
     return parse_upstream_response(resp)
-
-
-def _location_create() -> str:
-    return DEFAULT_LOCATION
-
-
-def _location_edit() -> int:
-    return int(DEFAULT_LOCATION)
-
-
-def build_list_payload(body: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "account": body["account"],
-        "uuid": body["uuid"],
-        "isPersonal": body["isPersonal"],
-    }
-
-
-def build_joined_payload(body: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "account": body["account"],
-        "uuid": body["uuid"],
-    }
-
-
-def build_create_payload(body: dict[str, Any]) -> dict[str, Any]:
-    payload: dict[str, Any] = {
-        "account": body["account"],
-        "uuid": body["uuid"],
-        "showName": body["showName"],
-        "kbIntro": body.get("kbIntro", ""),
-        "vsType": VS_TYPE,
-        "embedModel": EMBED_MODEL,
-        "iconType": ICON_TYPE,
-        "isPersonal": body["isPersonal"],
-        "location": body.get("location", _location_create()),
-    }
-    if "iconType" in body and body["iconType"] is not None:
-        payload["iconType"] = body["iconType"]
-    return payload
-
-
-def build_info_payload(body: dict[str, Any]) -> dict[str, Any]:
-    return {"kbName": body["kbName"]}
-
-
-def build_edit_payload(body: dict[str, Any]) -> dict[str, Any]:
-    payload: dict[str, Any] = {
-        "kbName": body["kbName"],
-        "showName": body["showName"],
-        "kbIntro": body.get("kbIntro", ""),
-        "iconType": body.get("iconType", ICON_TYPE),
-        "location": body.get("location", _location_edit()),
-    }
-    return payload
-
-
-def build_delete_kb_payload(body: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "account": body["account"],
-        "kbName": body["kbName"],
-    }
-
-
-def build_available_payload(body: dict[str, Any], default_size: int = DEFAULT_PAGE_SIZE) -> dict[str, Any]:
-    return {
-        "account": body["account"],
-        "uuid": body["uuid"],
-        "showName": body.get("showName", ""),
-        "kbIntro": body.get("kbIntro", ""),
-        "page": body["page"],
-        "size": body.get("size", default_size),
-    }
-
-
-def build_apply_join_payload(body: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "account": body["account"],
-        "uuid": body["uuid"],
-        "kbName": body["kbName"],
-    }
-
-
-def build_members_payload(body: dict[str, Any], default_size: int = DEFAULT_PAGE_SIZE) -> dict[str, Any]:
-    return {
-        "uuid": body["uuid"],
-        "kbName": body["kbName"],
-        "username": body.get("username", ""),
-        "account": body.get("account", ""),
-        "page": body["page"],
-        "size": body.get("size", default_size),
-    }
-
-
-def build_documents_payload(body: dict[str, Any], default_size: int = DEFAULT_PAGE_SIZE) -> dict[str, Any]:
-    return {
-        "kbName": body["kbName"],
-        "fileLevel": body.get("fileLevel", ""),
-        "fileName": body.get("fileName", ""),
-        "fileNumber": body.get("fileNumber", ""),
-        "fileClass": body.get("fileClass", ""),
-        "fileOrg": body.get("fileOrg", ""),
-        "fileExt": body.get("fileExt", ""),
-        "status": body.get("status", []),
-        "page": body["page"],
-        "size": body.get("size", default_size),
-        "sortName": body.get("sortName", ""),
-        "sortOrder": body.get("sortOrder", ""),
-    }
-
-
-def build_update_docs_payload(body: dict[str, Any]) -> dict[str, Any]:
-    file_properties = body.get("fileProperties")
-    if not isinstance(file_properties, list):
-        file_properties = []
-    return {
-        "kbName": body["kbName"],
-        "fileNames": body["fileNames"],
-        "fileProperties": file_properties,
-    }
-
-
-def build_delete_docs_payload(body: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "kbName": body["kbName"],
-        "fileNames": body["fileNames"],
-        "deleteContent": body.get("deleteContent", DELETE_CONTENT),
-        "notRefreshVsCache": body.get("notRefreshVsCache", NOT_REFRESH_VS_CACHE),
-    }
-
-
-def build_search_docs_payload(body: dict[str, Any]) -> dict[str, Any]:
-    payload: dict[str, Any] = {
-        "query": body["query"],
-        "knowledge_base_name": body["kbName"],
-        "top_k": body.get("topK", DEFAULT_TOP_K),
-        "score_threshold": body.get("scoreThreshold", DEFAULT_SCORE_THRESHOLD),
-    }
-    return payload
-
-
-def build_search_docs_xcore_payload(body: dict[str, Any]) -> dict[str, Any]:
-    payload: dict[str, Any] = {
-        "query": body["query"],
-        "kbNames": body["kbNames"],
-        "top_k": body.get("topK", DEFAULT_TOP_K),
-        "score_threshold": body.get("scoreThreshold", DEFAULT_SCORE_THRESHOLD),
-    }
-    return payload
-
-
-def parse_file_properties_json(raw: str) -> list[dict[str, Any]]:
-    if not raw:
-        return []
-    parsed = json.loads(raw)
-    if not isinstance(parsed, list):
-        raise ValueError("fileProperties must be a JSON array")
-    return [dict(item) for item in parsed if isinstance(item, dict)]
 
 
 def build_upload_form_data(
