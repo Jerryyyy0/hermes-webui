@@ -60,8 +60,10 @@ set -eu
 if [[ "${1:-}" == "-" ]]; then
   cat >/dev/null
   printf 'default\\t%s\\tfalse\\n' "${HERMES_HOME}"
+  printf 'named\\t%s\\tfalse\\n' "${HERMES_HOME}/profiles/named"
   exit 0
 fi
+printf '%s\\n' "$*" >> "${HERMES_HOME}/gateway-argv"
 printf 'gateway stdout\\n'
 printf 'gateway stderr\\n' >&2
 trap 'exit 0' TERM INT
@@ -113,3 +115,6 @@ while true; do sleep 1; done
     assert "gateway stderr" in output
     assert "gateway stdout" in log_file.read_text(encoding="utf-8")
     assert "gateway stderr" in log_file.read_text(encoding="utf-8")
+    gateway_argv = (home / "gateway-argv").read_text(encoding="utf-8").splitlines()
+    assert "-m hermes_cli.main gateway run -v" in gateway_argv
+    assert "-m hermes_cli.main -p named gateway run -v" in gateway_argv

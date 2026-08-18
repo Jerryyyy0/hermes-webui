@@ -12,6 +12,8 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Fixed
 
+- **Container Gateway console log completeness** — Plain-container Profile Gateways now run with `-v`, forwarding INFO-and-above gateway records to Docker stdout/stderr while preserving per-Profile `gateway.log` persistence.
+
 - **Integration workspace files stale managed-session artifacts** — `Session.save()` now invalidates the integration root file index when the saved session workspace is below `HERMES_WEBUI_DEFAULT_WORKSPACE`. Files written by an Agent into managed subdirectories are therefore visible from `GET /api/integration/workspace/files` without requiring `refresh=1`; explicitly external workspaces keep their existing cache scope.
 
 - **Cron job delete latency** — `POST /api/integration/crons/delete` 的同步历史清理改为按 Profile 批量删除：每个 `state.db` 只获取一次清理锁、打开一次连接并执行一次事务，不再对每条 Cron session 重复扫描 manifest 和建立数据库事务；WebUI sidecar 与输出目录清理语义保持不变。
