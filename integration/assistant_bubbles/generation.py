@@ -105,9 +105,16 @@ class BubbleTask:
     base_url: str | None = None
 
 
+@dataclass(frozen=True)
+class BubbleRefreshTask:
+    profile: str
+    profile_path: str
+
+
 _lock = threading.Lock()
 _cv = threading.Condition(_lock)
 _pending: dict[tuple[str, str], BubbleTask] = {}
+_pending_refreshes: dict[tuple[str, str], BubbleRefreshTask] = {}
 _worker_started = False
 _disabled = False
 
@@ -147,7 +154,19 @@ def enqueue(profile: str, profile_path: Path, category: str, fingerprint: str) -
 
 
 def enqueue_missing_or_stale(profile: str, profile_path: Path, cache: dict[str, Any] | None = None) -> None:
-    cache = cache if cache is not None else store.read_store(profile_path)
+    """Schedule stale checking on the generator worker without blocking an HTTP read."""
+    del cache  # The worker must re-read the authoritative cache when it handles the request.
+    task = BubbleRefreshTask(profile=profile, profile_path=str(profile_path))
+    _ensure_worker()
+    with _cv:
+        if _disabled:
+            return
+        _pending_refreshes[(profile, str(profile_path))] = task
+        _cv.notify()
+
+
+def _enqueue_missing_or_stale_now(profile: str, profile_path: Path) -> None:
+    cache = store.read_store(profile_path)
     for category in GENERATION_ORDER:
         context = collectors.collect_context(profile, profile_path, category)
         fp = collectors.fingerprint_for(category, context)
@@ -207,24 +226,39 @@ def should_generate(category: str, fingerprint: str, cache: dict[str, Any] | Non
 def _worker_loop() -> None:
     while True:
         with _cv:
-            while not _pending:
+            while not _pending and not _pending_refreshes:
                 _cv.wait()
-            key = next(iter(_pending))
-            task = _pending.pop(key)
+            if _pending:
+                key = next(iter(_pending))
+                task = _pending.pop(key)
+                refresh_task = None
+            else:
+                key = next(iter(_pending_refreshes))
+                refresh_task = _pending_refreshes.pop(key)
+                task = None
         try:
-            _run_task(task)
+            if refresh_task is not None:
+                _enqueue_missing_or_stale_now(refresh_task.profile, Path(refresh_task.profile_path))
+            elif task is not None:
+                _run_task(task)
         except Exception:
-            logger.debug(
-                _log_line(
-                    "task_failed",
-                    {
-                        "profile": task.profile,
-                        "category": task.category,
-                        "fingerprint": task.fingerprint[:12],
-                    },
-                ),
-                exc_info=True,
-            )
+            if refresh_task is not None:
+                logger.debug(
+                    _log_line("refresh_failed", {"profile": refresh_task.profile}),
+                    exc_info=True,
+                )
+            elif task is not None:
+                logger.debug(
+                    _log_line(
+                        "task_failed",
+                        {
+                            "profile": task.profile,
+                            "category": task.category,
+                            "fingerprint": task.fingerprint[:12],
+                        },
+                    ),
+                    exc_info=True,
+                )
 
 
 def _run_task(task: BubbleTask) -> None:

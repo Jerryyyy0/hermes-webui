@@ -636,6 +636,18 @@ def _emit_to_session_streams(session_id: str, event: str, data: dict) -> int:
     return emitted
 
 
+def emit_session_channel_event(session_id: str, event: str, data: dict) -> int:
+    """Broadcast a lifecycle envelope only to existing session-SSE subscribers."""
+    ch = get_session_channel(session_id)
+    if ch is None:
+        return 0
+    try:
+        return ch.emit(event, data)
+    except Exception:
+        logger.debug("SessionChannel emit failed for session %s", session_id, exc_info=True)
+        return 0
+
+
 def _emit_bg_task_complete_events_now(session_id: str, payload: dict) -> int:
     """Emit the canonical bg_task_complete event and temporary legacy alias."""
     # T1 emit rename: the canonical event name is now ``bg_task_complete``
@@ -941,19 +953,17 @@ def _record_async_delegation_accepted(
     payload = _build_payload(evt, session_id)
     try:
         from api.models import get_session
-        from integration.async_delegation_turns import resolve_async_delegation_origin
+        from integration.async_delegation_turns import resolve_async_delegation_origin, task_event
 
-        origin = resolve_async_delegation_origin(
-            get_session(session_id), completion_delivery_id(evt)
-        )
+        session = get_session(session_id)
+        delegation_id = completion_delivery_id(evt)
+        origin = resolve_async_delegation_origin(session, delegation_id)
         if origin:
-            payload.update(
-                {
-                    "delegation_id": completion_delivery_id(evt),
-                    "origin_turn_key": str(origin.get("turn_key") or ""),
-                    "status": "completed",
-                    "wakeup_state": "running",
-                }
+            payload = task_event(
+                session,
+                "bg_task_complete",
+                delegation_id,
+                origin,
             )
     except Exception:
         # Legacy process-only callers retain the minimal payload contract.
@@ -982,28 +992,59 @@ def _emit_async_delegation_status(
     content: object,
 ) -> None:
     """Publish non-transcript lifecycle state for one async delegation."""
-    payload = {
-        "session_id": str(session_id),
-        "delegation_id": str(delegation_id),
-        "origin_turn_key": str((record or {}).get("turn_key") or ""),
-        "status": status,
-        "wakeup_state": wakeup_state,
-    }
+    payload = None
+    session = None
+    try:
+        from api.models import get_session
+        from integration.async_delegation_turns import idle_event, is_idle, task_event
+
+        session = get_session(session_id)
+        payload = task_event(
+            session,
+            "background_task_status",
+            delegation_id,
+            record,
+        )
+    except Exception:
+        logger.debug(
+            "async delegation status envelope build failed for session %s",
+            session_id,
+            exc_info=True,
+        )
+        payload = {
+            "session_id": str(session_id),
+            "delegation_id": str(delegation_id),
+            "origin_turn_key": str((record or {}).get("turn_key") or ""),
+            "status": status,
+            "wakeup_state": wakeup_state,
+        }
     try:
         _emit_to_session_streams(session_id, "background_task_status", payload)
+        if session is not None and is_idle(session):
+            _emit_to_session_streams(
+                session_id,
+                "background_tasks_idle",
+                idle_event(session),
+            )
     except Exception:
         logger.debug(
             "async delegation status emit failed for session %s",
             session_id,
             exc_info=True,
         )
+    logged_payload = payload.get("payload") if isinstance(payload, dict) else None
+    origin_turn_key = (
+        str(logged_payload.get("origin_turn_key") or "")
+        if isinstance(logged_payload, dict)
+        else str((payload or {}).get("origin_turn_key") or "")
+    )
     logger.debug(
         "hermes_message_semantics action=background_task_status "
         "class=context_anchor kind=async_delegation_completion role=user "
         "session_id=%s turn_key_present=%s delegation_id=%s "
         "status=%s wakeup_state=%s",
         session_id,
-        bool(payload["origin_turn_key"]),
+        bool(origin_turn_key),
         delegation_id,
         status,
         wakeup_state,
@@ -1033,6 +1074,29 @@ def emit_async_delegation_status(
         wakeup_state=wakeup_state,
         content=content,
     )
+
+
+def _async_delegation_child_task_summary(evt: dict, record: dict | None) -> dict[str, int] | None:
+    """Summarize an Agent batch without leaking its result content into SSE."""
+    results = evt.get("results")
+    if not isinstance(results, list):
+        return None
+    try:
+        recorded_count = int((record or {}).get("child_task_count") or 0)
+    except (TypeError, ValueError):
+        recorded_count = 0
+    total = max(len(results), recorded_count)
+    summary = {"total": total, "completed": 0, "failed": 0, "cancelled": 0}
+    for result in results:
+        result = result if isinstance(result, dict) else {}
+        status = str(result.get("status") or "").strip().lower()
+        if status in {"completed", "success", "succeeded"}:
+            summary["completed"] += 1
+        elif status in {"cancelled", "canceled", "interrupted"}:
+            summary["cancelled"] += 1
+        else:
+            summary["failed"] += 1
+    return summary
 
 
 def _start_async_delegation_wakeup_turn(
@@ -1089,6 +1153,7 @@ def _start_async_delegation_wakeup_turn(
                 from api.config import _get_session_agent_lock
                 from integration.async_delegation_turns import (
                     mark_async_delegation_completion,
+                    normalize_async_delegation_status,
                     resolve_async_delegation_origin,
                 )
                 with _get_session_agent_lock(session_id):
@@ -1101,12 +1166,16 @@ def _start_async_delegation_wakeup_turn(
                         delegation_id,
                         wakeup_state="queued",
                         content=wakeup_prompt,
+                        status=normalize_async_delegation_status(evt.get("status")),
+                        child_task_summary=_async_delegation_child_task_summary(
+                            evt, failed_origin
+                        ),
                     )
                 _emit_async_delegation_status(
                     session_id,
                     delegation_id,
                     failed_record or failed_origin,
-                    status="completed",
+                    status=normalize_async_delegation_status(evt.get("status")),
                     wakeup_state="queued",
                     content=wakeup_prompt,
                 )
@@ -1171,6 +1240,7 @@ def _process_async_delegation_event(
         from api.config import _get_session_agent_lock
         from integration.async_delegation_turns import (
             mark_async_delegation_completion,
+            normalize_async_delegation_status,
             resolve_async_delegation_origin,
         )
 
@@ -1200,6 +1270,8 @@ def _process_async_delegation_event(
         if origin is None:
             origin = {"turn_key": ""}
         origin_turn_key = str(origin.get("turn_key") or "").strip()
+        completion_status = normalize_async_delegation_status(evt.get("status"))
+        child_task_summary = _async_delegation_child_task_summary(evt, origin)
         wakeup_prompt_raw = format_wakeup_prompt(evt)
         wakeup_prompt = wakeup_prompt_raw.strip() if wakeup_prompt_raw else ""
         if not wakeup_prompt:
@@ -1215,12 +1287,14 @@ def _process_async_delegation_event(
                     delegation_id,
                     wakeup_state="queued",
                     content=wakeup_prompt,
+                    status=completion_status,
+                    child_task_summary=child_task_summary,
                 )
             _emit_async_delegation_status(
                 session_id,
                 delegation_id,
                 record or origin,
-                status="completed",
+                status=completion_status,
                 wakeup_state="queued",
                 content=wakeup_prompt,
             )
@@ -1234,12 +1308,14 @@ def _process_async_delegation_event(
                 delegation_id,
                 wakeup_state="running",
                 content=wakeup_prompt,
+                status=completion_status,
+                child_task_summary=child_task_summary,
             )
         _emit_async_delegation_status(
             session_id,
             delegation_id,
             record or origin,
-            status="completed",
+            status=completion_status,
             wakeup_state="running",
             content=wakeup_prompt,
         )

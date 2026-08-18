@@ -201,3 +201,32 @@ def build_gateway_command(runtime: AgentCliInvocation, profile: dict, action: st
         args.extend(["-p", name])
     args.extend(["gateway", action])
     return runtime.command(*args)
+
+
+def build_gateway_run_command(runtime: AgentCliInvocation, profile: dict) -> list[str]:
+    """Build the fixed foreground command for a WebUI-owned Gateway.
+
+    ``--external-supervisor`` keeps Agent-planned restarts under WebUI process
+    management.  Deliberately do not add ``--force`` or ``--replace``: both
+    bypass the Agent's normal duplicate-instance protection.
+    """
+    return [*build_gateway_command(runtime, profile, "run"), "-vv", "--external-supervisor"]
+
+
+def build_agent_python_command(runtime: AgentCliInvocation, *args: str) -> list[str] | None:
+    """Build a trusted Agent-Python invocation for a machine-readable probe.
+
+    The WebUI interpreter may not have the Agent package on ``sys.path``.  A
+    verified ``*_python`` runtime can run the probe directly; a managed
+    launcher has a sibling virtualenv Python.  Arbitrary explicit/PATH
+    launchers are intentionally not guessed and therefore fail closed.
+    """
+    if runtime.kind.endswith("_python"):
+        return [runtime.command_prefix[0], *args]
+    if runtime.kind == "managed_launcher":
+        launcher = Path(runtime.command_prefix[0])
+        python_name = "python.exe" if os.name == "nt" else "python"
+        candidate = launcher.with_name(python_name)
+        if _is_executable(candidate):
+            return [str(candidate), *args]
+    return None

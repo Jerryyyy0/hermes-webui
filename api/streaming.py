@@ -6129,9 +6129,6 @@ def _agent_result_terminal_failure(result) -> bool:
     return False
 
 
-_TOOL_RESULT_SNIPPET_MAX = 4000
-
-
 _LIVE_TOOL_PROMPT_DELTA_MAX = 12_000
 _LIVE_TOOL_PROMPT_TURN_MAX = 24_000
 
@@ -6190,19 +6187,16 @@ def live_usage_prompt_estimate_after_tool_delta(
     }
 
 
-def _tool_result_snippet(raw, limit: int = _TOOL_RESULT_SNIPPET_MAX) -> str:
-    """Extract a bounded result preview from a stored tool message payload."""
-    if limit <= 0:
+def _tool_result_snippet(raw) -> str:
+    """Return the complete original tool result for SSE and recovery."""
+    if raw is None:
         return ''
-    text = str(raw or '')
+    if isinstance(raw, str):
+        return raw
     try:
-        data = raw if isinstance(raw, dict) else json.loads(text)
-        if isinstance(data, dict):
-            preview = data.get('output') or data.get('result') or data.get('error') or text
-            text = str(preview)
+        return json.dumps(raw, ensure_ascii=False, default=str)
     except Exception:
-        pass
-    return text[:limit]
+        return str(raw)
 
 
 def _truncate_tool_args(args, limit: int = 6) -> dict:
@@ -8091,13 +8085,33 @@ def _run_agent_streaming(
                 if str(name or "") != "delegate_task" or not _manifest_turn_key:
                     return
                 try:
-                    from integration.async_delegation_turns import record_async_delegation_dispatch
+                    from integration.async_delegation_turns import (
+                        record_async_delegation_dispatch,
+                        task_event,
+                    )
                     with _get_session_agent_lock(session_id):
-                        record_async_delegation_dispatch(
+                        record = record_async_delegation_dispatch(
                             s,
                             function_result,
                             turn_key=_manifest_turn_key,
                         )
+                    if record is None:
+                        return
+                    event_payload = task_event(
+                        s,
+                        "background_task_dispatched",
+                        str(record.get("delegation_id") or ""),
+                        record,
+                        dispatched_at=record.get("created_at"),
+                    )
+                    put("background_task_dispatched", event_payload)
+                    from api.background_process import emit_session_channel_event
+
+                    emit_session_channel_event(
+                        session_id,
+                        "background_task_dispatched",
+                        event_payload,
+                    )
                 except Exception:
                     logger.debug(
                         "Failed to record async delegation origin for session %s",

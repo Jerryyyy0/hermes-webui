@@ -25,16 +25,26 @@ WebUI 分配 stream_turn_key
 
 若执行端不支持快照、workspace 不可达或扫描预算耗尽，必须返回 `capture_status=partial|unknown`，不能返回空变更并伪装成功。
 
-## 可行性核实基线
+## 审查依据与已确认的 V1 决策
 
-本方案基于以下版本核实：
+本方案基于以下源码与公开产品资料核实：
 
-- Hermes WebUI：`4d0d24375aa3cb6e1fe3907e0b750f7c5f049ef7`
-- Hermes Agent：`93d827f139e9e490abc6f04ed9cae9bb29154b4a`
-- Codex 源码参考：`c4f42d161ae44a8d696ee9fb595709661979d187`
-- Codex app-server 当前公开契约：`fileChange.changes[]` 包含 `path/kind/diff`，`turn/diff/updated` 包含本轮最新聚合 unified diff
+- Hermes WebUI：`effd307130d9875386244e311746e7b09094fbfa`
+- Hermes Agent：`b272fb77e2f136355df6974a932294ee146555f1`
+- Codex 官方开源仓库：`openai/codex` 的 `9ded177ce7c1c0bd2047f902936c177612ab3434`。已直接审查 `TurnDiffTracker`、每个用户 turn 的 tracker 创建点、`AppliedPatchDelta` 与 app-server notification schema。
+- Codex app-server 当前公开契约：`fileChange.changes[]` 包含 `path/kind/diff`，`turn/diff/updated` 包含本轮最新聚合 unified diff；官方文档明确 app-server 实现开源于同一仓库。
+- 腾讯 CodeBuddy WorkBuddy：仅使用其公开文档验证产品语义（按任务呈现文件变更、文件树与产物，并支持并行任务）；客户端源码未公开，本文不把其内部实现当作事实依据。
 
 后续实现前应重新生成当前安装版本的 Codex app-server JSON Schema，因为 app-server schema 与本机 Codex 版本绑定。
+
+本轮设计评审已经确认下列不可变边界：
+
+- V1 只递归捕获实际 execution workspace 根目录；根外写入不读取、不持久化，未来须通过独立授权 scope 加入。
+- 同一 workspace 的重叠 capture 可以同时观察到同一外部写入；每个 capture 都保留该变化，并标为 `attribution=ambiguous`，绝不猜测唯一 owner。只有共享 watcher journal 或受控 delta 能证明同一事件时才关联 `change_event_id`；snapshot 只能证明区间净变化时不伪造该 ID。
+- 本地 provider 的完整支持目标是 macOS、Linux、原生 Windows 与 WSL；Docker、SSH、Gateway 等环境必须由实际执行端提供 provider，否则诚实返回 `unknown`。
+- 普通策略 `observe` 允许任务在无法建立 baseline 时执行但返回 `unknown`；`require_complete` 在 baseline 不能证明完整时拒绝启动。
+- terminal 是本轮硬边界。它之后仍在运行的后台进程另走延迟 capture，可逻辑关联原 `turn_key`，但不能反写已结算的结果。
+- 变更集是独立执行账本，不并入 Session Manifest 的 Artifacts；前者包含删除、缓存与失败/取消期间写入，后者只表达可交付成果。
 
 ## 捕获语义
 
@@ -50,7 +60,7 @@ WebUI 分配 stream_turn_key
 - 符号链接的新建、删除和目标变化，但不跟随 workspace 外目标；
 - 可执行位等受支持的文件 mode 变化；
 - `write_file`、`patch`、Codex `apply_patch`、MCP/插件写入；
-- shell、脚本、重定向、heredoc 和构建命令造成的间接写入；
+- shell、`terminal`、`execute_code`（Python 的 `open()`、`pathlib`、`os`、其子进程与 RPC 工具调用）、重定向、heredoc 和构建命令造成的间接写入；
 - 成功、失败、部分失败和取消 turn 在结算时已经落盘的净变化。
 
 “净变化”意味着：
@@ -60,7 +70,7 @@ WebUI 分配 stream_turn_key
 - 受控工具的中间操作仍可进入内部 delta journal，但不进入最终净 diff；
 - turn 结算后仍在后台运行的进程造成的后续写入不属于该 turn，已知存在后台进程时写入 diagnostics。
 
-本方案不声称仅凭前后快照能证明“哪个进程”造成了变化。若另一个进程同时写入同一 workspace，该变化仍属于捕获区间，但 `attribution=ambiguous`。
+本方案不声称仅凭前后快照能证明“哪个进程”造成了变化。若另一个进程同时写入同一 workspace，该变化仍属于捕获区间，但 `attribution=ambiguous`。两个 capture 的观察窗口重叠时，同一变化可以进入两者的结果，并在 diagnostics 互列 `overlap_capture_ids`。仅当共享 watcher journal 或受控 delta 保留了同一事件证据时，两个结果才携带相同 `change_event_id`；snapshot 不能证明这一点时，该字段为 `null`，UI/导出不得把同路径/同 hash 猜成同一写入。
 
 ### 唯一默认排除项
 
@@ -176,6 +186,7 @@ session_id: str
 stream_id: str
 turn_key: str
 requested_scope: workspace_net
+capture_policy: observe | require_complete
 ```
 
 `client_turn_id` 是跨网络幂等键。执行端不能把 WebUI 传入的任意绝对路径直接当成可信 workspace；实际根目录由 Agent session/environment 解析，并在结果中返回 opaque `workspace_identity`。
@@ -258,6 +269,7 @@ attribution: controlled | interval | ambiguous
 content_fidelity: full | mixed | metadata_only
 controlled_delta_status: valid | invalidated | unavailable
 changes: [{
+  change_event_id: opaque | null,
   path,
   operation,
   before,
@@ -302,7 +314,7 @@ release_capture(handle) -> None
 
 首批 provider：
 
-- `LocalWorkspaceSnapshotProvider`：本机文件系统；
+- `LocalWorkspaceSnapshotProvider`：使用可移植的 Python 文件系统语义支持 macOS、Linux、原生 Windows 与 WSL；不以 inotify、FSEvents 或 ReadDirectoryChangesW 的单一事件流作为完整性证据；
 - `UnsupportedSnapshotProvider`：显式返回 `unknown`；
 - 后续为 Docker/SSH 等 environment 增加对应 provider，或在该 environment 内运行同一 snapshot helper。
 
@@ -315,7 +327,7 @@ provider 选择必须基于实际 environment，不得静默回退到 Agent 进�
 3. 启动文件系统 watcher（若平台支持），记录 sequence/overflow；watcher 只是加速与冲突检测，不能单独作为完整性证明。
 4. 对范围内所有 entries 做 baseline scan，流式计算指纹。
 5. 对扫描期间 watcher 报告的路径重新读取，直到得到稳定 baseline；达到重试/时间预算则 baseline 为 `partial`。
-6. baseline handle 持久化成功后，才允许 Agent 开始本轮工具执行。
+6. baseline handle 持久化成功后，才允许 Agent 开始本轮工具执行；若 `capture_policy=require_complete` 且无法达到 complete，拒绝启动。`observe` 可以继续运行，但 handle 必须从一开始标为 `partial|unknown`。
 
 不能用父目录 mtime 决定“目录未变化所以不递归”。原地覆盖文件内容通常不会改变父目录 mtime。没有可靠 watcher journal 时，最终必须重新检查所有 baseline entries 和新增 entries。
 
@@ -342,7 +354,7 @@ MVP 建议：
 
 1. 停止接受新的受控 delta，记录最终 delta sequence。
 2. 等待当前前台工具 I/O 完成；已知后台进程不阻塞无限等待，只写 diagnostics。
-3. 对 workspace 做最终全量指纹扫描，或使用无 overflow 的 watcher journal 缩小读取范围后执行完整一致性校验。
+3. 对 workspace 做最终全量指纹扫描，或使用无 overflow 的 watcher journal 缩小读取范围后执行完整一致性校验；扫描前后比较根签名和受影响 entry identity，变化时局部重扫并有限次重试，无法收敛即返回 `partial`，不得把非原子遍历称为 complete。
 4. 比较 baseline/final fingerprint，得到 add/delete/update/chmod/type change。
 5. 用 confirmed delta 补充工具归因、move 关系和部分失败细节。
 6. delta 的最终 postimage 与 final scan 冲突时，以 final scan 表示结算时状态，保留冲突诊断并将 `controlled_delta_status` 置为 `invalidated`；final scan 仍完整时，`capture_status` 可以保持 `complete`。
@@ -376,6 +388,27 @@ snapshot 发现的一对 delete/add 即使 digest 相同，也默认保留为 de
 4. multi-file patch 按实际成功文件生成多条 delta；
 5. display/TUI 继续消费同一结构渲染 inline diff；
 6. 新增可选 `turn_file_change_callback(event)`，旧调用方忽略即可。
+
+### `execute_code` 的 scope 规则
+
+`execute_code` 可直接运行任意 Python，并可在脚本中启动子进程；它不能依赖
+`tool_complete` 或 terminal 命令解析来枚举写入。最终 snapshot provider 是其完整性
+来源，规则按实际执行 environment 区分：
+
+- **`project` 模式、本地 environment**：当前实现把 child CWD 解析到 task/session 的
+  workspace（session cwd record → registered override → `TERMINAL_CWD`）。脚本直接写入、
+  `subprocess`/`os.system` 写入，以及它经 RPC 调用的文件工具，只要最终落在该 workspace
+  根内，都会由同一轮的 baseline/final scan 捕获；是否能生成实时受控 diff 另由 delta
+  完整度决定。
+- **`strict` 模式的 staging tmpdir**：纯粹写入私有 staging 目录不属于 session execution
+  workspace，V1 不报告为用户 workspace 变更。脚本通过 RPC 实际写入 task workspace 时，仍
+  按上项捕获。
+- **Docker、SSH、Gateway 等 remote environment**：只由其中运行 `execute_code` 的
+  execution owner/provider 捕获；V1 provider 未实现时结果为 `unknown`，WebUI 不扫描本地
+  同名目录。
+
+无论模式，脚本或子进程在 terminal 之后继续写入，仍遵循本方案的后台进程硬边界：不追加
+到已结算 turn，而是由未来的延迟 capture 处理。
 
 ### Codex bridge
 
@@ -515,7 +548,7 @@ turn_change_sets(
 )
 
 turn_file_changes(
-  capture_id, path, operation,
+  capture_id, change_event_id, path, operation,
   before_json, after_json, move_path,
   provenance_json, diff, sequence
 )
@@ -563,6 +596,7 @@ SSE 是乐观态并写入 run journal；`done` 后 GET 覆盖前端状态。`cap
 - active capture 的 baseline pin 不受普通 checkpoint pruning 影响；
 - process crash 后保留 active record，重启可尽力结算为 `abandoned`；若无法证明 crash 到 recovery 期间没有外部写入，`attribution=ambiguous`；
 - 同 workspace 并发 capture 均可记录各自区间净变化，但在没有独占写入保证时设置 `overlap_capture_ids` 和 `attribution=ambiguous`。
+- 共享 watcher journal 或受控 delta 能证明同一外部写入被多个重叠窗口观察到时，执行端生成稳定的 `change_event_id`；它是关联键，不表示唯一因果归属，也不能用于跨 environment 合并同名相对路径。仅有 snapshot 证据时该字段为 `null`，以避免把相同 before/after 指纹误称为同一次写入。
 
 ## 实施阶段
 
@@ -570,10 +604,11 @@ SSE 是乐观态并写入 run journal；`done` 后 GET 覆盖前端状态。`cap
 
 - 在 Hermes Agent 定义 request/delta/change set schema；
 - 实现 local provider、durable baseline handle、active pin 和 recovery；
+- 以 `observe` / `require_complete` 覆盖 baseline 无法完整建立时的允许与拒绝路径；
 - 覆盖全量 fingerprint、文本 preimage、sensitive/binary metadata-only；
 - 实现 `UnsupportedSnapshotProvider`，先建立诚实降级语义。
 
-交付标准：独立 Agent 测试能捕获 shell 和文件工具的 workspace 净变化。
+交付标准：独立 Agent 测试能在 macOS/Linux/Windows/WSL 的支持矩阵中捕获 shell 和文件工具的 workspace 净变化；未实现的远程 environment 只能声明 `unknown`。
 
 ### Phase 2：Hermes 受控 delta 与 Codex 复用
 
@@ -622,10 +657,12 @@ SSE 是乐观态并写入 run journal；`done` 后 GET 覆盖前端状态。`cap
 2. 文件原地覆盖但父目录 mtime 不变，仍必须被发现。
 3. 同一文件多次更新、更新后还原、新建后删除。
 4. 内容相同的 delete+add 不误判 rename。
-5. shell redirect、heredoc、脚本、build、MCP/plugin 写入。
-6. `node_modules`、build、cache、binary、large、sensitive 参与 fingerprint。
-7. unreadable path、扫描时删除、symlink swap、watcher overflow、预算耗尽。
-8. baseline 扫描期间发生变化时重新读取或返回 partial。
+5. shell redirect、heredoc、脚本、build、MCP/plugin 写入；本地 `execute_code(project)` 的 Python 直接写入、`os.system`/`subprocess` 子进程写入及 RPC 文件工具写入。
+6. `execute_code(strict)` 仅写 staging tmpdir 时不产生 session workspace change；其 RPC 写入 task workspace 时产生 change。
+7. remote `execute_code` 无 provider 时为 `unknown`，有 provider 时由远端最终 snapshot 结算。
+8. `node_modules`、build、cache、binary、large、sensitive 参与 fingerprint。
+9. unreadable path、扫描时删除、symlink swap、watcher overflow、预算耗尽。
+10. baseline 扫描期间发生变化时重新读取或返回 partial。
 
 ### Delta reconciliation
 
@@ -646,8 +683,9 @@ SSE 是乐观态并写入 run journal；`done` 后 GET 覆盖前端状态。`cap
 2. SSE 断开、worker replace、迟到 callback/finally。
 3. Gateway run completed/failed/cancelled，terminal change event 丢失/重复/乱序。
 4. process crash 后 active baseline recovery 为 abandoned。
-5. 两个 session 同 workspace 并发和 overlap diagnostics。
+5. 两个 session 同 workspace 并发、外部写入与 overlap diagnostics；共享 journal 能证明同一事件时两个 change set 共享 `change_event_id`，只有 snapshot 时该字段为 `null`，两种情况均为 `ambiguous`。
 6. in-process、Codex、Gateway Runs、legacy Gateway、unsupported remote environment。
+7. `observe` 在 baseline 不可验证时仍执行但终态为 `unknown`；`require_complete` 拒绝在该环境启动。
 
 ### Persistence and API
 
@@ -670,6 +708,8 @@ SSE 是乐观态并写入 run journal；`done` 后 GET 覆盖前端状态。`cap
 - 变更完整度、进程归因和内容展示完整度分别表达；
 - cancel/error/replace/restart 不丢失已确认落盘变化，也不把不确定结果显示为精确空 diff；
 - `(profile, session_id, stream_id, turn_key, client_turn_id, capture_id)` 能唯一绑定记录，迟到事件不能污染其它 turn；
+- 同一 workspace 的重叠窗口允许重复记录同一变化，以 `overlap_capture_ids` 说明重叠；只有共享 journal 可证明身份时才填写 `change_event_id`，不伪造唯一归因；
+- V1 在 execution workspace 根内完整工作；本地支持范围覆盖 macOS、Linux、原生 Windows 与 WSL，未接入的远端环境必须明确降级；
 - Session Manifest 与 TurnFileChangeSet 保持独立，可分别重放和修复。
 
 ## 明确不采用的方案
@@ -686,9 +726,12 @@ SSE 是乐观态并写入 run journal；`done` 后 GET 覆盖前端状态。`cap
 
 ## 参考
 
-- Codex app-server `fileChange` 与 `turn/diff/updated`：<https://learn.chatgpt.com/docs/app-server.md>
-- Codex apply patch handler：<https://github.com/openai/codex/blob/c4f42d161ae44a8d696ee9fb595709661979d187/codex-rs/core/src/tools/handlers/apply_patch.rs>
-- Codex applied patch delta：<https://github.com/openai/codex/blob/c4f42d161ae44a8d696ee9fb595709661979d187/codex-rs/apply-patch/src/lib.rs>
-- Codex turn diff tracker：<https://github.com/openai/codex/blob/c4f42d161ae44a8d696ee9fb595709661979d187/codex-rs/core/src/turn_diff_tracker.rs>
+- Codex app-server 官方文档（声明 app-server 源码公开、定义 `fileChange` / `turn/diff/updated`）：<https://learn.chatgpt.com/docs/app-server>
+- Codex 官方源码，app-server notification schema：<https://github.com/openai/codex/blob/9ded177ce7c1c0bd2047f902936c177612ab3434/codex-rs/app-server-protocol/src/protocol/common.rs>
+- Codex 官方源码，turn 级 tracker 的创建与生命周期：<https://github.com/openai/codex/blob/9ded177ce7c1c0bd2047f902936c177612ab3434/codex-rs/core/src/session/turn.rs>
+- Codex 官方源码，`AppliedPatchDelta`：<https://github.com/openai/codex/blob/9ded177ce7c1c0bd2047f902936c177612ab3434/codex-rs/apply-patch/src/lib.rs>
+- Codex 官方源码，`TurnDiffTracker`：<https://github.com/openai/codex/blob/9ded177ce7c1c0bd2047f902936c177612ab3434/codex-rs/core/src/turn_diff_tracker.rs>
+- 腾讯 CodeBuddy WorkBuddy，变更面板与按任务查看：<https://www.codebuddy.cn/docs/workbuddy/From-Beginner-to-Expert-Guide/Function-Description/Right-Sidebar>
+- 腾讯 CodeBuddy WorkBuddy，workspace、独立任务与并行任务：<https://www.codebuddy.cn/docs/workbuddy/From-Beginner-to-Expert-Guide/Function-Description/Task-Bar>
 - Hermes Agent：`agent/display.py`、`agent/tool_executor.py`、`agent/tool_dispatch_helpers.py`、`agent/tool_result_classification.py`、`agent/codex_runtime.py`、`agent/transports/codex_app_server_session.py`、`tools/checkpoint_manager.py`
 - Hermes WebUI：`api/streaming.py`、`api/gateway_chat.py`、`api/session_manifest.py`、`api/workspace.py`

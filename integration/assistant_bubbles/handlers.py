@@ -30,23 +30,29 @@ def _fallback_items(profile: str, profile_path: Path) -> list[dict]:
 
 
 def _items_for_response(profile: str, profile_path: Path, cache: dict | None) -> list[dict]:
-    fallback = _fallback_items(profile, profile_path)
     if not cache:
-        return fallback
+        return _fallback_items(profile, profile_path)
+    cached_items = cache.get("items")
+    if not isinstance(cached_items, list) or len(cached_items) != len(store.ITEM_ORDER):
+        return _fallback_items(profile, profile_path)
     out: list[dict] = []
-    fallback_by_slot = fallback
+    fallback: list[dict] | None = None
     stats = collectors.scheduled_task_stats(profile_path)
-    for idx, item in enumerate(cache.get("items") or []):
-        item_type = item.get("type")
+    for idx, item in enumerate(cached_items):
+        if not isinstance(item, dict) or item.get("type") != store.ITEM_ORDER[idx]:
+            return _fallback_items(profile, profile_path)
+        item_type = item["type"]
         if item_type == "scheduled_task":
             out.append({"type": "scheduled_task", "text": copy.scheduled_task_text(stats)})
             continue
         text = item.get("text")
         if not isinstance(text, str) or not text:
-            out.append(fallback_by_slot[idx])
+            if fallback is None:
+                fallback = _fallback_items(profile, profile_path)
+            out.append(fallback[idx])
             continue
         out.append({"type": item_type, "text": text})
-    return out if len(out) == len(store.ITEM_ORDER) else fallback
+    return out
 
 
 def try_handle_get(handler, parsed) -> bool:

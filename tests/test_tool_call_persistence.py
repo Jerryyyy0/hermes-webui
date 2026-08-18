@@ -10,6 +10,7 @@ from api.streaming import _extract_tool_calls_from_messages, _tool_result_snippe
 
 
 def test_extract_tool_calls_from_openai_message_linkage():
+    tool_result = '{"output":"file.txt","exit_code":0}'
     messages = [
         {"role": "user", "content": "ls"},
         {
@@ -23,32 +24,32 @@ def test_extract_tool_calls_from_openai_message_linkage():
         {
             "role": "tool",
             "tool_call_id": "call-1",
-            "content": '{"output":"file.txt","exit_code":0}',
+            "content": tool_result,
         },
     ]
     result = _extract_tool_calls_from_messages(messages)
     assert len(result) == 1
     assert result[0]["name"] == "terminal"
     assert result[0]["assistant_msg_idx"] == 1
-    assert result[0]["snippet"] == "file.txt"
+    assert result[0]["snippet"] == tool_result
     assert result[0]["done"] is True
 
 
-def test_tool_result_snippet_allows_frontend_show_more_threshold_but_stays_bounded():
-    """Persisted snippets should be long enough for frontend Show more but capped."""
+def test_tool_result_snippet_preserves_the_full_tool_result():
+    """Completed-tool SSE previews must retain the complete tool result."""
     medium_output = "m" * 1200
     huge_output = "h" * 5000
 
     medium_snippet = _tool_result_snippet(json.dumps({"output": medium_output}))
     huge_snippet = _tool_result_snippet(json.dumps({"output": huge_output}))
 
-    assert len(medium_snippet) == 1200
+    assert medium_snippet == json.dumps({"output": medium_output})
     assert len(medium_snippet) > 800
-    assert len(huge_snippet) == 4000
+    assert huge_snippet == json.dumps({"output": huge_output})
 
 
-def test_extract_tool_calls_persists_show_more_sized_snippets_with_bounded_cap():
-    """Tool-call summaries should store >800-char snippets without growing unbounded."""
+def test_extract_tool_calls_preserves_large_tool_results():
+    """Persisted tool results must not be silently shortened."""
     long_output = "x" * 1200
     huge_output = "y" * 5000
     messages = [
@@ -87,9 +88,9 @@ def test_extract_tool_calls_persists_show_more_sized_snippets_with_bounded_cap()
     result = _extract_tool_calls_from_messages(messages)
 
     assert len(result) == 2
-    assert len(result[0]["snippet"]) == 1200
+    assert result[0]["snippet"] == json.dumps({"output": long_output})
     assert len(result[0]["snippet"]) > 800
-    assert len(result[1]["snippet"]) == 4000
+    assert result[1]["snippet"] == json.dumps({"output": huge_output})
 
 
 def test_extract_tool_calls_falls_back_to_live_progress_when_ids_missing():
@@ -128,4 +129,4 @@ def test_extract_tool_calls_preserves_mixed_linked_and_fallback_results():
     assert result[0]["name"] == "terminal"
     assert result[1]["name"] == "write_file"
     assert result[1]["assistant_msg_idx"] == 2
-    assert result[1]["snippet"] == "saved"
+    assert result[1]["snippet"] == '{"result":"saved"}'

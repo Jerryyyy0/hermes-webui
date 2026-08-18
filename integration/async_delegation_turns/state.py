@@ -10,6 +10,33 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+def normalize_async_delegation_status(value: Any) -> str:
+    """Map Agent terminal spellings onto the WebUI lifecycle contract."""
+    status = str(value or "").strip().lower()
+    if not status:
+        return "completed"
+    if status in {"completed", "success", "succeeded"}:
+        return "completed"
+    if status in {"cancelled", "canceled", "interrupted"}:
+        return "cancelled"
+    if status == "running":
+        return "running"
+    return "failed"
+
+
+def _activity_version(session: Any) -> int:
+    try:
+        return max(0, int(getattr(session, "async_delegation_activity_version", 0) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _bump_activity_version(session: Any) -> int:
+    version = _activity_version(session) + 1
+    session.async_delegation_activity_version = version
+    return version
+
+
 def _records(session: Any) -> dict[str, dict[str, Any]]:
     raw = getattr(session, "async_delegation_origins", None)
     if not isinstance(raw, dict):
@@ -24,6 +51,23 @@ def _records(session: Any) -> dict[str, dict[str, Any]]:
 def _save(session: Any) -> None:
     # Background lifecycle changes must not reorder a session in the sidebar.
     session.save(touch_updated_at=False)
+
+
+def _dispatch_metadata(payload: dict[str, Any]) -> tuple[str, int, list[str]]:
+    raw_goals = payload.get("goals")
+    goals = (
+        [str(goal) for goal in raw_goals if isinstance(goal, str) and goal]
+        if isinstance(raw_goals, list)
+        else []
+    )
+    try:
+        child_task_count = int(payload.get("count") or 0)
+    except (TypeError, ValueError):
+        child_task_count = 0
+    if goals:
+        child_task_count = len(goals)
+    child_task_count = max(1, child_task_count)
+    return ("batch" if child_task_count > 1 else "single", child_task_count, goals)
 
 
 def record_async_delegation_dispatch(
@@ -47,17 +91,35 @@ def record_async_delegation_dispatch(
     origin_turn_key = str(turn_key or "").strip()
     if not delegation_id or not origin_turn_key:
         return None
+    delegation_kind, child_task_count, goals = _dispatch_metadata(payload)
 
     records = _records(session)
     record = dict(records.get(delegation_id) or {})
-    record.update(
-        {
-            "turn_key": origin_turn_key,
-            "created_at": record.get("created_at") or time.time(),
-            "status": "running",
-            "wakeup_state": "idle",
-            "completed_at": None,
-        }
+    existing = bool(record)
+    if not existing:
+        record.update(
+            {
+                "delegation_id": delegation_id,
+                "turn_key": origin_turn_key,
+                "created_at": time.time(),
+                "status": "running",
+                "wakeup_state": "idle",
+                "completed_at": None,
+                "delegation_kind": delegation_kind,
+                "child_task_count": child_task_count,
+                "goals": goals,
+            }
+        )
+    else:
+        record["delegation_id"] = delegation_id
+        record.setdefault("delegation_kind", delegation_kind)
+        record.setdefault("child_task_count", child_task_count)
+        if not record.get("goals") and goals:
+            record["goals"] = goals
+    record["activity_version"] = (
+        int(record.get("activity_version") or _activity_version(session))
+        if existing
+        else _bump_activity_version(session)
     )
     records[delegation_id] = record
     session.async_delegation_origins = records
@@ -87,6 +149,8 @@ def mark_async_delegation_completion(
     *,
     wakeup_state: str,
     content: Any,
+    status: str = "completed",
+    child_task_summary: dict[str, int] | None = None,
 ) -> dict[str, Any] | None:
     """Persist completion receipt without materializing a transcript message."""
     delegation_id = str(delegation_id or "").strip()
@@ -95,9 +159,21 @@ def mark_async_delegation_completion(
     if not isinstance(record, dict):
         return None
     record = dict(record)
-    record["status"] = "completed"
+    was_status = record.get("status")
+    was_wakeup_state = record.get("wakeup_state")
+    normalized_status = normalize_async_delegation_status(status)
+    record["status"] = normalized_status
     record["completed_at"] = record.get("completed_at") or time.time()
+    if child_task_summary is not None:
+        record["child_task_summary"] = dict(child_task_summary)
+    changed = (
+        was_status != normalized_status or was_wakeup_state != wakeup_state
+    )
     record["wakeup_state"] = wakeup_state
+    if changed:
+        record["activity_version"] = _bump_activity_version(session)
+    else:
+        record["activity_version"] = int(record.get("activity_version") or _activity_version(session))
     records[delegation_id] = record
     session.async_delegation_origins = records
     _save(session)
@@ -127,7 +203,12 @@ def mark_async_delegation_wakeup(
     if not isinstance(record, dict):
         return None
     record = dict(record)
+    changed = record.get("wakeup_state") != wakeup_state
     record["wakeup_state"] = wakeup_state
+    if changed:
+        record["activity_version"] = _bump_activity_version(session)
+    else:
+        record["activity_version"] = int(record.get("activity_version") or _activity_version(session))
     records[delegation_id] = record
     session.async_delegation_origins = records
     _save(session)

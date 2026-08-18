@@ -210,6 +210,7 @@ def test_source_python_builds_named_profile_gateway_command(monkeypatch, tmp_pat
     python.write_text("", encoding="utf-8")
     python.chmod(0o755)
     monkeypatch.delenv("HERMES_WEBUI_HERMES_EXECUTABLE", raising=False)
+    monkeypatch.setattr(runtime, "_agent_dir", lambda: None)
     monkeypatch.setattr(runtime.sys, "executable", str(python))
     monkeypatch.setattr(runtime.shutil, "which", lambda _name: None)
 
@@ -237,6 +238,30 @@ def test_gateway_command_profile_shape():
     assert runtime.build_gateway_command(
         invocation, {"name": "abc", "is_default": False}, "start"
     ) == ["/hermes", "-p", "abc", "gateway", "start"]
+
+
+def test_gateway_run_command_uses_foreground_external_supervisor_without_force():
+    invocation = runtime.AgentCliInvocation(("/hermes",), "/home", {}, "launcher")
+
+    assert runtime.build_gateway_run_command(
+        invocation, {"name": "abc", "is_default": False}
+    ) == ["/hermes", "-p", "abc", "gateway", "run", "-vv", "--external-supervisor"]
+
+
+def test_agent_python_probe_uses_verified_python_runtime():
+    invocation = runtime.AgentCliInvocation(("/agent-python", "-m", "hermes_cli.main"), "/home", {}, "source_python")
+
+    assert runtime.build_agent_python_command(invocation, "-c", "print('ok')") == [
+        "/agent-python",
+        "-c",
+        "print('ok')",
+    ]
+
+
+def test_agent_python_probe_does_not_guess_an_explicit_launcher():
+    invocation = runtime.AgentCliInvocation(("/custom/hermes",), "/home", {}, "explicit_launcher")
+
+    assert runtime.build_agent_python_command(invocation, "-c", "print('ok')") is None
 
 
 def test_relative_explicit_launcher_is_rejected(monkeypatch):

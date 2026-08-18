@@ -74,7 +74,15 @@ First-time contributor RFCs should be discussed in an issue before opening a PR.
   Proposed contract for keeping asynchronous delegation completions hidden as
   model-context anchors while streaming their late results at the timeline tail
   and retaining their original user-turn ownership.
+- [`async-delegation-workspace-artifacts.md`](async-delegation-workspace-artifacts.md)
+  — Proposed cross-repository contract that gives each asynchronous child task
+  a frozen session-workspace boundary and returns only structured successful
+  child mutations to the originating turn's artifact settlement.
 - [`cron-session-workspaces.md`](cron-session-workspaces.md) — Proposed
   cross-repository contract for giving every Cron execution session an
   independent, immutable workspace from Agent execution through WebUI recovery
   and cleanup.
+- [`cron-model-provider-binding.md`](cron-model-provider-binding.md) — Proposed
+  cross-repository contract that makes every fixed Cron inference selection a
+  complete Provider/model binding, blocks unsafe legacy partial bindings before
+  network execution, and defines a safe migration/audit path.

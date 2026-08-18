@@ -29,7 +29,7 @@ Artifacts 可来自成功写入工具的结构化参数/diff、成功 terminal �
 - SSE delta 不写入 transcript，也不替代持久化 Manifest。
 - 本轮 `done` 后，前端重新请求 `GET /api/session/manifest` 并覆盖乐观状态。
 - 聊天区每轮成果 chips 只使用 GET 返回的 `manifest.turns[].artifacts`，不直接使用 SSE delta。
-- Artifacts 的持久化权威来源是 profile-aware artifact store。`GET /api/session/manifest` 只读取 store，或从 transcript / legacy sidecar 临时派生展示；不会由查看历史触发 backfill 或 empty-decision read-repair。
+- Artifacts 的持久化权威来源是 profile-aware artifact store。`GET /api/session/manifest` 只读取 store；若当前 lineage 没有 store decision，则返回空 Manifest，不读取 transcript 或 legacy sidecar 重建展示。查看历史不会触发 backfill 或 empty-decision read-repair。
 - Store artifact 没有同 key user anchor 时仍保留在顶层 `artifacts`，并列入 `diagnostics.orphan_turn_keys`；不得追加为正常 `turns[]`。
 
 ## UI 消费

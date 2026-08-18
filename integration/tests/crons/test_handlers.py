@@ -216,3 +216,19 @@ def test_integration_delete_cleans_job_history(handler_env):
 
     delete_history.assert_called_once_with("job1", owner_profile="ops", job=job)
     assert b'"history_cleanup"' in handler.wfile.write.call_args.args[0]
+
+
+def test_integration_resume_returns_actionable_error_for_past_one_shot_job(handler_env):
+    from integration.crons.handlers import _handle_resume
+
+    handler = MagicMock()
+    error = (
+        "Cannot resume: one-shot time 2026-07-30T15:57:58.524558+08:00 "
+        "is in the past (grace window: 120s) and will never fire."
+    )
+    with patch("cron.jobs.resume_job", side_effect=ValueError(error)):
+        _handle_resume(handler, {"profile": "ops", "job_id": "job1"})
+
+    handler.send_response.assert_called_with(400)
+    payload = json.loads(handler.wfile.write.call_args.args[0].decode("utf-8"))
+    assert payload == {"error": "执行时间是历史时间，请修改执行时间后启用"}

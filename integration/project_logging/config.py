@@ -125,6 +125,34 @@ def log_line(level: int, line: str) -> None:
         pass
 
 
+def log_gateway_line(level: int, line: str) -> None:
+    """Write a Gateway line to WebUI's configured console destination.
+
+    Gateway output is intentionally not filtered by ``HERMES_WEBUI_LOG_LEVEL``:
+    that variable controls WebUI's own diagnostics, while the child process is
+    explicitly started with ``-vv`` for observable Gateway logs.
+    """
+    try:
+        configure_logging()
+        console = _console_logger()
+        handlers = list(console.handlers)
+        if not handlers:
+            return
+        record = logging.LogRecord(
+            console.name,
+            level,
+            __file__,
+            0,
+            "%s",
+            (line,),
+            None,
+        )
+        for handler in handlers:
+            handler.handle(record)
+    except Exception:
+        pass
+
+
 def log_info(line: str) -> None:
     log_line(logging.INFO, line)
 

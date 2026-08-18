@@ -14,8 +14,8 @@ from integration.project_logging import get_logger
 
 logger = get_logger(__name__)
 
-_DEFAULT_TIMEOUT_SECONDS = 60.0
 _DEFAULT_MAX_WORKERS = 4
+_EXTERNAL_SERVICE_START_TIMEOUT_SECONDS = 60.0
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 _FALSE_VALUES = {"0", "false", "no", "off"}
 
@@ -66,45 +66,52 @@ def _multiplex_enabled(default_home: Path) -> bool:
 def _start_profile_gateway(
     profile: dict,
     *,
-    timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
-    runner: Callable = subprocess.run,
+    runtime_resolver: Callable | None = None,
+    process_starter: Callable | None = None,
+    service_runner: Callable = subprocess.run,
 ) -> dict:
-    name = str(profile.get("name") or "").strip() or "default"
-    if profile.get("gateway_running") is True:
-        return {"profile": name, "status": "already_running"}
+    """Start a Gateway under the correct lifecycle owner.
 
+    Native WebUI launches are foreground children owned by this process.  An
+    s6 container remains owned by its service manager, so its existing
+    ``gateway start`` path is deliberately retained and is not log-forwarded.
+    """
+    name = str(profile.get("name") or "").strip() or "default"
     try:
         from integration.gateway_startup.runtime import (
             AgentCliRuntimeUnavailable,
             build_gateway_command,
             resolve_agent_cli_runtime,
         )
-
+        from integration.gateway_startup.process import start_gateway_process
         try:
-            runtime = resolve_agent_cli_runtime()
+            runtime = (runtime_resolver or resolve_agent_cli_runtime)()
         except AgentCliRuntimeUnavailable as exc:
             return {"profile": name, "status": "runtime_unavailable", "error": str(exc)}
-        completed = runner(
-            build_gateway_command(runtime, profile, "start"),
-            cwd=runtime.cwd,
-            env=runtime.env,
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
-            check=False,
-        )
+        if _running_in_container() and _s6_service_manager_available():
+            if profile.get("gateway_running") is True:
+                return {"profile": name, "status": "already_running"}
+            completed = service_runner(
+                build_gateway_command(runtime, profile, "start"),
+                cwd=runtime.cwd,
+                env=runtime.env,
+                capture_output=True,
+                text=True,
+                timeout=_EXTERNAL_SERVICE_START_TIMEOUT_SECONDS,
+                check=False,
+            )
+            if completed.returncode == 0:
+                return {"profile": name, "status": "started", "owner": "s6"}
+            return {
+                "profile": name,
+                "status": "failed",
+                "error": f"gateway start exited with status {completed.returncode}",
+            }
+        return (process_starter or start_gateway_process)(profile, runtime=runtime)
     except subprocess.TimeoutExpired:
         return {"profile": name, "status": "timed_out"}
     except Exception as exc:
         return {"profile": name, "status": "failed", "error": type(exc).__name__}
-
-    if completed.returncode == 0:
-        return {"profile": name, "status": "started"}
-    return {
-        "profile": name,
-        "status": "failed",
-        "error": f"gateway start exited with status {completed.returncode}",
-    }
 
 
 def _deduplicate_profiles(profiles: list[dict]) -> list[dict]:
@@ -181,7 +188,7 @@ def ensure_all_profile_gateways(
             counts[status] = counts.get(status, 0) + 1
         logger.info("Profile gateway startup completed: %s", counts)
         for result in results:
-            if result.get("status") in {"failed", "timed_out", "runtime_unavailable"}:
+            if result.get("status") in {"failed", "runtime_unavailable", "state_unknown"}:
                 logger.warning(
                     "Profile gateway startup %s for %s%s",
                     result.get("status"),

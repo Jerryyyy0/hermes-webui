@@ -6,6 +6,10 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ## [Unreleased]
 
+### Added
+
+- **WebUI-owned Gateway console forwarding** — 原生 `server.py` 启动且确认 Profile Gateway 未运行时，WebUI 现在以前台 `gateway run -vv --external-supervisor` 子进程启动并持有该 Gateway，将合并 stdout/stderr 以 `[gateway:<profile>]` 前缀写入 WebUI 控制台及同一持久化日志。转发行不受 `HERMES_WEBUI_LOG_LEVEL` 过滤，敏感字段在输出前脱敏；WebUI 退出时只终止自身创建的 Gateway。已运行、s6 或其他外部托管 Gateway 不接管、不转发。
+
 ### Fixed
 
 - **Integration workspace files stale managed-session artifacts** — `Session.save()` now invalidates the integration root file index when the saved session workspace is below `HERMES_WEBUI_DEFAULT_WORKSPACE`. Files written by an Agent into managed subdirectories are therefore visible from `GET /api/integration/workspace/files` without requiring `refresh=1`; explicitly external workspaces keep their existing cache scope.
