@@ -263,7 +263,7 @@ data: {
 | `active_child_task_count` | integer | 固定为 `0`。 |
 | `settled_at` | number | 服务端完成聚合判断时的 Unix 时间戳。 |
 
-客户端确认该事件的 `background_activity_version` 不早于本地版本后，关闭 `GET /api/sessions/{session_id}/events`，清除该 session 的待跟踪任务即可。此事件不代表或替代任一聊天流的终态。
+客户端只在该事件尚未按 `event_id` 处理、`session_id` 与连接一致、`background_activity_version` 不早于本地版本，且 `active_delegation_count`、`active_child_task_count` 都为 `0` 时，才关闭 `GET /api/sessions/{session_id}/events` 并清除该 session 的待跟踪任务。此事件不代表或替代任一聊天流的终态。
 
 ## 6. 推荐的前端状态与伪代码
 
@@ -296,8 +296,13 @@ function onSessionEvent(event: Envelope) {
       ensureChatStream(event.payload.stream_id);
       break;
     case "background_tasks_idle":
-      closeSessionEvents(event.session_id);
-      clearPendingTasks(event.session_id);
+      if (
+        event.payload.active_delegation_count === 0 &&
+        event.payload.active_child_task_count === 0
+      ) {
+        closeSessionEvents(event.session_id);
+        clearPendingTasks(event.session_id);
+      }
       break;
     default:
       applyTaskUpdate(event.session_id, event.payload);
@@ -333,11 +338,13 @@ function onSessionEvent(event: Envelope) {
 
 只有下列任一情况可以主动关闭一条 session SSE：
 
-1. 收到 `background_tasks_idle`，且 `payload.active_delegation_count === 0`、`payload.active_child_task_count === 0`；
+1. 收到尚未处理的 `background_tasks_idle`，其 `session_id` 与订阅一致，`background_activity_version >=` 该 session 已知版本，且 `payload.active_delegation_count === 0`、`payload.active_child_task_count === 0`；
 2. 用户登出、应用销毁或明确放弃该 session 的后台通知；
 3. 服务端已终止连接，客户端决定不再重连。
 
 下列事件都不是关闭条件：单个 child task 完成、delegation `status=completed`、`bg_task_complete`、`server_turn_started`，以及任意单个 wakeup chat stream 的 `done`。
+
+收到过期 idle，例如本地已处理 version `17` 后才收到 version `16` 的 `background_tasks_idle`，必须忽略，不能关闭当前连接。以后新的父 chat stream 再收到 `background_task_dispatched` 时，调用 `ensureSessionEvents(session_id)` 重新建立该 session 的事件流。
 
 ## 10. 接入验收清单
 

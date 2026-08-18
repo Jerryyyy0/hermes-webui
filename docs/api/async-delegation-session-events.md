@@ -533,8 +533,10 @@ server_turn_started
   → 可选地使用 stream_id 附着正常 chat stream；不得再次 POST /api/chat/start
 
 background_tasks_idle(active_delegation_count=0, active_child_task_count=0)
-  → 仅当 version 不早于已知 version 时，关闭该 session 的 SSE 连接
+  → 仅当 session_id 与连接一致、event_id 尚未处理且 version 不早于已知 version 时，关闭该 session 的 SSE 连接
 ```
+
+`background_tasks_idle` 不是任意终态的关闭快捷方式。订阅方还必须验证其 `active_delegation_count` 与 `active_child_task_count` 都为 `0`；旧版本的 idle 到达时必须忽略。之后有新的 `background_task_dispatched` 时，订阅方重新建立该 session 的会话 SSE。
 
 订阅方可以基于自身业务决定如何展示、缓存或分发事件；这些行为不属于本接口的契约。
 
