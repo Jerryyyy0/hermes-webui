@@ -251,13 +251,12 @@ def _profile_for_session(session) -> str:
 
 
 def _workspace_root_for_session(session) -> str:
-    """Return the canonical session root, or empty for legacy/unknown rows."""
-    raw = str(getattr(session, "workspace", "") or "").strip()
-    if not raw:
-        return ""
+    """Return the canonical artifact root, or empty when it is unavailable."""
     try:
-        return str(Path(raw).expanduser().resolve())
-    except (OSError, RuntimeError, ValueError):
+        from api.workspace import artifact_workspace_root_for_session
+
+        return str(artifact_workspace_root_for_session(session))
+    except (OSError, RuntimeError, ValueError, ImportError):
         return ""
 
 
