@@ -424,6 +424,7 @@ def test_generate_with_model_logs_call_success(tmp_path, capsys):
     assert "model=test-model" in err
     assert "elapsed_ms=" in err
     assert "output_chars=5" in err
+    assert import_module.return_value.call_llm.call_args.kwargs["timeout"] == 180
 
 
 def test_generate_with_model_logs_call_failure(tmp_path, capsys):

@@ -488,7 +488,7 @@ def _generate_with_model(
                 messages=messages,
                 temperature=0.2,
                 max_tokens=180 if category == "emotion" else 80,
-                timeout=45,
+                timeout=180,
             )
         content = resp.choices[0].message.content
     except Exception as exc:
