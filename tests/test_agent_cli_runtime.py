@@ -240,12 +240,12 @@ def test_gateway_command_profile_shape():
     ) == ["/hermes", "-p", "abc", "gateway", "start"]
 
 
-def test_gateway_run_command_uses_foreground_external_supervisor_without_force():
+def test_gateway_run_command_uses_info_console_logging_without_force():
     invocation = runtime.AgentCliInvocation(("/hermes",), "/home", {}, "launcher")
 
     assert runtime.build_gateway_run_command(
         invocation, {"name": "abc", "is_default": False}
-    ) == ["/hermes", "-p", "abc", "gateway", "run", "-vv", "--external-supervisor"]
+    ) == ["/hermes", "-p", "abc", "gateway", "run", "-v", "--external-supervisor"]
 
 
 def test_agent_python_probe_uses_verified_python_runtime():

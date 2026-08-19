@@ -47,13 +47,19 @@ def test_explicit_disable_skips_enumeration(monkeypatch):
     assert result == {"enabled": False, "results": []}
 
 
-def test_plain_container_disables_webui_gateway_coordinator(monkeypatch):
+def test_plain_container_uses_webui_gateway_coordinator(monkeypatch):
     monkeypatch.setattr(startup, "_running_in_container", lambda: True)
     monkeypatch.setattr(startup, "_s6_service_manager_available", lambda: False)
+    seen = []
 
-    result = startup.ensure_all_profile_gateways(list_profiles=lambda: pytest.fail("must not enumerate"))
+    result = startup.ensure_all_profile_gateways(
+        list_profiles=profiles,
+        start_profile=lambda profile: seen.append(profile["name"])
+        or {"profile": profile["name"], "status": "started"},
+    )
 
-    assert result == {"enabled": False, "results": []}
+    assert sorted(seen) == ["abc", "default"]
+    assert result["counts"] == {"started": 2}
 
 
 def test_s6_container_keeps_webui_gateway_coordinator_enabled(monkeypatch):
@@ -180,6 +186,32 @@ def test_runtime_unavailable_is_classified(monkeypatch):
 
     assert result["status"] == "runtime_unavailable"
     assert result["profile"] == "default"
+
+
+def test_runtime_resolution_retries_transient_failure(monkeypatch):
+    from integration.gateway_startup import runtime as agent_cli_runtime
+
+    invocation = agent_cli_runtime.AgentCliInvocation(("/hermes",), str(Path.home()), {}, "launcher")
+    attempts = []
+
+    def resolver():
+        attempts.append(True)
+        if len(attempts) < 3:
+            raise agent_cli_runtime.AgentCliRuntimeUnavailable("temporary probe failure")
+        return invocation
+
+    monkeypatch.setattr(startup.time, "sleep", lambda _seconds: None)
+    result = startup._start_profile_gateway(
+        profiles()[0],
+        runtime_resolver=resolver,
+        process_starter=lambda profile, *, runtime: {
+            "profile": profile["name"],
+            "status": "started",
+        },
+    )
+
+    assert result == {"profile": "default", "status": "started"}
+    assert len(attempts) == 3
 
 
 def test_ui_gateway_running_flag_is_not_an_authoritative_process_probe(monkeypatch):

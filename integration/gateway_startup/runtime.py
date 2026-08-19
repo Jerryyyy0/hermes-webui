@@ -210,7 +210,7 @@ def build_gateway_run_command(runtime: AgentCliInvocation, profile: dict) -> lis
     management.  Deliberately do not add ``--force`` or ``--replace``: both
     bypass the Agent's normal duplicate-instance protection.
     """
-    return [*build_gateway_command(runtime, profile, "run"), "-vv", "--external-supervisor"]
+    return [*build_gateway_command(runtime, profile, "run"), "-v", "--external-supervisor"]
 
 
 def build_agent_python_command(runtime: AgentCliInvocation, *args: str) -> list[str] | None:

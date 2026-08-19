@@ -66,7 +66,7 @@ Implementation: [`integration/runtime_logging/`](runtime_logging/).
 
 ### All-profile Gateway startup and console logs
 
-WebUI startup asynchronously ensures every visible Hermes Profile Gateway is running by default. On a native host, when the Agent's authoritative Profile lock confirms that no Gateway is running, WebUI launches and owns a foreground child using `hermes gateway run -vv --external-supervisor`. Its combined stdout/stderr is forwarded to the same WebUI console sink and persistence destination with a `[gateway:<profile>]` prefix; direct interactive `python server.py` therefore also writes those lines to `{HERMES_WEBUI_STATE_DIR}/server-<port>.log`.
+WebUI startup asynchronously ensures every visible Hermes Profile Gateway is running by default. On native hosts and plain containers, when the Agent's authoritative Profile lock confirms that no Gateway is running, WebUI launches and owns a foreground child using `hermes gateway run -v --external-supervisor`. Its combined stdout/stderr is forwarded to the same WebUI console sink and persistence destination with a `[gateway:<profile>]` prefix; direct interactive `python server.py` and container stdout therefore include INFO-and-above Gateway records.
 
 - Gateway forwarding is enabled by default and does not add an environment variable. `HERMES_WEBUI_LOG_LEVEL` still filters WebUI's own diagnostics, but does not suppress lines forwarded from a WebUI-owned Gateway.
 - Only the child processes created by this WebUI instance are forwarded. A running Gateway is skipped, never replaced or stopped, and no historical `gateway.log` file is tailed. Gateway lines are redacted before being sent to the WebUI console sink.
@@ -75,22 +75,19 @@ WebUI startup asynchronously ensures every visible Hermes Profile Gateway is run
 - Per-profile failures and unavailable/unknown runtime state are logged but never block the HTTP server.
 - When the default profile enables `gateway.multiplex_profiles`, only the default Gateway is started because it serves all profiles.
 - Isolated-profile deployments only enumerate and start their pinned profile.
-- Native hosts and s6 containers enable the WebUI coordinator by default. Plain containers without s6 disable it automatically because Hermes `gateway start` is a successful no-op there; `run_container_services.sh` owns those Gateway processes instead. `HERMES_WEBUI_START_PROFILE_GATEWAYS=0` / `1` remains an explicit override when needed. Starting gateways can activate scheduled model calls and configured messaging/API platforms.
+- Native hosts, plain containers, and s6 containers enable the WebUI coordinator by default. Plain containers use the same WebUI-owned process path as native hosts; s6 containers retain their `gateway start` service-manager lifecycle. `HERMES_WEBUI_START_PROFILE_GATEWAYS=0` / `1` remains an explicit override when needed. Starting gateways can activate scheduled model calls and configured messaging/API platforms.
 - Gateway lifecycle commands resolve a dependency-complete Hermes runtime: optional absolute `HERMES_WEBUI_HERMES_EXECUTABLE`, then the discovered Agent installation's own `venv` launcher/Python, then the running WebUI Python from the discovered Agent source root or WebUI repository root, and finally a verified `hermes` on `PATH`.
 - The source-root runtimes support custom containers that already launch `python -m hermes_cli.main` from `/home/hermeswebui/.hermes/hermes-agent` or `/app`. A candidate is accepted only when a clean subprocess can import `hermes_cli.main`, `rich`, and `yaml` and run `--version`; lifecycle commands retain that verified working directory.
 - Do not combine an arbitrary Python with an Agent checkout through `PYTHONPATH`; runtime probes remove `PYTHONPATH` and `PYTHONHOME` before validation.
 
-Plain containers without s6/systemd must not use `gateway start`: Hermes treats that command as a successful no-op because the container runtime is expected to own the long-lived process. The project-owned [`run_container_services.sh`](gateway_startup/run_container_services.sh) handles **Profile Gateways only**: it discovers Profiles through `hermes_cli.profiles.list_profiles()`, runs each required `gateway run -v` process so INFO-and-above gateway records reach the container console, mirrors its stdout/stderr while appending per-Profile `logs/gateway.log`, honors multiplex mode, forwards termination, and exits if a managed Gateway exits. It does not locate, configure, or start WebUI.
-
-Start it as a dedicated supervised process alongside WebUI. The outer container entrypoint or supervisor starts both processes; WebUI automatically skips its service-lifecycle coordinator in a plain non-s6 container:
+Plain containers without s6/systemd must not use `gateway start`: Hermes treats that command as a successful no-op there. Start only WebUI; `server.py` owns the foreground Profile Gateway children and forwards their merged output to the container console. Existing container entrypoints may still invoke [`run_container_services.sh`](gateway_startup/run_container_services.sh), but it is a compatibility no-op and must not be used as a gateway supervisor.
 
 ```bash
-"${HERMES_HOME%/}/hermes-webui/integration/gateway_startup/run_container_services.sh" &
 cd "${HERMES_HOME%/}/hermes-webui"
 exec /usr/local/bin/python3 server.py
 ```
 
-The script defaults to `${HERMES_HOME}/hermes-agent`; `HERMES_WEBUI_AGENT_DIR` and `HERMES_PYTHON_PATH` override that runtime. Do not separately launch the default Gateway when using it.
+Do not separately launch any Profile Gateway in the container entrypoint.
 
 Implementation: [`integration/gateway_startup/`](gateway_startup/), including the runtime boundary in [`integration/gateway_startup/runtime.py`](gateway_startup/runtime.py). `api/agent_cli_runtime.py` only preserves compatibility for existing core callers. The WebUI code root is derived from module locations, so local checkouts and containers can run `server.py` directly without a `~/.hermes/hermes-webui` symlink. Agent discovery prefers `HERMES_WEBUI_AGENT_DIR`, then `${HERMES_HOME}/hermes-agent`, then the existing `api.config` discovery fallbacks. The only startup seam is the asynchronous hook in `server.py`.
 

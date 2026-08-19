@@ -8,11 +8,11 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Added
 
-- **WebUI-owned Gateway console forwarding** — 原生 `server.py` 启动且确认 Profile Gateway 未运行时，WebUI 现在以前台 `gateway run -vv --external-supervisor` 子进程启动并持有该 Gateway，将合并 stdout/stderr 以 `[gateway:<profile>]` 前缀写入 WebUI 控制台及同一持久化日志。转发行不受 `HERMES_WEBUI_LOG_LEVEL` 过滤，敏感字段在输出前脱敏；WebUI 退出时只终止自身创建的 Gateway。已运行、s6 或其他外部托管 Gateway 不接管、不转发。
+- **Unified Profile Gateway ownership** — `server.py` 现在同时在原生主机和普通 Docker 容器中持有 Profile Gateway；所有 WebUI-owned Gateway 都以前台 `gateway run -v --external-supervisor` 子进程运行，将合并 stdout/stderr 以 `[gateway:<profile>]` 前缀写入 WebUI 控制台及同一持久化日志。转发行不受 `HERMES_WEBUI_LOG_LEVEL` 过滤，敏感字段在输出前脱敏；WebUI 退出时只终止自身创建的 Gateway。s6 仍保留 service-manager 生命周期。
 
 ### Fixed
 
-- **Container Gateway console log completeness** — Plain-container Profile Gateways now run with `-v`, forwarding INFO-and-above gateway records to Docker stdout/stderr while preserving per-Profile `gateway.log` persistence.
+- **Profile Gateway startup runtime retry** — WebUI-owned Gateway 在 Agent CLI runtime 短暂不可用时自动重试最多 3 次，避免容器启动阶段的一次性探测失败导致所有 Profile Gateway 永久不启动。
 
 - **Integration workspace files stale managed-session artifacts** — `Session.save()` now invalidates the integration root file index when the saved session workspace is below `HERMES_WEBUI_DEFAULT_WORKSPACE`. Files written by an Agent into managed subdirectories are therefore visible from `GET /api/integration/workspace/files` without requiring `refresh=1`; explicitly external workspaces keep their existing cache scope.
 

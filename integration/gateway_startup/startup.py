@@ -8,6 +8,7 @@ import logging
 import os
 import subprocess
 import threading
+import time
 from pathlib import Path
 from typing import Callable
 from integration.project_logging import get_logger
@@ -16,6 +17,8 @@ logger = get_logger(__name__)
 
 _DEFAULT_MAX_WORKERS = 4
 _EXTERNAL_SERVICE_START_TIMEOUT_SECONDS = 60.0
+_RUNTIME_RESOLUTION_ATTEMPTS = 3
+_RUNTIME_RESOLUTION_RETRY_SECONDS = 1.0
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 _FALSE_VALUES = {"0", "false", "no", "off"}
 
@@ -44,8 +47,6 @@ def gateway_autostart_enabled() -> bool:
         if raw in _FALSE_VALUES:
             return False
         return raw in _TRUE_VALUES
-    if _running_in_container() and not _s6_service_manager_available():
-        return False
     return True
 
 
@@ -84,10 +85,19 @@ def _start_profile_gateway(
             resolve_agent_cli_runtime,
         )
         from integration.gateway_startup.process import start_gateway_process
-        try:
-            runtime = (runtime_resolver or resolve_agent_cli_runtime)()
-        except AgentCliRuntimeUnavailable as exc:
-            return {"profile": name, "status": "runtime_unavailable", "error": str(exc)}
+        resolver = runtime_resolver or resolve_agent_cli_runtime
+        runtime = None
+        runtime_error = None
+        for attempt in range(_RUNTIME_RESOLUTION_ATTEMPTS):
+            try:
+                runtime = resolver()
+                break
+            except AgentCliRuntimeUnavailable as exc:
+                runtime_error = exc
+                if attempt + 1 < _RUNTIME_RESOLUTION_ATTEMPTS:
+                    time.sleep(_RUNTIME_RESOLUTION_RETRY_SECONDS)
+        if runtime is None:
+            return {"profile": name, "status": "runtime_unavailable", "error": str(runtime_error)}
         if _running_in_container() and _s6_service_manager_available():
             if profile.get("gateway_running") is True:
                 return {"profile": name, "status": "already_running"}
