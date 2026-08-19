@@ -15,7 +15,7 @@ def test_first_fill_has_no_success_cooldown_between_categories(tmp_path):
     assert generation.should_generate("emotion", "d", cache, now=now) is True
 
 
-def test_changed_fingerprint_respects_success_cooldown():
+def test_changed_fingerprint_respects_ten_minute_success_cooldown():
     now = 1000.0
     cache = store.empty_store()
     cache["generation"]["skill"] = {
@@ -26,7 +26,9 @@ def test_changed_fingerprint_respects_success_cooldown():
     }
 
     assert generation.should_generate("skill", "new", cache, now=now) is False
-    assert generation.should_generate("skill", "new", cache, now=now + 301) is True
+    assert generation.SUCCESS_REGEN_COOLDOWN_SECONDS == 10 * 60
+    assert generation.should_generate("skill", "new", cache, now=now + 589) is False
+    assert generation.should_generate("skill", "new", cache, now=now + 590) is True
 
 
 def test_failure_retry_after_blocks_until_elapsed():
@@ -43,7 +45,7 @@ def test_failure_retry_after_blocks_until_elapsed():
     assert generation.should_generate("memory", "same", cache, now=now + 31) is True
 
 
-def test_emotion_refreshes_after_5_minutes():
+def test_emotion_refreshes_after_ten_minutes():
     now = 100000.0
     cache = store.empty_store()
     cache["generation"]["emotion"] = {
@@ -55,6 +57,7 @@ def test_emotion_refreshes_after_5_minutes():
 
     assert generation.should_generate("emotion", "same", cache, now=now) is False
     cache["generation"]["emotion"]["generated_at"] = now - generation.EMOTION_REFRESH_SECONDS - 1
+    assert generation.EMOTION_REFRESH_SECONDS == 10 * 60
     assert generation.should_generate("emotion", "same", cache, now=now) is True
 
 
