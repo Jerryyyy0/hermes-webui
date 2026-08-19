@@ -1,6 +1,6 @@
 # 异步委派批次的会话事件接口交互
 
-- **状态：** 已实施
+- **状态：** 部分已实施；页面刷新恢复所需的无条件快照待服务端实现
 - **范围：** `delegate_task(mode="background")` 的服务端事件契约、后台完成、wakeup 回复与会话级 SSE 资源释放；不约束任何特定 WebUI 前端实现。
 
 本文定义目标接口交互，不改变 Hermes Agent 的 `delegate_task` 工具、异步委派数据库或 completion 事件格式。
@@ -23,13 +23,15 @@ child task；Agent 等所有 child task 都结束后只投递一条 completion�
 | 事件 | 发射时机 | 当前发射目标 |
 | --- | --- | --- |
 | `background_task_dispatched` | 成功记录派发归属后 | 派发它的当前 chat stream；已订阅的 session 同时经 `SessionChannel` 接收。 |
-| `background_tasks_snapshot` | session SSE 建连、完成 sidecar 读取并确认存在未结算任务后 | 仅发往新建立的 session SSE，用于填补建连竞态。 |
+| `background_tasks_snapshot` | 每次 session SSE 建连、完成 sidecar 读取后 | 仅发往新建立的 session SSE；无论是否存在未结算任务都发送，用于填补建连竞态和页面刷新恢复。 |
 | `background_task_status` | completion 进入 `queued` / `running`，或 wakeup 进入 `settled` / `failed` | 匹配的活跃聊天流，以及 `SessionChannel`。 |
 | `bg_task_complete` | 服务端已成功接受 completion 并启动 wakeup | 匹配的活跃聊天流，以及 `SessionChannel`。 |
 | `server_turn_started` | 服务端成功创建 wakeup run | `SessionChannel`。 |
 | `background_tasks_idle` | sidecar 中最后一个任务及其 wakeup 结算后 | 匹配的活跃聊天流，以及 `SessionChannel`。 |
 
 `GET /api/sessions/{session_id}/events` 同时保留 run-journal 回放、活跃 run 订阅和 snapshot 恢复，并原子订阅 `SessionChannel`。含未结算后台工作的连接会跨 Agent run 继续接收生命周期事件；普通会话保留原有的 run 终态关闭行为。
+
+> 当前实现限制：现有 handler 只在 snapshot 的 `active_task_count > 0` 时发送 `background_tasks_snapshot`。因此，若页面刷新期间任务已结算，重新订阅的客户端尚不能从空快照得知可以关闭连接。本文件规定的“每次建连必发快照”是待实现的接口契约。
 
 实现不另起第二条客户端 transport，也不把 assistant token 转移到会话事件流。异步委派生命周期事件使用第 5.2 节定义的统一事件信封。
 
@@ -301,7 +303,7 @@ data: {
 
 ### 5.4 `background_tasks_snapshot`
 
-每次存在未结算后台任务的 session SSE 成功完成认证、可见性校验和 `SessionChannel` 订阅后，服务端立即从该 session 的 sidecar 构建并只向这个新订阅者发送一次快照。它解决以下竞态：
+每次 session SSE 成功完成认证、可见性校验和 `SessionChannel` 订阅后，服务端立即从该 session 的 sidecar 构建并只向这个新订阅者发送一次快照，**无论是否存在未结算后台任务**。它解决以下竞态：
 
 ```text
 chat stream 收到 background_task_dispatched
@@ -342,6 +344,8 @@ data: {
 ```
 
 `tasks` 只包含未结算 delegation 批次，即 `status=running` 或 `wakeup_state` 为 `idle`、`queued`、`running` 的记录。订阅方以快照完整替换该 session 的后台委派本地集合；后续只接受 `background_activity_version` 不早于该快照的增量事件。`active_task_count` 是兼容字段，统计 delegation 批次数；新的接入方应使用 `active_delegation_count` 与 `active_child_task_count`。
+
+空快照必须使用相同信封，并令 `tasks: []`、`active_delegation_count: 0`、`active_child_task_count: 0`。它是刷新恢复时的关闭结论：客户端可关闭这条刚建立的 SSE 并删除持久化的待跟踪 session ID，不必等待刷新前可能已错过的 `background_tasks_idle`。
 
 ### 5.5 `background_task_status`
 
@@ -468,7 +472,7 @@ GET /api/chat/stream?stream_id=stream_wakeup_123
 
 ### 5.8 `background_tasks_idle`
 
-该事件由服务端基于 session sidecar 聚合得出，是订阅方关闭按需会话事件流的唯一正向信号。
+该事件由服务端基于 session sidecar 聚合得出，是连接未中断时订阅方关闭按需会话事件流的聚合终态信号。页面刷新或重连后的首帧关闭判断由空 `background_tasks_snapshot` 承担，因为此前的 idle 可能已经错过。
 
 ```text
 event: background_tasks_idle
@@ -506,6 +510,7 @@ data: {
 | --- | --- |
 | 派发通知 | 后端在 sidecar 成功写入后向当前 chat stream 发 `background_task_dispatched`；订阅方使用事件顶层 `session_id` 生成固定路径，建立或复用 session SSE。 |
 | chat SSE 重连 | 父 turn 结束前重连时，服务端重放尚未确认的 `background_task_dispatched`；订阅方不解析 `tool_complete`，并以首个 `background_tasks_snapshot` 校正状态。 |
+| 刷新后恢复 | 客户端持久化待跟踪 session ID，重新订阅后服务端必发首个 `background_tasks_snapshot`；非空快照恢复追踪，空快照关闭连接并移除该 ID。 |
 | 统一信封 | 六类后台事件的 SSE `event:` / `id:` 与 JSON `event_type` / `event_id` 一致；公共字段齐全，事件专属字段只出现在 `payload`。 |
 | run 间空档完成 | 没有活跃 `STREAMS` 时，订阅方仍从按会话 SSE 收到 `background_task_status`、`bg_task_complete` 和 `server_turn_started`。 |
 | 当前会话忙碌 | completion 先报告 `wakeup_state=queued`；当前 run 终态后才启动下一条 wakeup stream。 |
@@ -525,6 +530,7 @@ background_task_dispatched
 
 background_tasks_snapshot
   → 用 payload.tasks 作为该 session 未结算 delegation 批次的完整基线
+  → 两个活动计数都为 0 时，关闭刚建立的连接并删除持久化待跟踪 session ID
 
 background_task_status / bg_task_complete
   → 按 event_id 去重，并按 background_activity_version 应用增量
@@ -533,10 +539,10 @@ server_turn_started
   → 可选地使用 stream_id 附着正常 chat stream；不得再次 POST /api/chat/start
 
 background_tasks_idle(active_delegation_count=0, active_child_task_count=0)
-  → 仅当 session_id 与连接一致、event_id 尚未处理且 version 不早于已知 version 时，关闭该 session 的 SSE 连接
+  → 未刷新时，仅当 session_id 与连接一致、event_id 尚未处理且 version 不早于已知 version 时，关闭该 session 的 SSE 连接
 ```
 
-`background_tasks_idle` 不是任意终态的关闭快捷方式。订阅方还必须验证其 `active_delegation_count` 与 `active_child_task_count` 都为 `0`；旧版本的 idle 到达时必须忽略。之后有新的 `background_task_dispatched` 时，订阅方重新建立该 session 的会话 SSE。
+`background_tasks_idle` 不是任意终态的关闭快捷方式。订阅方还必须验证其 `active_delegation_count` 与 `active_child_task_count` 都为 `0`；旧版本的 idle 到达时必须忽略。页面刷新后的首个关闭判断应以无条件 `background_tasks_snapshot` 为准，因为刷新前的 idle 可能已经错过。之后有新的 `background_task_dispatched` 时，订阅方重新建立该 session 的会话 SSE。
 
 订阅方可以基于自身业务决定如何展示、缓存或分发事件；这些行为不属于本接口的契约。
 

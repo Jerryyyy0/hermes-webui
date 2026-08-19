@@ -1,5 +1,7 @@
 # 异步委派：外部前端接入指南
 
+> 实现状态：本文的“每次成功建连必发 `background_tasks_snapshot`”是刷新恢复所需的目标契约。当前服务端仅在存在活动后台任务时发送该事件；在无条件快照实现前，刷新后连接无法可靠判断是否应关闭。
+
 - **适用范围：** 调用 WebUI 聊天 API，并希望实时获知 `delegate_task(mode="background")` 生命周期的任意前端。
 - **协议版本：** `schema_version: 1`
 - **相关服务端契约：** [异步子任务的会话事件接口交互](async-delegation-session-events.md)
@@ -19,7 +21,7 @@
 | SSE | 地址 | 何时建立 | 接收内容 | 何时关闭 |
 | --- | --- | --- | --- | --- |
 | 聊天流 | `GET /api/chat/stream?stream_id={stream_id}` | 每次已知一个 Agent run 的 `stream_id` 时 | token、工具事件、run 终态，以及派发通知 | 对应 run 的 `done` / `stream_end` / 错误终态后 |
-| 会话事件流 | `GET /api/sessions/{session_id}/events` | 收到 `background_task_dispatched` 后，按 session 建立或复用 | 后台任务状态、服务端启动 wakeup run、可关闭通知 | 收到 `background_tasks_idle` 后，或应用主动销毁时 |
+| 会话事件流 | `GET /api/sessions/{session_id}/events` | 收到 `background_task_dispatched` 后，或刷新恢复本地待跟踪 session 后，按 session 建立或复用 | 后台任务状态、服务端启动 wakeup run、状态快照、可关闭通知 | 收到空快照或 `background_tasks_idle` 后，或应用主动销毁时 |
 
 会话事件流不发送 wakeup 的 assistant token。收到 `server_turn_started` 后，前端要用事件中的 `stream_id` 再建立一条聊天流，才会收到该 wakeup 的实时回复。
 
@@ -117,7 +119,7 @@ Accept: text/event-stream
 
 ## 4. 会话事件流的首帧与通用信封
 
-会话 SSE 连接建立后，如果服务端发现该 session 有未结算后台任务，第一条后台业务事件为 `background_tasks_snapshot`。它是连接期间可能漏掉增量事件时的权威状态基线。
+会话 SSE 连接建立、认证与 session 可见性校验成功后，服务端必须把 `background_tasks_snapshot` 作为第一条后台业务事件发送，**无论该 session 是否有未结算后台任务**。它是连接期间可能漏掉增量事件、页面刷新和重新订阅时的权威状态基线。
 
 ```text
 event: background_tasks_snapshot
@@ -162,6 +164,8 @@ data: {
 
 对同一个 session，前端应忽略 `background_activity_version` 小于本地已处理版本的增量事件。事件 ID 相同的事件也必须幂等处理。
 
+空快照同样有效：`tasks: []`、`active_delegation_count: 0`、`active_child_task_count: 0`。它表示服务端在这次建连时确认该 session 没有待结算的后台工作；前端应立即关闭刚建立的会话 SSE，并删除本地的待跟踪 `session_id`，无需等待刷新前可能已经错过的 `background_tasks_idle`。
+
 会话 SSE 还保留既有 run-journal 的 `session_snapshot` 等恢复帧。外部前端若只接入后台任务，可忽略这些非后台事件；实时 assistant 文本始终以聊天流为准。
 
 ## 5. 事件处理表
@@ -169,7 +173,7 @@ data: {
 | 事件 | `payload` 关键字段 | 前端必须做什么 | 不应做什么 |
 | --- | --- | --- | --- |
 | `background_task_dispatched` | delegation 公共字段，首次通常为 `running` / `idle` | 按 `session_id` 建立或复用会话 SSE；记录 delegation 批次 | 不解析 `tool_complete`；不为 child task 单独建 SSE |
-| `background_tasks_snapshot` | `active_delegation_count`、`active_child_task_count`、`tasks[]` | 用 `tasks` 完整替换该 session 的未结算 delegation 集合 | 不把它当作普通增量逐条叠加 |
+| `background_tasks_snapshot` | `active_delegation_count`、`active_child_task_count`、`tasks[]` | 用 `tasks` 完整替换该 session 的未结算 delegation 集合；若两个计数均为 `0`，立即关闭该连接 | 不把它当作普通增量逐条叠加 |
 | `background_task_status` | delegation 公共字段 | 更新指定 `delegation_id` 的批次执行和 wakeup 状态 | 批次 `completed` 时立即关闭 session SSE |
 | `bg_task_complete` | delegation 公共字段 | 可更新通知/进度；按 `event_id` 去重 | 认为 wakeup 已结束 |
 | `server_turn_started` | delegation 公共字段、`stream_id`、`source` | 按 `stream_id` 建立或复用聊天 SSE | 再次调用 `POST /api/chat/start` |
@@ -235,7 +239,7 @@ data: {
 
 ### 5.2 `background_tasks_idle` 事件内容
 
-服务端确认该 session 不再有未结算后台任务时发送。这是关闭该 session 会话 SSE 的唯一正向信号。
+服务端确认该 session 不再有未结算后台任务时发送。它是连接未中断时关闭该 session 会话 SSE 的聚合终态信号；刷新或重连后的首帧关闭判断由空 `background_tasks_snapshot` 承担。
 
 ```text
 event: background_tasks_idle
@@ -274,11 +278,18 @@ const sessionStreams = new Map<string, EventSource>();
 const chatStreams = new Map<string, EventSource>();
 const activityVersion = new Map<string, number>();
 const seenEventIds = new Set<string>();
+const pendingSessionIds = loadPendingSessionIds();
 
 function onChatEvent(event: { event_type?: string; session_id?: string; event_id?: string }) {
   if (event.event_type === "background_task_dispatched" && event.session_id) {
+    pendingSessionIds.add(event.session_id);
+    persistPendingSessionIds(pendingSessionIds);
     ensureSessionEvents(event.session_id);
   }
+}
+
+for (const sessionId of pendingSessionIds) {
+  ensureSessionEvents(sessionId);
 }
 
 function onSessionEvent(event: Envelope) {
@@ -291,6 +302,14 @@ function onSessionEvent(event: Envelope) {
   switch (event.event_type) {
     case "background_tasks_snapshot":
       replacePendingTasks(event.session_id, event.payload.tasks);
+      if (
+        event.payload.active_delegation_count === 0 &&
+        event.payload.active_child_task_count === 0
+      ) {
+        closeSessionEvents(event.session_id);
+        pendingSessionIds.delete(event.session_id);
+        persistPendingSessionIds(pendingSessionIds);
+      }
       break;
     case "server_turn_started":
       ensureChatStream(event.payload.stream_id);
@@ -302,6 +321,8 @@ function onSessionEvent(event: Envelope) {
       ) {
         closeSessionEvents(event.session_id);
         clearPendingTasks(event.session_id);
+        pendingSessionIds.delete(event.session_id);
+        persistPendingSessionIds(pendingSessionIds);
       }
       break;
     default:
@@ -312,6 +333,8 @@ function onSessionEvent(event: Envelope) {
 
 实现 `seenEventIds` 时应设置容量或时间窗口，避免长时间运行的客户端无限占用内存。`background_activity_version` 是 session 级版本，不可跨 session 比较。
 
+`pendingSessionIds` 必须持久化到前端存储。收到 `background_task_dispatched` 时先写入，再建立 SSE；浏览器刷新后从该列表重新订阅，而不是等待新的派发事件。只有收到空 snapshot 或合格的 idle 后才删除该 ID。
+
 ## 7. 多会话、切换和应用重启
 
 多个会话可同时存在未结算 delegation。每个 `session_id` 独立维护一条会话 SSE；session A 的事件不可更新 session B 的委派状态。
@@ -320,9 +343,9 @@ function onSessionEvent(event: Envelope) {
 
 仅因为用户切换到了另一个会话，不应关闭旧 session 的会话 SSE。旧会话仍可能收到 completion，并启动新的 wakeup chat stream。应在 `background_tasks_idle` 后关闭，或在整个应用销毁时关闭。
 
-如果产品必须在页面切换时释放连接，需持久化“已收到派发通知、尚未收到 idle”的 session ID 列表。恢复后重新订阅这些 ID，并以 `background_tasks_snapshot` 覆盖本地状态。
+前端必须持久化“已收到派发通知、尚未收到空 snapshot 或 idle”的 session ID 列表。收到 `background_task_dispatched` 后先写入该列表，再建立会话 SSE；收到空 snapshot 或合格的 idle 后才移除。应用刷新后重新订阅列表中的所有 ID，并以首个 `background_tasks_snapshot` 覆盖本地状态。
 
-当前协议不提供“列出所有存在后台任务的 session”的专用发现接口。因此，冷启动客户端无法仅靠 session SSE 枚举未知的活跃任务；应保存自己的待跟踪 session ID，或将此能力作为服务端补充接口单独设计。
+该协议仍不提供“列出所有存在后台任务的 session”的专用发现接口。因此，冷启动客户端无法仅靠 session SSE 枚举从未保存过的活跃 session；需要跨设备或清空本地存储恢复时，应另行设计服务端发现接口。
 
 ## 8. 断线、重连与失败处理
 
@@ -338,9 +361,10 @@ function onSessionEvent(event: Envelope) {
 
 只有下列任一情况可以主动关闭一条 session SSE：
 
-1. 收到尚未处理的 `background_tasks_idle`，其 `session_id` 与订阅一致，`background_activity_version >=` 该 session 已知版本，且 `payload.active_delegation_count === 0`、`payload.active_child_task_count === 0`；
-2. 用户登出、应用销毁或明确放弃该 session 的后台通知；
-3. 服务端已终止连接，客户端决定不再重连。
+1. 收到尚未处理的 `background_tasks_snapshot`，其 `session_id` 与订阅一致，且 `payload.active_delegation_count === 0`、`payload.active_child_task_count === 0`；
+2. 收到尚未处理的 `background_tasks_idle`，其 `session_id` 与订阅一致，`background_activity_version >=` 该 session 已知版本，且 `payload.active_delegation_count === 0`、`payload.active_child_task_count === 0`；
+3. 用户登出、应用销毁或明确放弃该 session 的后台通知；
+4. 服务端已终止连接，客户端决定不再重连。
 
 下列事件都不是关闭条件：单个 child task 完成、delegation `status=completed`、`bg_task_complete`、`server_turn_started`，以及任意单个 wakeup chat stream 的 `done`。
 
@@ -350,12 +374,12 @@ function onSessionEvent(event: Envelope) {
 
 - 收到专用 `background_task_dispatched`，而非解析 `tool_complete` 后，建立会话事件流。
 - 每个 session 至多维护一条会话 SSE；切换页面不会导致仍活跃任务的订阅被误关。
-- 首个 `background_tasks_snapshot` 会覆盖本地未结算任务集合。
+- 每次 session SSE 建连都会收到 `background_tasks_snapshot`；非空快照覆盖本地未结算任务集合，空快照会关闭连接并清除待跟踪 ID。
 - 所有事件按 JSON `event_id` 去重，并按 session 内 `background_activity_version` 防止旧状态回滚。
 - 一个 batch dispatch 的 `child_task_count` 与 `goals` 能在 SSE 中被正确恢复。
 - 一个 batch completion 只产生一个 `server_turn_started`，不按 child task 数量创建多个 stream。
 - 同一父 chat stream 的多个 `background_task_dispatched` 都能被正确记录；它们共用一条 session SSE，并按 `delegation_id` 分别处理。
 - 同一 session 的多个 wakeup 不并行运行；排队批次在前一个 wakeup 结束后才建立自己的 chat stream。
 - `server_turn_started` 只使用 `stream_id` 订阅聊天流，不额外发起聊天请求。
-- 仅在 `background_tasks_idle(active_delegation_count=0, active_child_task_count=0)` 后关闭会话 SSE。
+- 刷新后从持久化待跟踪 ID 列表重新订阅；仅在空 `background_tasks_snapshot` 或 `background_tasks_idle(active_delegation_count=0, active_child_task_count=0)` 后关闭会话 SSE。
 - 断线重连后，以 snapshot 和 `GET /api/session` 恢复，而非假定实时事件完整无缺。
