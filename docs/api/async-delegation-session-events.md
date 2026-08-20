@@ -107,7 +107,26 @@ child task；Agent 等所有 child task 都结束后只投递一条 completion�
 
 `_turn_key` 与事件中的 `origin_turn_key` 必须相同，用于把实时事件与历史消息关联。对本契约上线后创建的 user turn，`async_delegations` 缺失表示未成功派发后台任务。旧会话、导入会话或无法确认写入版本的消息字段缺失时必须视为未知，不能推断为未派发。
 
-`state` 是该轮的聚合结论：`running` 表示仍有未结算批次，`cancelling` 表示至少一个批次正在取消，`cancelled` 表示全部批次取消，`settled` 表示全部批次已结算但并非全部取消。具体结果始终以 `items[delegation_id]` 的 `status`、`wakeup_state` 与 `cancel_state` 为准。
+`async_delegations.state` 是**这一条 user message**下全部 delegation 的聚合结论，不是整个
+session 的取消状态。具体结果始终以 `items[delegation_id]` 的 `status`、`wakeup_state` 与
+`cancel_state` 为准：
+
+| 聚合 `state` | 判定条件 | 含义 |
+| --- | --- | --- |
+| `running` | 仍有批次 `status=running`，或其 `wakeup_state` 为 `idle` / `queued` / `running`，且没有任何批次处于 `cancel_state=requested`。 | 该轮仍有正常后台工作或 wakeup 未结算。 |
+| `cancelling` | 仍有未结算批次，且至少一个批次 `cancel_state=requested`。 | 已对该轮覆盖的批次请求取消，尚未全部收口。 |
+| `cancelled` | 全部批次已结算，且全部 item 的 `status=cancelled`。 | 该轮的全部后台批次都实际被取消。 |
+| `settled` | 全部批次已结算，但并非全部 item 的 `status=cancelled`。 | 该轮已经结束，包含成功、失败，或取消竞争中仍完成的混合结果。 |
+
+例如，两个批次都被 Agent 中断时，`items` 中二者均为
+`status=cancelled`、`wakeup_state=settled`、`cancel_state=cancelled`，该轮聚合状态为
+`cancelled`。若其中一个批次已在取消竞争中正常完成，其状态保留
+`status=completed`、`cancel_state=requested`；即使另一个批次被取消，该轮聚合状态也必须为
+`settled`，不能写成 `cancelled`。
+
+这与 `GET /api/sessions/background_tasks/cancel` 的响应 `state=settled` 不同：后者表示一次
+**session 级固定取消范围**已经收口，允许其中包含 `completed`、`failed` 或 `cancelled` 的
+真实终态；它不等价于某一条 user message 的 `async_delegations.state`。
 
 历史查询只读取持久化结果，不补发 `background_task_dispatched`、`server_turn_started` 或 token。若某个 wakeup 已经结束，客户端用该轮 `async_delegations` 和可见消息恢复结果；只有仍在运行的任务才需要继续订阅 session SSE。
 

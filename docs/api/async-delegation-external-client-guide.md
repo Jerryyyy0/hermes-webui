@@ -23,7 +23,9 @@
 | 聊天流 | `GET /api/chat/stream?stream_id={stream_id}` | 每次已知一个 Agent run 的 `stream_id` 时 | token、工具事件、run 终态，以及派发通知 | 对应 run 的 `done` / `stream_end` / 错误终态后 |
 | 会话事件流 | `GET /api/sessions/{session_id}/events` | 收到 chat SSE 的 `background_task_dispatched` 后，或刷新恢复本地待跟踪 session 后，按 session 建立或复用 | 状态快照、后台任务状态、服务端启动 wakeup run、可关闭通知；不发送派发通知 | 收到空快照或 `background_tasks_idle` 后，或应用主动销毁时 |
 
-会话事件流不发送 wakeup 的 assistant token。收到 `server_turn_started` 后，前端要用事件中的 `stream_id` 再建立一条聊天流，才会收到该 wakeup 的实时回复。
+会话事件流不发送 wakeup 的 assistant token。若前端需要实时显示 wakeup 回复，可消费
+`server_turn_started`，再用其中的 `stream_id` 建立聊天流；不消费该事件也不影响后台任务的
+订阅和收口，最终内容可通过 `GET /api/session` 恢复。
 
 ## 2. 完整交互时序
 
@@ -73,6 +75,42 @@ Content-Type: application/json
 `session_id` 决定取消范围。服务端在 session 锁内固定当时未结算的 delegation，并在 Session sidecar 持久化 `state`、`delegation_ids` 与 `requested_at` 后才请求 Agent 中断。重复调用在 `cancelling` 期间返回同一范围；收口后再次调用才重新快照。
 
 `202` 且 `state: "cancelling"` 表示已受理固定范围，不表示 child 已中断。没有未结算任务时返回 `200`、`state: "idle"` 和空 `delegation_ids`。无效 `session_id` 返回 `400`，不可见或不存在的 session 返回 `404`，无法持久化屏障返回 `500` 且不会触发中断。
+
+成功响应统一为以下结构。`202` 的范围是本次取消操作的唯一范围，后续新派发的
+delegation 不会出现在其中：
+
+```json
+{
+  "session_id": "session_123",
+  "state": "cancelling",
+  "delegation_ids": ["deleg_123", "deleg_456"],
+  "requested_at": 1786004500,
+  "settled_at": null
+}
+```
+
+若请求时没有未结算任务，服务端返回 `200 OK`：
+
+```json
+{
+  "session_id": "session_123",
+  "state": "idle",
+  "delegation_ids": [],
+  "requested_at": null,
+  "settled_at": null
+}
+```
+
+| 字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `session_id` | string | 已接受取消请求的会话。 |
+| `state` | string | `cancelling` 表示已受理；`idle` 表示本次没有可取消任务。`POST` 不返回 `settled`。 |
+| `delegation_ids` | string[] | `cancelling` 时固定的取消范围；`idle` 时为空数组。 |
+| `requested_at` | number / null | 服务端持久化取消范围的 Unix 时间戳；`idle` 时为 `null`。 |
+| `settled_at` | null | `POST` 返回时尚未确认范围收口，固定为 `null`。 |
+
+`400`、`404`、`500` 为错误响应，不返回上述取消范围。客户端收到 `202` 后必须改用下方
+`GET` 查询；不能依据 HTTP 返回、SSE 断开或单个 delegation 的终态判断取消完成。
 
 取消 `POST` 不是轮询接口。确认它是否完成时，轮询只读查询接口：
 
@@ -233,15 +271,19 @@ data: {
 
 ## 5. 事件处理表
 
-| 事件 | `payload` 关键字段 | 前端必须做什么 | 不应做什么 |
+最小外部前端只需消费三类事件：派发通知用来建连，快照用来恢复和判断空状态，idle
+用来关闭连接。其余事件均可忽略，不会影响取消轮询、会话 SSE 的关闭或最终从会话历史恢复
+回答。
+
+| 事件 | 接入级别 | `payload` 关键字段 | 前端处理 |
 | --- | --- | --- | --- |
-| `background_task_dispatched`（仅 chat SSE） | delegation 公共字段，首次通常为 `running` / `idle` | 按 `session_id` 建立或复用会话 SSE；持久化待跟踪 session ID | 不解析 `tool_complete`；不把其 payload 当作会话任务基线；不为 child task 单独建 SSE |
-| `background_tasks_snapshot` | `active_delegation_count`、`active_child_task_count`、`tasks[]` | 用 `tasks` 完整替换该 session 的未结算 delegation 集合；若两个计数均为 `0`，立即关闭该连接 | 不把它当作普通增量逐条叠加 |
-| `background_task_status` | delegation 公共字段 | 更新指定 `delegation_id` 的批次执行和 wakeup 状态 | 批次 `completed` 时立即关闭 session SSE |
-| `bg_task_complete` | delegation 公共字段 | 可更新通知/进度；按 `event_id` 去重 | 认为 wakeup 已结束 |
-| `server_turn_started` | delegation 公共字段、`stream_id`、`source` | 按 `stream_id` 建立或复用聊天 SSE | 再次调用 `POST /api/chat/start` |
-| `background_task_unresolved` | `delegation_id`、`reason`、`retryable` | 将对应批次标记失败，继续等待 `background_tasks_idle` | 推测 origin user turn 或创建 wakeup |
-| `background_tasks_idle` | `active_delegation_count: 0`、`active_child_task_count: 0`、`settled_at` | 关闭该 session 的会话 SSE，并清除活动委派追踪 | 因单个 child task 结束而自行猜测 idle |
+| `background_task_dispatched`（仅 chat SSE） | 必需 | delegation 公共字段，首次通常为 `running` / `idle` | 按 `session_id` 建立或复用会话 SSE，并持久化待跟踪 session ID；不解析 `tool_complete`，不以该 payload 作为任务基线。 |
+| `background_tasks_snapshot` | 必需 | `active_delegation_count`、`active_child_task_count`、`tasks[]` | 用 `tasks` 完整替换该 session 的未结算集合；两个计数均为 `0` 时关闭连接。 |
+| `background_tasks_idle` | 必需 | `active_delegation_count: 0`、`active_child_task_count: 0`、`settled_at` | 确认 version 不旧且计数均为 0 后，关闭会话 SSE 并清除活动追踪。 |
+| `background_task_status` | 可选 | delegation 公共字段 | 需要逐批次实时状态、排队或取消状态时更新对应 `delegation_id`；否则可忽略，不能据单个 `completed` 关闭 SSE。 |
+| `bg_task_complete` | 可选 | delegation 公共字段 | 用于通知或进度展示；与 `background_task_status` 存在信息重叠，不需要单独消费。 |
+| `server_turn_started` | 可选 | delegation 公共字段、`stream_id`、`source` | 需要 wakeup 回复的实时 token 时，按 `stream_id` 建立聊天 SSE；否则等待并通过 `GET /api/session` 读取最终内容。不得再次调用 `POST /api/chat/start`。 |
+| `background_task_unresolved` | 可选 | `delegation_id`、`reason`、`retryable` | 需要明确展示归属失败原因时，将对应批次标记失败；否则可等待最终 `background_tasks_idle`。不得猜测 origin user turn 或创建 wakeup。 |
 
 会话 SSE 中 `background_task_status`、`bg_task_complete` 与 `server_turn_started` 的 `payload` 均包含：
 
