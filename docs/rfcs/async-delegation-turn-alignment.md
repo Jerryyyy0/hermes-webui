@@ -3,7 +3,7 @@
 - **状态：** 部分已实施；每轮消息状态与会话级取消契约待实现
 - **作者：** @wzq
 - **创建日期：** 2026-08-06
-- **关联契约：** [WebUI Run State Consistency Contract](webui-run-state-consistency-contract.md)、[Session Inspector Manifest](../session-inspector-manifest.md)
+- **关联契约：** [WebUI Run State Consistency Contract](webui-run-state-consistency-contract.md)、[Session Manifest HTTP/SSE 契约](../api/session-manifest-api.md)
 
 ## 问题
 

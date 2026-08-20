@@ -2882,7 +2882,6 @@ def extract_manifest_delta_from_tool_event(
     stream_id: str = '',
     turn_key: str = '',
     sequence: int | None = None,
-    source_kind: str = '',
     skills_dir: Path | None = None,
     default_profile: str = '',
     artifact_workspace: Path | None = None,
@@ -2911,12 +2910,6 @@ def extract_manifest_delta_from_tool_event(
         'session_id': str(session_id or ''),
         'stream_id': str(stream_id or ''),
         'turn_key': str(turn_key or ''),
-        'source': {
-            'kind': source_kind or normalized_event.source,
-            'tool': normalized_event.name,
-            'tid': normalized_event.tid,
-            'status': normalized_event.status,
-        },
         'artifacts': _rows_to_wire(
             artifacts, artifact_root, skills_dir,
             default_profile=default_profile, collection='artifacts',
@@ -3003,12 +2996,6 @@ def extract_manifest_delta_from_turn_reconcile(
         'session_id': str(session_id or ''),
         'stream_id': str(stream_id or ''),
         'turn_key': turn_key,
-        'source': {
-            'kind': 'turn_complete',
-            'tool': TURN_RECONCILE_SOURCE,
-            'tid': '',
-            'status': 'completed',
-        },
         'artifacts': wire_artifacts,
         'turns': [{
             'turn_key': turn_key,

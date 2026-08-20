@@ -1774,6 +1774,8 @@ def test_manifest_delta_extracts_todo_and_artifact(tmp_path):
 
     assert todo_delta['todos']['items'] == [{'id': 't1', 'content': 'Ship', 'status': 'unknown'}]
     assert write_delta['artifacts'] == []
+    assert 'source' not in todo_delta
+    assert 'source' not in write_delta
 
 
 def test_merge_manifest_delta_is_idempotent_by_path():
@@ -2309,8 +2311,7 @@ def test_extract_manifest_delta_from_assistant_media_turn_scope(tmp_path):
         turn_key='turn:0',
         sequence=3,
     )
-    assert delta['source']['kind'] == 'turn_complete'
-    assert delta['source']['tool'] == TURN_RECONCILE_SOURCE
+    assert 'source' not in delta
     assert delta['artifacts'] == [{
         'path': 'turn0.md',
         'preview': MANIFEST_PREVIEW_FILE,
@@ -2804,7 +2805,7 @@ def test_extract_manifest_delta_from_turn_reconcile_assistant_prose(tmp_path):
         turn_key='turn:0',
         sequence=2,
     )
-    assert delta['source']['tool'] == TURN_RECONCILE_SOURCE
+    assert 'source' not in delta
     assert delta['artifacts'] == [{
         'path': 'report.docx',
         'preview': MANIFEST_PREVIEW_FILE,
@@ -3045,7 +3046,7 @@ def test_extract_manifest_delta_from_turn_reconcile_multi_turn_key(tmp_path):
         turn_key='turn:20',
         sequence=3,
     )
-    assert delta['source']['tool'] == TURN_RECONCILE_SOURCE
+    assert 'source' not in delta
     assert delta['artifacts'] == [{
         'path': '微博热搜榜_20260612.docx',
         'preview': MANIFEST_PREVIEW_FILE,

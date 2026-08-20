@@ -113,155 +113,18 @@ Do not use /workspace/<filename> unless the user explicitly requests that path.
 此层是模型决策引导，不是安全边界。它的职责是修复“未指定路径时被旧记忆误导”的行为，
 而不是拒绝跨工作区变更。
 
-## 5. 第二层：执行与 Artifact 的同根兼容
+## 5. 与 Manifest Artifact 的交界
 
-### 5.1 执行路径保持现有兼容性
+默认 workspace 不限制用户显式指定的绝对路径；Agent 继续按任务 cwd 解析相对路径，也不把
+绝对路径重写进 session workspace。一个文件是否成为可预览 Artifact、Artifact 根如何在
+SSE → persist → GET → preview 间保持一致、以及 `workspace_root + path` 的存储和安全约束，
+均由 [Session Manifest Artifacts 实现](session-manifest-artifacts.md) 唯一维护。
 
-以下已有行为应保留并覆盖回归测试：
+该交界不新增数据库表或 Manifest wire 字段。`done` 后 GET 是聊天 artifact chip 的最终权威，
+流式 SSE 只是 Inspector 乐观态。
 
-1. `api/streaming.py::_build_agent_thread_env()` 将 `TERMINAL_CWD` 设为
-   `str(s.workspace)`；profile 配置中的旧 cwd 不能覆盖它。
-2. Agent 文件工具对相对路径按任务 cwd 解析。
-3. Agent 文件工具对绝对路径仅规范化，不把它重写为 session workspace 内路径。
+## 6. 验证与可观测性
 
-这意味着默认相对写入和显式跨工作区写入可以共存。不要在 Agent 侧引入“所有绝对路径
-必须位于 session workspace”这一类 containment guard。
-
-### 5.2 新增唯一的 Artifact 根决策函数
-
-在 `api/session_manifest.py` 或一个无循环依赖的 workspace helper 中新增唯一入口：
-
-```python
-def artifact_workspace_root_for_session(session) -> Path:
-    """Return the normalized root eligible for ordinary file artifacts."""
-    default_root = resolve_trusted_workspace(None)
-    session_root = Path(session.workspace).expanduser().resolve()
-    return default_root if session_root.is_relative_to(default_root) else session_root
-```
-
-实现必须使用当前运行时的 `api.config.DEFAULT_WORKSPACE`，而非硬编码 `/workspace`、
-启动 cwd 或从 Memory 推断的目录。若根目录无法规范化或不可信，Artifact 采集应 fail closed：
-不发布普通 file artifact，并记录可诊断的结算失败；不能退化为任意绝对路径预览。
-
-`session.workspace` 仍是默认写入目录；该 helper 只影响 Artifact 资格与 preview。对于
-历史或外部 workspace 会话，helper 回退到 session 自身根，避免把不相关的根目录合并。
-
-### 5.3 同一权威值必须贯穿全部阶段
-
-将当前直接传入 `Path(str(s.workspace))` 或 `Path(str(session.workspace))` 的
-Artifact 调用替换为同一个 `artifact_workspace_root_for_session(...)` 结果。
-
-| 阶段 | 当前入口 | 变更要求 |
-| --- | --- | --- |
-| 工具完成 SSE | `extract_manifest_delta_from_tool_event()` 的 streaming 调用 | 使用当前 stream 的 artifact root |
-| turn 完成 SSE | `extract_manifest_delta_from_turn_reconcile()` 的 streaming 调用 | 使用相同 artifact root |
-| transcript reconcile | `extract_turn_artifact_entries_for_manifest()` | 使用 session artifact root |
-| 持久化 preview gate | `_persist_turn_artifact_paths()` + `filter_existing_turn_artifact_entries()` | 使用相同 artifact root |
-| GET 投影 | `build_session_manifest()`、`_row_to_wire()` | 查询与预览按同一 artifact root |
-
-这是一条端到端不变量：`input → normalize → SSE → persist → GET → preview` 使用同一个
-规范化根。不得只放宽 `_resolve_manifest_path()`；那会制造不同阶段的可见性分歧。
-
-### 5.4 存储与 wire 不新增字段
-
-现有 store 身份已经含有 `workspace_root + path`。将本次 file artifact 的
-`workspace_root` 记录为 Artifact 归属根，`path` 保持该根下的 POSIX 相对路径即可，例如：
-
-```text
-workspace_root = /Users/wzq/workspace
-path           = sessions/<session_id>/brief.md
-```
-
-或：
-
-```text
-workspace_root = /Users/wzq/workspace
-path           = 北京天气简报.md
-```
-
-现有 integration workspace preview 已以 `DEFAULT_WORKSPACE` 为根；因此同根路径可以
-投影为现有 `/api/integration/workspace/file` 使用的相对路径，无需 `scope`、
-`external_file` 或新的 wire schema。
-
-`DEFAULT_WORKSPACE` 外的绝对路径必须在现有 file preview gate 被排除；不要在 wire 中
-回退为裸绝对路径。
-
-## 6. 证据与安全边界
-
-Artifact 资格不是“文件位于根目录”这一项就足够。仍需同时满足：
-
-1. 当前 turn 的成功 completed 工具事件，或当前 turn 最后一条 assistant 的严格验证成果；
-2. 路径位于 `artifact_workspace_root_for_session(session)` 内；
-3. 文件当前真实存在、是普通文件、非 cruft、可预览；
-4. turn key 与当前真实 user anchor 一致；
-5. store 写入成功后，`done` 后 GET 的结果才是聊天 chip 的最终权威来源。
-
-不允许从 terminal stdout、`ls`、搜索结果、读取结果、heredoc 或整个 workspace 推断成果。
-这保留 [Session Inspector Manifest](session-inspector-manifest.md) 与
-[Manifest Artifacts](session-manifest-artifacts.md) 的证据模型。
-
-## 7. 实现落点
-
-1. 在 `api/streaming.py` 新增末尾 workspace ephemeral policy helper 和单元测试。
-2. 新增 `artifact_workspace_root_for_session()`，并为默认根、受管 session 子目录和
-   无法规范化根写入单元测试。
-3. 将 streaming 的 tool-complete delta、turn-complete delta、完成/错误/取消结算统一
-   传入 Artifact 根。
-4. 将 `api/session_manifest.py` 的 transcript 提取、reconcile、`build_session_manifest()`
-   与 store root 判定统一改用该根。
-5. 核对 `api/session_manifest_store.py` 的 `workspace_root` 写入与
-   `effective_manifest_workspace_root()` / integration projection 对同一根保持一致。
-6. 在 WebUI 中手动验证：实时 chip、完成后自动 GET 刷新、刷新页面后重开 session、
-   preview 点击，四者均指向同一文件。
-
-## 8. 验收测试矩阵
-
-所有 pytest 通过仓库脚本运行：
-
-```bash
-./scripts/test.sh \
-  tests/test_session_manifest.py \
-  tests/test_session_manifest_store.py \
-  tests/test_session_manifest_contract.py \
-  tests/test_session_manifest_replay.py \
-  tests/test_session_managed_workspace.py \
-  tests/test_issue1913_workspace_prefix_sentinel.py \
-  tests/test_profile_terminal_env.py
-```
-
-已新增以下关键行为的自动化覆盖；其余场景应继续由相邻 Manifest 回归测试保护：
-
-| 场景 | 写入目标 | 期望 |
-| --- | --- | --- |
-| 无路径的新文件 | `session.workspace/report.md` | 成为当前 turn Artifact；可 SSE、GET 与 preview |
-| Memory 含 `/workspace` | 用户只说“生成报告” | 仍写入 `session.workspace`，并成为 Artifact |
-| 显式全局 workspace 文件 | `DEFAULT_WORKSPACE/report.md` | 保持原绝对路径；成为当前 turn Artifact；GET 后仍可预览 |
-| 显式另一受管 session 子目录文件 | `DEFAULT_WORKSPACE/sessions/other/a.md` | 只在当前 turn 有成功工具证据时显示；不扫描或自动发现 |
-| 显式 workspace 外文件 | `/Users/wzq/Documents/a.md` | 写入不被该方案阻止；不成为普通 file Artifact |
-| 失败、取消、未完成工具 | 任意路径 | 不产生 Artifact；不能伪装为 empty 成功 |
-| 两个并发 session | 不同 session workspace | SSE/DB/turn key 不串线；各自只显示自己的成功证据 |
-
-## 9. 迁移与回滚
-
-本方案不改变数据库表结构或公开 wire schema。新决策仅影响后续 turn 的
-`workspace_root` 与路径相对化。历史 store rows 按其已有 `workspace_root` 继续读取，
-不由 GET 迁移或回填。
-
-回滚时恢复 session-workspace 作为 Artifact 根即可；历史以 `DEFAULT_WORKSPACE` 写入的
-记录仍能被现有 integration-root 投影读取，不需要删除或改写 `session_manifest.db`。
-
-## 10. 可观测性
-
-在 stream diagnostic / turn journal 中记录非敏感字段：
-
-```text
-artifact_workspace_root
-artifact_candidate_count
-artifact_accepted_count
-artifact_rejected_outside_root_count
-artifact_persistence_status
-```
-
-不要记录完整 system prompt、Memory、USER Profile、文件内容、凭据或未获成果证据支持的
-任意路径。出现 Artifact 缺失时，可借此区分：模型选错默认路径、成功工具证据缺失、
-preview gate 拒绝、turn key 绑定失败或 store 持久化失败。
+通过仓库测试脚本运行 Manifest、受管 workspace 与 profile terminal 环境测试。诊断仅记录
+`artifact_workspace_root`、候选/接受/根外拒绝计数和持久化状态；不得记录完整 prompt、
+Memory、Profile、文件内容或未经成果证据支持的任意路径。

@@ -32,10 +32,10 @@
 - [`architecture/state_db表结构说明.md`](architecture/state_db表结构说明.md) - Hermes Agent `state.db` 的 schema 和字段说明。
 - [`api/async-delegation-session-events.md`](api/async-delegation-session-events.md) - 异步子任务的会话事件、wakeup 聊天流与多会话订阅交互提案。
 - [`api/async-delegation-external-client-guide.md`](api/async-delegation-external-client-guide.md) - 外部前端接入异步子任务双 SSE、重连与关闭逻辑。
+- [`api/session-manifest-api.md`](api/session-manifest-api.md) - Session Manifest 的 GET/SSE 唯一字段契约与全部资源类型示例。
 - [`integration/skillhub后端接口文档约束.md`](integration/skillhub后端接口文档约束.md) - SkillHub 对外接口约束。
 - [`integration/webui-external-service-接口说明.md`](integration/webui-external-service-接口说明.md) - WebUI 与外部服务的调用关系。
 - [`integration/integration-common-tasks-api.md`](integration/integration-common-tasks-api.md) - 欢迎页常办任务接口。
 - [`operations/日志说明文档.md`](operations/日志说明文档.md) - 聊天流 `stream_diag` 日志说明。
-- [`plans/知识库MCP会话轮次引用集成方案.md`](plans/知识库MCP会话轮次引用集成方案.md) - `ithink_kb_mcp` 检索结果按会话轮次派生和展示的集成提案。
 - [`plans/轮次级文件事务与归档方案.md`](plans/轮次级文件事务与归档方案.md) - 轮次级文件 ChangeSet 与归档设计。
 - [`fix/异步wakeup原始用户重放去重修复方案.md`](fix/异步wakeup原始用户重放去重修复方案.md) - 异步 Wakeup 重放去重方案。

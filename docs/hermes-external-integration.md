@@ -40,3 +40,6 @@ sidecar 状态。
 允许的上游接缝只有 `api/session_manifest.py`：它把已配对的 completed ToolEvent 交给
 解析器，并把结果放入既有 `manifest_delta` SSE 与 `GET /api/session/manifest` 的同一
 references wire。不得在 `api/streaming.py` 或前端重复解析 MCP 结果。
+
+公开字段、SSE 帧和生命周期只在 [Session Manifest HTTP/SSE 契约](api/session-manifest-api.md)
+维护；本节只记录 Fork 接缝与实现边界。

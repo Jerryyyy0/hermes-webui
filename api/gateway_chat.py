@@ -992,7 +992,6 @@ def _run_gateway_chat_streaming(
                 stream_id=stream_id,
                 turn_key=manifest_turn_key,
                 sequence=manifest_delta_sequence[0],
-                source_kind="tool_complete" if is_complete else "tool_start",
                 skills_dir=_gateway_manifest_skills_dir(),
                 default_profile=_gateway_manifest_default_profile(),
             )

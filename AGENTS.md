@@ -187,7 +187,7 @@ not verify.
 
 ### 会话 Inspector Manifest 约束
 
-涉及会话待办、成果、参考（Session Inspector / manifest）时，请先阅读 [`docs/architecture/session-inspector-manifest.md`](docs/architecture/session-inspector-manifest.md)。
+涉及会话待办、成果、参考（Session Inspector / manifest）时，请先阅读 [`docs/api/session-manifest-api.md`](docs/api/session-manifest-api.md)；实现 Artifact 派生、存储或路径规则时再阅读 [`docs/architecture/session-manifest-artifacts.md`](docs/architecture/session-manifest-artifacts.md)。
 
 - Manifest 是会话活动的派生索引，不是 transcript、执行 journal 或 workspace 全量文件列表。
 - References 只表示实际读取/打开的内容来源；搜索命中、目录列表和助手正文里提到的路径不默认算参考。

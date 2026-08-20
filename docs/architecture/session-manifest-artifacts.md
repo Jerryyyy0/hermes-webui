@@ -1,6 +1,6 @@
 # Session Manifest Artifacts 实现
 
-本文是 Artifacts 证据提取、路径安全、turn 归属、持久化、显式 backfill/read-repair 和 wire projection 的唯一实现说明。产品语义见 [session-inspector-manifest.md](./session-inspector-manifest.md)；HTTP/SSE 字段见 [session-manifest-api.md](./session-manifest-api.md)。
+本文是 Artifacts 证据提取、路径安全、turn 归属、持久化与显式 backfill/read-repair 的唯一实现说明。对外资源语义、HTTP/SSE 字段和 wire 示例以 [Session Manifest HTTP/SSE 契约](../api/session-manifest-api.md) 为准。
 
 实现入口：`api/session_manifest.py`、`api/session_manifest_store.py`、`api/streaming.py`、`api/gateway_chat.py`。
 
@@ -200,6 +200,12 @@ python .../md2word.py INPUT OUTPUT [options]
 
 ## 5. 路径规范化与安全
 
+### 默认 workspace 与 Artifact 根
+
+`session.workspace` 是未指定目标时的默认写入目录；普通 file artifact 的资格根则由唯一入口 `artifact_workspace_root_for_session(session)` 决定：当 session workspace 位于运行时 `DEFAULT_WORKSPACE` 下时使用该默认根，否则使用 session 自身根。该值必须贯穿 tool-complete SSE、turn reconcile、持久化、GET projection 与 preview，避免“流中可见、刷新后消失”。
+
+用户显式指定的绝对路径不因此被拒绝写入；只有位于 Artifact 根外的文件不成为普通 file artifact。根无法规范化或不可信时 fail closed，不发布普通 file artifact。store 继续以 `workspace_root + path` 保存归属，公开 wire 不新增字段。
+
 所有候选先经 `_resolve_manifest_path(workspace, raw)`：
 
 1. 清理引号和无效形态；
@@ -248,45 +254,13 @@ Profile 只来自 `session.profile`，缺失写空字符串；不从 active prof
 
 Legacy `session.turn_artifacts` 不再是新会话写入目标，只在显式 backfill 操作且 lineage 完全无 decision 时作为输入。Manifest GET 不读取它，也绝不将其回填至 store。Legacy 空 source 规范化为 `assistant_prose`，不伪装成写入工具。
 
-## 7. Wire projection 与 expired
+## 7. 对外投影边界
 
-对外基础字段为 `path`、`preview`、`source_tool`；Artifacts 可选 `profile`，Artifacts/References 可选 `status: "expired"`。完整 schema 见 [session-manifest-api.md](./session-manifest-api.md)。
+本模块只决定候选能否投影，不定义对外 JSON。`preview=file` 仅接受可预览的 workspace file 或允许的 media；`preview=skill` 仅接受可预览 canonical skill。历史证据存在但目标已不可预览时可投影为 expired；结算前已失效或没有 provenance 的候选一律不输出。字段、去重优先级和 SSE 帧均以 [Session Manifest HTTP/SSE 契约](../api/session-manifest-api.md) 为准。
 
-正常行：
+`extract_manifest_delta_from_tool_event()` 只接受成功 `tool_complete`；`extract_manifest_delta_from_turn_reconcile()` 在 assistant durable 后、`done` 前产生当前 turn 的补充候选。两者只更新 Inspector 乐观态，聊天区 chips 始终在 `done` 后以 GET 为准。
 
-- `preview=file`：workspace file 或允许的 media 可预览；
-- `preview=skill`：canonical skill 可预览。
-
-持久化 file artifact 必须用行内 `workspace_root`（历史空值映射默认根）解析；只有该根位于 integration workspace 根内时，才投影为 `/api/integration/workspace/file` 可使用的相对 path。默认根外的 external/worktree row 保留归属记录，但不输出 `preview=file`，不得退回裸相对 path。
-
-Expired 行：
-
-- file artifact 有 per-turn/store provenance 但文件已缺失；
-- skill reference/artifact 有明确 provenance 但 skill 已缺失。
-
-Expired 只描述已成功写入 store 后才丢失的历史成果；结算前已失效的候选不会进入该状态。
-
-缺失但没有持久化/per-turn provenance 的候选不输出。Expired 行不可点击预览。
-
-去重与优先级：
-
-- Session/turn 内按 canonical path 去重；
-- References 只允许成功 `skill_view` 的 skill row；同技能 artifact > skill reference；
-- 同 path 的 source 优先级为 mutation tool > `media` / `assistant_prose`；
-- skill 按 canonical skill 名去重。
-
-
-
-## 8. SSE
-
-- `extract_manifest_delta_from_tool_event()`：`tool_start` 不产生 artifact/reference；只有成功 `tool_complete` 可产生工具候选。文件 read 永不产生公开 delta，成功 `skill_view` 可产生 reference。
-- `extract_manifest_delta_from_turn_reconcile()`：assistant durable 后、`done` 前，按当前 turn 工具强证据、`MEDIA:` 和 final assistant 生成 `turn_complete` delta。
-- 候选未通过 preview gate 时不发送。
-- SSE 只更新 Inspector 乐观态；per-turn chips 以 `done` 后 GET 为准。
-
-
-
-## 9. 关键函数
+## 8. 关键函数
 
 
 | 函数                                         | 职责                                |
@@ -312,7 +286,7 @@ Expired 只描述已成功写入 store 后才丢失的历史成果；结算前�
 
 
 
-## 10. 测试
+## 9. 测试
 
 ```bash
 ./scripts/test.sh tests/test_session_manifest.py tests/test_session_manifest_store.py tests/test_session_manifest_contract.py tests/test_session_manifest_replay.py -q

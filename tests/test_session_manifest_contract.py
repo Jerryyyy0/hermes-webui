@@ -150,31 +150,26 @@ def test_completed_transcript_is_saved_before_manifest_decision_and_settlement_o
     assert "_artifact_decision.get('status') == 'persisted'" in block
 
 
-def test_session_manifest_docs_separate_product_api_and_artifact_contracts():
-    product = (REPO / 'docs' / 'architecture' / 'session-inspector-manifest.md').read_text(encoding='utf-8')
+def test_session_manifest_docs_assign_public_contract_to_api():
     api = (REPO / 'docs' / 'api' / 'session-manifest-api.md').read_text(encoding='utf-8')
     artifacts = (REPO / 'docs' / 'architecture' / 'session-manifest-artifacts.md').read_text(encoding='utf-8')
 
-    assert '派生索引' in product
-    assert '核心不变量' in product
-    assert 'session-manifest-api.md' in product
-    assert 'session-manifest-artifacts.md' in product
-
     assert 'GET `/api/session/manifest`' in api
+    assert 'Manifest 的定位与资源边界' in api
+    assert '派生索引' in api
+    assert 'artifacts > references' in api
     assert '"version": 1' in api
     assert '"sequence": 7' in api
     assert '"turn_key": "turn:' in api
-    assert '`tool_start`、`tool_complete` 或 `turn_complete`' in api
+    assert '顶层不携带工具调用来源' in api
     assert 'mcp__ithink_kb_mcp__searchKnowledgeBaseDocuments' in api
     assert 'mcp__ithink_kb_mcp__searchKnowledgeBaseDocumentsAcross' in api
     assert '"page_content"' in api
     assert '无需新增数据库表' in api
 
-    assert 'Knowledge Base References' in product
-    assert '(kbName, fileName)' in product
-    assert '不新增数据库表' in product
-
     assert 'Decision-first 构建流程' in artifacts
+    assert '默认 workspace 与 Artifact 根' in artifacts
+    assert 'artifact_workspace_root_for_session' in artifacts
     assert 'write_file' in artifacts
     assert '`terminal`' in artifacts
     assert 'stdout' in artifacts
@@ -182,6 +177,8 @@ def test_session_manifest_docs_separate_product_api_and_artifact_contracts():
     assert 'ARTIFACT_EXCLUSION_READ_TOOLS' in artifacts
     assert '不进入顶层/per-turn references' in artifacts
     assert '只抑制同 turn、同 path 的 `assistant_prose`' in artifacts
+    assert '完整 JSON' not in artifacts
+    assert 'event: manifest_delta' not in artifacts
 
     assert not (REPO / 'docs' / 'session-manifest-artifact-regex.md').exists()
     assert not (REPO / 'docs' / 'session-manifest-artifacts-entry.md').exists()

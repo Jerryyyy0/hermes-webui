@@ -172,52 +172,20 @@ GET /api/session?session_id=...&messages=1&msg_limit=50&turn_align=1
 
 ## 4. `/api/session/manifest` 接口中的 turn_key
 
+本节只定义 turn 身份如何投影到 Manifest；公开 HTTP/SSE 字段、完整 JSON 示例、资源语义和
+前端合并规则以 [Session Manifest HTTP/SSE 契约](../api/session-manifest-api.md) 为唯一来源。
+
 ### 4.1 接口入口
 
-**路由**: `api/routes.py` 第 5851 行 `GET /api/session/manifest?session_id=...`
-
-```python
-from api.session_manifest import build_session_manifest, merge_manifest_delta, _wire_todos
-session = get_session(sid)
-manifest = build_session_manifest(session)
-# 如果存在活跃 stream，合并 live manifest delta
-stream_id = getattr(session, "active_stream_id", None)
-if stream_id:
-    with STREAMS_LOCK:
-        live_manifest = STREAM_LIVE_MANIFEST.get(stream_id)
-    if isinstance(live_manifest, dict) and live_manifest:
-        manifest = merge_manifest_delta(manifest, live_manifest, scope="active_stream")
-return j(handler, {"manifest": manifest})
-```
+`api/routes.py` 调用 `build_session_manifest()`；若该会话有活跃 stream，则将其 live delta
+合并后返回。`turn_key` 不由 HTTP 请求推导，而是由 transcript 中真实 user anchor 提供。
 
 ### 4.2 `build_session_manifest()` 流程
 
-**文件**: `api/session_manifest.py` 第 1749–1784 行
-
-```python
-def build_session_manifest(session) -> dict[str, Any]:
-    messages = _load_display_messages(session)   # 加载完整消息列表（含 lineage 合并）
-    messages = _ensure_turn_keys(messages)        # 深拷贝，不补 active turn key
-    tool_calls = list(getattr(session, 'tool_calls', None) or [])
-    events = _collect_tool_events(messages, tool_calls)
-    events.extend(_collect_media_artifact_events(messages, workspace))
-    todos = _extract_latest_todos(messages)
-    artifacts, references, turns = _extract_manifest_records(
-        events, workspace, messages, ...)
-    # Turn reconcile：从 transcript 中挖掘（MEDIA、交付语句等）
-    _apply_turn_reconcile_to_manifest_records(...)
-    # Artifact store：读取 profile-aware session_manifest.db，store 记录优先；
-    # transcript/tool/prose reconcile 只补缺失记录
-    return {
-        'todos': ...,
-        'artifacts': ...,
-        'references': ...,
-        'turns': [_turn_to_wire(turn, ...) for turn in turns],
-        'diagnostics': {...},
-    }
-```
-
-Artifacts 的长期权威来源是 `api/session_manifest_store.py` 管理的 `session_manifest.db`。身份键为 `lineage_key + profile + turn_key + record_kind + path`；`profile` 只来自 `session.profile`，缺失写空字符串 `""`，不从 parent/workspace/path 推断。`record_kind` 第一版只存 `"artifact"`，todos/references 仍由 transcript/tool events 派生。
+`build_session_manifest()` 加载 display transcript、按 user message 切轮、把 tool event 归属到
+turn，并输出 per-turn 投影。Artifacts 的长期权威来源是 profile-aware
+`session_manifest.db`；todos/references 仍从 transcript/tool events 派生。Artifact store 的身份
+与决策规则见 [Session Manifest Artifacts 实现](session-manifest-artifacts.md)。
 
 ### 4.3 `_message_turns()` — 从消息推导 turns
 
@@ -275,26 +243,8 @@ def _turn_key_for_event(event: ToolEvent, turns: list[dict[str, Any]]) -> str | 
 
 ### 4.5 turn 的序列化格式：`_turn_to_wire()`
 
-**文件**: `api/session_manifest.py` 第 1491–1504 行
-
-```python
-def _turn_to_wire(turn, workspace, skills_dir=None, *, default_profile=''):
-    return {
-        'turn_key': str(turn.get('turn_key') or ''),
-        'artifacts': _rows_to_wire(turn.get('artifacts'), ...),
-        'references': _rows_to_wire(turn.get('references'), ...),
-    }
-```
-
-这是最终通过 HTTP 返回给前端的 turn 格式：
-
-```json
-{
-  "turn_key": "turn:3",
-  "artifacts": [{"path": "...", "preview": "file", "source_tool": "write_file"}],
-  "references": []
-}
-```
+`_turn_to_wire()` 输出该 turn 的 key、artifacts 与 references。字段定义和示例见 API 契约的
+[`turns[]`](../api/session-manifest-api.md#turns按-user-turn-的局部投影) 一节。
 
 ### 4.6 Turn Reconcile（轮次交付物归因）
 
@@ -322,63 +272,14 @@ def _turn_to_wire(turn, workspace, skills_dir=None, *, default_profile=''):
 
 ### 5.1 `_emit_manifest_delta()` — 工具事件实时推送
 
-**文件**: `api/streaming.py` 第 5291–5336 行
-
-每当一个工具调用开始或完成时，构造 `manifest_delta` 事件并推送 SSE：
-
-```python
-def _emit_manifest_delta(name, args, result='', *, tid='', status='completed', source_kind='tool_complete'):
-    _delta = extract_manifest_delta_from_tool_event(
-        _event, Path(str(s.workspace)),
-        session_id=session_id,
-        stream_id=stream_id,
-        turn_key=_manifest_turn_key,  # ← 当前轮次的 turn_key
-        sequence=_manifest_delta_sequence[0],
-        ...
-    )
-    put('manifest_delta', _delta)
-```
-
-SSE 事件结构（`api/session_manifest.py` 第 1866–1890 行）：
-
-```json
-{
-  "version": 1,
-  "session_id": "abc123",
-  "stream_id": "stream-xyz",
-  "sequence": 7,
-  "turn_key": "turn:3",
-  "source": {
-    "kind": "tool_complete",
-    "tool": "write_file",
-    "tid": "call-1",
-    "status": "completed"
-  },
-  "artifacts": [...],
-  "references": [...],
-  "todos": {...}
-}
-```
+工具调用完成后，`_emit_manifest_delta()` 使用当前 `_manifest_turn_key` 产生 delta。开始事件
+不产生 artifact/reference；完整事件外壳与字段约束见 API 契约的
+[`manifest_delta`](../api/session-manifest-api.md#3-sse-manifest_delta) 一节。
 
 ### 5.2 `_emit_turn_complete_reconcile_delta()` — 轮次完成后 reconcile
 
-**文件**: `api/streaming.py` 第 5340–5374 行
-
-当 agent 完成整轮回答后，执行一次 transcript reconcile：
-
-```python
-def _emit_turn_complete_reconcile_delta():
-    _delta = extract_manifest_delta_from_turn_reconcile(
-        s.messages, Path(str(s.workspace)),
-        session_id=session_id,
-        stream_id=stream_id,
-        turn_key=_manifest_turn_key,  # ← 使用同一个 turn_key
-        ...
-    )
-    put('manifest_delta', _delta)
-```
-
-SSE 事件中的 `turn_key` 字段使得前端能将 delta 合并到正确的轮次。
+整轮结束后，`_emit_turn_complete_reconcile_delta()` 使用同一个 key 作一次 transcript reconcile。
+因此前端能把工具完成与 turn-complete delta 归入同一轮；该 delta 的字段形状仍由 API 契约定义。
 
 ---
 
@@ -386,49 +287,17 @@ SSE 事件中的 `turn_key` 字段使得前端能将 delta 合并到正确的轮
 
 ### 6.1 从 session 消息中提取
 
-**文件**: `static/ui.js` 第 8220 行
-
-渲染助手回复时，从对应的 user 消息中读取 `_turn_key`：
-
-```javascript
-const userMsg = S.session?.messages?.[currentAssistantTurnUserRawIdx];
-currentAssistantTurn.dataset.turnKey = (userMsg && userMsg._turn_key)
-    ? userMsg._turn_key
-    : `turn:${currentAssistantTurnUserRawIdx}`;
-```
+渲染助手回复时，`static/ui.js` 从对应 user message 读取 `_turn_key` 并写入
+`data-turn-key`；仅历史无 key transcript 才按 API 契约的 fallback 规则处理。
 
 ### 6.2 从 manifest 中获取 per-turn 成果
 
-**文件**: `static/workspace.js` 第 329–333 行
-
-```javascript
-function getTurnArtifacts(turnKey) {
-  const manifest = _manifestForActiveSession();
-  const turn = manifest.turns.find(row => row && row.turn_key === turnKey);
-  return turn && Array.isArray(turn.artifacts) ? turn.artifacts : [];
-}
-```
+`static/workspace.js` 按相同 key 查询 `manifest.turns[]`，聊天区只消费该 turn 的 artifacts。
 
 ### 6.3 SSE manifest_delta 合并
 
-**文件**: `static/workspace.js` 第 259–317 行
-
-```javascript
-function _normalizeDeltaTurnKey(delta) {
-  const key = String(delta && delta.turn_key || '').trim();
-  return key.startsWith('turn:') ? key : '';
-}
-
-function applySessionManifestDelta(delta) {
-  const turnKey = _normalizeDeltaTurnKey(delta);
-  const incomingTurns = Array.isArray(delta.turns) ? delta.turns
-    : (turnKey ? [{ turn_key: turnKey, artifacts: delta.artifacts, references: delta.references }] : []);
-  // 合并到 _sessionManifest.turns
-  _sessionManifest.turns = _mergeManifestTurns(_sessionManifest.turns, incomingTurns);
-}
-```
-
-当 SSE `manifest_delta` 包含 `turn_key` 但不含独立的 `turns[]` 时，前端自动将其包裹为单元素 `turns[{"turn_key": delta.turn_key, artifacts, references}]` 进行合并。
+收到 `manifest_delta` 后，前端按其 `turn_key` 将局部行并入缓存；合并/幂等规则不在此处重复，
+以 API 契约为准。
 
 ---
 
@@ -464,15 +333,7 @@ api/session_manifest.py: build_session_manifest()
     │  ← 输出 turns[] 到 manifest 响应
     ▼
 GET /api/session/manifest?session_id=...
-    {
-      "manifest": {
-        "turns": [
-          {"turn_key": "turn:1", "artifacts": [...], "references": [...]},
-          {"turn_key": "turn:2", "artifacts": [...], "references": [...]},
-          ...
-        ]
-      }
-    }
+    → 按 API 契约返回各 `turn_key` 的 artifacts/references 局部投影
     │
     ▼
 前端 ui.js: 从 session.messages[]._turn_key 取 key

@@ -3,7 +3,7 @@
 - **状态：** Proposed
 - **作者：** @wzq
 - **创建日期：** 2026-08-14
-- **关联契约：** [异步委派完成的 Turn 对齐与实时展示](async-delegation-turn-alignment.md)、[Session Inspector Manifest](../architecture/session-inspector-manifest.md)、[Session Manifest Artifacts 实现](../architecture/session-manifest-artifacts.md)
+- **关联契约：** [异步委派完成的 Turn 对齐与实时展示](async-delegation-turn-alignment.md)、[Session Manifest HTTP/SSE 契约](../api/session-manifest-api.md)、[Session Manifest Artifacts 实现](../architecture/session-manifest-artifacts.md)
 
 ## 问题
 

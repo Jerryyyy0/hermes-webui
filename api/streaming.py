@@ -7963,7 +7963,7 @@ def _run_agent_streaming(
                     put, session_id, stream_id, tool_name, tool_args=tool_args,
                 )
 
-            def _emit_manifest_delta(name, args, result='', *, tid='', status='completed', source_kind='tool_complete'):
+            def _emit_manifest_delta(name, args, result='', *, tid='', status='completed'):
                 try:
                     from api.session_manifest import (
                         ToolEvent,
@@ -7987,7 +7987,6 @@ def _run_agent_streaming(
                         stream_id=stream_id,
                         turn_key=_manifest_turn_key,
                         sequence=_manifest_delta_sequence[0],
-                        source_kind=source_kind,
                         skills_dir=_manifest_skills_dir,
                         default_profile=_manifest_default_profile,
                         artifact_workspace=_manifest_workspace_root,
@@ -8189,7 +8188,6 @@ def _run_agent_streaming(
                         args,
                         result='',
                         status='in_progress',
-                        source_kind='tool_start',
                     )
                     _maybe_emit_browser_preview(name, args)
                     put('tool', {
@@ -8258,7 +8256,6 @@ def _run_agent_streaming(
                         args,
                         result=preview or '',
                         status='error' if bool(cb_kwargs.get('is_error', False)) else 'completed',
-                        source_kind='tool_complete',
                     )
                     put('tool_complete', {
                         'event_type': event_type,
@@ -8328,7 +8325,6 @@ def _run_agent_streaming(
                             result='',
                             tid=tool_call_id,
                             status='in_progress',
-                            source_kind='tool_start',
                         )
                         _maybe_emit_browser_preview(name, args)
                         put('tool', {
@@ -8374,7 +8370,6 @@ def _run_agent_streaming(
                             result=result_snippet,
                             tid=tool_call_id,
                             status='completed',
-                            source_kind='tool_complete',
                         )
                         put('tool_complete', {
                             'event_type': 'tool.completed',

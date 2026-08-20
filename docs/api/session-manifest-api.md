@@ -1,8 +1,25 @@
 # Session Manifest HTTP/SSE 契约
 
-本文定义 Session Manifest 的对外 HTTP/SSE 字段、合并和生命周期契约。产品语义见 [session-inspector-manifest.md](./session-inspector-manifest.md)；Artifacts 内部提取与持久化见 [session-manifest-artifacts.md](./session-manifest-artifacts.md)。
+本文是 Session Manifest 的唯一对外契约：定义 HTTP/SSE 字段、资源语义、合并和生命周期。Artifacts 的内部提取、持久化和路径安全见 [Session Manifest Artifacts 实现](../architecture/session-manifest-artifacts.md)；`turn_key` 的生成、压缩与消息层对齐见 [Turn Key 后端说明](../architecture/turn-key-backend.md)。
 
 实现入口：`api/routes.py`（HTTP）、`api/session_manifest.py`（构建与 delta）、`api/streaming.py` / `api/gateway_chat.py`（SSE）、`static/workspace.js`（前端缓存）。
+
+## 0. Manifest 的定位与资源边界
+
+Session Manifest 是从会话活动派生出的轻量索引，服务于 Workspace Inspector 的 Tasks、Artifacts、References，以及聊天区每轮的 artifact chips。它不是 transcript、执行 journal，也不是 workspace 文件清单。
+
+| 数据 | 含义 | 明确排除 |
+| --- | --- | --- |
+| Tasks | 当前轮 `todo` 工具产生的最新任务快照 | 历史流水、助手正文中的列表 |
+| Artifacts | 当前会话由明确成果证据创建、修改或交付的文件/技能 | 搜索命中、目录列表、输入文件、跨字段推断 |
+| References | 明确成功 `skill_view` 的技能，或受支持知识库 MCP 返回的文档命中 | 文件读取、搜索、列目录、助手普通提及 |
+| Turns | 按真实 user 消息划分的 per-turn artifacts/references 视图 | transcript、完整执行历史、Agent internal scaffold、model-only context anchor |
+
+同一资源在一个 Manifest 中只保留一个主归类，优先级为 `artifacts > references`。缺失字段保持为空或跳过，不从相似字段推断、复制或补全。
+
+Artifacts 只接受成功 completed 工具的结构化证据、显式 `MEDIA:`、成功 skill mutation，或当前 turn 最后一条 assistant 中经严格验证的 workspace 文件。工具 start、文件读取、terminal stdout、目录列表、中间 assistant prose 和全 workspace 扫描不构成 artifact 证据；具体白名单与路径 gate 以 [Artifacts 实现文档](../architecture/session-manifest-artifacts.md) 为准。
+
+References 只接受成功 completed 的 `skill_view` 或本页列出的两个知识库 MCP 工具。知识库 reference 不写入 `session_manifest.db`，也不新增数据库表或 sidecar；artifact store 只负责 artifacts 的成果/空决策。
 
 ## 1. GET `/api/session/manifest`
 
@@ -16,7 +33,7 @@
 GET /api/session/manifest?session_id=abc123
 ```
 
-### 成功响应 `200`
+### 成功响应 `200`：完整 Manifest 示例
 
 ```json
 {
@@ -95,12 +112,19 @@ GET 是只读的：不得执行 artifact backfill 或 empty-decision repair，�
 
 ## 2. Manifest schema
 
-### `todos`
+以下所有 JSON 均为实际 wire 形状，可直接作为客户端类型定义、fixture 或 mock 的参考。
+未列出的字段不应自行推断或补写。
+
+### `todos`：任务快照
 
 ```json
 {
   "items": [
-    { "id": "plan", "content": "Implement", "status": "completed" }
+    { "id": "research", "content": "检索市场规则", "status": "completed" },
+    { "id": "draft", "content": "撰写答复", "status": "in_progress" },
+    { "id": "review", "content": "核对引用", "status": "pending" },
+    { "id": "obsolete", "content": "旧任务", "status": "cancelled" },
+    { "id": "legacy", "content": "旧工具状态", "status": "unknown" }
   ]
 }
 ```
@@ -111,9 +135,10 @@ GET 是只读的：不得执行 artifact backfill 或 empty-decision repair，�
 | `content` | string | 可展示任务说明；空值不出站 |
 | `status` | string | `pending`、`in_progress`、`completed`、`cancelled` 或 `unknown` |
 
-Todos 是当前轮最新快照，不是历史流水。GET 中不包含 SSE 专用的 `mode`。
+Todos 是当前轮最新快照，不是历史流水。GET 中不包含 SSE 专用的 `mode`；SSE 中的
+`todos.mode: "replace_latest"` 表示本次 items 应替换当前轮的任务快照。
 
-### Artifact row
+### `artifacts[]` / `turns[].artifacts[]`：成果行
 
 基础字段：
 
@@ -128,7 +153,42 @@ Todos 是当前轮最新快照，不是历史流水。GET 中不包含 SSE 专�
 | 字段 | 适用范围 | 说明 |
 | --- | --- | --- |
 | `profile` | artifacts | 来自 `session.profile`；无明确值时省略 |
-| `status` | artifacts | 当前仅 `expired`，表示有历史 provenance 但不可预览 |
+| `status` | artifacts / Skill references | 当前仅 `expired`，表示有历史 provenance 但不可预览 |
+
+#### 文件成果：`preview: "file"`
+
+```json
+{
+  "path": "sessions/abc123/reports/result.md",
+  "preview": "file",
+  "source_tool": "write_file",
+  "profile": "ops"
+}
+```
+
+#### 技能成果：`preview: "skill"`
+
+```json
+{
+  "path": "research/market-analysis",
+  "preview": "skill",
+  "source_tool": "skill_manage",
+  "profile": "ops"
+}
+```
+
+#### 已过期成果
+
+```json
+{
+  "path": "reports/deleted.md",
+  "preview": "file",
+  "source_tool": "write_file",
+  "status": "expired"
+}
+```
+
+`status: "expired"` 仅表示历史成果证据仍在、当前不可预览；客户端必须保留展示但禁用打开。
 
 **`preview=file` 的 `path` 语义（wire）：** 持久化 artifact 以自身的 `workspace_root` 解析；历史 `workspace_root=""` 在运行时解释为启动时的 `HERMES_WEBUI_DEFAULT_WORKSPACE`，数据库原值不回填。当该根位于 integration 根之下时，GET/SSE 返回**相对 integration 根**的路径，以便直接调用 `GET /api/integration/workspace/file?path=...`：历史默认根为 `report.md`，新 managed 会话为 `sessions/<session_id>/report.md`，base 子目录 external workspace 为 `project-a/report.md`。根位于 integration 根之外的持久化 artifact 不返回 `preview=file`，不能退回裸相对路径或绝对路径。仅尚未持久化的 transcript/SSE 临时行沿用当前 session workspace 的既有投影。`preview=skill` 与 workspace 外绝对 `MEDIA:` path 不改写。
 
@@ -136,12 +196,55 @@ Manifest 不返回文件或技能正文。非 expired 且 `preview` 为 `file`/`
 
 文件预览使用 integration workspace file API（path 为上表 wire 语义），skill 预览使用 SkillHub content API，workspace 外 `MEDIA:` 使用 session media API。具体接口与部署约束见 [integration/README.md](../integration/README.md)。
 
-### Reference row
+### `references[]` / `turns[].references[]`：引用行
 
 文件读取、搜索命中、目录列表与助手正文提及均不进入 references。当前仅有两类：成功 completed 的 `skill_view`，以及以下两个 MCP 工具的成功 completed 调用：
 
 - `mcp__ithink_kb_mcp__searchKnowledgeBaseDocuments`
 - `mcp__ithink_kb_mcp__searchKnowledgeBaseDocumentsAcross`
+
+所有引用共用的最小外壳如下：
+
+```json
+{
+  "kind": "<资源类型>",
+  "source": [
+    { "tool": "<完整工具名>", "tid": "<工具调用 ID>" }
+  ],
+  "metadata": {}
+}
+```
+
+#### Skill 引用：`kind: "skill"`
+
+```json
+{
+  "kind": "skill",
+  "source": [
+    { "tool": "skill_view", "tid": "call-skill-1" }
+  ],
+  "metadata": {
+    "path": "research-skill"
+  }
+}
+```
+
+#### 已过期 Skill 引用
+
+```json
+{
+  "kind": "skill",
+  "source": [
+    { "tool": "skill_view", "tid": "call-skill-1" }
+  ],
+  "metadata": {
+    "path": "removed-skill"
+  },
+  "status": "expired"
+}
+```
+
+#### 知识库文档引用：`kind: "knowledge_base_document"`
 
 ```json
 {
@@ -160,18 +263,42 @@ Manifest 不返回文件或技能正文。非 expired 且 `preview` 为 `file`/`
 }
 ```
 
+同一文档由两个受支持工具命中后的聚合形状：
+
+```json
+{
+  "kind": "knowledge_base_document",
+  "source": [
+    {
+      "tool": "mcp__ithink_kb_mcp__searchKnowledgeBaseDocumentsAcross",
+      "tid": "call-across-1"
+    },
+    {
+      "tool": "mcp__ithink_kb_mcp__searchKnowledgeBaseDocuments",
+      "tid": "call-single-1"
+    }
+  ],
+  "metadata": {
+    "kbName": "share49",
+    "fileName": "电力市场运行基本规则.docx",
+    "page_content": ["第一章 总则……", "第二章 市场成员……"]
+  }
+}
+```
+
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | `kind` | string | `skill` 或 `knowledge_base_document` |
-| `source` | object[] | 来源工具与工具调用 ID；`skill` 使用 `skill_view` |
+| `source` | object[] | 来源工具与工具调用 ID；`skill` 使用 `skill_view`，知识库文档可聚合多个 MCP 调用 |
 | `metadata.path` | string | `kind=skill` 时的 canonical skill 名 |
 | `metadata.kbName` | string | `kind=knowledge_base_document` 时的知识库名 |
 | `metadata.fileName` | string | 文档文件名；单库工具从其私有 `metadata.source` 仅取 basename，不向浏览器透传原路径 |
 | `metadata.page_content` | string[] | 文档命中片段，保留工具返回顺序并去重 |
+| `status` | string | 可选；当前仅 `expired`，表示 Skill 有历史来源但当前不可预览 |
 
 知识库工具结果仅接受最多 50 条、总编码不超过 1 MiB 的 JSON 列表；畸形、失败、未知工具或超限结果一律跳过。Reference 是 transcript/tool-call 派生索引，不写入 artifact store，因此无需新增数据库表。
 
-### `turns[]`
+### `turns[]`：按 user turn 的局部投影
 
 ```json
 {
@@ -204,7 +331,14 @@ Manifest 不返回文件或技能正文。非 expired 且 `preview` 为 `file`/`
 
 `turn_key` 优先使用持久化的 `user._turn_key`；只有完全没有稳定 key 的历史 transcript 才 fallback 为 `turn:<user_msg_idx>`。混合 keyed/unkeyed transcript 不生成新的 `turn:N`。SSE 和聊天 `data-turn-key` 必须使用同一个 key。聊天区 per-turn chips 只消费 `turns[].artifacts`。
 
-### `diagnostics`
+### `diagnostics`：不影响展示的归属诊断
+
+```json
+{
+  "missing_turn_key_message_indices": [8, 15],
+  "orphan_turn_keys": ["turn:99"]
+}
+```
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
@@ -217,6 +351,8 @@ Orphan artifact 仍保留在顶层 `artifacts`，但不进入正常 `turns[]`。
 
 与聊天流共用 SSE 连接，事件名为 `manifest_delta`。
 
+### 通用 delta 外壳
+
 ```json
 {
   "version": 1,
@@ -224,12 +360,6 @@ Orphan artifact 仍保留在顶层 `artifacts`，但不进入正常 `turns[]`。
   "stream_id": "stream-xyz",
   "turn_key": "turn:42",
   "sequence": 7,
-  "source": {
-    "kind": "tool_complete",
-    "tool": "write_file",
-    "tid": "call-1",
-    "status": "completed"
-  },
   "todos": {
     "items": [
       { "id": "plan", "content": "Implement", "status": "completed" }
@@ -254,28 +384,61 @@ Orphan artifact 仍保留在顶层 `artifacts`，但不进入正常 `turns[]`。
 | `stream_id` | 配合 `sequence` 做幂等和过期流过滤 |
 | `turn_key` | stream 启动时确定；前端不得从 `stream_id` 推断 |
 | `sequence` | 单 stream 内单调递增 |
-| `source.kind` | `tool_start`、`tool_complete` 或 `turn_complete` |
-| `source.tool` / `tid` / `status` | provenance、展示和去重信息 |
 | `todos` | 可选；SSE 可额外含 `mode: "replace_latest"` |
 | `artifacts` / `references` | 可选；row schema 与 GET 相同 |
 
 `todos`、`artifacts`、`references` 均为空时不发送 delta。
 
-### 知识库 MCP 示例
+每条 delta 至少包含 `version`、`session_id`、`stream_id`、`turn_key`、`sequence`，再携带本次
+有变化的 `todos`、`artifacts` 或 `references`。顶层不携带工具调用来源；引用来源只在
+`references[].source[]` 中表达。
 
-以下是 `searchKnowledgeBaseDocuments` 成功完成时的完整 SSE 帧。`source` 描述本次
-delta 的触发事件，因此 `source.tool` 使用内部规范化的小写工具名；具体文档的来源保留在
-`references[].source[]`，使用完整的 MCP 工具名和调用 ID。
+### Todo delta
 
 ```text
 event: manifest_delta
-data: {"version":1,"session_id":"5ccfb09bb7a7","stream_id":"stream-xyz","turn_key":"turn:4","sequence":12,"source":{"kind":"tool_complete","tool":"mcp__ithink_kb_mcp__searchknowledgebasedocuments","tid":"call_00_nvU4eugjt9ji9RA6gxWu6032","status":"completed"},"artifacts":[],"references":[{"kind":"knowledge_base_document","source":[{"tool":"mcp__ithink_kb_mcp__searchKnowledgeBaseDocuments","tid":"call_00_nvU4eugjt9ji9RA6gxWu6032"}],"metadata":{"kbName":"share49","fileName":"电力市场运行基本规则.docx","page_content":["第一章 总则……"]}}]}
+data: {"version":1,"session_id":"abc123","stream_id":"stream-xyz","turn_key":"turn:4","sequence":8,"todos":{"items":[{"id":"draft","content":"撰写答复","status":"in_progress"}],"mode":"replace_latest"},"artifacts":[],"references":[]}
+```
+
+### 文件成果 delta
+
+```text
+event: manifest_delta
+data: {"version":1,"session_id":"abc123","stream_id":"stream-xyz","turn_key":"turn:4","sequence":9,"artifacts":[{"path":"reports/result.md","preview":"file","source_tool":"write_file","profile":"ops"}],"references":[]}
+```
+
+### Skill 引用 delta
+
+```text
+event: manifest_delta
+data: {"version":1,"session_id":"abc123","stream_id":"stream-xyz","turn_key":"turn:4","sequence":10,"artifacts":[],"references":[{"kind":"skill","source":[{"tool":"skill_view","tid":"call-skill-1"}],"metadata":{"path":"research-skill"}}]}
+```
+
+### 知识库 MCP 示例
+
+以下是 `searchKnowledgeBaseDocuments` 成功完成时的完整 SSE 帧。具体文档的来源保留在
+`references[].source[]`，使用完整的 MCP 工具名和调用 ID；delta 顶层不重复携带工具
+完成事件字段。
+
+```text
+event: manifest_delta
+data: {"version":1,"session_id":"5ccfb09bb7a7","stream_id":"stream-xyz","turn_key":"turn:4","sequence":12,"artifacts":[],"references":[{"kind":"knowledge_base_document","source":[{"tool":"mcp__ithink_kb_mcp__searchKnowledgeBaseDocuments","tid":"call_00_nvU4eugjt9ji9RA6gxWu6032"}],"metadata":{"kbName":"share49","fileName":"电力市场运行基本规则.docx","page_content":["第一章 总则……"]}}]}
 
 ```
 
 同一调用返回多个文档时，`references[]` 包含多条行；同一 turn 内两个受支持工具命中同一
 `(kbName, fileName)` 时，客户端按既有合并规则合并为一条，追加不重复的
 `source[]` 与 `metadata.page_content[]`。
+
+### Turn reconcile 成果 delta
+
+turn reconcile 仅补充 artifacts；它的 `turns[]` 仅含当前 `turn_key` 的局部 artifacts，
+references 固定为空。
+
+```text
+event: manifest_delta
+data: {"version":1,"session_id":"abc123","stream_id":"stream-xyz","turn_key":"turn:4","sequence":13,"artifacts":[{"path":"reports/final.docx","preview":"file","source_tool":"assistant_prose"}],"turns":[{"turn_key":"turn:4","artifacts":[{"path":"reports/final.docx","preview":"file","source_tool":"assistant_prose"}],"references":[]}]}
+```
 
 ### 发射阶段
 
