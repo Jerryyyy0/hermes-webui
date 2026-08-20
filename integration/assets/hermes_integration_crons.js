@@ -462,6 +462,12 @@
     const schedule = job.schedule_display || (job.schedule && job.schedule.expression) || job.schedule || '';
     const skills = Array.isArray(job.skills) && job.skills.length ? job.skills.join(', ') : '—';
     const deliver = job.deliver || 'local';
+    const workspacePolicy = job.workspace_policy && typeof job.workspace_policy === 'object'
+      ? job.workspace_policy
+      : null;
+    const workspaceSummary = workspacePolicy
+      ? `${workspacePolicy.strategy || 'managed'} · ${workspacePolicy.base_workspace || ''}`
+      : tr('integration_cron_workspace_legacy', 'Legacy workspace');
     const isNoAgent = !!job.no_agent;
     const cronJobMode = isNoAgent ? 'no-agent' : 'agent';
     const modelProvider =
@@ -497,6 +503,7 @@
           <div class="detail-row"><div class="detail-row-label">${esc(T('cron_next'))}</div><div class="detail-row-value">${esc(nextRun)}</div></div>
           <div class="detail-row"><div class="detail-row-label">${esc(T('cron_last'))}</div><div class="detail-row-value">${esc(lastRun)}</div></div>
           <div class="detail-row"><div class="detail-row-label">Deliver</div><div class="detail-row-value">${esc(deliver)}</div></div>
+          <div class="detail-row"><div class="detail-row-label">${esc(tr('integration_cron_workspace_label', 'Execution workspace'))}</div><div class="detail-row-value"><code>${esc(workspaceSummary)}</code></div></div>
           <div class="detail-row"><div class="detail-row-label">Mode</div><div class="detail-row-value"><span class="detail-badge" id="integrationCronJobMode">${esc(cronJobMode)}</span>${modelProvider ? ` <code>${modelProvider}</code>` : ''}</div></div>
           ${isNoAgent ? `<div class="detail-row"><div class="detail-row-label">No-agent script</div><div class="detail-row-value"><code>${esc(script || '—')}</code></div></div>` : ''}
           <div class="detail-row"><div class="detail-row-label">${esc(T('cron_toast_notifications_label') || 'Completion toasts')}</div><div class="detail-row-value"><span class="detail-badge ${toastNotifications ? 'active' : ''}">${esc(toastNotifications ? T('cron_toast_notifications_enabled') || 'Enabled' : T('cron_toast_notifications_disabled') || 'Disabled')}</span></div></div>
@@ -767,17 +774,18 @@
         `/api/session?session_id=${encodeURIComponent(sessionId)}&messages=1&resolve_model=0`
       );
       const session = data.session || {};
+      const workspaceUnverified = session.workspace_state === 'workspace_unverified';
       host.innerHTML = `<div class="integration-cron-session-panel">
         <div class="integration-cron-session-header">
           <div>
             <div class="detail-card-title">${esc(session.title || T('cron_session_steps') || 'Session steps')}</div>
-            <div class="integration-cron-session-sub">${esc(sessionId)}${session.message_count ? ` · ${esc(session.message_count)} messages` : ''}</div>
+            <div class="integration-cron-session-sub">${esc(sessionId)}${session.message_count ? ` · ${esc(session.message_count)} messages` : ''}${workspaceUnverified ? ` · ${esc(tr('integration_cron_workspace_unverified', 'Workspace unavailable'))}` : ''}</div>
           </div>
-          <button type="button" class="btn secondary" data-action="open-full-session">${esc(T('cron_open_session') || 'Open session')}</button>
+          <button type="button" class="btn secondary" data-action="open-full-session"${workspaceUnverified ? ' disabled' : ''}>${esc(T('cron_open_session') || 'Open session')}</button>
         </div>
         <div class="integration-cron-session-messages">${renderSessionMessages(session)}</div>
       </div>`;
-      host.querySelector('[data-action="open-full-session"]')?.addEventListener('click', ev => {
+      host.querySelector('[data-action="open-full-session"]:not([disabled])')?.addEventListener('click', ev => {
         ev.stopPropagation();
         openSession(sessionId);
       });
@@ -803,6 +811,11 @@
     const formProfile = row?.ownerProfile || job.profile || '';
     const profileOpts = cronProfileOptions(formProfile);
     const deliver = job.deliver || 'local';
+    const workspacePolicy = job.workspace_policy && typeof job.workspace_policy === 'object'
+      ? job.workspace_policy
+      : null;
+    const workspaceStrategy = workspacePolicy?.strategy || (isEdit ? 'legacy' : 'managed');
+    const workspaceBase = workspacePolicy?.base_workspace || '';
     const deliverOpt = (v, l) => `<option value="${v}"${deliver === v ? ' selected' : ''}>${esc(l)}</option>`;
     const toastNotifications = job.toast_notifications !== false;
     title.textContent = isEdit
@@ -839,6 +852,19 @@
             <div class="detail-form-hint">${esc(tr('integration_cron_profile_required_hint', 'Cron Hub jobs are stored and run under this profile; server default is not available here.'))}</div>
           </div>
           <div class="detail-form-row">
+            <label for="integrationCronFormWorkspaceStrategy">${esc(tr('integration_cron_workspace_label', 'Execution workspace'))}</label>
+            <select id="integrationCronFormWorkspaceStrategy">
+              ${isEdit && !workspacePolicy ? `<option value="legacy" selected>${esc(tr('integration_cron_workspace_legacy', 'Keep legacy workspace'))}</option>` : ''}
+              <option value="managed"${workspaceStrategy === 'managed' ? ' selected' : ''}>${esc(tr('integration_cron_workspace_managed', 'New isolated directory'))}</option>
+              <option value="worktree"${workspaceStrategy === 'worktree' ? ' selected' : ''}>${esc(tr('integration_cron_workspace_worktree', 'Detached Git worktree'))}</option>
+            </select>
+            <div class="detail-form-hint">${esc(tr('integration_cron_workspace_hint', 'Each new execution uses its own directory.'))}</div>
+          </div>
+          <div class="detail-form-row" id="integrationCronFormWorkspaceBaseRow">
+            <label for="integrationCronFormWorkspaceBase">${esc(tr('integration_cron_workspace_base', 'Base workspace'))}</label>
+            <input type="text" id="integrationCronFormWorkspaceBase" value="${esc(workspaceBase)}" placeholder="${esc(tr('integration_cron_workspace_default', 'Use the approved default'))}" autocomplete="off">
+          </div>
+          <div class="detail-form-row">
             <label for="integrationCronFormSkillSearch">${esc(T('cron_skills_label') || 'Skills')}</label>
             <div class="skill-picker-wrap">
               <input type="text" id="integrationCronFormSkillSearch" placeholder="${esc(T('cron_skills_placeholder') || 'Add skills (optional)...')}" autocomplete="off" ${isEdit ? 'disabled' : ''}>
@@ -862,6 +888,15 @@
     _mode = isEdit ? 'edit' : 'create';
     setHeaderButtons(_mode, job);
     bindSkillPicker(isEdit);
+    const strategySelect = $('integrationCronFormWorkspaceStrategy');
+    const baseInput = $('integrationCronFormWorkspaceBase');
+    const syncWorkspaceFields = () => {
+      const legacy = strategySelect?.value === 'legacy';
+      if (baseInput) baseInput.disabled = legacy;
+      $('integrationCronFormWorkspaceBaseRow')?.classList.toggle('muted', legacy);
+    };
+    strategySelect?.addEventListener('change', syncWorkspaceFields);
+    syncWorkspaceFields();
   }
 
   async function openCreateForm() {
@@ -898,6 +933,8 @@
     const deliver = $('integrationCronFormDeliver')?.value || 'local';
     const profile = ($('integrationCronFormProfile')?.value || '').trim();
     const toastNotifications = $('integrationCronFormToast')?.checked !== false;
+    const workspaceStrategy = $('integrationCronFormWorkspaceStrategy')?.value || 'managed';
+    const workspaceBase = ($('integrationCronFormWorkspaceBase')?.value || '').trim();
     if (!schedule || !prompt) {
       showErr(T('cron_form_required') || 'Schedule and prompt are required.');
       return;
@@ -907,6 +944,21 @@
       return;
     }
     const payload = { name: name || null, schedule, prompt, deliver, profile, toast_notifications: toastNotifications };
+    if (workspaceStrategy === 'worktree' && !workspaceBase) {
+      showErr(tr('integration_cron_workspace_base_required', 'A Git base workspace is required for worktree mode.'));
+      return;
+    }
+    if (_mode === 'edit' && workspaceStrategy !== 'legacy' && !workspaceBase) {
+      showErr(tr('integration_cron_workspace_migration_base_required', 'Choose a base workspace to migrate this legacy job.'));
+      return;
+    }
+    if (workspaceStrategy !== 'legacy' && (workspaceBase || workspaceStrategy === 'worktree')) {
+      payload.workspace_policy = {
+        version: 1,
+        strategy: workspaceStrategy,
+        base_workspace: workspaceBase,
+      };
+    }
     try {
       if (_mode === 'create') {
         if (_selectedSkills.length) payload.skills = _selectedSkills;

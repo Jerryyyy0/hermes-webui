@@ -747,6 +747,64 @@ def delete_cron_job_history(
     deleted_profiles: list[str] = []
     deleted_output_dirs: list[str] = []
     deleted_output_files = 0
+    workspace_cleanup: list[dict[str, Any]] = []
+    preserved_sidecars: list[str] = []
+
+    # Sidecars are the recovery owner for V1 roots. Read their immutable
+    # binding before deleting anything, and keep a sidecar when cleanup fails
+    # so a later explicit retry still has authoritative ownership evidence.
+    cleanup_by_session: dict[str, dict[str, Any]] = {}
+    try:
+        from api.models import Session
+        from integration.crons.worktree import cleanup_execution_workspace
+
+        for sid in sorted(session_ids):
+            sidecar = Session.load_metadata_only(sid)
+            if sidecar is None:
+                continue
+            if (
+                str(getattr(sidecar, "source_tag", "") or "") != "cron"
+                or str(getattr(sidecar, "workspace_state", "") or "") != "ready"
+                or str(getattr(sidecar, "workspace_mode", "") or "") not in {"managed", "worktree"}
+            ):
+                continue
+            result = cleanup_execution_workspace(
+                getattr(sidecar, "workspace", ""),
+                session_id=sid,
+                mode=str(getattr(sidecar, "workspace_mode", "") or ""),
+                repo_root=getattr(sidecar, "worktree_repo_root", None),
+            )
+            outcome = {"session_id": sid, **result}
+            cleanup_by_session[sid] = outcome
+            workspace_cleanup.append(outcome)
+    except Exception as exc:
+        workspace_cleanup.append({"ok": False, "deleted": False, "reason": str(exc)})
+
+    failed_cleanup = [item for item in workspace_cleanup if not item.get("ok")]
+    if failed_cleanup:
+        # Preserve the sidecar and execution records as the retry handle. The
+        # immutable sidecar binding is the only trustworthy ownership evidence.
+        try:
+            from api.models import Session
+
+            for outcome in failed_cleanup:
+                sid = str(outcome.get("session_id") or "").strip()
+                session = Session.load(sid) if sid else None
+                if session is None or str(getattr(session, "source_tag", "") or "") != "cron":
+                    continue
+                session.workspace_state = "cleanup_failed"
+                session.save()
+                preserved_sidecars.append(sid)
+        except Exception as exc:
+            logger.warning("failed to persist cron cleanup_failed state: %s", exc)
+        return {
+            "ok": False,
+            "deleted": False,
+            "job_id": job_id,
+            "workspace_cleanup": workspace_cleanup,
+            "preserved_sidecars": sorted(set(preserved_sidecars)),
+            "reason": "workspace_cleanup_failed",
+        }
 
     try:
         from api.models import _delete_state_db_session_rows_many
@@ -754,6 +812,10 @@ def delete_cron_job_history(
         _delete_state_db_session_rows_many = None
 
     for sid in sorted(session_ids):
+        cleanup = cleanup_by_session.get(sid)
+        if cleanup is not None and not cleanup.get("ok"):
+            preserved_sidecars.append(sid)
+            continue
         if _delete_webui_cron_session_sidecar(sid):
             deleted_sidecars.append(sid)
 
@@ -799,6 +861,8 @@ def delete_cron_job_history(
         "deleted_profiles": deleted_profiles,
         "deleted_output_dirs": deleted_output_dirs,
         "deleted_output_files": deleted_output_files,
+        "workspace_cleanup": workspace_cleanup,
+        "preserved_sidecars": preserved_sidecars,
     }
 
 
@@ -997,6 +1061,18 @@ def _cron_session_id_parts(sid: str) -> tuple[str | None, str | None]:
     # Current shape: cron_<job_id>_YYYYMMDD_HHMMSS. Split the final two
     # timestamp components together so job_id stays ee50... rather than
     # ee50..._YYYYMMDD.
+    parts = body.rsplit("_", 3)
+    if (
+        len(parts) == 4
+        and parts[0]
+        and len(parts[1]) == 8
+        and len(parts[2]) == 6
+        and len(parts[3]) == 8
+        and parts[1].isdigit()
+        and parts[2].isdigit()
+        and all(char in "0123456789abcdefABCDEF" for char in parts[3])
+    ):
+        return parts[0], f"{parts[1]}_{parts[2]}"
     parts = body.rsplit("_", 2)
     if (
         len(parts) == 3
@@ -1935,6 +2011,8 @@ def _materialize_cron_session_found(
     end_reason: str | None = None,
     execution_ended_at: float | None = None,
     execution_error_detail: str | None = None,
+    workspace_binding=None,
+    state_db_cwd: str | None = None,
 ) -> str:
     sid, cli_title, started_at, model = found
     model = str(model or "").strip()
@@ -1967,6 +2045,12 @@ def _materialize_cron_session_found(
                 or getattr(existing, "source_tag", None) != "cron"
                 or getattr(existing, "cron_execution_profile", None) != execution_source
             )
+            if workspace_binding is not None:
+                needs_update = needs_update or (
+                    str(getattr(existing, "workspace", "") or "") != workspace_binding.root
+                    or getattr(existing, "workspace_mode", None) != workspace_binding.mode
+                    or getattr(existing, "workspace_state", None) != workspace_binding.state
+                )
             needs_model_update = bool(
                 model and (not getattr(existing, "model", None) or getattr(existing, "model", None) == "unknown")
             )
@@ -1995,6 +2079,19 @@ def _materialize_cron_session_found(
                 full.is_cli_session = False
                 full.source_tag = "cron"
                 changed = True
+            if workspace_binding is not None:
+                if str(getattr(full, "workspace", "") or "") != workspace_binding.root:
+                    # A previously materialized root is immutable. Do not let a
+                    # replay or a malformed current-run input redirect it.
+                    full.workspace_state = "workspace_unverified"
+                    changed = True
+                else:
+                    full.workspace_mode = workspace_binding.mode
+                    full.workspace_state = workspace_binding.state
+                    if workspace_binding.mode == "worktree":
+                        full.worktree_path = workspace_binding.root
+                        full.worktree_repo_root = workspace_binding.worktree_repo_root
+                    changed = True
             execution_source = execution_profile or target_profile
             if getattr(full, "cron_execution_profile", None) != execution_source:
                 full.cron_execution_profile = execution_source
@@ -2057,6 +2154,23 @@ def _materialize_cron_session_found(
     msgs = _stamp_cron_manifest_turn_keys(normalize_cron_manifest_messages(msgs))
 
     title = (job or {}).get("name") or cli_title or f"Cron {str((job or {}).get('id') or '').strip()}"
+    if workspace_binding is not None:
+        imported_workspace = workspace_binding.root
+        imported_workspace_mode = workspace_binding.mode
+        imported_workspace_state = workspace_binding.state
+    elif state_db_cwd:
+        imported_workspace = state_db_cwd
+        imported_workspace_mode = "external"
+        imported_workspace_state = "legacy_shared"
+    else:
+        # A session object needs a path-shaped value, but this marker is never
+        # exposed to workspace consumers because the shared resolver rejects it.
+        from api.config import DEFAULT_WORKSPACE
+
+        imported_workspace = str(DEFAULT_WORKSPACE)
+        imported_workspace_mode = "external"
+        imported_workspace_state = "workspace_unverified"
+
     s = import_cli_session(
         sid,
         title,
@@ -2065,10 +2179,17 @@ def _materialize_cron_session_found(
         profile=target_profile,
         created_at=started_at,
         updated_at=started_at,
+        workspace=imported_workspace,
+        workspace_mode=imported_workspace_mode,
+        workspace_state=imported_workspace_state,
+        require_workspace_binding=True,
     )
     s.project_id = ensure_cron_project(profile=target_profile)
     s.is_cli_session = False
     s.source_tag = "cron"
+    if workspace_binding is not None and workspace_binding.mode == "worktree":
+        s.worktree_path = workspace_binding.root
+        s.worktree_repo_root = workspace_binding.worktree_repo_root
     s.cron_execution_profile = execution_profile or target_profile
     s.cron_execution_ended_at = execution_ended_at
     if cron_error_message:
@@ -2076,6 +2197,61 @@ def _materialize_cron_session_found(
     s.save()
     publish_session_list_changed("cron_session_imported")
     return sid
+
+
+def _cron_session_cwd(conn: sqlite3.Connection, session_id: str) -> str | None:
+    """Read the Agent-owned cwd without assuming legacy state.db columns."""
+    try:
+        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(sessions)")}
+        if "cwd" not in columns:
+            return None
+        row = conn.execute("SELECT cwd FROM sessions WHERE id = ?", (session_id,)).fetchone()
+    except sqlite3.Error:
+        return None
+    if not row:
+        return None
+    value = str(row[0] or "").strip()
+    return value or None
+
+
+def _current_run_workspace_binding(job: dict, session_id: str, state_db_cwd: str | None):
+    """Build a binding only from this run's explicit Agent hand-off values."""
+    if not isinstance((job or {}).get("workspace_policy"), dict):
+        return None
+    try:
+        from integration.crons.workspace_policy import binding_for_current_run
+
+        return binding_for_current_run(
+            job,
+            session_id=session_id,
+            cwd=(job or {}).get("_cron_execution_workspace"),
+            state_db_cwd=state_db_cwd,
+        )
+    except Exception as exc:
+        logger.warning("cron workspace binding rejected for session_id=%s: %s", session_id, exc)
+        return None
+
+
+def _legacy_workspace_binding(
+    job: dict,
+    *,
+    state_db_cwd: str | None,
+    profile_home: Path | None,
+):
+    """Create a follow-up-only binding for a job that predates V1 policy."""
+    if isinstance((job or {}).get("workspace_policy"), dict):
+        return None
+    try:
+        from integration.crons.workspace_policy import binding_for_legacy_session
+
+        return binding_for_legacy_session(
+            job,
+            state_db_cwd=state_db_cwd,
+            profile_home=profile_home,
+        )
+    except Exception as exc:
+        logger.warning("legacy cron workspace binding rejected: %s", exc)
+        return None
 
 
 def materialize_cron_session(
@@ -2129,6 +2305,11 @@ def materialize_cron_session(
     def materialize_output_fallback() -> str | None:
         if fallback_record is None:
             return None
+        workspace_binding = _legacy_workspace_binding(
+            job,
+            state_db_cwd=None,
+            profile_home=Path(execution_home),
+        )
         return _materialize_cron_session_found(
             job,
             (
@@ -2144,6 +2325,8 @@ def materialize_cron_session(
             end_reason=fallback_record.get("end_reason"),
             execution_ended_at=execution_ended_at,
             execution_error_detail=execution_error_detail,
+            workspace_binding=workspace_binding,
+            state_db_cwd=None,
         )
 
     db_path = Path(execution_home) / "state.db"
@@ -2159,6 +2342,7 @@ def materialize_cron_session(
                 session_id=session_id,
             )
             end_reason, ended_at = _cron_session_completion(conn, found[0]) if found else (None, None)
+            state_db_cwd = _cron_session_cwd(conn, found[0]) if found else None
     except sqlite3.Error as exc:
         logger.debug("materialize_cron_session: state.db read failed: %s", exc)
         return materialize_output_fallback()
@@ -2176,11 +2360,21 @@ def materialize_cron_session(
                 end_reason, ended_at = (
                     _cron_session_completion(conn, found[0]) if found else (None, None)
                 )
+                state_db_cwd = _cron_session_cwd(conn, found[0]) if found else None
         except sqlite3.Error as exc:
             logger.debug("materialize_cron_session: synthesized state.db read failed: %s", exc)
 
     if not found:
         return materialize_output_fallback()
+
+    current_v1 = isinstance((job or {}).get("workspace_policy"), dict)
+    workspace_binding = _current_run_workspace_binding(job, found[0], state_db_cwd)
+    if not current_v1:
+        workspace_binding = _legacy_workspace_binding(
+            job,
+            state_db_cwd=state_db_cwd,
+            profile_home=Path(execution_home),
+        )
 
     return _materialize_cron_session_found(
         job,
@@ -2192,6 +2386,8 @@ def materialize_cron_session(
         end_reason=end_reason,
         execution_ended_at=ended_at,
         execution_error_detail=execution_error_detail,
+        workspace_binding=workspace_binding,
+        state_db_cwd=state_db_cwd if workspace_binding is not None or not current_v1 else None,
     )
 
 
@@ -2213,16 +2409,31 @@ def materialize_cron_session_run(
         (run or {}).get("started_at"),
         str((run or {}).get("model") or ""),
     )
+    # History/replay never receives the current-run in-memory policy/cwd
+    # hand-off, so V1 rows without a sidecar remain unverified by design.
+    is_v1_job = isinstance((job or {}).get("workspace_policy"), dict)
+    execution_profile = _execution_profile_name(job) or owner
+    try:
+        profile_home = Path(_profile_home_for_name(execution_profile))
+    except Exception:
+        profile_home = None
+    workspace_binding = _legacy_workspace_binding(
+        job,
+        state_db_cwd=(run or {}).get("cwd"),
+        profile_home=profile_home,
+    )
     return _materialize_cron_session_found(
         job,
         found,
         target_profile=_target_profile_for_job(job, owner),
-        execution_profile=_execution_profile_name(job) or owner,
+        execution_profile=execution_profile,
         fallback_output=fallback_output,
         run_mtime=(run or {}).get("ended_at") or (run or {}).get("started_at"),
         end_reason=(run or {}).get("end_reason"),
         execution_ended_at=(run or {}).get("ended_at"),
         execution_error_detail=(run or {}).get("execution_error_detail") or (run or {}).get("error"),
+        workspace_binding=workspace_binding,
+        state_db_cwd=None if is_v1_job else (run or {}).get("cwd"),
     )
 
 
@@ -2257,6 +2468,10 @@ def materialize_cron_sessions_for_runs(
                 sid: _cron_session_completion(conn, sid)
                 for sid, _, _, _ in candidates
             }
+            cwd_by_session = {
+                sid: _cron_session_cwd(conn, sid)
+                for sid, _, _, _ in candidates
+            }
     except sqlite3.Error as exc:
         logger.debug("materialize_cron_sessions_for_runs: state.db read failed: %s", exc)
         return {}
@@ -2275,6 +2490,11 @@ def materialize_cron_sessions_for_runs(
         found = _select_cron_session_candidate(candidates, run_mtime=run_mtime)
         if not found:
             continue
+        workspace_binding = _legacy_workspace_binding(
+            job,
+            state_db_cwd=cwd_by_session.get(found[0]),
+            profile_home=Path(execution_home),
+        )
         sid = _materialize_cron_session_found(
             job,
             found,
@@ -2284,6 +2504,8 @@ def materialize_cron_sessions_for_runs(
             run_mtime=run_mtime,
             end_reason=completions.get(found[0], (None, None))[0],
             execution_ended_at=completions.get(found[0], (None, None))[1],
+            workspace_binding=workspace_binding,
+            state_db_cwd=cwd_by_session.get(found[0]),
         )
         if filename:
             session_ids[filename] = sid

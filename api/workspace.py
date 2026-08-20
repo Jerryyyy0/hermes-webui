@@ -922,7 +922,11 @@ def resolve_session_workspace(
     that root with another directory.
     """
     current = getattr(session, "workspace", None)
-    is_managed = str(getattr(session, "workspace_mode", "") or "").strip().lower() == "managed"
+    source_tag = str(getattr(session, "source_tag", "") or "").strip().lower()
+    workspace_state = str(getattr(session, "workspace_state", "ready") or "ready").strip().lower()
+    if source_tag == "cron" and workspace_state == "workspace_unverified":
+        raise ValueError("Cron session workspace is unverified")
+    is_managed = str(getattr(session, "workspace_mode", "") or "").strip().lower() in {"managed", "worktree"}
     # Managed roots are durable identity state, so validate them even when a
     # worker receives an already-validated workspace from its route boundary.
     current_resolved = resolve_trusted_workspace(current) if is_managed or not requested_is_trusted else _resolve_path(current)

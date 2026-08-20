@@ -105,6 +105,34 @@ def test_env_var_workspace_takes_priority_over_passed_raw(monkeypatch, tmp_path)
     assert resolved == env_ws.resolve()
 
 
+def test_global_default_workspace_is_exposed_to_agent_when_env_is_not_explicit(monkeypatch, tmp_path):
+    workspace = tmp_path / "webui_workspace"
+    workspace.mkdir()
+
+    monkeypatch.delenv("HERMES_WEBUI_DEFAULT_WORKSPACE", raising=False)
+    monkeypatch.setattr(config, "_AGENT_WORKSPACE_ENV_WAS_EXPLICIT", False)
+    monkeypatch.setattr(config, "DEFAULT_WORKSPACE", workspace)
+
+    config._sync_agent_default_workspace_env()
+
+    assert config.os.environ["HERMES_WEBUI_DEFAULT_WORKSPACE"] == str(workspace)
+
+
+def test_explicit_agent_workspace_env_is_not_replaced_by_global_setting(monkeypatch, tmp_path):
+    operator_workspace = tmp_path / "operator_workspace"
+    configured_workspace = tmp_path / "webui_workspace"
+    operator_workspace.mkdir()
+    configured_workspace.mkdir()
+
+    monkeypatch.setenv("HERMES_WEBUI_DEFAULT_WORKSPACE", str(operator_workspace))
+    monkeypatch.setattr(config, "_AGENT_WORKSPACE_ENV_WAS_EXPLICIT", True)
+    monkeypatch.setattr(config, "DEFAULT_WORKSPACE", configured_workspace)
+
+    config._sync_agent_default_workspace_env()
+
+    assert config.os.environ["HERMES_WEBUI_DEFAULT_WORKSPACE"] == str(operator_workspace)
+
+
 def test_ensure_workspace_dir_returns_false_for_unwritable_path(monkeypatch, tmp_path):
     """_ensure_workspace_dir returns False for a path that can't be created."""
     def fail_mkdir(self, mode=0o777, parents=False, exist_ok=False):

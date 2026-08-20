@@ -1195,6 +1195,46 @@ def _execution_home_for_cron_session_lookup(job: dict, owner_profile: str | None
     return _DEFAULT_HERMES_HOME
 
 
+_CRON_EXECUTION_HANDOFF_FIELDS = (
+    "_cron_execution_workspace",
+    "_cron_workspace_strategy",
+    "_cron_worktree_repo_root",
+    "_cron_workspace_namespace_base",
+)
+
+
+def _cron_execution_handoff(job):
+    """Return the per-run values that must cross the manual-run process boundary."""
+    handoff = {}
+    for key in ("_cron_session_id", *_CRON_EXECUTION_HANDOFF_FIELDS):
+        value = (job or {}).get(key)
+        if isinstance(value, str) and value.strip():
+            handoff[key] = value.strip()
+    return handoff
+
+
+def _apply_cron_execution_handoff(job, handoff):
+    """Copy a verified child-process execution handoff onto the parent job copy."""
+    if not isinstance(job, dict) or not isinstance(handoff, dict):
+        return
+    session_id = str(handoff.get("_cron_session_id") or "").strip()
+    expected_session_id = str(job.get("_cron_session_id") or "").strip()
+    if not session_id:
+        return
+    if expected_session_id and session_id != expected_session_id:
+        logger.warning(
+            "Ignoring cron subprocess workspace handoff with mismatched session ID: expected=%s got=%s",
+            expected_session_id,
+            session_id,
+        )
+        return
+    job["_cron_session_id"] = session_id
+    for key in _CRON_EXECUTION_HANDOFF_FIELDS:
+        value = handoff.get(key)
+        if isinstance(value, str) and value.strip():
+            job[key] = value.strip()
+
+
 def _cron_job_subprocess_main(job, execution_profile_home, result_queue):
     """Run one cron job inside a child process pinned to a profile home."""
     try:
@@ -1210,7 +1250,10 @@ def _cron_job_subprocess_main(job, execution_profile_home, result_queue):
 
             with cron_profile_context_for_home(execution_profile_home):
                 result = _run()
-        result_queue.put(("ok", result))
+        # ``spawn`` gives this worker its own job dictionary.  Return the
+        # canonical allocation explicitly so the parent can materialize the
+        # same execution instead of falling back to an unverified workspace.
+        result_queue.put(("ok", result, _cron_execution_handoff(job)))
     except BaseException as exc:  # pragma: no cover - surfaced in parent
         import traceback
 
@@ -1294,6 +1337,7 @@ def _run_cron_job_in_profile_subprocess(job, execution_profile_home):
         result_queue.join_thread()
 
     if status == "ok":
+        _apply_cron_execution_handoff(job, payload[1] if len(payload) > 1 else None)
         return payload[0]
 
     message = payload[0]
@@ -1336,11 +1380,18 @@ def _run_cron_tracked(job, profile_home=None, execution_profile_home=None, owner
     job_id = job.get("id", "")
     execution_profile_home = execution_profile_home or profile_home
     if not str(job.get("_cron_session_id") or "").strip() and job_id:
-        from datetime import datetime
+        try:
+            from cron.execution_workspace import new_cron_session_id
 
-        job["_cron_session_id"] = (
-            f"cron_{job_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        )
+            job["_cron_session_id"] = new_cron_session_id(job_id)
+        except ImportError:
+            # Older Agents have no V1 workspace module. They only run legacy
+            # jobs, for which the historical timestamp identity remains valid.
+            from datetime import datetime
+
+            job["_cron_session_id"] = (
+                f"cron_{job_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            )
 
     def _with_cron_home(home, fn):
         if home is None:
@@ -20435,7 +20486,11 @@ def _handle_chat_start(handler, body, diag=None):
 
 def _resolve_chat_workspace_with_recovery(s, requested_workspace) -> str:
     """Recover stale implicit session workspaces without hiding explicit errors."""
-    if str(getattr(s, "workspace_mode", "") or "").strip().lower() == "managed":
+    workspace_mode = str(getattr(s, "workspace_mode", "") or "").strip().lower()
+    if (
+        workspace_mode in {"managed", "worktree"}
+        or str(getattr(s, "source_tag", "") or "").strip().lower() == "cron"
+    ):
         return str(resolve_session_workspace(s, requested_workspace))
     explicit = requested_workspace not in (None, "")
     candidate = requested_workspace if explicit else getattr(s, "workspace", None)

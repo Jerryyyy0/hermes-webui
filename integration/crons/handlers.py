@@ -13,6 +13,14 @@ from integration.config import cron_all_profiles_enabled
 from integration.crons.listing import _normalize_profile_name
 
 
+_UPDATE_FIELDS = {
+    "name", "prompt", "schedule", "schedule_display", "repeat", "deliver",
+    "skills", "skill", "model", "provider", "base_url", "script", "no_agent",
+    "context_from", "enabled_toolsets", "workdir", "enabled", "state",
+    "paused_at", "paused_reason", "workspace_policy", "toast_notifications",
+}
+
+
 def _respond(handler, payload, status: int = 200) -> bool:
     j(handler, payload, status=status)
     return True
@@ -102,10 +110,19 @@ def _handle_create(handler, body):
         return _respond_bad(handler, str(e))
 
     from cron.jobs import create_job, update_job
+    from integration.crons.workspace_policy import normalize_workspace_policy
+    from integration.crons.workspace_policy import approved_default_workspace
 
     toast_notifications = body.get("toast_notifications") is not False
     try:
         with _owner_cron_context(profile) as owner:
+            raw_policy = body.get("workspace_policy")
+            default_base = (
+                approved_default_workspace(get_hermes_home_for_profile(owner))
+                if raw_policy is None
+                else None
+            )
+            workspace_policy = normalize_workspace_policy(raw_policy, default_base=default_base)
             job = create_job(
                 prompt=body["prompt"],
                 schedule=body["schedule"],
@@ -113,6 +130,7 @@ def _handle_create(handler, body):
                 deliver=body.get("deliver") or "local",
                 skills=body.get("skills") or [],
                 model=body.get("model") or None,
+                workspace_policy=workspace_policy,
             )
             post_create: dict = {"profile": owner}
             if not toast_notifications:
@@ -138,14 +156,16 @@ def _handle_update(handler, body):
 
     from cron.jobs import update_job
 
-    updates = {
-        k: v
-        for k, v in body.items()
-        if k not in ("job_id", "profile", "owner_profile") and v is not None
-    }
+    updates = {k: v for k, v in body.items() if k in _UPDATE_FIELDS and v is not None}
     updates["profile"] = profile
     try:
         with _owner_cron_context(profile) as owner:
+            if "workspace_policy" in updates:
+                from integration.crons.workspace_policy import normalize_workspace_policy
+
+                updates["workspace_policy"] = normalize_workspace_policy(
+                    updates["workspace_policy"],
+                )
             job = update_job(body["job_id"], updates)
             if not job:
                 return _respond_bad(handler, "Job not found", 404)
@@ -173,9 +193,6 @@ def _handle_delete(handler, body):
         job = get_job(body["job_id"])
         if not job:
             return _respond_bad(handler, "Job not found", 404)
-        ok = remove_job(body["job_id"])
-    if not ok:
-        return _respond_bad(handler, "Job not found", 404)
     try:
         from integration.crons.session_bridge import delete_cron_job_history
 
@@ -186,6 +203,16 @@ def _handle_delete(handler, body):
         )
     except Exception as e:
         history_cleanup = {"ok": False, "deleted": False, "error": str(e)}
+    if not history_cleanup.get("ok"):
+        return _respond(
+            handler,
+            {"ok": False, "job_id": body["job_id"], "history_cleanup": history_cleanup},
+            status=409,
+        )
+    with _owner_cron_context(profile):
+        ok = remove_job(body["job_id"])
+    if not ok:
+        return _respond_bad(handler, "Job not found", 404)
     return _respond(
         handler,
         {"ok": True, "job_id": body["job_id"], "history_cleanup": history_cleanup},

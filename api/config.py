@@ -800,6 +800,11 @@ cfg = _cfg_cache  # alias for backward compat with existing references
 
 
 # ── Default workspace discovery ───────────────────────────────────────────────
+_AGENT_WORKSPACE_ENV_WAS_EXPLICIT = bool(
+    os.getenv("HERMES_WEBUI_DEFAULT_WORKSPACE", "").strip()
+)
+
+
 def _workspace_candidates(raw: str | Path | None = None) -> list[Path]:
     """Return ordered candidate workspace paths, de-duplicated."""
     candidates: list[Path] = []
@@ -868,6 +873,17 @@ def _discover_default_workspace() -> Path:
 
 DEFAULT_WORKSPACE = _discover_default_workspace()
 DEFAULT_MODEL = os.getenv("HERMES_WEBUI_DEFAULT_MODEL", "")  # Empty = use provider default; avoids showing unavailable OpenAI model to non-OpenAI users (#646)
+
+
+def _sync_agent_default_workspace_env() -> None:
+    """Expose WebUI's global default to Agent-created cron jobs.
+
+    Keep an operator-provided environment variable authoritative. Otherwise the
+    Agent's direct ``cron.jobs.create_job`` callers would fall back to
+    ``HERMES_HOME/workspace`` and diverge from the WebUI default setting.
+    """
+    if not _AGENT_WORKSPACE_ENV_WAS_EXPLICIT:
+        os.environ["HERMES_WEBUI_DEFAULT_WORKSPACE"] = str(DEFAULT_WORKSPACE)
 
 
 # ── Startup diagnostics ───────────────────────────────────────────────────────
@@ -9810,6 +9826,7 @@ def save_settings(settings: dict) -> dict:
     global DEFAULT_WORKSPACE
     if "default_workspace" in current:
         DEFAULT_WORKSPACE = resolve_default_workspace(current["default_workspace"])
+        _sync_agent_default_workspace_env()
     current["default_model"] = get_effective_default_model()
     return current
 
@@ -9837,6 +9854,8 @@ if _settings_file_exists:
             _startup_settings.get("default_workspace"),
             DEFAULT_WORKSPACE,
         )
+
+_sync_agent_default_workspace_env()
 
 # ── SESSIONS in-memory cache (LRU OrderedDict) ───────────────────────────────
 SESSIONS: collections.OrderedDict = collections.OrderedDict()

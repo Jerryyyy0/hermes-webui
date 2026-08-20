@@ -20,16 +20,21 @@ def cron_env(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_INTEGRATION", "1")
     monkeypatch.setenv("HERMES_WEBUI_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("HERMES_HOME", str(home))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setenv("HERMES_WEBUI_DEFAULT_WORKSPACE", str(workspace))
 
     state_dir = Path(os.environ["HERMES_WEBUI_STATE_DIR"])
     sessions_dir = state_dir / "sessions"
     sessions_dir.mkdir(parents=True, exist_ok=True)
     import api.config as webui_config
     import api.models as models
+    import api.workspace as workspace_api
 
     monkeypatch.setattr(webui_config, "SESSION_DIR", sessions_dir)
     monkeypatch.setattr(webui_config, "STATE_DIR", state_dir)
     monkeypatch.setattr(models, "SESSION_DIR", sessions_dir)
+    monkeypatch.setattr(workspace_api, "_BOOT_DEFAULT_WORKSPACE", workspace)
 
     db = home / "state.db"
     with closing(sqlite3.connect(str(db))) as conn:
@@ -64,7 +69,7 @@ def cron_env(tmp_path, monkeypatch):
         )
         conn.commit()
 
-    return {"home": home, "db": db}
+    return {"home": home, "db": db, "workspace": workspace}
 
 
 def test_cron_sessions_never_visible_in_sidebar(monkeypatch):
@@ -236,6 +241,180 @@ def test_materialize_persists_execution_boundary_from_state_db(cron_env, monkeyp
     from api.models import Session
 
     assert Session.load(sid).cron_execution_ended_at == 1700000250.0
+
+
+def test_current_v1_materialize_uses_state_db_cwd_as_immutable_workspace(cron_env, monkeypatch):
+    workspace = cron_env["workspace"] / "sessions" / "cron" / "default" / "cron_job1_1700000000"
+    workspace.mkdir(parents=True)
+    with closing(sqlite3.connect(str(cron_env["db"]))) as conn:
+        conn.execute("ALTER TABLE sessions ADD COLUMN cwd TEXT")
+        conn.execute(
+            "UPDATE sessions SET cwd = ? WHERE id = ?",
+            (str(workspace), "cron_job1_1700000000"),
+        )
+        conn.commit()
+
+    job = {
+        "id": "job1",
+        "name": "Nightly",
+        "profile": "default",
+        "_cron_session_id": "cron_job1_1700000000",
+        "_cron_execution_workspace": str(workspace),
+        "workspace_policy": {
+            "version": 1,
+            "strategy": "managed",
+            "base_workspace": str(cron_env["workspace"]),
+        },
+    }
+    with patch("api.models.get_state_db_session_messages", return_value=[{"role": "user", "content": "hi"}]):
+        from integration.crons.session_bridge import materialize_cron_session
+
+        sid = materialize_cron_session(
+            job,
+            owner_profile="default",
+            execution_home=cron_env["home"],
+            session_id="cron_job1_1700000000",
+        )
+
+    from api.models import Session
+
+    session = Session.load(sid)
+    assert session.workspace == str(workspace)
+    assert session.workspace_mode == "managed"
+    assert session.workspace_state == "ready"
+
+
+def test_legacy_empty_cwd_uses_profile_shared_continuation_workspace(cron_env, monkeypatch):
+    """Legacy records without Agent cwd remain usable in the approved shared root."""
+    from integration.crons.session_bridge import materialize_cron_session
+
+    monkeypatch.setattr(
+        "integration.crons.workspace_policy.approved_default_workspace",
+        lambda _profile_home: cron_env["workspace"],
+    )
+    with patch(
+        "api.models.get_state_db_session_messages",
+        return_value=[{"role": "user", "content": "hi"}],
+    ):
+        sid = materialize_cron_session(
+            {"id": "job1", "name": "Legacy nightly", "profile": ""},
+            owner_profile="default",
+            execution_home=cron_env["home"],
+        )
+
+    from api.models import Session
+    from api.workspace import resolve_session_workspace
+
+    session = Session.load(sid)
+    assert session.workspace == str(cron_env["workspace"])
+    assert session.workspace_mode == "external"
+    assert session.workspace_state == "legacy_shared"
+    assert resolve_session_workspace(session) == cron_env["workspace"].resolve()
+
+
+def test_legacy_history_materializers_use_shared_continuation_workspace(cron_env, monkeypatch):
+    from integration.crons.session_bridge import (
+        materialize_cron_session_run,
+        materialize_cron_sessions_for_runs,
+    )
+
+    monkeypatch.setattr(
+        "integration.crons.workspace_policy.approved_default_workspace",
+        lambda _profile_home: cron_env["workspace"],
+    )
+    monkeypatch.setattr(
+        "integration.crons.session_bridge._profile_home_for_name",
+        lambda _profile: cron_env["home"],
+    )
+    job = {"id": "job1", "name": "Legacy nightly", "profile": ""}
+    run = {
+        "session_id": "cron_job1_1700000000",
+        "title": "Legacy nightly",
+        "started_at": 1700000000.0,
+        "ended_at": 1700000001.0,
+    }
+
+    assert materialize_cron_session_run(job, owner_profile="default", run=run) == run["session_id"]
+    session_ids = materialize_cron_sessions_for_runs(
+        job,
+        owner_profile="default",
+        execution_home=cron_env["home"],
+        runs=[{"filename": "legacy.md", "run_mtime": 1700000000.0}],
+    )
+
+    from api.models import Session
+
+    assert session_ids == {"legacy.md": run["session_id"]}
+    assert Session.load(run["session_id"]).workspace_state == "legacy_shared"
+
+
+def test_legacy_same_root_sidecar_is_repaired_from_unverified(cron_env, monkeypatch):
+    from api.models import Session
+    from integration.crons.session_bridge import materialize_cron_session
+
+    sid = "cron_job1_1700000000"
+    Session(
+        session_id=sid,
+        title="Legacy nightly",
+        profile="default",
+        source_tag="cron",
+        workspace=str(cron_env["workspace"]),
+        workspace_mode="external",
+        workspace_state="workspace_unverified",
+        messages=[{"role": "user", "content": "hi"}],
+    ).save()
+    monkeypatch.setattr(
+        "integration.crons.workspace_policy.approved_default_workspace",
+        lambda _profile_home: cron_env["workspace"],
+    )
+
+    materialize_cron_session(
+        {"id": "job1", "name": "Legacy nightly", "profile": ""},
+        owner_profile="default",
+        execution_home=cron_env["home"],
+    )
+
+    repaired = Session.load(sid)
+    assert repaired.workspace == str(cron_env["workspace"])
+    assert repaired.workspace_state == "legacy_shared"
+
+
+def test_v1_missing_current_workspace_handoff_remains_unverified(cron_env):
+    from integration.crons.session_bridge import materialize_cron_session
+
+    sid = materialize_cron_session(
+        {
+            "id": "job1",
+            "name": "V1 nightly",
+            "profile": "default",
+            "_cron_session_id": "cron_job1_1700000000",
+            "workspace_policy": {
+                "version": 1,
+                "strategy": "managed",
+                "base_workspace": str(cron_env["workspace"]),
+            },
+        },
+        owner_profile="default",
+        execution_home=cron_env["home"],
+        session_id="cron_job1_1700000000",
+    )
+
+    from api.models import Session
+
+    assert Session.load(sid).workspace_state == "workspace_unverified"
+
+
+def test_unverified_cron_workspace_is_rejected_by_shared_resolver(cron_env):
+    from api.workspace import resolve_session_workspace
+
+    session = SimpleNamespace(
+        workspace=str(cron_env["workspace"]),
+        workspace_mode="external",
+        workspace_state="workspace_unverified",
+        source_tag="cron",
+    )
+    with pytest.raises(ValueError, match="unverified"):
+        resolve_session_workspace(session)
 
 
 def test_materialize_selects_session_for_run_mtime(cron_env, monkeypatch):
@@ -1257,6 +1436,47 @@ def test_delete_cron_job_history_removes_all_job_runs_and_preserves_other_jobs(c
         assert conn.execute("SELECT id FROM sessions WHERE id = ?", (job2_sid,)).fetchone() is not None
         assert conn.execute("SELECT id FROM messages WHERE session_id = ?", (job1_sid_2,)).fetchone() is None
         assert conn.execute("SELECT id FROM messages WHERE session_id = ?", (job2_sid,)).fetchone() is not None
+
+
+def test_delete_cron_job_history_preserves_records_when_workspace_cleanup_fails(cron_env, monkeypatch):
+    from api.models import Session
+    from integration.crons.session_bridge import delete_cron_job_history
+
+    sid = "cron_job1_20260819_010101_deadbeef"
+    session = Session(
+        session_id=sid,
+        title="Cron run",
+        profile="default",
+        source_tag="cron",
+        workspace=str(cron_env["home"] / "workspace"),
+        workspace_mode="managed",
+        workspace_state="ready",
+        messages=[{"role": "assistant", "content": "done"}],
+    )
+    session.save()
+    with patch(
+        "integration.crons.session_bridge._cron_session_ids_by_profile",
+        return_value={"default": {sid}},
+    ), patch(
+        "integration.crons.session_bridge._cron_state_db_profiles_for_job_delete",
+        return_value=["default"],
+    ), patch(
+        "integration.crons.session_bridge._cron_owner_profiles_for_job_delete",
+        return_value=["default"],
+    ), patch(
+        "integration.crons.session_bridge._profile_home_for_name",
+        return_value=cron_env["home"],
+    ), patch(
+        "integration.crons.worktree.cleanup_execution_workspace",
+        return_value={"ok": False, "deleted": False, "reason": "busy"},
+    ):
+        result = delete_cron_job_history("job1", owner_profile="default", job={"id": "job1"})
+
+    assert result["ok"] is False
+    assert result["reason"] == "workspace_cleanup_failed"
+    restored = Session.load(sid)
+    assert restored is not None
+    assert restored.workspace_state == "cleanup_failed"
 
 
 def test_ensure_cron_project_explicit_profile(tmp_path, monkeypatch):

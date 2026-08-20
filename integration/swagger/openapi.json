@@ -982,6 +982,15 @@
                   "prompt": { "type": "string" },
                   "deliver": { "type": "string" },
                   "skills": { "type": "array", "items": { "type": "string" }, "description": "创建时附加的技能名列表" },
+                  "workspace_policy": {
+                    "type": "object",
+                    "description": "可省略；服务端会保存默认 managed policy。worktree 必须提供已登记的 Git base_workspace。",
+                    "properties": {
+                      "version": { "type": "integer", "enum": [1] },
+                      "strategy": { "type": "string", "enum": ["managed", "worktree"] },
+                      "base_workspace": { "type": "string" }
+                    }
+                  },
                   "toast_notifications": { "type": "boolean" }
                 }
               }
@@ -1004,7 +1013,16 @@
                 "required": ["profile", "job_id"],
                 "properties": {
                   "profile": { "type": "string", "description": "任务所在 Profile（存储与执行相同）" },
-                  "job_id": { "type": "string" }
+                  "job_id": { "type": "string" },
+                  "workspace_policy": {
+                    "type": "object",
+                    "description": "仅显式迁移 legacy job 时提供；必须是完整的 V1 policy。",
+                    "properties": {
+                      "version": { "type": "integer", "enum": [1] },
+                      "strategy": { "type": "string", "enum": ["managed", "worktree"] },
+                      "base_workspace": { "type": "string" }
+                    }
+                  }
                 }
               }
             }

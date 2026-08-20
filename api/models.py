@@ -1298,6 +1298,10 @@ class Session:
         if _workspace_mode not in {'managed', 'external', 'worktree'}:
             _workspace_mode = 'worktree' if worktree_path else 'external'
         self.workspace_mode = _workspace_mode
+        _workspace_state = str(kwargs.get('workspace_state') or '').strip().lower()
+        if _workspace_state not in {'ready', 'legacy_shared', 'workspace_unverified', 'cleanup_failed'}:
+            _workspace_state = 'ready'
+        self.workspace_state = _workspace_state
         self.model = model
         self.model_provider = str(model_provider).strip().lower() if model_provider else None
         # #5979: signature of the model the user DELIBERATELY picked this session
@@ -1490,7 +1494,7 @@ class Session:
         # without parsing the full messages array (which may be 400KB+).
         # Fields are listed in the order they should appear in the JSON file.
         METADATA_FIELDS = [
-            'session_id', 'title', 'workspace', 'workspace_mode', 'model', 'model_provider', 'model_explicit_pick_signature', 'created_at', 'updated_at',
+            'session_id', 'title', 'workspace', 'workspace_mode', 'workspace_state', 'model', 'model_provider', 'model_explicit_pick_signature', 'created_at', 'updated_at',
             'pinned', 'pinned_at', 'archived', 'project_id', 'profile',
             'input_tokens', 'output_tokens', 'estimated_cost',
             'cache_read_tokens', 'cache_write_tokens',
@@ -1907,6 +1911,7 @@ class Session:
             'has_pending_user_message': has_pending_user_message,
             'is_cli_session': self.is_cli_session,
             'source_tag': self.source_tag,
+            'workspace_state': self.workspace_state,
             'raw_source': self.raw_source,
             'session_source': self.session_source,
             'source_label': self.source_label,
@@ -6408,6 +6413,10 @@ def import_cli_session(
     created_at=None,
     updated_at=None,
     parent_session_id=None,
+    workspace=None,
+    workspace_mode=None,
+    workspace_state=None,
+    require_workspace_binding: bool = False,
 ):
     """Create a new WebUI session populated with CLI/agent messages.
 
@@ -6415,10 +6424,14 @@ def import_cli_session(
     keep their lineage in the WebUI store and sidebar instead of reappearing as
     detached orphan chats.
     """
+    if require_workspace_binding and workspace in (None, ''):
+        raise ValueError('Cron session requires an explicit workspace binding')
     s = Session(
         session_id=session_id,
         title=title,
-        workspace=get_last_workspace(),
+        workspace=workspace if workspace not in (None, '') else get_last_workspace(),
+        workspace_mode=workspace_mode,
+        workspace_state=workspace_state,
         model=model,
         messages=messages,
         profile=profile,

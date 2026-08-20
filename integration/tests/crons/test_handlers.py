@@ -83,6 +83,8 @@ def test_integration_create_allows_missing_model_like_core_api(handler_env):
         jobs = list_jobs(include_disabled=True)
     assert len(jobs) == 1
     assert jobs[0]["model"] is None
+    assert jobs[0]["workspace_policy"]["version"] == 1
+    assert jobs[0]["workspace_policy"]["strategy"] == "managed"
 
 
 def test_integration_create_accepts_explicit_model_without_profile_default(handler_env):

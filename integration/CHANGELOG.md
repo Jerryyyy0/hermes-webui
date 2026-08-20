@@ -14,9 +14,19 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 - **异步委派会话取消与恢复** — session SSE 每次建连均先发送 `background_tasks_snapshot`（包括空快照）；真实 user message 持久化其 `async_delegations` 生命周期。新增 `POST` / `GET /api/sessions/background_tasks/cancel`：取消范围先写入 Session sidecar，再并行请求 Agent 中断，客户端轮询至 `state=settled` 确认该固定范围已收口。归属映射耗尽重试后发送 `background_task_unresolved`，取消范围内的完成结果不会启动新的 wakeup stream。
 
-- **Unified Profile Gateway ownership** — `server.py` 现在同时在原生主机和普通 Docker 容器中持有 Profile Gateway；所有 WebUI-owned Gateway 都以前台 `gateway run -v --external-supervisor` 子进程运行，将合并 stdout/stderr 以 `[gateway:<profile>]` 前缀写入 WebUI 控制台及同一持久化日志。转发行不受 `HERMES_WEBUI_LOG_LEVEL` 过滤，敏感字段在输出前脱敏；WebUI 退出时只终止自身创建的 Gateway。s6 仍保留 service-manager 生命周期。
+- **Cron execution workspaces** — 新建 Cron Hub 任务会持久化 V1 managed
+  workspace policy；可显式选择 detached Git worktree。每次运行使用独立
+  `cron_*` workspace，WebUI 仅在 Agent 当前运行提供一致的 canonical `cwd`
+  时开放继续会话、终端和文件操作。历史任务保持原 `workdir` 行为，删除任务时
+  仅清理已验证的 execution root。
+
+- **Unified Profile Gateway ownership** — `server.py` 现在同时在原生主机和普通 Docker 容器中持有 Profile Gateway；所有 WebUI-owned Gateway 都以前台 `gateway run -v --external-supervisor` 子进程运行，将合并 stdout/stderr 以 `[gateway:<profile>]` 前缀写入 WebUI 控制台及同一持久化日志。普通容器发现遗留 Gateway 时使用 Agent 的 `--replace` 协议接管，确保新 WebUI 继续转发日志；原生主机保留已运行 Gateway 的外部所有权，避免与 launchd 抢占，同时持续跟随各 Profile 新写入的 `gateway.log` 与 `gateway.error.log` 到 WebUI 控制台。转发行不受 `HERMES_WEBUI_LOG_LEVEL` 过滤，敏感字段在输出前脱敏；WebUI 退出时只终止自身创建的 Gateway。s6 仍保留 service-manager 生命周期。
 
 ### Fixed
+
+- **Legacy Cron continuation** — 历史 Cron session 缺少 Agent `cwd` 时不再一律标记
+  `workspace_unverified`。无 V1 policy 的记录会绑定 Profile 已批准的共享继续目录并标记
+  `legacy_shared`，因此可继续对话；该目录不会被表述或持久化为历史 execution 的实际 cwd。
 
 - **Profile Gateway startup runtime retry** — WebUI-owned Gateway 在 Agent CLI runtime 短暂不可用时自动重试最多 3 次，避免容器启动阶段的一次性探测失败导致所有 Profile Gateway 永久不启动。
 
@@ -81,7 +91,7 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 - **Session status and unread cursors** — `GET /api/sessions` 在 integration 开启时为每行返回 `status`（`error` / `in_progress` / `has_new_messages` / `ready`）与独立 `is_unread`；`POST /api/integration/sessions/mark_read` 由服务端推进当前 Profile 会话的已读游标。游标集中存于 `{HERMES_WEBUI_STATE_DIR}/session_status.db`，以 `(profile, session_id)` 隔离；运行与异常事实仍由 Session sidecar 维护，不持久化派生 status。
 
-- **All-profile Gateway startup** — `server.py` 默认异步确保所有可见 Profile 的 Hermes Gateway 已运行，使各 Profile 的 Cron 在 WebUI 启动后自动恢复。命名 Profile 使用独立 Hermes service，已运行实例会跳过；default 开启 `gateway.multiplex_profiles` 时只启动 default；单 Profile 失败不阻塞 WebUI。可用 `HERMES_WEBUI_START_PROFILE_GATEWAYS=0` 关闭。Gateway lifecycle 统一解析并验证 Agent 自身 launcher/venv；对于直接从已发现 Agent 源码根目录或 WebUI 仓库根目录执行 `python -m hermes_cli.main` 的部署，也会在依赖导入与 `--version` 均通过后复用当前 Python 和已验证工作目录。所有探测仍清除 `PYTHONPATH` / `PYTHONHOME`，不会把 Agent 源码注入任意 Python。Gateway runtime resolver 已收口至 `integration/gateway_startup/runtime.py`，WebUI 根目录按模块位置确定、Agent 根目录依次由 `HERMES_WEBUI_AGENT_DIR`、`${HERMES_HOME}/hermes-agent` 与既有自动发现确定。普通 Docker 容器中 `gateway start` 是成功退出但不启动进程的 no-op，新增 `integration/gateway_startup/run_container_services.sh` 作为纯 Profile Gateway supervisor：通过 Agent Profile registry 动态执行各 Profile 的 `gateway run`、遵守 multiplex、写入独立日志、转发退出信号，并在任一受管 Gateway 退出时失败退出；脚本不定位或启动 WebUI。WebUI 会自动识别无 s6 的普通容器并跳过自身 `gateway start` 协调器，外层启动器无需新增环境变量，只需分别启动该脚本与 `server.py`；s6 容器和原生 service manager 行为保持不变，显式 `HERMES_WEBUI_START_PROFILE_GATEWAYS=0/1` 仍可覆盖自动判断。WebUI 与 Agent 可直接使用 `${HERMES_HOME}/hermes-webui` / `${HERMES_HOME}/hermes-agent` 实体目录，无需 `/app` 或软链接。
+- **All-profile Gateway startup** — `server.py` 默认异步确保所有可见 Profile 的 Hermes Gateway 已运行，使各 Profile 的 Cron 在 WebUI 启动后自动恢复。原生机发现已运行 Gateway 时，只有 Agent 权威快照确认 launchd/systemd 正在管理，才先从新增内容开始跟随 `gateway.log` / `gateway.error.log`，再调用 Agent 的 `gateway restart`；所有权无法确认时不盲目执行可能常驻的 CLI 重启，未运行时才由 WebUI 启动前台子进程。命名 Profile 使用独立 Hermes service，default 开启 `gateway.multiplex_profiles` 时只启动 default；单 Profile 失败不阻塞 WebUI。可用 `HERMES_WEBUI_START_PROFILE_GATEWAYS=0` 关闭。Gateway lifecycle 统一解析并验证 Agent 自身 launcher/venv；对于直接从已发现 Agent 源码根目录或 WebUI 仓库根目录执行 `python -m hermes_cli.main` 的部署，也会在依赖导入与 `--version` 均通过后复用当前 Python 和已验证工作目录。所有探测仍清除 `PYTHONPATH` / `PYTHONHOME`，不会把 Agent 源码注入任意 Python。Gateway runtime resolver 已收口至 `integration/gateway_startup/runtime.py`，WebUI 根目录按模块位置确定、Agent 根目录依次由 `HERMES_WEBUI_AGENT_DIR`、`${HERMES_HOME}/hermes-agent` 与既有自动发现确定。普通 Docker 容器中 `gateway start` 是成功退出但不启动进程的 no-op，WebUI 通过 Agent Profile registry 动态执行各 Profile 的 `gateway run`、遵守 multiplex、转发输出与退出信号；s6 容器和原生 service manager 行为保持不变，显式 `HERMES_WEBUI_START_PROFILE_GATEWAYS=0/1` 仍可覆盖自动判断。WebUI 与 Agent 可直接使用 `${HERMES_HOME}/hermes-webui` / `${HERMES_HOME}/hermes-agent` 实体目录，无需 `/app` 或软链接。
 
 - **Direct `server.py` runtime log persistence** — 直接运行 `python server.py` 时，stdout/stderr 会同时输出到终端并落盘到 `{HERMES_WEBUI_STATE_DIR}/server-<port>.log`，主日志按大小轮转（默认 10 MiB，保留 5 份）。`faulthandler` / crash visibility 使用独立 `{HERMES_WEBUI_STATE_DIR}/server-<port>-crash.log`，避免主日志轮转影响 native crash 诊断。`bootstrap.py` 会显式设置 `HERMES_WEBUI_SERVER_LOG_EXTERNAL=1`，继续只使用既有 `bootstrap-<port>.log`，不重复写 `server-<port>.log`。配置见 `integration/README.md`。
 

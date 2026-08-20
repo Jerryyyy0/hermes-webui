@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import copy
 import logging
-import time
 from dataclasses import dataclass
 
 from integration.agent_message_semantics.classifier import (
@@ -534,7 +533,18 @@ def _install_run_job_materialize_hook() -> None:
         if isinstance(job, dict) and not str(job.get("_cron_session_id") or "").strip():
             job_id = str(job.get("id") or "").strip()
             if job_id:
-                job["_cron_session_id"] = f"cron_{job_id}_{time.strftime('%Y%m%d_%H%M%S')}"
+                try:
+                    from cron.execution_workspace import new_cron_session_id
+
+                    job["_cron_session_id"] = new_cron_session_id(job_id)
+                except ImportError:
+                    # Older Agents have no V1 workspace module; preserve the
+                    # legacy scheduler identity for jobs without a policy.
+                    from datetime import datetime
+
+                    job["_cron_session_id"] = (
+                        f"cron_{job_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                    )
         execution_home = _home_for_scheduled_cron_job(job)
         try:
             from integration.crons.listing import resolve_owner_profile_for_job

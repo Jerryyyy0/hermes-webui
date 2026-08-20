@@ -1,5 +1,8 @@
 """Regression tests for manual WebUI cron runs."""
 
+import copy
+import multiprocessing
+
 
 def _install_cron_fakes(monkeypatch, calls, deliver_result=None, silent_marker="[SILENT]"):
     cron_jobs = type("CronJobs", (), {})()
@@ -157,3 +160,104 @@ def test_manual_cron_failure_forwards_result_to_materializer(monkeypatch):
     routes._run_cron_tracked({"id": "job-missing-script", "no_agent": True})
 
     assert ("materialize", result) in calls
+
+
+def test_manual_cron_subprocess_returns_v1_workspace_handoff_to_parent(monkeypatch, tmp_path):
+    """V1 allocation happens in the spawned child, not the parent job copy."""
+    import api.routes as routes
+
+    class FakeQueue:
+        def __init__(self):
+            self.items = []
+
+        def put(self, value):
+            self.items.append(value)
+
+        def get(self, timeout=None):
+            return self.items.pop(0)
+
+        def close(self):
+            pass
+
+        def join_thread(self):
+            pass
+
+    class FakeProcess:
+        def __init__(self, *, target, args):
+            self._target = target
+            # Model ``spawn``: mutation in the child cannot alter the original job.
+            self._args = (copy.deepcopy(args[0]), *args[1:])
+            self.exitcode = 0
+
+        def start(self):
+            self._target(*self._args)
+
+        def join(self, timeout=None):
+            pass
+
+        def is_alive(self):
+            return False
+
+        def terminate(self):
+            raise AssertionError("successful fake child must not be terminated")
+
+    class FakeContext:
+        def __init__(self):
+            self.queue = FakeQueue()
+
+        def Queue(self, maxsize):
+            return self.queue
+
+        def Process(self, *, target, args):
+            return FakeProcess(target=target, args=args)
+
+    workspace = tmp_path / "workspace" / "sessions" / "cron" / "default" / "cron_job1_run1"
+    workspace.mkdir(parents=True)
+    def fake_subprocess_main(child_job, _execution_profile_home, result_queue):
+        child_job.update(
+            {
+                "_cron_execution_workspace": str(workspace),
+                "_cron_workspace_strategy": "managed",
+                "_cron_workspace_namespace_base": str(workspace.parent),
+            }
+        )
+        result_queue.put(
+            (
+                "ok",
+                (True, "output", "final", None),
+                routes._cron_execution_handoff(child_job),
+            )
+        )
+
+    monkeypatch.setattr(routes, "_cron_job_subprocess_main", fake_subprocess_main)
+    monkeypatch.setattr(multiprocessing, "get_context", lambda name: FakeContext())
+
+    job = {
+        "id": "job1",
+        "_cron_session_id": "cron_job1_run1",
+        "workspace_policy": {"version": 1, "strategy": "managed"},
+    }
+    assert routes._run_cron_job_in_profile_subprocess(job, None) == (
+        True,
+        "output",
+        "final",
+        None,
+    )
+    assert job["_cron_execution_workspace"] == str(workspace)
+    assert job["_cron_workspace_strategy"] == "managed"
+    assert job["_cron_workspace_namespace_base"] == str(workspace.parent)
+
+
+def test_manual_cron_subprocess_rejects_mismatched_workspace_handoff():
+    import api.routes as routes
+
+    job = {"_cron_session_id": "cron_job1_expected"}
+    routes._apply_cron_execution_handoff(
+        job,
+        {
+            "_cron_session_id": "cron_job1_other",
+            "_cron_execution_workspace": "/tmp/untrusted-workspace",
+        },
+    )
+
+    assert "_cron_execution_workspace" not in job

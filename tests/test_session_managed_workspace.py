@@ -225,3 +225,17 @@ def test_internal_worker_can_reuse_prevalidated_external_workspace(tmp_path):
     assert resolve_session_workspace(
         session, str(workspace), requested_is_trusted=True
     ) == workspace.resolve()
+
+
+def test_chat_start_rejects_unverified_cron_workspace(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    session = SimpleNamespace(
+        workspace=str(workspace),
+        workspace_mode="external",
+        workspace_state="workspace_unverified",
+        source_tag="cron",
+    )
+
+    with pytest.raises(ValueError, match="unverified"):
+        routes._resolve_chat_workspace_with_recovery(session, None)
