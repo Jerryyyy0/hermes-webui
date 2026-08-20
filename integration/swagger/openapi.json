@@ -2445,6 +2445,32 @@
           "403": { "description": "无权删除" },
           "404": { "description": "申请单不存在" }
         }
+      },
+      "post": {
+        "tags": ["SkillPublish"],
+        "summary": "编辑草稿/已驳回申请单",
+        "description": "仅 draft / rejected 状态可编辑，且仅允许更新 application_type / reason / category（未传字段保持不变）。rejected 单编辑后状态不回退，仍需重新提交（产生 re_submit 流水，audit_comment 不清除）。application_type 变更时联动：切至 unpublish 需校验同用户无进行中的下架申请、技能由本人经 WebUI 发布且已上架，并回填最新版本号；切至 publish 清空版本号（提交时重新计算）并清空旧下架原因（除非本次请求显式传入新值）。用户身份从配置获取，无需传 account。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "application_type": { "type": "string", "enum": ["publish", "unpublish"], "description": "申请类型（可选）" },
+                  "reason": { "type": "string", "description": "申请原因，下架申请必填（可选）" },
+                  "category": { "type": "string", "description": "技能分类（可选）" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "更新成功，返回最新申请单" },
+          "400": { "description": "申请类型无效 / 无可更新字段 / 下架申请必须填写 reason" },
+          "404": { "description": "申请单不存在" },
+          "409": { "description": "仅草稿或已驳回状态的申请单可编辑 / 已存在进行中的同类型申请 / 技能非上架状态不可下架" }
+        }
       }
     },
 

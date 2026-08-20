@@ -226,6 +226,15 @@ def test_post_create_unpublish_not_owner_403(db_path_patch):
     assert handler.send_response.call_args.args[0] == 403
 
 
+def test_post_create_unpublish_no_local_version_403(db_path_patch):
+    handler = MagicMock()
+    parsed = urlparse("/api/skillhub/publish/applications")
+    body = {"skill_name": "demo-skill", "account": "acct-a",
+            "application_type": "unpublish", "reason": "bye"}
+    assert handlers.try_handle_post(handler, parsed, body) is True
+    assert handler.send_response.call_args.args[0] == 403
+
+
 def test_post_create_unpublish_not_listed_409(db_path_patch):
     _publish_version(db_path_patch, upstream_status="3")
     handler = MagicMock()
@@ -281,6 +290,158 @@ def test_post_create_active_exists_409(db_path_patch):
     body = {"skill_name": "demo-skill", "account": "acct-a"}
     assert handlers.try_handle_post(handler, parsed, body) is True
     assert handler.send_response.call_args.args[0] == 409
+
+
+# ── POST update (draft only) ─────────────────────────────────────────────────
+
+
+@pytest.fixture
+def db_update(db, monkeypatch):
+    monkeypatch.setattr(handlers, "_DB_PATH", db)
+    return db
+
+
+def _draft(db, **extra):
+    fields = {
+        "skill_name": "demo-skill",
+        "application_type": "publish",
+        "reason": "",
+        "status": PublishStatus.DRAFT,
+        "submitter_account": "acct-a",
+    }
+    fields.update(extra)
+    return store.create_application(fields=fields, db_path=db)
+
+
+def _call_update(handler, app_id, body):
+    parsed = urlparse(f"/api/skillhub/publish/applications/{app_id}")
+    return handlers.try_handle_post(handler, parsed, body)
+
+
+def test_post_update_draft_fields(db_update):
+    app = _draft(db_update, reason="old", category="tools")
+    handler = MagicMock()
+    assert _call_update(handler, app["id"], {"reason": "new-reason",
+                                             "category": "productivity"}) is True
+    assert handler.send_response.call_args.args[0] == 200
+    payload = _payload(handler)
+    assert payload["ok"] is True
+    assert payload["application"]["reason"] == "new-reason"
+    assert payload["application"]["category"] == "productivity"
+    assert payload["application"]["application_type"] == "publish"
+
+
+def test_post_update_not_found_404(db_update):
+    handler = MagicMock()
+    assert _call_update(handler, "skp-nope", {"reason": "x"}) is True
+    assert handler.send_response.call_args.args[0] == 404
+
+
+def test_post_update_not_draft_409(db_update):
+    app = _draft(db_update, status=PublishStatus.PENDING)
+    handler = MagicMock()
+    assert _call_update(handler, app["id"], {"reason": "x"}) is True
+    assert handler.send_response.call_args.args[0] == 409
+
+
+def test_post_update_rejected_fields(db_update):
+    app = _draft(db_update, status=PublishStatus.REJECTED, reason="old",
+                 audit_comment="理由不充分")
+    handler = MagicMock()
+    assert _call_update(handler, app["id"], {"reason": "更充分的理由"}) is True
+    assert handler.send_response.call_args.args[0] == 200
+    payload = _payload(handler)
+    assert payload["application"]["reason"] == "更充分的理由"
+    assert payload["application"]["status"] == PublishStatus.REJECTED
+    assert payload["application"]["audit_comment"] == "理由不充分"
+
+
+def test_post_update_rejected_switch_to_unpublish(db_update):
+    _publish_version(db_update, account="acct-a")
+    app = _draft(db_update, status=PublishStatus.REJECTED)
+    handler = MagicMock()
+    assert _call_update(handler, app["id"],
+                        {"application_type": "unpublish", "reason": "cleanup"}) is True
+    assert handler.send_response.call_args.args[0] == 200
+    payload = _payload(handler)
+    assert payload["application"]["application_type"] == "unpublish"
+    assert payload["application"]["version"] == "1.0.0"
+
+
+def test_post_update_invalid_type_400(db_update):
+    app = _draft(db_update)
+    handler = MagicMock()
+    assert _call_update(handler, app["id"], {"application_type": "bogus"}) is True
+    assert handler.send_response.call_args.args[0] == 400
+
+
+def test_post_update_no_fields_400(db_update):
+    app = _draft(db_update)
+    handler = MagicMock()
+    assert _call_update(handler, app["id"], {}) is True
+    assert handler.send_response.call_args.args[0] == 400
+
+
+def test_post_update_switch_to_unpublish(db_update):
+    _publish_version(db_update, account="acct-a")
+    app = _draft(db_update)
+    handler = MagicMock()
+    assert _call_update(handler, app["id"],
+                        {"application_type": "unpublish", "reason": "cleanup"}) is True
+    assert handler.send_response.call_args.args[0] == 200
+    payload = _payload(handler)
+    assert payload["application"]["application_type"] == "unpublish"
+    assert payload["application"]["version"] == "1.0.0"
+    assert payload["application"]["reason"] == "cleanup"
+
+
+def test_post_update_switch_to_unpublish_requires_reason_400(db_update):
+    _publish_version(db_update, account="acct-a")
+    app = _draft(db_update)
+    handler = MagicMock()
+    assert _call_update(handler, app["id"], {"application_type": "unpublish"}) is True
+    assert handler.send_response.call_args.args[0] == 400
+
+
+def test_post_update_switch_conflict_409(db_update):
+    _publish_version(db_update, account="acct-a")
+    app = _draft(db_update)
+    _draft(db_update, application_type="unpublish", reason="bye")
+    handler = MagicMock()
+    assert _call_update(handler, app["id"],
+                        {"application_type": "unpublish", "reason": "cleanup"}) is True
+    assert handler.send_response.call_args.args[0] == 409
+
+
+def test_post_update_switch_to_unpublish_not_listed_409(db_update):
+    _publish_version(db_update, account="acct-a", upstream_status="3")
+    app = _draft(db_update)
+    handler = MagicMock()
+    assert _call_update(handler, app["id"],
+                        {"application_type": "unpublish", "reason": "cleanup"}) is True
+    assert handler.send_response.call_args.args[0] == 409
+
+
+def test_post_update_switch_to_publish_clears_reason(db_update):
+    app = _draft(db_update, application_type="unpublish", reason="old reason",
+                 version="1.0.0")
+    handler = MagicMock()
+    assert _call_update(handler, app["id"], {"application_type": "publish"}) is True
+    assert handler.send_response.call_args.args[0] == 200
+    payload = _payload(handler)
+    assert payload["application"]["application_type"] == "publish"
+    assert payload["application"]["reason"] == ""
+    assert payload["application"]["version"] == ""
+
+
+def test_post_update_switch_to_publish_keeps_explicit_reason(db_update):
+    app = _draft(db_update, application_type="unpublish", reason="old reason")
+    handler = MagicMock()
+    assert _call_update(handler, app["id"],
+                        {"application_type": "publish", "reason": "updated"}) is True
+    assert handler.send_response.call_args.args[0] == 200
+    payload = _payload(handler)
+    assert payload["application"]["reason"] == "updated"
 
 
 # ── GET detail ────────────────────────────────────────────────────────────────

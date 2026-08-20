@@ -92,6 +92,9 @@ def try_handle_post(handler, parsed, body: dict) -> bool:
     match = _WITHDRAW_RE.match(path)
     if match:
         return _post_withdraw(handler, match.group(1), body or {})
+    match = _DETAIL_RE.match(path)
+    if match:
+        return _post_update(handler, match.group(1), body or {})
     return False
 
 
@@ -284,8 +287,14 @@ def _post_create(handler, body: dict) -> bool:
         fields.update(snapshot)
     else:
         latest = store.get_latest_version(skill_name, db_path=_DB_PATH)
-        if not latest or latest.get("submitter_account") != account:
-            return _respond_bad(handler, "无权下架该技能", 403)
+        if not latest:
+            return _respond_bad(
+                handler,
+                "该技能非你发布，无法通过本平台下架",
+                403,
+            )
+        if latest.get("submitter_account") != account:
+            return _respond_bad(handler, "该技能由其他用户发布，你无权下架", 403)
         if latest.get("upstream_status") != "2":
             return _respond_bad(handler, "技能非上架状态，不可下架", 409)
         fields["version"] = latest.get("version") or ""
@@ -352,6 +361,83 @@ def _parse_frontmatter(text: str):
     from tools.skills_tool import _parse_frontmatter as parse
 
     return parse(text)
+
+
+# ── POST update (draft only) ─────────────────────────────────────────────────
+
+
+_UPDATABLE_FIELDS = ("application_type", "reason", "category")
+
+
+def _post_update(handler, app_id: str, body: dict) -> bool:
+    app = store.get_application(app_id, db_path=_DB_PATH)
+    if not app:
+        return _respond_bad(handler, "申请单不存在", 404)
+    if app.get("status") not in (PublishStatus.DRAFT, PublishStatus.REJECTED):
+        return _respond_bad(handler, "仅草稿或已驳回状态的申请单可编辑", 409)
+
+    update_fields: dict[str, Any] = {}
+    if "application_type" in body:
+        new_type = str(body.get("application_type") or "").strip()
+        if new_type not in ApplicationType.ALL:
+            return _respond_bad(
+                handler, "申请类型无效，仅支持 publish（上架）或 unpublish（下架）", 400
+            )
+        if new_type != app.get("application_type"):
+            update_fields["application_type"] = new_type
+    if "reason" in body:
+        update_fields["reason"] = str(body.get("reason") or "").strip()
+    if "category" in body:
+        update_fields["category"] = str(body.get("category") or "").strip()
+
+    if not update_fields:
+        return _respond_bad(
+            handler, "无可更新字段，仅支持 application_type / reason / category", 400
+        )
+
+    resulting_type = (
+        update_fields.get("application_type")
+        or app.get("application_type")
+        or ApplicationType.PUBLISH
+    )
+    resulting_reason = update_fields.get("reason", app.get("reason") or "")
+    if resulting_type == ApplicationType.UNPUBLISH and not resulting_reason:
+        return _respond_bad(handler, "下架申请必须填写 reason", 400)
+
+    # Type switch side effects mirror create-time semantics (7.3).
+    if "application_type" in update_fields:
+        if store.has_active_application(
+            app.get("submitter_account") or "",
+            app["skill_name"],
+            update_fields["application_type"],
+            exclude_id=app_id,
+            db_path=_DB_PATH,
+        ):
+            return _respond_bad(
+                handler,
+                f"技能 '{app['skill_name']}' 已存在进行中的申请（草稿或审核中），请勿重复提交",
+                409,
+            )
+        if update_fields["application_type"] == ApplicationType.UNPUBLISH:
+            latest = store.get_latest_version(app["skill_name"], db_path=_DB_PATH)
+            if not latest:
+                return _respond_bad(
+                    handler, "该技能非你发布，无法通过本平台下架", 403
+                )
+            if latest.get("submitter_account") != app.get("submitter_account"):
+                return _respond_bad(handler, "该技能由其他用户发布，你无权下架", 403)
+            if latest.get("upstream_status") != "2":
+                return _respond_bad(handler, "技能非上架状态，不可下架", 409)
+            update_fields["version"] = latest.get("version") or ""
+        else:
+            update_fields["version"] = ""
+            # reason 是下架申请专属字段；本次请求未显式传入时清空旧下架原因
+            if "reason" not in update_fields:
+                update_fields["reason"] = ""
+
+    store.update_application(app_id, fields=update_fields, db_path=_DB_PATH)
+    refreshed = store.get_application(app_id, db_path=_DB_PATH)
+    return _respond(handler, {"ok": True, "application": _public_app(refreshed or app)})
 
 
 # ── POST submit ──────────────────────────────────────────────────────────────
