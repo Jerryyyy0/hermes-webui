@@ -1,6 +1,6 @@
 # 异步委派：外部前端接入指南
 
-> 实现状态：本文的“每次成功建连必发 `background_tasks_snapshot`”是刷新恢复所需的目标契约。当前服务端仅在存在活动后台任务时发送该事件；在无条件快照实现前，刷新后连接无法可靠判断是否应关闭。
+> 实现状态：`background_tasks_snapshot`、每轮 `async_delegations` 状态、会话级取消与 `background_task_unresolved` 已实施。批次内 child task 的实时逐项执行进度仍不作为此协议的事件面；服务端只在批次完成后提供 `child_task_summary`。
 
 - **适用范围：** 调用 WebUI 聊天 API，并希望实时获知 `delegate_task(mode="background")` 生命周期的任意前端。
 - **协议版本：** `schema_version: 1`
@@ -21,7 +21,7 @@
 | SSE | 地址 | 何时建立 | 接收内容 | 何时关闭 |
 | --- | --- | --- | --- | --- |
 | 聊天流 | `GET /api/chat/stream?stream_id={stream_id}` | 每次已知一个 Agent run 的 `stream_id` 时 | token、工具事件、run 终态，以及派发通知 | 对应 run 的 `done` / `stream_end` / 错误终态后 |
-| 会话事件流 | `GET /api/sessions/{session_id}/events` | 收到 `background_task_dispatched` 后，或刷新恢复本地待跟踪 session 后，按 session 建立或复用 | 后台任务状态、服务端启动 wakeup run、状态快照、可关闭通知 | 收到空快照或 `background_tasks_idle` 后，或应用主动销毁时 |
+| 会话事件流 | `GET /api/sessions/{session_id}/events` | 收到 chat SSE 的 `background_task_dispatched` 后，或刷新恢复本地待跟踪 session 后，按 session 建立或复用 | 状态快照、后台任务状态、服务端启动 wakeup run、可关闭通知；不发送派发通知 | 收到空快照或 `background_tasks_idle` 后，或应用主动销毁时 |
 
 会话事件流不发送 wakeup 的 assistant token。收到 `server_turn_started` 后，前端要用事件中的 `stream_id` 再建立一条聊天流，才会收到该 wakeup 的实时回复。
 
@@ -55,6 +55,69 @@ sequenceDiagram
 ```
 
 “未结算”同时考虑 delegation 批次执行和父会话 wakeup：`status=completed` 但 `wakeup_state=queued` 或 `running` 时，仍必须保持会话事件流。
+
+## 2.1 取消与关闭连接不同
+
+关闭 `GET /api/sessions/{session_id}/events` 只取消订阅，不取消后台任务。要取消该 session 当前的
+全部后台 delegation，调用显式取消接口；它不取消主会话，也不阻止之后新 user turn 派发任务：
+
+```http
+POST /api/sessions/background_tasks/cancel
+Content-Type: application/json
+
+{
+  "session_id": "session_123"
+}
+```
+
+`session_id` 决定取消范围。服务端在 session 锁内固定当时未结算的 delegation，并在 Session sidecar 持久化 `state`、`delegation_ids` 与 `requested_at` 后才请求 Agent 中断。重复调用在 `cancelling` 期间返回同一范围；收口后再次调用才重新快照。
+
+`202` 且 `state: "cancelling"` 表示已受理固定范围，不表示 child 已中断。没有未结算任务时返回 `200`、`state: "idle"` 和空 `delegation_ids`。无效 `session_id` 返回 `400`，不可见或不存在的 session 返回 `404`，无法持久化屏障返回 `500` 且不会触发中断。
+
+取消 `POST` 不是轮询接口。确认它是否完成时，轮询只读查询接口：
+
+```http
+GET /api/sessions/background_tasks/cancel?session_id=session_123
+```
+
+```json
+{
+  "session_id": "session_123",
+  "state": "settled",
+  "delegation_ids": ["deleg_123", "deleg_456"],
+  "requested_at": 1786004500,
+  "settled_at": 1786004502
+}
+```
+
+`state=settled` 表示该响应中固定的全部 `delegation_ids` 已收口，是取消完成的唯一判断。`state=cancelling` 时继续以退避间隔轮询；`state=idle` 表示没有可查询的取消记录。该 `GET` 不触发取消，成功响应均为 `200`；无效 `session_id` 返回 `400`，不可见或不存在的 session 返回 `404`。
+
+取消期间，服务端对每个受影响批次发送 `background_task_status`，其中
+`cancel_state=requested` 或 `cancelled`。Agent 确认中断时，最终
+`status=cancelled`、`wakeup_state=settled`。若 child 已在取消竞争中完成，则保留真实的
+`completed` 或 `failed` 状态，但仍不会产生 `server_turn_started`。
+
+对应 origin user message 的持久化状态为：
+
+```json
+{
+  "_turn_key": "turn:8",
+  "async_delegations": {
+    "state": "cancelling",
+    "items": {
+      "deleg_123": {
+        "status": "running",
+        "wakeup_state": "idle",
+        "cancel_state": "requested"
+      }
+    }
+  }
+}
+```
+
+该轮全部批次取消后，`async_delegations.state` 更新为 `cancelled`。只要存在未被取消的终态
+批次，最终状态就是 `settled`，具体结果以 `items` 中每个 `delegation_id` 为准。不会发送
+`background_tasks_cancelled` 或其他取消专用 SSE 事件；SSE 仅用于实时展示既有生命周期。
 
 ## 3. 首次聊天与派发通知
 
@@ -95,7 +158,6 @@ data: {
   "background_activity_version": 12,
   "payload": {
     "delegation_id": "deleg_123",
-    "delegation_kind": "batch",
     "child_task_count": 2,
     "goals": ["调研模型 A", "调研模型 B"],
     "origin_turn_key": "turn:8",
@@ -121,6 +183,8 @@ Accept: text/event-stream
 
 会话 SSE 连接建立、认证与 session 可见性校验成功后，服务端必须把 `background_tasks_snapshot` 作为第一条后台业务事件发送，**无论该 session 是否有未结算后台任务**。它是连接期间可能漏掉增量事件、页面刷新和重新订阅时的权威状态基线。
 
+`background_task_dispatched` 不会在 `GET /api/sessions/{session_id}/events` 中重复发送。它只在发起 delegation 的 chat SSE 中出现，用来建立或复用这条会话连接；已建立会话连接的任务集合只能以 snapshot 和后续增量事件为准。
+
 ```text
 event: background_tasks_snapshot
 id: background:snapshot:12
@@ -137,7 +201,6 @@ data: {
     "active_child_task_count": 2,
     "tasks": [{
       "delegation_id": "deleg_123",
-      "delegation_kind": "batch",
       "child_task_count": 2,
       "goals": ["调研模型 A", "调研模型 B"],
       "origin_turn_key": "turn:8",
@@ -172,25 +235,26 @@ data: {
 
 | 事件 | `payload` 关键字段 | 前端必须做什么 | 不应做什么 |
 | --- | --- | --- | --- |
-| `background_task_dispatched` | delegation 公共字段，首次通常为 `running` / `idle` | 按 `session_id` 建立或复用会话 SSE；记录 delegation 批次 | 不解析 `tool_complete`；不为 child task 单独建 SSE |
+| `background_task_dispatched`（仅 chat SSE） | delegation 公共字段，首次通常为 `running` / `idle` | 按 `session_id` 建立或复用会话 SSE；持久化待跟踪 session ID | 不解析 `tool_complete`；不把其 payload 当作会话任务基线；不为 child task 单独建 SSE |
 | `background_tasks_snapshot` | `active_delegation_count`、`active_child_task_count`、`tasks[]` | 用 `tasks` 完整替换该 session 的未结算 delegation 集合；若两个计数均为 `0`，立即关闭该连接 | 不把它当作普通增量逐条叠加 |
 | `background_task_status` | delegation 公共字段 | 更新指定 `delegation_id` 的批次执行和 wakeup 状态 | 批次 `completed` 时立即关闭 session SSE |
 | `bg_task_complete` | delegation 公共字段 | 可更新通知/进度；按 `event_id` 去重 | 认为 wakeup 已结束 |
 | `server_turn_started` | delegation 公共字段、`stream_id`、`source` | 按 `stream_id` 建立或复用聊天 SSE | 再次调用 `POST /api/chat/start` |
+| `background_task_unresolved` | `delegation_id`、`reason`、`retryable` | 将对应批次标记失败，继续等待 `background_tasks_idle` | 推测 origin user turn 或创建 wakeup |
 | `background_tasks_idle` | `active_delegation_count: 0`、`active_child_task_count: 0`、`settled_at` | 关闭该 session 的会话 SSE，并清除活动委派追踪 | 因单个 child task 结束而自行猜测 idle |
 
-除 `background_tasks_snapshot` 与 `background_tasks_idle` 外，delegation 生命周期事件的 `payload` 均包含：
+会话 SSE 中 `background_task_status`、`bg_task_complete` 与 `server_turn_started` 的 `payload` 均包含：
 
 | 字段 | 值域 | 含义 |
 | --- | --- | --- |
 | `delegation_id` | string | 后台委派批次标识。 |
-| `delegation_kind` | `single` / `batch` | 批次包含一个还是多个 child task。 |
 | `child_task_count` | integer | 此 delegation 批次启动的 child task 数量。 |
 | `goals` | string[] | child task 的目标列表；可能为空。 |
 | `origin_turn_key` | string | 派发该 delegation 的父 user turn。 |
 | `status` | `running` / `completed` / `failed` / `cancelled` | delegation 批次执行状态。 |
 | `wakeup_state` | `idle` / `queued` / `running` / `settled` / `failed` | 父会话处理该结果的状态。 |
 | `child_task_summary` | object，可选 | completion 后的 child 结果计数，不包含结果正文。 |
+| `cancel_state` | `requested` / `cancelled`，可选 | 当前 delegation 的取消阶段；缺失表示未取消。 |
 
 `background_tasks_snapshot.payload.active_task_count` 为兼容字段，统计 delegation 批次数；外部前端应使用 `active_delegation_count` 和 `active_child_task_count`。
 `server_turn_started.payload` 额外包含 `stream_id` 和固定来源值 `source: "async_delegation_wakeup"`。
@@ -211,7 +275,6 @@ data: {
   "background_activity_version": 15,
   "payload": {
     "delegation_id": "deleg_123",
-    "delegation_kind": "batch",
     "child_task_count": 2,
     "goals": ["调研模型 A", "调研模型 B"],
     "origin_turn_key": "turn:8",
@@ -226,7 +289,6 @@ data: {
 | `payload` 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | `delegation_id` | string | 触发此 wakeup 的 delegation 批次。 |
-| `delegation_kind` | string | `single` 或 `batch`。 |
 | `child_task_count` | integer | 批次中的 child task 数量。 |
 | `goals` | string[] | 批次中各 child task 的目标。 |
 | `origin_turn_key` | string | 最初派发 delegation 的父 user turn。 |
@@ -325,6 +387,9 @@ function onSessionEvent(event: Envelope) {
         persistPendingSessionIds(pendingSessionIds);
       }
       break;
+    case "background_task_unresolved":
+      markTaskFailed(event.session_id, event.payload.delegation_id, event.payload.reason);
+      break;
     default:
       applyTaskUpdate(event.session_id, event.payload);
   }
@@ -351,11 +416,13 @@ function onSessionEvent(event: Envelope) {
 
 聊天 SSE 在父 turn 尚未结束时断线，重新附着该聊天流后可能再次收到 `background_task_dispatched`。该事件是建立会话 SSE 的触发器，因此 `ensureSessionEvents` 必须是幂等的。
 
-会话 SSE 断开不会取消后台 delegation，也不会阻止服务端启动 wakeup。重连成功后，以 `background_tasks_snapshot` 作为当前后台状态基线；不要假设每个中间增量事件都会被精确重放。
+会话 SSE 断开不会取消后台 delegation，也不会阻止服务端启动 wakeup。重连成功后，以 `background_tasks_snapshot` 作为当前后台状态基线；不要假设每个中间增量事件都会被精确重放。显式取消只通过 `POST /api/sessions/background_tasks/cancel` 发起。
 
 浏览器 `EventSource` 会自动重连。其他客户端应采用带退避的重连策略，并将最近的 SSE `id:` 作为 `Last-Event-ID` 发送。无论是否支持该 header，都要保留 JSON `event_id` 去重与 snapshot 覆盖逻辑。
 
 收到 `server_turn_started` 时，若对应聊天流已结束或无法附着，不需要重启 wakeup。调用 `GET /api/session?session_id={session_id}` 读取持久化会话即可恢复最终内容。
+
+历史响应的每条真实 user message 都可带 `async_delegations`。它是该轮 delegation 的持久化结论；按 `_turn_key == origin_turn_key` 关联实时事件。对于本契约上线后创建的消息，字段缺失表示未成功派发；旧会话、导入会话或写入版本未知时字段缺失必须视为未知。完整字段见[服务端接口契约](async-delegation-session-events.md#21-历史会话查询与每轮任务状态)。
 
 ## 9. 关闭规则
 
@@ -372,7 +439,7 @@ function onSessionEvent(event: Envelope) {
 
 ## 10. 接入验收清单
 
-- 收到专用 `background_task_dispatched`，而非解析 `tool_complete` 后，建立会话事件流。
+- 仅在 chat SSE 消费专用 `background_task_dispatched`，而非解析 `tool_complete` 后建立会话事件流；会话 SSE 的第一条后台业务事件必须是 `background_tasks_snapshot`，且不会重复派发通知。
 - 每个 session 至多维护一条会话 SSE；切换页面不会导致仍活跃任务的订阅被误关。
 - 每次 session SSE 建连都会收到 `background_tasks_snapshot`；非空快照覆盖本地未结算任务集合，空快照会关闭连接并清除待跟踪 ID。
 - 所有事件按 JSON `event_id` 去重，并按 session 内 `background_activity_version` 防止旧状态回滚。
@@ -382,4 +449,6 @@ function onSessionEvent(event: Envelope) {
 - 同一 session 的多个 wakeup 不并行运行；排队批次在前一个 wakeup 结束后才建立自己的 chat stream。
 - `server_turn_started` 只使用 `stream_id` 订阅聊天流，不额外发起聊天请求。
 - 刷新后从持久化待跟踪 ID 列表重新订阅；仅在空 `background_tasks_snapshot` 或 `background_tasks_idle(active_delegation_count=0, active_child_task_count=0)` 后关闭会话 SSE。
+- 取消仅传入 `session_id`；`POST` 返回 `202` 后轮询取消 `GET`，直到固定范围的 `state=settled`。不重试 `POST` 来查询，也不以单个批次终态、`background_tasks_idle` 或 SSE 断开判定该次取消完成。
+- 收到 `background_task_unresolved` 时标记对应批次失败且不启动 wakeup；仍以最终 `background_tasks_idle` 释放会话 SSE。
 - 断线重连后，以 snapshot 和 `GET /api/session` 恢复，而非假定实时事件完整无缺。

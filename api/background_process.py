@@ -65,6 +65,9 @@ _DRAIN_STOP = threading.Event()
 _PROCESS_RECOVERY_DONE = False
 _PROCESS_CHECKPOINT_RECOVERED = False
 _PROCESS_RECOVERY_LOCK = threading.Lock()
+_UNMAPPED_RETRY_LOCK = threading.Lock()
+_UNMAPPED_RETRY_ATTEMPTS: dict[str, int] = {}
+_MAX_UNMAPPED_RETRIES = 3
 
 _REAPER_THREAD: Optional[threading.Thread] = None
 _REAPER_STOP = threading.Event()
@@ -921,17 +924,23 @@ def _requeue_async_delegation_event(
     )
 
 
-def _retry_unmapped_async_delegation_event(process_registry, evt: dict) -> None:
-    """Retry durable routing, or one bounded best-effort legacy routing pass."""
+def _retry_unmapped_async_delegation_event(process_registry, evt: dict) -> bool:
+    """Retry routing a bounded number of times; return whether it was queued."""
+    delegation_id = completion_delivery_id(evt)
+    with _UNMAPPED_RETRY_LOCK:
+        attempts = _UNMAPPED_RETRY_ATTEMPTS.get(delegation_id, 0)
+        if attempts >= _MAX_UNMAPPED_RETRIES:
+            return False
+        _UNMAPPED_RETRY_ATTEMPTS[delegation_id] = attempts + 1
     completion_queue = getattr(process_registry, "completion_queue", None)
     if schedule_async_delegation_claim_retry(
         evt,
         completion_queue,
         delay=ASYNC_DELIVERY_ROUTING_RETRY_SECONDS,
     ):
-        return
+        return True
     if evt.get("_webui_routing_retry_attempted"):
-        return
+        return True
     retry_evt = dict(evt)
     retry_evt["_webui_routing_retry_attempted"] = True
     _requeue_async_delegation_event(
@@ -939,6 +948,36 @@ def _retry_unmapped_async_delegation_event(process_registry, evt: dict) -> None:
         retry_evt,
         delay=ASYNC_DELIVERY_ROUTING_RETRY_SECONDS,
     )
+    return True
+
+
+def _emit_async_delegation_unresolved(session_id: str, delegation_id: str) -> None:
+    """Publish the fail-closed terminal event after origin retries are exhausted."""
+    try:
+        from api.models import get_session
+        from integration.async_delegation_turns import (
+            idle_event,
+            is_idle,
+            mark_async_delegation_unresolved,
+            unresolved_event,
+        )
+
+        session = get_session(session_id)
+        mark_async_delegation_unresolved(session, delegation_id)
+        emit_session_channel_event(
+            session_id,
+            "background_task_unresolved",
+            unresolved_event(session, delegation_id),
+        )
+        if is_idle(session):
+            emit_session_channel_event(session_id, "background_tasks_idle", idle_event(session))
+    except Exception:
+        logger.warning(
+            "async delegation unresolved event emit failed for session %s delegation %s",
+            session_id,
+            delegation_id,
+            exc_info=True,
+        )
 
 
 def _record_async_delegation_accepted(
@@ -1239,6 +1278,7 @@ def _process_async_delegation_event(
         from api.models import get_session
         from api.config import _get_session_agent_lock
         from integration.async_delegation_turns import (
+            cancellation_delegation_ids,
             mark_async_delegation_completion,
             normalize_async_delegation_status,
             resolve_async_delegation_origin,
@@ -1258,7 +1298,7 @@ def _process_async_delegation_event(
             legacy_originless_route = True
         if origin is None and not legacy_originless_route:
             release_async_delegation_delivery(evt, claim)
-            _retry_unmapped_async_delegation_event(process_registry, evt)
+            retry_scheduled = _retry_unmapped_async_delegation_event(process_registry, evt)
             logger.warning(
                 "async_delegation_origin_unresolved session_id=%s "
                 "delegation_id=%s event_type=%s",
@@ -1266,12 +1306,49 @@ def _process_async_delegation_event(
                 delegation_id,
                 type(evt).__name__,
             )
+            if not retry_scheduled:
+                _emit_async_delegation_unresolved(session_id, delegation_id)
+                complete_async_delegation_delivery(evt, claim)
+                with _UNMAPPED_RETRY_LOCK:
+                    _UNMAPPED_RETRY_ATTEMPTS.pop(delegation_id, None)
             return
         if origin is None:
             origin = {"turn_key": ""}
+        with _UNMAPPED_RETRY_LOCK:
+            _UNMAPPED_RETRY_ATTEMPTS.pop(delegation_id, None)
         origin_turn_key = str(origin.get("turn_key") or "").strip()
         completion_status = normalize_async_delegation_status(evt.get("status"))
         child_task_summary = _async_delegation_child_task_summary(evt, origin)
+        cancellation_matched = False
+        cancellation_record = None
+        with _get_session_agent_lock(session_id):
+            # Read the durable barrier while holding the same lock used by the
+            # cancel endpoint. A completion racing with cancellation must
+            # settle under that barrier, never start a new wakeup turn.
+            session = get_session(session_id)
+            if delegation_id in cancellation_delegation_ids(session):
+                cancellation_matched = True
+                cancel_state = "cancelled" if completion_status == "cancelled" else "requested"
+                cancellation_record = mark_async_delegation_completion(
+                    session,
+                    delegation_id,
+                    wakeup_state="settled",
+                    content="",
+                    status=completion_status,
+                    child_task_summary=child_task_summary,
+                    cancel_state=cancel_state,
+                )
+        if cancellation_matched:
+            _emit_async_delegation_status(
+                session_id,
+                delegation_id,
+                cancellation_record or origin,
+                status=completion_status,
+                wakeup_state="settled",
+                content="",
+            )
+            complete_async_delegation_delivery(evt, claim)
+            return
         wakeup_prompt_raw = format_wakeup_prompt(evt)
         wakeup_prompt = wakeup_prompt_raw.strip() if wakeup_prompt_raw else ""
         if not wakeup_prompt:

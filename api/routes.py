@@ -11816,6 +11816,14 @@ def handle_get(handler, parsed) -> bool:
 
     # ── Integration skills (GET) ──
     try:
+        from integration.async_delegation_turns.handlers import try_handle_get as _async_delegation_try_get
+
+        if _async_delegation_try_get(handler, parsed) is True:
+            return True
+    except ImportError:
+        pass
+
+    try:
         from integration.skills.handlers import try_handle_get as _integration_try_get
 
         if _integration_try_get(handler, parsed) is True:
@@ -13956,6 +13964,14 @@ def handle_post(handler, parsed) -> bool:
         pass
 
     try:
+        from integration.async_delegation_turns.handlers import try_handle_post as _async_delegation_try_post
+
+        if _async_delegation_try_post(handler, parsed, body) is True:
+            return True
+    except ImportError:
+        pass
+
+    try:
         from integration.profiles.handlers import try_handle_post as _profiles_try_post
 
         if _profiles_try_post(handler, parsed, body) is True:
@@ -15994,15 +16010,14 @@ def _handle_session_run_journal_stream_for_session(handler, parsed, session_id):
 
         session_channel, session_subscriber = subscribe_to_session_channel(session_id)
         background_snapshot = snapshot_event(session)
-        if background_snapshot["payload"]["active_task_count"]:
-            background_subscription = True
-            _sse_with_id(
-                handler,
-                "background_tasks_snapshot",
-                background_snapshot,
-                background_snapshot["event_id"],
-            )
-            note_sent_event_id(background_snapshot["event_id"])
+        background_subscription = True
+        _sse_with_id(
+            handler,
+            "background_tasks_snapshot",
+            background_snapshot,
+            background_snapshot["event_id"],
+        )
+        note_sent_event_id(background_snapshot["event_id"])
 
         replay_events = []
         if resume_event_id:

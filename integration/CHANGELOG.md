@@ -8,6 +8,8 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Added
 
+- **异步委派会话取消与恢复** — session SSE 每次建连均先发送 `background_tasks_snapshot`（包括空快照）；真实 user message 持久化其 `async_delegations` 生命周期。新增 `POST` / `GET /api/sessions/background_tasks/cancel`：取消范围先写入 Session sidecar，再并行请求 Agent 中断，客户端轮询至 `state=settled` 确认该固定范围已收口。归属映射耗尽重试后发送 `background_task_unresolved`，取消范围内的完成结果不会启动新的 wakeup stream。
+
 - **Unified Profile Gateway ownership** — `server.py` 现在同时在原生主机和普通 Docker 容器中持有 Profile Gateway；所有 WebUI-owned Gateway 都以前台 `gateway run -v --external-supervisor` 子进程运行，将合并 stdout/stderr 以 `[gateway:<profile>]` 前缀写入 WebUI 控制台及同一持久化日志。转发行不受 `HERMES_WEBUI_LOG_LEVEL` 过滤，敏感字段在输出前脱敏；WebUI 退出时只终止自身创建的 Gateway。s6 仍保留 service-manager 生命周期。
 
 ### Fixed

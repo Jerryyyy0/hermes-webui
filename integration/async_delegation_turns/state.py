@@ -9,6 +9,8 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+_UNSETTLED_WAKEUP_STATES = frozenset({"idle", "queued", "running"})
+
 
 def normalize_async_delegation_status(value: Any) -> str:
     """Map Agent terminal spellings onto the WebUI lifecycle contract."""
@@ -53,7 +55,163 @@ def _save(session: Any) -> None:
     session.save(touch_updated_at=False)
 
 
-def _dispatch_metadata(payload: dict[str, Any]) -> tuple[str, int, list[str]]:
+def _message_item(record: dict[str, Any]) -> dict[str, Any]:
+    """Return the stable, public lifecycle projection for one delegation."""
+    try:
+        child_task_count = max(1, int(record.get("child_task_count") or 1))
+    except (TypeError, ValueError):
+        child_task_count = 1
+    item = {
+        "status": str(record.get("status") or "running"),
+        "wakeup_state": str(record.get("wakeup_state") or "idle"),
+        "cancel_state": str(record.get("cancel_state") or "none"),
+        "child_task_count": child_task_count,
+        "goals": list(record.get("goals") or []) if isinstance(record.get("goals"), list) else [],
+        "dispatched_at": record.get("created_at"),
+        "completed_at": record.get("completed_at"),
+    }
+    if isinstance(record.get("child_task_summary"), dict):
+        item["child_task_summary"] = dict(record["child_task_summary"])
+    return item
+
+
+def _turn_state(items: list[dict[str, Any]]) -> str:
+    if not items:
+        return "settled"
+    if any(
+        item["status"] == "running" or item["wakeup_state"] in _UNSETTLED_WAKEUP_STATES
+        for item in items
+    ):
+        return "cancelling" if any(item["cancel_state"] == "requested" for item in items) else "running"
+    if all(item["status"] == "cancelled" for item in items):
+        return "cancelled"
+    return "settled"
+
+
+def _project_turns(session: Any, records: dict[str, dict[str, Any]]) -> None:
+    """Project delegation state onto the exact origin user message only."""
+    messages = getattr(session, "messages", None)
+    if not isinstance(messages, list):
+        return
+    by_turn: dict[str, list[dict[str, Any]]] = {}
+    for record in records.values():
+        turn_key = str(record.get("turn_key") or "").strip()
+        if turn_key:
+            by_turn.setdefault(turn_key, []).append(record)
+    for message in messages:
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        turn_key = str(message.get("_turn_key") or "").strip()
+        records_for_turn = by_turn.get(turn_key)
+        if not records_for_turn:
+            continue
+        items = {
+            str(record.get("delegation_id")): _message_item(record)
+            for record in records_for_turn
+            if str(record.get("delegation_id") or "").strip()
+        }
+        message["async_delegations"] = {
+            "state": _turn_state(list(items.values())),
+            "items": items,
+        }
+
+
+def _persist(session: Any, records: dict[str, dict[str, Any]]) -> None:
+    session.async_delegation_origins = records
+    _project_turns(session, records)
+    _save(session)
+
+
+def _refresh_cancellation(session: Any, records: dict[str, dict[str, Any]]) -> None:
+    cancellation = getattr(session, "async_delegation_cancellation", None)
+    if not isinstance(cancellation, dict) or cancellation.get("state") != "cancelling":
+        return
+    delegation_ids = [str(item) for item in cancellation.get("delegation_ids") or []]
+    if not delegation_ids:
+        return
+    if any(
+        (records.get(delegation_id) or {}).get("status") == "running"
+        or (records.get(delegation_id) or {}).get("wakeup_state") in _UNSETTLED_WAKEUP_STATES
+        for delegation_id in delegation_ids
+    ):
+        return
+    settled_at = time.time()
+    session.async_delegation_cancellation = {
+        **cancellation,
+        "state": "settled",
+        "settled_at": settled_at,
+    }
+
+
+def cancellation_status(session: Any) -> dict[str, Any]:
+    cancellation = getattr(session, "async_delegation_cancellation", None)
+    if not isinstance(cancellation, dict) or cancellation.get("state") not in {"cancelling", "settled"}:
+        return {
+            "state": "idle",
+            "delegation_ids": [],
+            "requested_at": None,
+            "settled_at": None,
+        }
+    return {
+        "state": str(cancellation.get("state")),
+        "delegation_ids": [str(item) for item in cancellation.get("delegation_ids") or []],
+        "requested_at": cancellation.get("requested_at"),
+        "settled_at": cancellation.get("settled_at"),
+    }
+
+
+def begin_async_delegation_cancellation(session: Any, *, now: float | None = None) -> dict[str, Any]:
+    """Atomically snapshot the currently unsettled delegation IDs."""
+    current = cancellation_status(session)
+    if current["state"] == "cancelling":
+        return current
+    records = _records(session)
+    delegation_ids = [
+        delegation_id
+        for delegation_id, record in records.items()
+        if str(record.get("status") or "running") == "running"
+        or str(record.get("wakeup_state") or "idle") in _UNSETTLED_WAKEUP_STATES
+    ]
+    if not delegation_ids:
+        return current
+    requested_at = time.time() if now is None else float(now)
+    session.async_delegation_cancellation = {
+        "state": "cancelling",
+        "delegation_ids": delegation_ids,
+        "requested_at": requested_at,
+        "settled_at": None,
+    }
+    for delegation_id in delegation_ids:
+        record = dict(records[delegation_id])
+        record["cancel_state"] = "requested"
+        records[delegation_id] = record
+    _persist(session, records)
+    return cancellation_status(session)
+
+
+def cancellation_delegation_ids(session: Any) -> set[str]:
+    cancellation = getattr(session, "async_delegation_cancellation", None)
+    if not isinstance(cancellation, dict) or cancellation.get("state") != "cancelling":
+        return set()
+    return {str(item) for item in cancellation.get("delegation_ids") or []}
+
+
+def mark_async_delegation_unresolved(session: Any, delegation_id: str) -> None:
+    """Remove an unresolved completion from cancellation/activity accounting."""
+    records = _records(session)
+    record = records.get(str(delegation_id or "").strip())
+    if isinstance(record, dict):
+        record = dict(record)
+        record["status"] = "failed"
+        record["wakeup_state"] = "settled"
+        record["completed_at"] = record.get("completed_at") or time.time()
+        record["activity_version"] = _bump_activity_version(session)
+        records[str(delegation_id).strip()] = record
+        _refresh_cancellation(session, records)
+        _persist(session, records)
+
+
+def _dispatch_metadata(payload: dict[str, Any]) -> tuple[int, list[str]]:
     raw_goals = payload.get("goals")
     goals = (
         [str(goal) for goal in raw_goals if isinstance(goal, str) and goal]
@@ -67,7 +225,7 @@ def _dispatch_metadata(payload: dict[str, Any]) -> tuple[str, int, list[str]]:
     if goals:
         child_task_count = len(goals)
     child_task_count = max(1, child_task_count)
-    return ("batch" if child_task_count > 1 else "single", child_task_count, goals)
+    return child_task_count, goals
 
 
 def record_async_delegation_dispatch(
@@ -91,7 +249,7 @@ def record_async_delegation_dispatch(
     origin_turn_key = str(turn_key or "").strip()
     if not delegation_id or not origin_turn_key:
         return None
-    delegation_kind, child_task_count, goals = _dispatch_metadata(payload)
+    child_task_count, goals = _dispatch_metadata(payload)
 
     records = _records(session)
     record = dict(records.get(delegation_id) or {})
@@ -105,14 +263,14 @@ def record_async_delegation_dispatch(
                 "status": "running",
                 "wakeup_state": "idle",
                 "completed_at": None,
-                "delegation_kind": delegation_kind,
+                "cancel_state": "none",
                 "child_task_count": child_task_count,
                 "goals": goals,
             }
         )
     else:
         record["delegation_id"] = delegation_id
-        record.setdefault("delegation_kind", delegation_kind)
+        record.setdefault("cancel_state", "none")
         record.setdefault("child_task_count", child_task_count)
         if not record.get("goals") and goals:
             record["goals"] = goals
@@ -122,8 +280,7 @@ def record_async_delegation_dispatch(
         else _bump_activity_version(session)
     )
     records[delegation_id] = record
-    session.async_delegation_origins = records
-    _save(session)
+    _persist(session, records)
     logger.debug(
         "hermes_message_semantics action=async_delegation_origin_recorded "
         "class=context_anchor kind=async_delegation_completion role=user "
@@ -151,6 +308,7 @@ def mark_async_delegation_completion(
     content: Any,
     status: str = "completed",
     child_task_summary: dict[str, int] | None = None,
+    cancel_state: str | None = None,
 ) -> dict[str, Any] | None:
     """Persist completion receipt without materializing a transcript message."""
     delegation_id = str(delegation_id or "").strip()
@@ -164,6 +322,8 @@ def mark_async_delegation_completion(
     normalized_status = normalize_async_delegation_status(status)
     record["status"] = normalized_status
     record["completed_at"] = record.get("completed_at") or time.time()
+    if cancel_state is not None:
+        record["cancel_state"] = str(cancel_state)
     if child_task_summary is not None:
         record["child_task_summary"] = dict(child_task_summary)
     changed = (
@@ -175,8 +335,8 @@ def mark_async_delegation_completion(
     else:
         record["activity_version"] = int(record.get("activity_version") or _activity_version(session))
     records[delegation_id] = record
-    session.async_delegation_origins = records
-    _save(session)
+    _refresh_cancellation(session, records)
+    _persist(session, records)
     logger.debug(
         "hermes_message_semantics action=background_task_status "
         "class=context_anchor kind=async_delegation_completion role=user "
@@ -210,8 +370,8 @@ def mark_async_delegation_wakeup(
     else:
         record["activity_version"] = int(record.get("activity_version") or _activity_version(session))
     records[delegation_id] = record
-    session.async_delegation_origins = records
-    _save(session)
+    _refresh_cancellation(session, records)
+    _persist(session, records)
     logger.debug(
         "hermes_message_semantics action=background_task_status "
         "class=context_anchor kind=async_delegation_completion role=user "

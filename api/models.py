@@ -1286,6 +1286,7 @@ class Session:
                  process_wakeup_pause=None,
                  async_delegation_origins=None,
                  async_delegation_activity_version=0,
+                 async_delegation_cancellation=None,
                  share_token=None,
                  share_created_at=None,
                  workspace_mode=None,
@@ -1433,6 +1434,11 @@ class Session:
             )
         except (TypeError, ValueError):
             self.async_delegation_activity_version = 0
+        self.async_delegation_cancellation = (
+            dict(async_delegation_cancellation)
+            if isinstance(async_delegation_cancellation, dict)
+            else None
+        )
         self.share_token = str(share_token).strip() if share_token else None
         self.share_created_at = share_created_at
         # #5854: a compact fingerprint of anchor_activity_scenes ({scene_key:
@@ -1511,6 +1517,7 @@ class Session:
             'process_wakeup_pause',
             'async_delegation_origins',
             'async_delegation_activity_version',
+            'async_delegation_cancellation',
             'share_token', 'share_created_at',
         ]
         meta = {k: getattr(self, k, None) for k in METADATA_FIELDS}
@@ -1913,6 +1920,11 @@ class Session:
                 else {}
             ),
             'async_delegation_activity_version': self.async_delegation_activity_version,
+            'async_delegation_cancellation': (
+                dict(self.async_delegation_cancellation)
+                if isinstance(self.async_delegation_cancellation, dict)
+                else None
+            ),
             'share_token': self.share_token,
             'share_created_at': self.share_created_at,
             'is_streaming': _is_streaming_session(

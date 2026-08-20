@@ -101,6 +101,85 @@ def test_async_wakeup_is_queued_while_foreground_turn_is_active(monkeypatch):
     assert statuses[-1]["wakeup_state"] == "queued"
 
 
+def test_cancelled_completion_settles_without_starting_a_wakeup(monkeypatch):
+    from api import background_process as bp
+    from integration.async_delegation_turns import begin_async_delegation_cancellation
+
+    session = SimpleNamespace(
+        session_id="session-1",
+        async_delegation_origins={
+            "deleg-1": {"delegation_id": "deleg-1", "turn_key": "turn:8", "status": "running", "wakeup_state": "idle"}
+        },
+        async_delegation_activity_version=0,
+        save=lambda **_: None,
+    )
+    begin_async_delegation_cancellation(session)
+    registry = SimpleNamespace(completion_queue=None)
+    claim = SimpleNamespace(durable=False)
+    started = []
+    emitted = []
+
+    monkeypatch.setattr(bp, "claim_async_delegation_delivery", lambda *_: claim)
+    monkeypatch.setattr(bp, "complete_async_delegation_delivery", lambda *_: None)
+    monkeypatch.setattr(bp, "release_async_delegation_delivery", lambda *_: None)
+    monkeypatch.setattr(bp, "_start_async_delegation_wakeup_turn", lambda *args, **kwargs: started.append((args, kwargs)))
+    monkeypatch.setattr(bp, "_emit_async_delegation_status", lambda *args, **kwargs: emitted.append(kwargs))
+    monkeypatch.setattr("api.models.get_session", lambda _sid: session)
+    monkeypatch.setattr("api.config._get_session_agent_lock", lambda _sid: _NoopLock())
+
+    bp._process_async_delegation_event(
+        {"type": "async_delegation", "delegation_id": "deleg-1", "status": "cancelled"},
+        session_id="session-1",
+        delegation_id="deleg-1",
+        process_registry=registry,
+    )
+
+    assert started == []
+    assert emitted[-1]["wakeup_state"] == "settled"
+    assert session.async_delegation_origins["deleg-1"]["cancel_state"] == "cancelled"
+    assert session.async_delegation_cancellation["state"] == "settled"
+
+
+def test_unresolved_completion_emits_terminal_event_after_retry_is_exhausted(monkeypatch):
+    from api import background_process as bp
+
+    emitted = []
+    registry = SimpleNamespace(completion_queue=None)
+    claim = SimpleNamespace(durable=False)
+    session = SimpleNamespace(
+        session_id="session-1",
+        async_delegation_origins={},
+        async_delegation_activity_version=2,
+        save=lambda **_: None,
+    )
+
+    monkeypatch.setattr(bp, "claim_async_delegation_delivery", lambda *_: claim)
+    monkeypatch.setattr(bp, "release_async_delegation_delivery", lambda *_: None)
+    monkeypatch.setattr(bp, "complete_async_delegation_delivery", lambda *_: None)
+    monkeypatch.setattr(bp, "_retry_unmapped_async_delegation_event", lambda *_: False)
+    monkeypatch.setattr("api.models.get_session", lambda _sid: session)
+    monkeypatch.setattr("api.config._get_session_agent_lock", lambda _sid: _NoopLock())
+    monkeypatch.setattr(
+        bp,
+        "emit_session_channel_event",
+        lambda session_id, event, payload: emitted.append((session_id, event, payload)),
+    )
+
+    bp._process_async_delegation_event(
+        {"type": "async_delegation", "delegation_id": "deleg-missing"},
+        session_id="session-1",
+        delegation_id="deleg-missing",
+        process_registry=registry,
+    )
+
+    assert emitted[0][0:2] == ("session-1", "background_task_unresolved")
+    assert emitted[0][2]["payload"] == {
+        "delegation_id": "deleg-missing",
+        "reason": "origin_unresolved",
+        "retryable": False,
+    }
+
+
 def test_async_batch_error_is_published_as_failed(monkeypatch):
     """An all-failed Agent batch still wakes the parent but keeps its failure state."""
     from api import background_process as bp
@@ -112,7 +191,6 @@ def test_async_batch_error_is_published_as_failed(monkeypatch):
                 "turn_key": "turn:8",
                 "status": "running",
                 "wakeup_state": "idle",
-                "delegation_kind": "batch",
                 "child_task_count": 2,
             }
         },
@@ -211,6 +289,7 @@ def test_async_wakeup_status_uses_versioned_lifecycle_envelope(monkeypatch):
                 "status": "completed",
                 "wakeup_state": "settled",
                 "activity_version": 3,
+                "delegation_kind": "single",
             }
         },
     )
@@ -237,7 +316,6 @@ def test_async_wakeup_status_uses_versioned_lifecycle_envelope(monkeypatch):
     assert status[2]["background_activity_version"] == 3
     assert status[2]["payload"] == {
         "delegation_id": "deleg-1",
-        "delegation_kind": "single",
         "child_task_count": 1,
         "goals": [],
         "origin_turn_key": "turn:8",

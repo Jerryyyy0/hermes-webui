@@ -8105,13 +8105,6 @@ def _run_agent_streaming(
                         dispatched_at=record.get("created_at"),
                     )
                     put("background_task_dispatched", event_payload)
-                    from api.background_process import emit_session_channel_event
-
-                    emit_session_channel_event(
-                        session_id,
-                        "background_task_dispatched",
-                        event_payload,
-                    )
                 except Exception:
                     logger.debug(
                         "Failed to record async delegation origin for session %s",

@@ -353,9 +353,12 @@ def test_session_route_emits_snapshot_without_id_for_missing_cursor_and_keepaliv
     )
 
     body = handler.wfile.getvalue().decode("utf-8")
+    assert "id: background:snapshot:0\n" in body
+    assert "event: background_tasks_snapshot\n" in body
     assert "event: session_snapshot\n" in body
     assert ": keepalive\n\n" in body
-    assert "id: " not in body
+    session_snapshot = body[body.index("event: session_snapshot\n") :]
+    assert "id: " not in session_snapshot
     assert stop["count"] == 1
 
 

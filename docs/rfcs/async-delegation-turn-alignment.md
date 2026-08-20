@@ -1,6 +1,6 @@
 # 异步委派完成的 Turn 对齐与实时展示
 
-- **状态：** Implemented
+- **状态：** 部分已实施；每轮消息状态与会话级取消契约待实现
 - **作者：** @wzq
 - **创建日期：** 2026-08-06
 - **关联契约：** [WebUI Run State Consistency Contract](webui-run-state-consistency-contract.md)、[Session Inspector Manifest](../session-inspector-manifest.md)
@@ -116,9 +116,8 @@ WebUI 的显示副本会为异步回补产生的 assistant/tool 行补充：
 }
 ```
 
-原始 user 的显示副本同时从 session sidecar 的
-`async_delegation_origins` 补充 `_background_task_ids`。这些字段只属于 WebUI 显示/归属
-投影，不写入 Agent 模型上下文，也不对历史 assistant 执行回溯重绑。
+原始 user 消息持久化 WebUI 专属的 `async_delegations` 元数据。它用于显示、归属与取消，
+不写入 Agent 模型上下文，也不对历史 assistant 执行回溯重绑。
 
 completion anchor 不显示、不产生普通 SSE `message` 事件，也不成为 turn anchor。最后一条
 assistant、其工具事件、`MEDIA:`、References 和 artifact 都属于 `turn:8`。
@@ -180,26 +179,22 @@ _hermes_scaffold_kind
 该桥只表达“这条输入是隐藏的模型上下文”，不传递 WebUI 的 turn 所有权。Provider API
 副本继续删除 `_hermes_*` 与旧兼容 flag，外部模型不会收到内部元数据。
 
-### 2. WebUI 记录 origin，而非推断
+### 2. WebUI 索引 origin，而非推断
 
 WebUI 在一个成功的后台 `delegate_task` 结果到达时，以当前不可变的
-`stream_turn_key` 写入 session sidecar：
+`stream_turn_key` 写入 session sidecar 的轻量反查索引：
 
 ```json
 {
-  "async_delegation_origins": {
-    "deleg_123": {
-      "turn_key": "turn:8",
-      "created_at": 1786004400,
-      "status": "running",
-      "wakeup_state": "idle"
-    }
+  "async_delegation_index": {
+    "deleg_123": "turn:8"
   }
 }
 ```
 
-`delegation_id` 是该映射的唯一键。WebUI 不得从 completion 文本、消息尾部或“最新 user”
-推断来源。这个 mapping 是 WebUI 自己的显示/归属状态，因此不扩大 Hermes Agent 的
+`delegation_id` 是该映射的唯一键。它仅用于由 completion 快速定位对应 user message，
+不保存任务运行状态。WebUI 不得从 completion 文本、消息尾部或“最新 user”推断来源。
+这个索引是 WebUI 自己的归属状态，因此不扩大 Hermes Agent 的
 `async_delegation` 表或事件协议。
 
 同一 origin turn 可有多个 delegation id；它们必须是独立的 sidecar 记录和独立的
@@ -207,24 +202,67 @@ WebUI 在一个成功的后台 `delegate_task` 结果到达时，以当前不可
 
 ### 3. 原始 turn 的后台任务状态
 
-sidecar 在成功派发后记录并通过 SSE 发送一个非 transcript 状态：
+成功派发后，WebUI 将状态写入对应真实 user message 的 WebUI 专属元数据：
 
-```yaml
-turn:8:
-  background_tasks:
-    - delegation_id: deleg_123
-      status: running
-      dispatched_at: "19:00"
-      completed_at: null
+```json
+{
+  "role": "user",
+  "_turn_key": "turn:8",
+  "async_delegations": {
+    "state": "running",
+    "items": {
+      "deleg_123": {
+        "status": "running",
+        "wakeup_state": "idle",
+        "cancel_state": "none"
+      }
+    }
+  }
+}
 ```
 
-状态只能为 `running`、`completed`、`failed` 或 `cancelled`。`wakeup_state` 只能为 `idle`、
-`queued`、`running`、`settled` 或 `failed`，用于区分委派任务本身和完成后的 Agent 唤醒。
-例如 completion 已到达但 `turn:9` 仍活动时，任务 `status=completed`、
-`wakeup_state=queued`。该标记属于 turn 活动/Inspector 投影，而不是 `messages[]` 的 user
-或 assistant 行。刷新、回放、重连时从 sidecar 恢复，不得通过 transcript 反推。
+`items` 的键是 `delegation_id`。`status` 只能为 `running`、`completed`、`failed` 或
+`cancelled`；`wakeup_state` 只能为 `idle`、`queued`、`running`、`settled` 或 `failed`。
+`cancel_state` 只能为 `none`、`requested` 或 `cancelled`。
 
-### 4. Completion 唤醒与 SSE
+`async_delegations.state` 是这一轮的聚合状态：`running` 表示仍有未结算批次；`cancelling`
+表示至少一个批次已请求取消；`cancelled` 表示全部批次已取消并收口；`settled` 表示全部批次
+已结算但并非全部取消，包括全部成功、全部失败或混合终态。
+
+例如 completion 已到达但 `turn:9` 仍活动时，`items.deleg_123.status=completed`、
+`wakeup_state=queued`，聚合状态仍为 `running`。该元数据属于 WebUI 持久化显示状态；向
+Agent、Provider 和 hidden completion anchor 构造的消息副本必须移除它。
+
+### 4. 会话级取消
+
+会话级取消只取消请求时已经存在的未结算 delegation，不取消主会话、历史消息或之后新派发
+的任务。取消请求保存在 Session sidecar，用于审计与并发屏障：
+
+```json
+{
+  "async_delegation_cancellation": {
+    "state": "cancelling",
+    "delegation_ids": ["deleg_123", "deleg_456"],
+    "requested_at": 1786004500
+  }
+}
+```
+
+服务端在同一个 session agent lock 内先快照全部未结算 `delegation_id`，再持久化取消请求，
+并把每个对应 user message 的聚合状态更新为 `cancelling`、item 更新为
+`cancel_state=requested`。释放锁后才请求 Agent 中断 child task。
+
+取消仍在进行时，重复取消请求必须返回已持久化的 `delegation_ids`，不得扩大范围。取消收口后，
+下一次请求代表新的“取消当前任务”操作，会重新快照当时的未结算 delegation。Agent 确认中断的 delegation 终态为 `status=cancelled`、
+`wakeup_state=settled`、`cancel_state=cancelled`。取消无法逆转恰好已经完成的 child：该批次
+保留其真实 `completed` 或 `failed` 状态与 `cancel_state=requested`，但仍不得启动 wakeup。
+当该轮全部批次取消时，其 `async_delegations.state=cancelled`；其余全量结算结果为 `settled`。
+
+取消屏障必须在 completion 处理和 wakeup 启动前检查。取消范围内的晚到 completion 可以被
+确认和记录，但不得进入 `queued` 或 `running`，不得产生 `server_turn_started`。已经运行的
+`async_delegation_wakeup` stream 应被取消；不属于该 delegation 的普通用户 stream 不受影响。
+
+### 5. Completion 唤醒与 SSE
 
 `api/background_process.py` 接到 completion 后执行：
 
@@ -252,7 +290,7 @@ turn:8:
 
 不得新建平行 transport，也不得把 completion anchor 作为普通 `message` SSE 广播。
 
-### 5. 前端如何接收后台消息
+### 6. 前端如何接收后台消息
 
 前端保持一个会话级 SSE 监听通道。该通道负责传递后台任务状态和 server-side turn 的
 启动通知；具体 assistant token 仍通过 `stream_id` 对应的既有 chat stream 接收。
@@ -297,7 +335,7 @@ assistant token、tool、MEDIA 和终态事件，并把可见内容追加到当�
 后台 wakeup stream 活跃期间提交新消息，前端保留输入并等待现有 stream 终态；后端按单
 session 调度规则接受或排队该输入，绝不并行执行。
 
-### 6. mapping 缺失或竞态
+### 7. mapping 缺失或竞态
 
 派发工具 callback 与 completion 可能竞态。completion 到达但 origin mapping 尚未落盘时，
 `api/background_process.py` 仅在有上限的短暂重试窗口内重新读取 sidecar。
@@ -313,7 +351,7 @@ session 调度规则接受或排队该输入，绝不并行执行。
 
 这样宁可需要人工恢复，也不会把后台结果写到错误用户问题下。
 
-### 7. 统一语义显示投影
+### 8. 统一语义显示投影
 
 WebUI 的 `integration/agent_message_semantics/` 是分类和显示投影的唯一入口。
 分类优先级为：
@@ -336,7 +374,7 @@ projection 删除，但保留在 Agent model context 所需的位置。
 `drop_non_display_messages()`，候选循环再作一次防御性跳过。还必须阻止“当前输入缺失于显示
 transcript 时自动补一个可见 user”的 fallback 把 completion anchor 重新实体化。
 
-### 8. Turn、Manifest 与 artifact
+### 9. Turn、Manifest 与 artifact
 
 `_latest_user_turn_binding`、`_message_turns`、pending checkpoint/recovered pending turn 查找、
 `_next_turn_key` 和 artifact persistence 前的 user-anchor 校验，都必须将
@@ -355,7 +393,7 @@ Manifest 仍是派生索引，不是 transcript 或执行 journal。它可以显
 task lifecycle，但不会以 completion anchor 新建 `manifest.turns[]` 项；普通 `turns[]` 仍只
 来自真实 user anchor。
 
-### 9. Agent 写入幂等与数据库约束
+### 10. Agent 写入幂等与数据库约束
 
 异步 wakeup 会重新构造一份包含原始 user 的模型上下文。该 user 不是新的用户输入，但如果
 复制后的消息字典没有 `_DB_PERSISTED_MARKER`，`run_agent.py::_flush_messages_to_session_db_unlocked`
@@ -438,9 +476,9 @@ delegation_id=...
 | 层 | 变更 |
 | --- | --- |
 | Hermes Agent | 增加 `messages.hermes_dedupe_key` 可空列和活动行部分唯一索引；统一 append、批量、replay/recovery 写入幂等；保留 `user_message_metadata` 最小透传桥，为 completion anchor 赋予 `context_anchor/async_delegation_completion` 语义。 |
-| WebUI sidecar | 保存 `delegation_id -> origin_turn_key` 与 per-turn 后台任务状态。 |
-| `api/background_process.py` | 解析 origin，调用带 `turn_key_override` 的 wakeup；处理有界竞态与失败关闭。 |
-| `api/streaming.py` | 使用语义显示投影、避免 completion fallback visible user、沿用 override 结算所有输出。 |
+| WebUI metadata | Session 保存 `delegation_id -> origin_turn_key` 索引和取消请求；对应 user message 保存 `async_delegations` 状态。 |
+| `api/background_process.py` | 解析 origin，调用带 `turn_key_override` 的 wakeup；在取消屏障后处理有界竞态与失败关闭。 |
+| `api/streaming.py` | 写入 user-message 任务状态，使用语义显示投影，避免 completion fallback visible user，并沿用 override 结算所有输出。 |
 | `api/session_manifest.py` | 非真实 user 不切 turn；origin turn 收集异步 run 的工具/MEDIA/artifact。 |
 | 前端/SSE | 扩展现有 `server_turn_started` 和任务状态事件；在时间线尾部实时展示该 run，不渲染 hidden anchor。 |
 
@@ -459,6 +497,8 @@ delegation_id=...
 | 多个后台任务 | 每个 delegation id 独立解析、更新状态，不能交叉结算。 |
 | 多 profile/session | origin mapping 不能跨 profile 或 session 命中。 |
 | callback/completion 竞态 | mapping 在重试窗口内落盘可继续；窗口耗尽不 continuation、不新建 turn。 |
+| 会话级取消 | 请求瞬间快照未结算 delegation；之后新派发的批次不受影响；晚到 completion 不启动 wakeup。 |
+| 取消聚合状态 | 一轮全部取消为 `async_delegations.state=cancelled`；其他所有全量结算结果为 `settled`。 |
 | 语义投影 | `GET /api/session`、分页、SSE、merge、replay、导出均不含 completion anchor；真实最终 assistant 保留。 |
 | Manifest/artifact | synthetic user 不生成 turn；`turn:8` 的 MEDIA、工具和 artifact 持久化成功。 |
 | Agent 持久化幂等 | async wakeup 重放原始 user 时只保留一条 active 数据库记录；重复 flush 不重复增加 session 计数；不同 turn 的相同正文仍分别保留。 |

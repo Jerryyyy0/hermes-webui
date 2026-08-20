@@ -14,6 +14,7 @@ _EVENT_ID_KINDS = {
     "background_task_status": "status",
     "bg_task_complete": "complete",
     "server_turn_started": "run-started",
+    "background_task_unresolved": "unresolved",
 }
 
 
@@ -29,7 +30,6 @@ def _task_payload(delegation_id: str, record: dict[str, Any], **extra: Any) -> d
     goals = record.get("goals")
     payload = {
         "delegation_id": str(delegation_id),
-        "delegation_kind": str(record.get("delegation_kind") or "single"),
         "child_task_count": child_task_count,
         "goals": list(goals) if isinstance(goals, list) else [],
         "origin_turn_key": str(record.get("turn_key") or ""),
@@ -40,6 +40,9 @@ def _task_payload(delegation_id: str, record: dict[str, Any], **extra: Any) -> d
     if isinstance(child_task_summary, dict):
         payload["child_task_summary"] = dict(child_task_summary)
     payload.update({key: value for key, value in extra.items() if value is not None})
+    cancel_state = str(record.get("cancel_state") or "none")
+    if cancel_state != "none":
+        payload["cancel_state"] = cancel_state
     return payload
 
 
@@ -98,6 +101,24 @@ def snapshot_event(session: Any) -> dict[str, Any]:
                 _as_int(task.get("child_task_count"), 1) for task in tasks
             ),
             "tasks": tasks,
+        },
+    }
+
+
+def unresolved_event(session: Any, delegation_id: str) -> dict[str, Any]:
+    """Build the terminal event used when completion ownership is unavailable."""
+    version = _activity_version(session)
+    return {
+        "schema_version": 1,
+        "event_id": f"{delegation_id}:unresolved:{version}",
+        "event_type": "background_task_unresolved",
+        "session_id": str(getattr(session, "session_id", "") or ""),
+        "emitted_at": time.time(),
+        "background_activity_version": version,
+        "payload": {
+            "delegation_id": str(delegation_id),
+            "reason": "origin_unresolved",
+            "retryable": False,
         },
     }
 

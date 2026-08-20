@@ -481,6 +481,13 @@ curl -sS -X POST 'http://127.0.0.1:8787/api/integration/notifications/read' \
 | GET | `/api/skills/content` | Local SKILL.md / linked files |
 | POST | `/api/skills/save`, `/delete`, `/toggle` | Local CRUD |
 
+### Async delegation (`integration/async_delegation_turns/handlers.py`)
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| POST | `/api/sessions/background_tasks/cancel` | 固定并异步中断指定 session 当前未结算的 delegation；请求体为必填 `session_id`，受理后返回 `202`。 |
+| GET | `/api/sessions/background_tasks/cancel?session_id=` | 查询当前或最近一次取消记录；轮询至 `state=settled` 即表示该固定范围已收口。 |
+
 ### SkillHub proxy (`integration/skills/handlers.py` → `SKILLHUB_URL`)
 
 | WebUI | Upstream |
@@ -535,7 +542,7 @@ Response includes global `stats`: `{ hub, installed, not_installed, custom }` ac
 | `scripts/fetch_profile_logos.py` | Generate built-in logo library |
 | `assets/profile-logos/` | Logo preset PNGs + manifest |
 | `agent_message_semantics/` | Hermes Agent 内部脚手架与 model-only context anchor 的兼容分类、一问一答显示投影和无正文 DEBUG 审计；`api/streaming.py` / `api/session_manifest.py` 只保留薄调用 |
-| `async_delegation_turns/` | 后台委派的 sidecar 归属、持久化活动版本与统一 SSE 生命周期事件信封；`api/streaming.py`、`api/background_process.py`、`api/routes.py` 仅保留发射与 transport 接缝 |
+| `async_delegation_turns/` | 后台委派的 sidecar 归属、每轮状态投影、取消屏障、持久化活动版本与统一 SSE 生命周期事件信封；`api/streaming.py`、`api/background_process.py`、`api/routes.py` 仅保留发射与 transport 接缝 |
 | `assets/hermes_skillhub.js` | SkillHub sidebar panel |
 | `assets/hermes_profiles.js` | Profiles panel enrich |
 | `swagger/openapi.json` | Integration API 规范（`GET /api/openapi.json` 动态 `servers`） |

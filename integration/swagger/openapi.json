@@ -233,6 +233,52 @@
         }
       }
     },
+    "/api/sessions/background_tasks/cancel": {
+      "get": {
+        "tags": ["Session"],
+        "summary": "查询后台任务取消状态",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string" },
+            "description": "会话 ID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "当前或最近一次取消记录",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/BackgroundTaskCancellation" } } }
+          },
+          "400": { "description": "session_id 缺失或无效" },
+          "404": { "description": "会话不存在或不可见" }
+        }
+      },
+      "post": {
+        "tags": ["Session"],
+        "summary": "取消会话当前未结算的后台任务",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": { "schema": { "$ref": "#/components/schemas/BackgroundTaskCancellationRequest" } }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "取消范围已持久化并已请求中断",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/BackgroundTaskCancellation" } } }
+          },
+          "200": {
+            "description": "当前没有未结算后台任务",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/BackgroundTaskCancellation" } } }
+          },
+          "400": { "description": "session_id 缺失或无效" },
+          "404": { "description": "会话不存在或不可见" },
+          "500": { "description": "取消状态无法保存" }
+        }
+      }
+    },
     "/api/session": {
       "get": {
         "tags": ["Session"],
@@ -5361,6 +5407,25 @@
           "ok": { "type": "boolean", "enum": [true] },
           "session_id": { "type": "string" },
           "read_until": { "type": "number" }
+        }
+      },
+      "BackgroundTaskCancellationRequest": {
+        "type": "object",
+        "required": ["session_id"],
+        "properties": {
+          "session_id": { "type": "string" }
+        },
+        "additionalProperties": false
+      },
+      "BackgroundTaskCancellation": {
+        "type": "object",
+        "required": ["session_id", "state", "delegation_ids", "requested_at", "settled_at"],
+        "properties": {
+          "session_id": { "type": "string" },
+          "state": { "type": "string", "enum": ["idle", "cancelling", "settled"] },
+          "delegation_ids": { "type": "array", "items": { "type": "string" } },
+          "requested_at": { "type": "number", "nullable": true },
+          "settled_at": { "type": "number", "nullable": true }
         }
       },
       "McpServerSummary": {
