@@ -65,13 +65,19 @@ def test_dispatch_records_immutable_origin_turn():
     assert record["turn_key"] == "turn:8"
     assert resolve_async_delegation_origin(session, "deleg-1")["turn_key"] == "turn:8"
     assert session.async_delegation_origins["deleg-1"]["wakeup_state"] == "idle"
+    assert "delegation_id" not in session.async_delegation_origins["deleg-1"]
 
 
 def test_dispatch_projects_lifecycle_state_to_its_origin_user_message():
     session = _session()
     session.messages = [
         {"role": "user", "content": "first", "_turn_key": "turn:7"},
-        {"role": "user", "content": "dispatch", "_turn_key": "turn:8"},
+        {
+            "role": "user",
+            "content": "dispatch",
+            "_turn_key": "turn:8",
+            "_background_task_ids": ["deleg-1"],
+        },
     ]
 
     record_async_delegation_dispatch(
@@ -85,10 +91,12 @@ def test_dispatch_projects_lifecycle_state_to_its_origin_user_message():
     assert session.messages[1]["async_delegations"]["state"] == "running"
     assert item["status"] == "running"
     assert item["cancel_state"] == "none"
+    assert "_background_task_ids" not in session.messages[1]
 
 
 def test_batch_dispatch_persists_child_metadata_and_snapshot_counts():
     session = _session()
+    session.messages = [{"role": "user", "content": "dispatch", "_turn_key": "turn:8"}]
     record = record_async_delegation_dispatch(
         session,
         {
@@ -102,7 +110,11 @@ def test_batch_dispatch_persists_child_metadata_and_snapshot_counts():
     )
 
     assert record["child_task_count"] == 2
-    assert record["goals"] == ["research model A", "research model B"]
+    assert "goals" not in session.async_delegation_origins["deleg-batch"]
+    assert session.messages[0]["async_delegations"]["items"]["deleg-batch"]["goals"] == [
+        "research model A",
+        "research model B",
+    ]
     assert "delegation_kind" not in record
 
     snapshot = snapshot_event(session)
@@ -182,7 +194,7 @@ def test_lifecycle_events_share_a_persisted_versioned_envelope():
         "background_task_dispatched",
         "deleg-1",
         dispatched,
-        dispatched_at=dispatched["created_at"],
+        dispatched_at=dispatched["dispatched_at"],
     )
 
     assert event["schema_version"] == 1
@@ -192,12 +204,40 @@ def test_lifecycle_events_share_a_persisted_versioned_envelope():
     assert event["payload"] == {
         "delegation_id": "deleg-1",
         "child_task_count": 1,
-        "goals": [],
         "origin_turn_key": "turn:8",
         "status": "running",
         "wakeup_state": "idle",
-        "dispatched_at": dispatched["created_at"],
+        "dispatched_at": dispatched["dispatched_at"],
     }
+
+
+def test_legacy_top_level_fields_are_migrated_to_the_compact_sidecar():
+    session = _session()
+    session.messages = [{"role": "user", "content": "dispatch", "_turn_key": "turn:8"}]
+    session.async_delegation_origins = {
+        "deleg-1": {
+            "delegation_id": "deleg-1",
+            "turn_key": "turn:8",
+            "created_at": 10.0,
+            "goals": ["legacy goal"],
+            "status": "running",
+            "wakeup_state": "idle",
+        }
+    }
+
+    mark_async_delegation_wakeup(
+        session,
+        "deleg-1",
+        wakeup_state="queued",
+        content="ignored",
+    )
+
+    record = session.async_delegation_origins["deleg-1"]
+    assert record["dispatched_at"] == 10.0
+    assert "created_at" not in record
+    assert "delegation_id" not in record
+    assert "goals" not in record
+    assert session.messages[0]["async_delegations"]["items"]["deleg-1"]["goals"] == ["legacy goal"]
 
 
 def test_snapshot_excludes_settled_tasks_and_idle_uses_current_version():
@@ -258,6 +298,33 @@ def test_cancellation_scope_is_stable_and_projects_to_origin_messages():
         turn_key="turn:9",
     )
     assert cancellation_status(session)["delegation_ids"] == ["deleg-1", "deleg-2"]
+
+
+def test_new_cancel_request_is_idle_after_a_previous_scope_settled():
+    session = _session()
+    record_async_delegation_dispatch(
+        session,
+        {"status": "dispatched", "mode": "background", "delegation_id": "deleg-1"},
+        turn_key="turn:8",
+    )
+    begin_async_delegation_cancellation(session, now=10.0)
+    mark_async_delegation_completion(
+        session,
+        "deleg-1",
+        wakeup_state="settled",
+        content="ignored",
+        status="cancelled",
+        cancel_state="cancelled",
+    )
+
+    assert cancellation_status(session)["state"] == "settled"
+    assert begin_async_delegation_cancellation(session, now=11.0) == {
+        "state": "idle",
+        "delegation_ids": [],
+        "requested_at": None,
+        "settled_at": None,
+    }
+    assert cancellation_status(session)["state"] == "settled"
 
 
 def test_unresolved_event_is_a_versioned_failure_envelope():

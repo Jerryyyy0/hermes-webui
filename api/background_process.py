@@ -1138,6 +1138,21 @@ def _async_delegation_child_task_summary(evt: dict, record: dict | None) -> dict
     return summary
 
 
+def _cancellation_completion_status(
+    completion_status: str,
+    child_task_summary: dict[str, int] | None,
+) -> str:
+    """Prefer a unanimous child interruption receipt over a stale batch error."""
+    if not isinstance(child_task_summary, dict):
+        return completion_status
+    try:
+        total = int(child_task_summary.get("total") or 0)
+        cancelled = int(child_task_summary.get("cancelled") or 0)
+    except (TypeError, ValueError):
+        return completion_status
+    return "cancelled" if total > 0 and cancelled == total else completion_status
+
+
 def _start_async_delegation_wakeup_turn(
     session_id: str,
     wakeup_prompt: str,
@@ -1328,6 +1343,10 @@ def _process_async_delegation_event(
             session = get_session(session_id)
             if delegation_id in cancellation_delegation_ids(session):
                 cancellation_matched = True
+                completion_status = _cancellation_completion_status(
+                    completion_status,
+                    child_task_summary,
+                )
                 cancel_state = "cancelled" if completion_status == "cancelled" else "requested"
                 cancellation_record = mark_async_delegation_completion(
                     session,

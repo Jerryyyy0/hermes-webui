@@ -23,8 +23,10 @@
 | 聊天流 | `GET /api/chat/stream?stream_id={stream_id}` | 每次已知一个 Agent run 的 `stream_id` 时 | token、工具事件、run 终态，以及派发通知 | 对应 run 的 `done` / `stream_end` / 错误终态后 |
 | 会话事件流 | `GET /api/sessions/{session_id}/events` | 收到 chat SSE 的 `background_task_dispatched` 后，或刷新恢复本地待跟踪 session 后，按 session 建立或复用 | 状态快照、后台任务状态、服务端启动 wakeup run、可关闭通知；不发送派发通知 | 收到空快照或 `background_tasks_idle` 后，或应用主动销毁时 |
 
-会话事件流不发送 wakeup 的 assistant token。若前端需要实时显示 wakeup 回复，可消费
-`server_turn_started`，再用其中的 `stream_id` 建立聊天流；不消费该事件也不影响后台任务的
+会话事件流的**对外契约**不把 wakeup 的 assistant token 作为可消费内容。由于该 endpoint
+保留上游 run-journal 回放和活跃 stream 兼容路径，实际连接可能出现 token 等 run 事件；外部
+前端必须忽略它们，避免与 chat stream 重复渲染。若需要实时显示 wakeup 回复，消费
+`server_turn_started` 后用其中的 `stream_id` 建立聊天流；不消费该事件也不影响后台任务的
 订阅和收口，最终内容可通过 `GET /api/session` 恢复。
 
 ## 2. 完整交互时序
@@ -197,7 +199,6 @@ data: {
   "payload": {
     "delegation_id": "deleg_123",
     "child_task_count": 2,
-    "goals": ["调研模型 A", "调研模型 B"],
     "origin_turn_key": "turn:8",
     "status": "running",
     "wakeup_state": "idle",
@@ -240,7 +241,6 @@ data: {
     "tasks": [{
       "delegation_id": "deleg_123",
       "child_task_count": 2,
-      "goals": ["调研模型 A", "调研模型 B"],
       "origin_turn_key": "turn:8",
       "status": "running",
       "wakeup_state": "idle",
@@ -291,7 +291,6 @@ data: {
 | --- | --- | --- |
 | `delegation_id` | string | 后台委派批次标识。 |
 | `child_task_count` | integer | 此 delegation 批次启动的 child task 数量。 |
-| `goals` | string[] | child task 的目标列表；可能为空。 |
 | `origin_turn_key` | string | 派发该 delegation 的父 user turn。 |
 | `status` | `running` / `completed` / `failed` / `cancelled` | delegation 批次执行状态。 |
 | `wakeup_state` | `idle` / `queued` / `running` / `settled` / `failed` | 父会话处理该结果的状态。 |
@@ -318,7 +317,6 @@ data: {
   "payload": {
     "delegation_id": "deleg_123",
     "child_task_count": 2,
-    "goals": ["调研模型 A", "调研模型 B"],
     "origin_turn_key": "turn:8",
     "status": "completed",
     "wakeup_state": "running",
@@ -332,7 +330,6 @@ data: {
 | --- | --- | --- |
 | `delegation_id` | string | 触发此 wakeup 的 delegation 批次。 |
 | `child_task_count` | integer | 批次中的 child task 数量。 |
-| `goals` | string[] | 批次中各 child task 的目标。 |
 | `origin_turn_key` | string | 最初派发 delegation 的父 user turn。 |
 | `status` | string | delegation 批次的最终执行状态；成功通常为 `completed`。 |
 | `wakeup_state` | string | 此时通常为 `running`；后续由 `background_task_status` 更新为 `settled` 或 `failed`。 |
@@ -485,7 +482,7 @@ function onSessionEvent(event: Envelope) {
 - 每个 session 至多维护一条会话 SSE；切换页面不会导致仍活跃任务的订阅被误关。
 - 每次 session SSE 建连都会收到 `background_tasks_snapshot`；非空快照覆盖本地未结算任务集合，空快照会关闭连接并清除待跟踪 ID。
 - 所有事件按 JSON `event_id` 去重，并按 session 内 `background_activity_version` 防止旧状态回滚。
-- 一个 batch dispatch 的 `child_task_count` 与 `goals` 能在 SSE 中被正确恢复。
+- 一个 batch dispatch 的 `child_task_count` 能在 SSE 中被正确恢复；任务目标从对应 user message 的 `async_delegations.items[delegation_id].goals` 读取。
 - 一个 batch completion 只产生一个 `server_turn_started`，不按 child task 数量创建多个 stream。
 - 同一父 chat stream 的多个 `background_task_dispatched` 都能被正确记录；它们共用一条 session SSE，并按 `delegation_id` 分别处理。
 - 同一 session 的多个 wakeup 不并行运行；排队批次在前一个 wakeup 结束后才建立自己的 chat stream。

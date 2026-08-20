@@ -8101,7 +8101,7 @@ def _run_agent_streaming(
                         "background_task_dispatched",
                         str(record.get("delegation_id") or ""),
                         record,
-                        dispatched_at=record.get("created_at"),
+                        dispatched_at=record.get("dispatched_at"),
                     )
                     put("background_task_dispatched", event_payload)
                 except Exception:

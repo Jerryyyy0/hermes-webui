@@ -27,11 +27,9 @@ def _as_int(value: Any, default: int = 0) -> int:
 
 def _task_payload(delegation_id: str, record: dict[str, Any], **extra: Any) -> dict[str, Any]:
     child_task_count = max(1, _as_int(record.get("child_task_count"), 1))
-    goals = record.get("goals")
     payload = {
         "delegation_id": str(delegation_id),
         "child_task_count": child_task_count,
-        "goals": list(goals) if isinstance(goals, list) else [],
         "origin_turn_key": str(record.get("turn_key") or ""),
         "status": str(record.get("status") or "running"),
         "wakeup_state": str(record.get("wakeup_state") or "idle"),
@@ -81,7 +79,7 @@ def snapshot_event(session: Any) -> dict[str, Any]:
             _task_payload(
                 delegation_id,
                 record,
-                dispatched_at=record.get("created_at"),
+                dispatched_at=record.get("dispatched_at") or record.get("created_at"),
                 completed_at=record.get("completed_at"),
             )
         )

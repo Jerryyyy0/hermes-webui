@@ -105,54 +105,16 @@ def _dedupe_replayed_users(messages: list, *, session_id: str | None = None) -> 
     return retained
 
 
-def _attach_background_task_ids(
-    messages: list,
-    origins: Any,
-    *,
-    session_id: str | None = None,
-) -> list:
-    """Attach sidecar delegation IDs to the display copy of origin users."""
-    if not isinstance(origins, dict):
-        return messages
-    ids_by_turn: dict[str, list[str]] = {}
-    for delegation_id, record in origins.items():
-        if not isinstance(record, dict):
-            continue
-        turn_key = str(record.get("turn_key") or "").strip()
-        delegation_id = str(delegation_id or "").strip()
-        if turn_key and delegation_id:
-            ids_by_turn.setdefault(turn_key, []).append(delegation_id)
-    if not ids_by_turn:
-        return messages
-
+def _strip_deprecated_background_task_ids(messages: list) -> list:
+    """Keep the public history projection on ``async_delegations.items`` only."""
     projected = []
     for message in messages:
-        if not isinstance(message, dict) or str(message.get("role") or "").lower() != "user":
-            projected.append(message)
-            continue
-        turn_key = _turn_key(message)
-        delegation_ids = ids_by_turn.get(turn_key)
-        if not delegation_ids:
-            projected.append(message)
-            continue
-        existing_ids = message.get("_background_task_ids")
-        merged_ids = []
-        if isinstance(existing_ids, list):
-            merged_ids.extend(str(value).strip() for value in existing_ids if str(value).strip())
-        merged_ids.extend(value for value in delegation_ids if value not in merged_ids)
-        if not merged_ids or existing_ids == merged_ids:
+        if not isinstance(message, dict) or "_background_task_ids" not in message:
             projected.append(message)
             continue
         display_message = dict(message)
-        display_message["_background_task_ids"] = merged_ids
+        display_message.pop("_background_task_ids", None)
         projected.append(display_message)
-        log_message_event(
-            "origin_metadata_attach",
-            display_message,
-            message_class="ordinary_user",
-            kind="async_origin_user",
-            session_id=session_id,
-        )
     return projected
 
 
@@ -278,11 +240,7 @@ def drop_non_display_messages(
         session_id=session_id,
     )
     retained = _dedupe_replayed_users(retained, session_id=session_id)
-    return _attach_background_task_ids(
-        retained,
-        background_task_origins,
-        session_id=session_id,
-    )
+    return _strip_deprecated_background_task_ids(retained)
 
 
 project_messages_for_display = drop_non_display_messages

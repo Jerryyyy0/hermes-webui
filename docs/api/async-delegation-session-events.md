@@ -124,11 +124,20 @@ session 的取消状态。具体结果始终以 `items[delegation_id]` 的 `stat
 `status=completed`、`cancel_state=requested`；即使另一个批次被取消，该轮聚合状态也必须为
 `settled`，不能写成 `cancelled`。
 
+取消屏障命中时，若 Agent 的 batch 顶层状态与 child receipt 不一致、但全部 child 都返回
+`cancelled`，服务端必须以 child receipt 收口为 `status=cancelled`、`cancel_state=cancelled`；
+不得把该批次显示为 `failed` / `requested`。只要存在任一 `completed` 或 `failed` child，仍保留
+Agent 的真实批次终态并按混合结果处理。
+
 这与 `GET /api/sessions/background_tasks/cancel` 的响应 `state=settled` 不同：后者表示一次
 **session 级固定取消范围**已经收口，允许其中包含 `completed`、`failed` 或 `cancelled` 的
 真实终态；它不等价于某一条 user message 的 `async_delegations.state`。
 
 历史查询只读取持久化结果，不补发 `background_task_dispatched`、`server_turn_started` 或 token。若某个 wakeup 已经结束，客户端用该轮 `async_delegations` 和可见消息恢复结果；只有仍在运行的任务才需要继续订阅 session SSE。
+
+`Session.async_delegation_origins`、`async_delegation_activity_version` 与 `async_delegation_cancellation` 都是服务端内部状态，不出现在 `GET /api/session` 的响应中，也不是外部前端的数据源。`origins` 的 map key 即 `delegation_id`，内部只保存 `turn_key`、执行/wakeup/取消状态、时间、child 计数、结果汇总和事件版本；任务目标 `goals` 只保存于对应 user message 的 `async_delegations.items[delegation_id]`。旧 sidecar 在下一次后台状态持久化时会自动迁移：删除重复的 `delegation_id`、`goals`，并将 `created_at` 统一为 `dispatched_at`。取消状态只能通过取消查询接口读取。
+
+历史消息也不返回旧的 `_background_task_ids`；它与 `async_delegations.items` 的 key 重复。客户端只使用 `items` 的 key 关联 delegation。
 
 ## 3. 完整交互
 
@@ -274,7 +283,6 @@ delegation 生命周期事件（`background_task_status`、`bg_task_complete`、
 | --- | --- | --- |
 | `delegation_id` | string | 后台委派批次唯一标识；批次内的 child task 共享此 ID。 |
 | `child_task_count` | integer | 该批次启动的 child task 数量。 |
-| `goals` | string[] | child task 的目标列表；可能为空。 |
 | `origin_turn_key` | string | 派发该 delegation 的真实 user turn。 |
 | `status` | string | delegation 批次执行状态：`running`、`completed`、`failed` 或 `cancelled`。 |
 | `wakeup_state` | string | 父会话处理状态：`idle`、`queued`、`running`、`settled` 或 `failed`。 |
@@ -304,7 +312,7 @@ Agent completion 的顶层 `status=error` 会转换为 WebUI 事件的 `status=f
 
 ```text
 run journal / active StreamChannel
-  → 保留既有恢复/回放、run journal cursor、session_snapshot；实时 assistant token 仍以 chat stream 为准
+  → 保留既有恢复/回放、run journal cursor、session_snapshot；外部前端的实时 assistant token 仍以 chat stream 为准
 
 SessionChannel(session_id)
   → background_task_status
@@ -318,7 +326,7 @@ SessionChannel(session_id)
 
 1. 先完成 session 可见性与认证校验，再以 `session_id` 原子订阅 `SessionChannel`。
 2. 从订阅成功到 HTTP SSE 头、初始恢复和循环写入的所有路径，都必须被同一个 `try/finally` 覆盖；每次退出均执行 `SessionChannel.unsubscribe()`。
-3. journal replay 继续使用既有 `Last-Event-ID` / snapshot 语义；`SessionChannel` 的瞬时生命周期事件不伪造为 run-journal token，也不能假称已被 journal 精确重放。
+3. journal replay 继续使用既有 `Last-Event-ID` / snapshot 语义；`SessionChannel` 的瞬时生命周期事件不伪造为 run-journal token，也不能假称已被 journal 精确重放。该 endpoint 为兼容上游 run-journal 仍可能出现 token 等 run 事件；外部客户端不得将其作为 token 主通道，以免和 chat stream 重复渲染。
 4. `background_task_dispatched` 只由发起该 delegation 的 chat stream 发送，`SessionChannel` 不重复发送该事件。会话状态由建连后的 `background_tasks_snapshot` 和后续生命周期事件提供。
 5. `server_turn_started` 只通知订阅方附着既有 `stream_id`；订阅方不得据此再次调用 `POST /api/chat/start`。
 6. handler 必须在开始 drain `SessionChannel` 队列前写出 `background_tasks_snapshot`。快照读取与订阅之间发生的状态变化要么进入快照，要么留在队列中作为快照后的增量；不得在快照前写出生命周期事件。
@@ -351,7 +359,6 @@ data: {
   "payload": {
     "delegation_id": "deleg_123",
     "child_task_count": 2,
-    "goals": ["调研模型 A", "调研模型 B"],
     "origin_turn_key": "turn:8",
     "status": "running",
     "wakeup_state": "idle",
@@ -393,7 +400,6 @@ data: {
       {
         "delegation_id": "deleg_123",
         "child_task_count": 2,
-        "goals": ["调研模型 A", "调研模型 B"],
         "origin_turn_key": "turn:8",
         "status": "running",
         "wakeup_state": "idle",
@@ -426,7 +432,6 @@ data: {
   "payload": {
     "delegation_id": "deleg_123",
     "child_task_count": 2,
-    "goals": ["调研模型 A", "调研模型 B"],
     "origin_turn_key": "turn:8",
     "status": "completed",
     "wakeup_state": "queued",
@@ -446,7 +451,6 @@ data: {
 | --- | --- | --- | --- |
 | `delegation_id` | string | 是 | 后台委派批次唯一标识。 |
 | `child_task_count` | integer | 是 | 批次中的 child task 数量。 |
-| `goals` | string[] | 是 | 批次中各 child task 的目标；没有目标时为空数组。 |
 | `origin_turn_key` | string | 是 | 成功派发该 delegation 的真实 user turn。 |
 | `status` | string | 是 | `running`、`completed`、`failed`、`cancelled`。 |
 | `wakeup_state` | string | 是 | `idle`、`queued`、`running`、`settled`、`failed`。 |
@@ -591,7 +595,6 @@ data: {
   "payload": {
     "delegation_id": "deleg_123",
     "child_task_count": 2,
-    "goals": ["调研模型 A", "调研模型 B"],
     "origin_turn_key": "turn:8",
     "status": "completed",
     "wakeup_state": "running",
@@ -624,7 +627,6 @@ data: {
   "payload": {
     "delegation_id": "deleg_123",
     "child_task_count": 2,
-    "goals": ["调研模型 A", "调研模型 B"],
     "origin_turn_key": "turn:8",
     "status": "completed",
     "wakeup_state": "running",

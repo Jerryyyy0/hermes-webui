@@ -28,7 +28,6 @@ def test_same_turn_replayed_user_is_hidden_and_metadata_is_kept(caplog):
         "role": "user",
         "content": "你好",
         "_turn_key": "turn:8",
-        "_background_task_ids": ["deleg_123"],
     }]
     assert canonical == {
         "role": "user",
@@ -38,6 +37,21 @@ def test_same_turn_replayed_user_is_hidden_and_metadata_is_kept(caplog):
     assert "action=display_duplicate_drop" in caplog.text
     assert "kind=async_origin_user_replay" in caplog.text
     assert "content=" not in caplog.text
+
+
+def test_background_task_ids_are_not_exposed_when_async_delegations_are_available():
+    message = {
+        "role": "user",
+        "content": "派发后台任务",
+        "_turn_key": "turn:8",
+        "_background_task_ids": ["deleg_123"],
+        "async_delegations": {"state": "running", "items": {"deleg_123": {}}},
+    }
+
+    visible = drop_non_display_messages([message])
+
+    assert "_background_task_ids" not in visible[0]
+    assert visible[0]["async_delegations"]["items"] == {"deleg_123": {}}
 
 
 def test_same_content_in_different_turns_is_preserved():
@@ -111,7 +125,7 @@ def test_session_display_projection_hides_replay_before_history_render():
     assert [message["content"] for message in visible] == [
         "派发后台任务", "已派发", "后台任务完成",
     ]
-    assert visible[0]["_background_task_ids"] == ["deleg_123"]
+    assert "_background_task_ids" not in visible[0]
 
 
 def test_verification_final_replaces_candidate_in_one_answer_projection():

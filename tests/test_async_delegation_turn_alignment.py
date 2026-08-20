@@ -111,6 +111,7 @@ def test_cancelled_completion_settles_without_starting_a_wakeup(monkeypatch):
             "deleg-1": {"delegation_id": "deleg-1", "turn_key": "turn:8", "status": "running", "wakeup_state": "idle"}
         },
         async_delegation_activity_version=0,
+        messages=[{"role": "user", "_turn_key": "turn:8"}],
         save=lambda **_: None,
     )
     begin_async_delegation_cancellation(session)
@@ -138,6 +139,59 @@ def test_cancelled_completion_settles_without_starting_a_wakeup(monkeypatch):
     assert emitted[-1]["wakeup_state"] == "settled"
     assert session.async_delegation_origins["deleg-1"]["cancel_state"] == "cancelled"
     assert session.async_delegation_cancellation["state"] == "settled"
+
+
+def test_cancelled_children_override_inconsistent_batch_error_during_cancellation(monkeypatch):
+    """A fully interrupted batch must not appear as a failed cancellation."""
+    from api import background_process as bp
+    from integration.async_delegation_turns import begin_async_delegation_cancellation
+
+    session = SimpleNamespace(
+        session_id="session-1",
+        async_delegation_origins={
+            "deleg-1": {
+                "turn_key": "turn:8",
+                "status": "running",
+                "wakeup_state": "idle",
+                "child_task_count": 2,
+            }
+        },
+        async_delegation_activity_version=0,
+        messages=[{"role": "user", "_turn_key": "turn:8"}],
+        save=lambda **_: None,
+    )
+    begin_async_delegation_cancellation(session)
+    registry = SimpleNamespace(completion_queue=None)
+    claim = SimpleNamespace(durable=False)
+    started = []
+
+    monkeypatch.setattr(bp, "claim_async_delegation_delivery", lambda *_: claim)
+    monkeypatch.setattr(bp, "complete_async_delegation_delivery", lambda *_: None)
+    monkeypatch.setattr(bp, "release_async_delegation_delivery", lambda *_: None)
+    monkeypatch.setattr(
+        bp, "_start_async_delegation_wakeup_turn", lambda *args, **kwargs: started.append((args, kwargs))
+    )
+    monkeypatch.setattr(bp, "_emit_async_delegation_status", lambda *args, **kwargs: None)
+    monkeypatch.setattr("api.models.get_session", lambda _sid: session)
+    monkeypatch.setattr("api.config._get_session_agent_lock", lambda _sid: _NoopLock())
+
+    bp._process_async_delegation_event(
+        {
+            "type": "async_delegation",
+            "delegation_id": "deleg-1",
+            "status": "error",
+            "results": [{"status": "cancelled"}, {"status": "cancelled"}],
+        },
+        session_id="session-1",
+        delegation_id="deleg-1",
+        process_registry=registry,
+    )
+
+    record = session.async_delegation_origins["deleg-1"]
+    assert started == []
+    assert record["status"] == "cancelled"
+    assert record["cancel_state"] == "cancelled"
+    assert session.messages[0]["async_delegations"]["state"] == "cancelled"
 
 
 def test_unresolved_completion_emits_terminal_event_after_retry_is_exhausted(monkeypatch):
@@ -317,13 +371,38 @@ def test_async_wakeup_status_uses_versioned_lifecycle_envelope(monkeypatch):
     assert status[2]["payload"] == {
         "delegation_id": "deleg-1",
         "child_task_count": 1,
-        "goals": [],
         "origin_turn_key": "turn:8",
         "status": "completed",
         "wakeup_state": "settled",
     }
     assert emitted[1][1] == "background_tasks_idle"
     assert emitted[1][2]["event_type"] == "background_tasks_idle"
+
+
+def test_session_response_hides_internal_async_delegation_sidecars():
+    from api.models import Session
+
+    session = Session(
+        session_id="delegation-public-view",
+        workspace="/tmp",
+        messages=[
+            {
+                "role": "user",
+                "_turn_key": "turn:8",
+                "async_delegations": {"state": "running", "items": {}},
+            }
+        ],
+        async_delegation_origins={"deleg-1": {"turn_key": "turn:8"}},
+        async_delegation_activity_version=3,
+        async_delegation_cancellation={"state": "cancelling", "delegation_ids": ["deleg-1"]},
+    )
+
+    response = session.compact() | {"messages": session.messages}
+
+    assert "async_delegation_origins" not in response
+    assert "async_delegation_activity_version" not in response
+    assert "async_delegation_cancellation" not in response
+    assert response["messages"][0]["async_delegations"]["state"] == "running"
 
 
 def test_async_wakeup_display_assistant_keeps_origin_identity():

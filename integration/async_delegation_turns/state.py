@@ -55,7 +55,7 @@ def _save(session: Any) -> None:
     session.save(touch_updated_at=False)
 
 
-def _message_item(record: dict[str, Any]) -> dict[str, Any]:
+def _message_item(record: dict[str, Any], *, goals: list[str] | None = None) -> dict[str, Any]:
     """Return the stable, public lifecycle projection for one delegation."""
     try:
         child_task_count = max(1, int(record.get("child_task_count") or 1))
@@ -66,8 +66,8 @@ def _message_item(record: dict[str, Any]) -> dict[str, Any]:
         "wakeup_state": str(record.get("wakeup_state") or "idle"),
         "cancel_state": str(record.get("cancel_state") or "none"),
         "child_task_count": child_task_count,
-        "goals": list(record.get("goals") or []) if isinstance(record.get("goals"), list) else [],
-        "dispatched_at": record.get("created_at"),
+        "goals": list(goals or []),
+        "dispatched_at": record.get("dispatched_at") or record.get("created_at"),
         "completed_at": record.get("completed_at"),
     }
     if isinstance(record.get("child_task_summary"), dict):
@@ -88,16 +88,30 @@ def _turn_state(items: list[dict[str, Any]]) -> str:
     return "settled"
 
 
-def _project_turns(session: Any, records: dict[str, dict[str, Any]]) -> None:
+def _existing_item_goals(message: dict[str, Any], delegation_id: str) -> list[str]:
+    """Keep presentation-only goals on the origin user message."""
+    lifecycle = message.get("async_delegations")
+    items = lifecycle.get("items") if isinstance(lifecycle, dict) else None
+    item = items.get(delegation_id) if isinstance(items, dict) else None
+    goals = item.get("goals") if isinstance(item, dict) else None
+    return [str(goal) for goal in goals if isinstance(goal, str) and goal] if isinstance(goals, list) else []
+
+
+def _project_turns(
+    session: Any,
+    records: dict[str, dict[str, Any]],
+    *,
+    dispatch_goals: dict[str, list[str]] | None = None,
+) -> None:
     """Project delegation state onto the exact origin user message only."""
     messages = getattr(session, "messages", None)
     if not isinstance(messages, list):
         return
-    by_turn: dict[str, list[dict[str, Any]]] = {}
-    for record in records.values():
+    by_turn: dict[str, list[tuple[str, dict[str, Any]]]] = {}
+    for delegation_id, record in records.items():
         turn_key = str(record.get("turn_key") or "").strip()
         if turn_key:
-            by_turn.setdefault(turn_key, []).append(record)
+            by_turn.setdefault(turn_key, []).append((delegation_id, record))
     for message in messages:
         if not isinstance(message, dict) or message.get("role") != "user":
             continue
@@ -105,20 +119,47 @@ def _project_turns(session: Any, records: dict[str, dict[str, Any]]) -> None:
         records_for_turn = by_turn.get(turn_key)
         if not records_for_turn:
             continue
-        items = {
-            str(record.get("delegation_id")): _message_item(record)
-            for record in records_for_turn
-            if str(record.get("delegation_id") or "").strip()
-        }
+        # ``async_delegations.items`` owns the public delegation IDs. Remove
+        # the legacy duplicate whenever this origin turn is persisted again.
+        message.pop("_background_task_ids", None)
+        items = {}
+        for delegation_id, record in records_for_turn:
+            goals = _existing_item_goals(message, delegation_id)
+            if not goals and dispatch_goals:
+                goals = list(dispatch_goals.get(delegation_id) or [])
+            # Read old sidecars once during migration, then persist goals only
+            # on the origin user message below.
+            if not goals and isinstance(record.get("goals"), list):
+                goals = [str(goal) for goal in record["goals"] if isinstance(goal, str) and goal]
+            items[delegation_id] = _message_item(record, goals=goals)
         message["async_delegations"] = {
             "state": _turn_state(list(items.values())),
             "items": items,
         }
 
 
-def _persist(session: Any, records: dict[str, dict[str, Any]]) -> None:
-    session.async_delegation_origins = records
-    _project_turns(session, records)
+def _canonical_record(record: dict[str, Any]) -> dict[str, Any]:
+    """Return the compact, runtime-only top-level sidecar record."""
+    canonical = dict(record)
+    canonical.pop("delegation_id", None)  # the mapping key is the canonical ID
+    canonical.pop("goals", None)  # presentation data belongs to the user turn
+    if canonical.get("dispatched_at") is None and canonical.get("created_at") is not None:
+        canonical["dispatched_at"] = canonical["created_at"]
+    canonical.pop("created_at", None)
+    return canonical
+
+
+def _persist(
+    session: Any,
+    records: dict[str, dict[str, Any]],
+    *,
+    dispatch_goals: dict[str, list[str]] | None = None,
+) -> None:
+    _project_turns(session, records, dispatch_goals=dispatch_goals)
+    session.async_delegation_origins = {
+        delegation_id: _canonical_record(record)
+        for delegation_id, record in records.items()
+    }
     _save(session)
 
 
@@ -143,15 +184,19 @@ def _refresh_cancellation(session: Any, records: dict[str, dict[str, Any]]) -> N
     }
 
 
+def _idle_cancellation_status() -> dict[str, Any]:
+    return {
+        "state": "idle",
+        "delegation_ids": [],
+        "requested_at": None,
+        "settled_at": None,
+    }
+
+
 def cancellation_status(session: Any) -> dict[str, Any]:
     cancellation = getattr(session, "async_delegation_cancellation", None)
     if not isinstance(cancellation, dict) or cancellation.get("state") not in {"cancelling", "settled"}:
-        return {
-            "state": "idle",
-            "delegation_ids": [],
-            "requested_at": None,
-            "settled_at": None,
-        }
+        return _idle_cancellation_status()
     return {
         "state": str(cancellation.get("state")),
         "delegation_ids": [str(item) for item in cancellation.get("delegation_ids") or []],
@@ -173,7 +218,9 @@ def begin_async_delegation_cancellation(session: Any, *, now: float | None = Non
         or str(record.get("wakeup_state") or "idle") in _UNSETTLED_WAKEUP_STATES
     ]
     if not delegation_ids:
-        return current
+        # Keep the last settled barrier for GET polling, but a new POST with
+        # no work is an idle request rather than a replay of that old result.
+        return _idle_cancellation_status()
     requested_at = time.time() if now is None else float(now)
     session.async_delegation_cancellation = {
         "state": "cancelling",
@@ -257,30 +304,29 @@ def record_async_delegation_dispatch(
     if not existing:
         record.update(
             {
-                "delegation_id": delegation_id,
                 "turn_key": origin_turn_key,
-                "created_at": time.time(),
+                "dispatched_at": time.time(),
                 "status": "running",
                 "wakeup_state": "idle",
                 "completed_at": None,
                 "cancel_state": "none",
                 "child_task_count": child_task_count,
-                "goals": goals,
             }
         )
     else:
-        record["delegation_id"] = delegation_id
         record.setdefault("cancel_state", "none")
         record.setdefault("child_task_count", child_task_count)
-        if not record.get("goals") and goals:
-            record["goals"] = goals
     record["activity_version"] = (
         int(record.get("activity_version") or _activity_version(session))
         if existing
         else _bump_activity_version(session)
     )
     records[delegation_id] = record
-    _persist(session, records)
+    _persist(
+        session,
+        records,
+        dispatch_goals={delegation_id: goals} if not existing else None,
+    )
     logger.debug(
         "hermes_message_semantics action=async_delegation_origin_recorded "
         "class=context_anchor kind=async_delegation_completion role=user "
@@ -289,7 +335,12 @@ def record_async_delegation_dispatch(
         bool(origin_turn_key),
         delegation_id,
     )
-    return dict(record)
+    # The transient return value identifies the event being emitted; the
+    # persisted map deliberately keeps that ID only as its key.
+    return {
+        "delegation_id": delegation_id,
+        **dict(session.async_delegation_origins[delegation_id]),
+    }
 
 
 def resolve_async_delegation_origin(session: Any, delegation_id: str) -> dict[str, Any] | None:

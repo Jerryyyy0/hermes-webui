@@ -1914,17 +1914,6 @@ class Session:
             'enabled_toolsets': self.enabled_toolsets,
             'composer_draft': self.composer_draft if isinstance(self.composer_draft, dict) else {},
             'process_wakeup_pause': self.process_wakeup_pause if isinstance(self.process_wakeup_pause, dict) else {},
-            'async_delegation_origins': (
-                self.async_delegation_origins
-                if isinstance(self.async_delegation_origins, dict)
-                else {}
-            ),
-            'async_delegation_activity_version': self.async_delegation_activity_version,
-            'async_delegation_cancellation': (
-                dict(self.async_delegation_cancellation)
-                if isinstance(self.async_delegation_cancellation, dict)
-                else None
-            ),
             'share_token': self.share_token,
             'share_created_at': self.share_created_at,
             'is_streaming': _is_streaming_session(
