@@ -79,6 +79,7 @@ package-lock.json
 docs/ui-ux/review-shots/
 
 VERSION.txt
+a.json
 
 # Python build metadata (never commit generated egg-info)
 *.egg-info/
