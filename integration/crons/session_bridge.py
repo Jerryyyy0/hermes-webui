@@ -2000,6 +2000,31 @@ def read_cron_output_for_run(
         return None, None
 
 
+def _can_repair_unverified_cron_workspace(session: Any) -> bool:
+    """Return whether a fallback sidecar can safely adopt Agent's cwd.
+
+    A Cron execution contributes one real user prompt. A second real user turn
+    means the user has already continued the transcript using the fallback
+    workspace, so rebinding it would silently split that conversation's
+    workspace. Agent-only control rows, including its max-iteration summary
+    request, do not count as a user continuation.
+    """
+    if getattr(session, "source_tag", None) != "cron":
+        return False
+    if getattr(session, "workspace_state", None) != "workspace_unverified":
+        return False
+    from integration.crons.hooks import _is_max_iteration_summary_request, _is_real_user_message
+
+    messages = list(getattr(session, "messages", None) or [])
+    user_messages = sum(
+        1
+        for index, message in enumerate(messages)
+        if _is_real_user_message(message)
+        and not _is_max_iteration_summary_request(messages, index)
+    )
+    return user_messages <= 1
+
+
 def _materialize_cron_session_found(
     job: dict,
     found: tuple[str, str, float | None, str],
@@ -2081,9 +2106,26 @@ def _materialize_cron_session_found(
                 changed = True
             if workspace_binding is not None:
                 if str(getattr(full, "workspace", "") or "") != workspace_binding.root:
-                    # A previously materialized root is immutable. Do not let a
-                    # replay or a malformed current-run input redirect it.
-                    full.workspace_state = "workspace_unverified"
+                    if _can_repair_unverified_cron_workspace(full):
+                        # The original import had no trustworthy root and used
+                        # the shared continuation fallback.  Before a user has
+                        # followed up, the canonical Agent record can repair
+                        # that incomplete import without redirecting a live
+                        # conversation.
+                        full.workspace = workspace_binding.root
+                        full.workspace_mode = workspace_binding.mode
+                        full.workspace_state = workspace_binding.state
+                        if workspace_binding.mode == "worktree":
+                            full.worktree_path = workspace_binding.root
+                            full.worktree_repo_root = workspace_binding.worktree_repo_root
+                        else:
+                            full.worktree_path = None
+                            full.worktree_repo_root = None
+                    else:
+                        # A previously materialized root is immutable. Do not
+                        # let a replay or malformed current-run input redirect
+                        # a conversation that may already use it.
+                        full.workspace_state = "workspace_unverified"
                     changed = True
                 else:
                     full.workspace_mode = workspace_binding.mode
@@ -2163,8 +2205,9 @@ def _materialize_cron_session_found(
         imported_workspace_mode = "external"
         imported_workspace_state = "legacy_shared"
     else:
-        # A session object needs a path-shaped value, but this marker is never
-        # exposed to workspace consumers because the shared resolver rejects it.
+        # A session object needs a path-shaped value.  The shared resolver
+        # deliberately ignores it for this state and uses the approved default
+        # workspace for continuation instead.
         from api.config import DEFAULT_WORKSPACE
 
         imported_workspace = str(DEFAULT_WORKSPACE)
@@ -2215,16 +2258,28 @@ def _cron_session_cwd(conn: sqlite3.Connection, session_id: str) -> str | None:
 
 
 def _current_run_workspace_binding(job: dict, session_id: str, state_db_cwd: str | None):
-    """Build a binding only from this run's explicit Agent hand-off values."""
+    """Build a V1 binding from the selected Agent record for this run.
+
+    In-process/manual runs retain the explicit execution hand-off.  Gateway
+    polling and recovery reload jobs.json after that transient hand-off has
+    disappeared, so their exact selected ``source=cron`` state.db session is
+    the corresponding durable identity and canonical cwd.
+    """
     if not isinstance((job or {}).get("workspace_policy"), dict):
         return None
     try:
         from integration.crons.workspace_policy import binding_for_current_run
 
+        expected_session_id = str((job or {}).get("_cron_session_id") or "").strip()
+        if expected_session_id and expected_session_id != session_id:
+            raise ValueError("当前运行的 session ID 不一致")
+        binding_job = job if expected_session_id else {**(job or {}), "_cron_session_id": session_id}
+        execution_cwd = (job or {}).get("_cron_execution_workspace") or state_db_cwd
+
         return binding_for_current_run(
-            job,
+            binding_job,
             session_id=session_id,
-            cwd=(job or {}).get("_cron_execution_workspace"),
+            cwd=execution_cwd,
             state_db_cwd=state_db_cwd,
         )
     except Exception as exc:
@@ -2409,19 +2464,36 @@ def materialize_cron_session_run(
         (run or {}).get("started_at"),
         str((run or {}).get("model") or ""),
     )
-    # History/replay never receives the current-run in-memory policy/cwd
-    # hand-off, so V1 rows without a sidecar remain unverified by design.
     is_v1_job = isinstance((job or {}).get("workspace_policy"), dict)
     execution_profile = _execution_profile_name(job) or owner
     try:
         profile_home = Path(_profile_home_for_name(execution_profile))
     except Exception:
         profile_home = None
-    workspace_binding = _legacy_workspace_binding(
-        job,
-        state_db_cwd=(run or {}).get("cwd"),
-        profile_home=profile_home,
-    )
+    state_db_cwd = None
+    if profile_home is not None:
+        db_path = profile_home / "state.db"
+        try:
+            with closing(sqlite3.connect(str(db_path))) as conn:
+                selected = _select_cron_session_for_run(
+                    conn,
+                    str((job or {}).get("id") or ""),
+                    session_id=sid,
+                )
+                if selected is not None and selected[0] == sid:
+                    state_db_cwd = _cron_session_cwd(conn, sid)
+        except sqlite3.Error as exc:
+            logger.debug("materialize_cron_session_run: state.db read failed: %s", exc)
+    if is_v1_job:
+        # The selected record is an exact source=cron session for this job, so
+        # its canonical cwd is as trustworthy as an in-process hand-off.
+        workspace_binding = _current_run_workspace_binding(job, sid, state_db_cwd)
+    else:
+        workspace_binding = _legacy_workspace_binding(
+            job,
+            state_db_cwd=state_db_cwd,
+            profile_home=profile_home,
+        )
     return _materialize_cron_session_found(
         job,
         found,
@@ -2433,7 +2505,7 @@ def materialize_cron_session_run(
         execution_ended_at=(run or {}).get("ended_at"),
         execution_error_detail=(run or {}).get("execution_error_detail") or (run or {}).get("error"),
         workspace_binding=workspace_binding,
-        state_db_cwd=None if is_v1_job else (run or {}).get("cwd"),
+        state_db_cwd=state_db_cwd if workspace_binding is not None or not is_v1_job else None,
     )
 
 
@@ -2456,6 +2528,7 @@ def materialize_cron_sessions_for_runs(
     owner = _normalize_profile_name(owner_profile)
     target_profile = _target_profile_for_job(job, owner)
     execution_profile = _execution_profile_name(job)
+    is_v1_job = isinstance((job or {}).get("workspace_policy"), dict)
 
     db_path = Path(execution_home) / "state.db"
     if not db_path.is_file():
@@ -2490,11 +2563,17 @@ def materialize_cron_sessions_for_runs(
         found = _select_cron_session_candidate(candidates, run_mtime=run_mtime)
         if not found:
             continue
-        workspace_binding = _legacy_workspace_binding(
-            job,
-            state_db_cwd=cwd_by_session.get(found[0]),
-            profile_home=Path(execution_home),
-        )
+        state_db_cwd = cwd_by_session.get(found[0])
+        if is_v1_job:
+            # ``found`` came from this job's source=cron candidate set, so the
+            # corresponding state.db cwd is a verified V1 execution record.
+            workspace_binding = _current_run_workspace_binding(job, found[0], state_db_cwd)
+        else:
+            workspace_binding = _legacy_workspace_binding(
+                job,
+                state_db_cwd=state_db_cwd,
+                profile_home=Path(execution_home),
+            )
         sid = _materialize_cron_session_found(
             job,
             found,
@@ -2505,7 +2584,7 @@ def materialize_cron_sessions_for_runs(
             end_reason=completions.get(found[0], (None, None))[0],
             execution_ended_at=completions.get(found[0], (None, None))[1],
             workspace_binding=workspace_binding,
-            state_db_cwd=cwd_by_session.get(found[0]),
+            state_db_cwd=state_db_cwd if workspace_binding is not None or not is_v1_job else None,
         )
         if filename:
             session_ids[filename] = sid

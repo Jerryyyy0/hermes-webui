@@ -194,9 +194,9 @@ WebUI 的 materializer 必须在查询 Agent session 时读取 `cwd`，并将其
 
 对新 cron session：
 
-- `cwd` 缺失、不是绝对目录、目录不再存在、越出已批准 base，或与已持久化 sidecar workspace 不一致时，标记 `workspace_unverified`。后续 Chat、Workspace、Terminal 和文件操作固定使用 WebUI 已批准的默认 workspace，而不使用或声称该 sidecar 路径是 execution root。
+- WebUI 可验证的来源是当前进程的显式 hand-off，或按该 job/session 精确选中的 `source=cron` Agent `state.db` 记录；两者的 `cwd` 缺失、不是绝对目录、目录不再存在或越出已批准 base 时，标记 `workspace_unverified`。后续 Chat、Workspace、Terminal 和文件操作固定使用 WebUI 已批准的默认 workspace，而不使用或声称该 sidecar 路径是 execution root。
 - `cwd` 验证通过时，sidecar 写入相同路径及 `workspace_mode`；后续 `resolve_session_workspace()` 沿用现有 managed/worktree 的不可替换规则。
-- 已存在的 sidecar 只允许幂等重放相同 canonical root。任何不同 root 都是完整性冲突：不覆盖旧值、不刷新 Manifest artifact root，并记录可诊断错误。
+- 已存在的 sidecar 只允许幂等重放相同 canonical root。唯一的修复例外是：`workspace_unverified` sidecar 仍只有 Cron 初始 user prompt（尚无 WebUI follow-up）时，可由上述精确 Agent record 补回 canonical root；已有 follow-up 的不同 root 仍是完整性冲突，不覆盖旧值、不刷新 Manifest artifact root，并记录可诊断错误。
 
 所有执行和消费路径都必须使用 `Session.workspace`：浏览器 Chat、Gateway Chat、SSE streaming、pending turn drain、process wakeup、goal、terminal、上传、文件下载、Git API、Session Manifest 和 workspace preview。它们不能重新读取 job policy、全局 cwd 或 last workspace。
 
@@ -219,7 +219,7 @@ follow-up 当成下一次调度的输入。需要跨运行传递结果时，仍�
 `workspace_unverified` 的 Cron session 仍可查看 transcript/output，并可继续聊天、使用
 Workspace、Terminal、上传和文件操作；这些操作固定使用 WebUI 已批准的默认 workspace，
 不属于也不反向声明为该次 execution 的历史 cwd。这只适用于 V1 当前运行缺少或不匹配其
-显式 hand-off 的情形，不影响该 job 后续按其既有或 V1 调度规则继续运行。
+显式 hand-off 或精确 Agent `state.db` record 的情形，不影响该 job 后续按其既有或 V1 调度规则继续运行。
 
 legacy session 使用 `legacy_shared`：它允许 follow-up、Workspace、Terminal、上传和
 文件操作，并将 workspace 标记为 `external`。该 root 是 Profile 明确批准的后续继续
@@ -335,7 +335,7 @@ Cron Hub 的新建请求可省略 `workspace_policy`；服务端必须在写入�
 | P0 | `integration/crons/workspace_policy.py`（**新增**） | **新增**：解析来自 Cron Hub 的 policy；调用 Profile-aware trusted workspace 校验；将当前 run 传入的 policy、session ID 和 Agent `cwd` 解析成 `CronWorkspaceBinding`（`root`、`mode`、`state`、`strategy`）。 | WebUI 的单一 validation choke point；当前 run 缺任一输入、或 `cwd` 冲突/越界一律得到 `workspace_unverified`，而不是 fallback。 |
 | P0 | `integration/crons/handlers.py`：`_handle_create()`、`_handle_update()` | **修改**：白名单接收 `workspace_policy`，先调用新 policy helper，再传给 `cron.jobs.create_job()` / `update_job()`；create 缺字段时生成完整 V1 policy，legacy update 缺字段时保持 legacy；不要让当前 `updates` comprehension 透传未验证的嵌套字段。 | `/api/integration/crons/create|update` 只持久化服务端验证后的 policy，并返回标准化结果。 |
 | P0 | `api/routes.py`：`_handle_cron_create()`、`_handle_cron_run()`、`_run_cron_tracked()`、`_cron_job_subprocess_main()` | **修改（薄接线）**：使上游单 Profile API 与 Cron Hub API 都携带相同 policy；手工 run 的内存 job copy 必须带 session ID/policy 到子进程；run 完成仍经 `materialize_after_cron_run()`。不要在此文件实现目录创建、验证或删除算法。 | 自动/手工、上游/Cron Hub 入口不会产生不同的 workspace 语义。 |
-| P0 | `integration/crons/session_bridge.py`：`_materialize_cron_session_found()`、`materialize_cron_session()`、`materialize_cron_session_run()`、批量 history 物化 | **修改**：当前 run 路径接收 policy/session ID/cwd 并调用 `CronWorkspaceBinding`；已存在 sidecar 只允许幂等重放同一 root；history/output fallback 不带当前 V1 输入时只能复用 sidecar 或生成只读记录。 | sidecar workspace 只能来自当前 V1 run 的显式输入或其自身既有值；相同 session ID 重放幂等，不同 root 不覆盖。 |
+| P0 | `integration/crons/session_bridge.py`：`_materialize_cron_session_found()`、`materialize_cron_session()`、`materialize_cron_session_run()`、批量 history 物化 | **修改**：当前 run 路径接收 policy/session ID/cwd 并调用 `CronWorkspaceBinding`；Gateway 轮询可使用精确选中的 Agent `state.db` record 代替已丢失的内存 hand-off；仅未继续对话的 `workspace_unverified` sidecar 可补回该 root；history/output fallback 不带可验证记录时只能复用 sidecar 或生成只读记录。 | sidecar workspace 只能来自可验证的 V1 execution record 或其自身既有值；相同 session ID 重放幂等，已有 follow-up 的不同 root 不覆盖。 |
 | P0 | `api/models.py`：`import_cli_session()`；外部 session fallback `get_session_for_file_ops()` / `_ExternalSessionView` | **修改**：`import_cli_session()` 接收显式 `workspace`、`workspace_mode`、`workspace_state`；普通 CLI 调用维持当前 fallback，cron 调用必须声明 `require_workspace_binding=True`。外部 session file-op fallback 不得给 unverified cron session 返回 `get_last_workspace()`。 | 消除 cron materialization 到 `last_workspace` 的隐式回退。 |
 | P1 | `api/workspace.py`：`create_managed_workspace()`、`resolve_session_workspace()` | **修改**：抽出可复用的受锚定 root 创建/验证/删除 primitive，供 integration Cron helper 使用；对 `workspace_unverified` Cron session 固定返回 WebUI 默认 workspace，绝不使用未验证 sidecar root。 | verified root 不可替换；未验证 session 可继续会话但不会访问猜测 execution root；其它会话管线文件无 cron 分支。 |
 | P1 | `integration/crons/worktree.py`（**新增**） | **新增**：调用 Agent 的 cron 专用 worktree API；删除时将已验证的 execution binding 传给 Agent。不得复用或修改普通 `api/worktrees.py` 的 session lifecycle。 | 只移除归属该 execution 的 worktree，普通 WebUI worktree 行为不变。 |

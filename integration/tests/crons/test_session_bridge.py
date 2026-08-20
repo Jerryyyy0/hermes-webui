@@ -244,7 +244,7 @@ def test_materialize_persists_execution_boundary_from_state_db(cron_env, monkeyp
     assert Session.load(sid).cron_execution_ended_at == 1700000250.0
 
 
-def test_current_v1_materialize_uses_state_db_cwd_as_immutable_workspace(cron_env, monkeypatch):
+def test_current_v1_materialize_uses_selected_state_db_cwd_without_transient_handoff(cron_env, monkeypatch):
     workspace = cron_env["workspace"] / "sessions" / "cron" / "default" / "cron_job1_1700000000"
     workspace.mkdir(parents=True)
     with closing(sqlite3.connect(str(cron_env["db"]))) as conn:
@@ -259,8 +259,6 @@ def test_current_v1_materialize_uses_state_db_cwd_as_immutable_workspace(cron_en
         "id": "job1",
         "name": "Nightly",
         "profile": "default",
-        "_cron_session_id": "cron_job1_1700000000",
-        "_cron_execution_workspace": str(workspace),
         "workspace_policy": {
             "version": 1,
             "strategy": "managed",
@@ -283,6 +281,107 @@ def test_current_v1_materialize_uses_state_db_cwd_as_immutable_workspace(cron_en
     assert session.workspace == str(workspace)
     assert session.workspace_mode == "managed"
     assert session.workspace_state == "ready"
+
+
+def test_unverified_v1_sidecar_repairs_before_user_followup(cron_env):
+    from api.models import Session
+    from integration.crons.hooks import _MAX_ITERATION_SUMMARY_REQUEST
+    from integration.crons.session_bridge import materialize_cron_session
+
+    sid = "cron_job1_1700000000"
+    execution_workspace = cron_env["workspace"] / "sessions" / "cron" / "default" / sid
+    execution_workspace.mkdir(parents=True)
+    with closing(sqlite3.connect(str(cron_env["db"]))) as conn:
+        conn.execute("ALTER TABLE sessions ADD COLUMN cwd TEXT")
+        conn.execute("UPDATE sessions SET cwd = ? WHERE id = ?", (str(execution_workspace), sid))
+        conn.commit()
+
+    Session(
+        session_id=sid,
+        title="Nightly",
+        profile="default",
+        source_tag="cron",
+        workspace=str(cron_env["workspace"]),
+        workspace_mode="external",
+        workspace_state="workspace_unverified",
+        messages=[
+            {"role": "user", "content": "run"},
+            {"role": "assistant", "tool_calls": [{"id": "tool-1"}]},
+            {"role": "tool", "content": "tool result"},
+            {"role": "user", "content": _MAX_ITERATION_SUMMARY_REQUEST},
+            {"role": "assistant", "content": "done"},
+        ],
+    ).save()
+
+    materialize_cron_session(
+        {
+            "id": "job1",
+            "name": "Nightly",
+            "profile": "default",
+            "workspace_policy": {
+                "version": 1,
+                "strategy": "managed",
+                "base_workspace": str(cron_env["workspace"]),
+            },
+        },
+        owner_profile="default",
+        execution_home=cron_env["home"],
+        session_id=sid,
+    )
+
+    repaired = Session.load(sid)
+    assert repaired.workspace == str(execution_workspace)
+    assert repaired.workspace_mode == "managed"
+    assert repaired.workspace_state == "ready"
+
+
+def test_unverified_v1_sidecar_with_user_followup_is_not_rebound(cron_env):
+    from api.models import Session
+    from integration.crons.session_bridge import materialize_cron_session
+
+    sid = "cron_job1_1700000000"
+    execution_workspace = cron_env["workspace"] / "sessions" / "cron" / "default" / sid
+    execution_workspace.mkdir(parents=True)
+    with closing(sqlite3.connect(str(cron_env["db"]))) as conn:
+        conn.execute("ALTER TABLE sessions ADD COLUMN cwd TEXT")
+        conn.execute("UPDATE sessions SET cwd = ? WHERE id = ?", (str(execution_workspace), sid))
+        conn.commit()
+
+    fallback_workspace = str(cron_env["workspace"])
+    Session(
+        session_id=sid,
+        title="Nightly",
+        profile="default",
+        source_tag="cron",
+        workspace=fallback_workspace,
+        workspace_mode="external",
+        workspace_state="workspace_unverified",
+        messages=[
+            {"role": "user", "content": "run"},
+            {"role": "assistant", "content": "done"},
+            {"role": "user", "content": "continue"},
+        ],
+    ).save()
+
+    materialize_cron_session(
+        {
+            "id": "job1",
+            "name": "Nightly",
+            "profile": "default",
+            "workspace_policy": {
+                "version": 1,
+                "strategy": "managed",
+                "base_workspace": str(cron_env["workspace"]),
+            },
+        },
+        owner_profile="default",
+        execution_home=cron_env["home"],
+        session_id=sid,
+    )
+
+    preserved = Session.load(sid)
+    assert preserved.workspace == fallback_workspace
+    assert preserved.workspace_state == "workspace_unverified"
 
 
 def test_legacy_empty_cwd_uses_profile_shared_continuation_workspace(cron_env, monkeypatch):
@@ -347,6 +446,76 @@ def test_legacy_history_materializers_use_shared_continuation_workspace(cron_env
 
     assert session_ids == {"legacy.md": run["session_id"]}
     assert Session.load(run["session_id"]).workspace_state == "legacy_shared"
+
+
+def test_v1_history_run_uses_exact_state_db_workspace_record(cron_env, monkeypatch):
+    from integration.crons import session_bridge
+
+    sid = "cron_job1_1700000000"
+    workspace = cron_env["workspace"] / "sessions" / "cron" / "default" / sid
+    workspace.mkdir(parents=True)
+    with closing(sqlite3.connect(str(cron_env["db"]))) as conn:
+        conn.execute("ALTER TABLE sessions ADD COLUMN cwd TEXT")
+        conn.execute("UPDATE sessions SET cwd = ? WHERE id = ?", (str(workspace), sid))
+        conn.commit()
+    monkeypatch.setattr(session_bridge, "_profile_home_for_name", lambda _profile: cron_env["home"])
+
+    result = session_bridge.materialize_cron_session_run(
+        {
+            "id": "job1",
+            "name": "V1 nightly",
+            "profile": "default",
+            "workspace_policy": {
+                "version": 1,
+                "strategy": "managed",
+                "base_workspace": str(cron_env["workspace"]),
+            },
+        },
+        owner_profile="default",
+        run={"session_id": sid, "title": "V1 nightly", "started_at": 1700000000.0},
+    )
+
+    from api.models import Session
+
+    session = Session.load(result)
+    assert session.workspace == str(workspace)
+    assert session.workspace_mode == "managed"
+    assert session.workspace_state == "ready"
+
+
+def test_v1_history_batch_uses_exact_state_db_workspace_records(cron_env, monkeypatch):
+    from integration.crons import session_bridge
+
+    sid = "cron_job1_1700000000"
+    workspace = cron_env["workspace"] / "sessions" / "cron" / "default" / sid
+    workspace.mkdir(parents=True)
+    with closing(sqlite3.connect(str(cron_env["db"]))) as conn:
+        conn.execute("ALTER TABLE sessions ADD COLUMN cwd TEXT")
+        conn.execute("UPDATE sessions SET cwd = ? WHERE id = ?", (str(workspace), sid))
+        conn.commit()
+
+    session_ids = session_bridge.materialize_cron_sessions_for_runs(
+        {
+            "id": "job1",
+            "name": "V1 nightly",
+            "profile": "default",
+            "workspace_policy": {
+                "version": 1,
+                "strategy": "managed",
+                "base_workspace": str(cron_env["workspace"]),
+            },
+        },
+        owner_profile="default",
+        execution_home=cron_env["home"],
+        runs=[{"filename": "v1.md", "run_mtime": 1700000000.0}],
+    )
+
+    from api.models import Session
+
+    session = Session.load(session_ids["v1.md"])
+    assert session.workspace == str(workspace)
+    assert session.workspace_mode == "managed"
+    assert session.workspace_state == "ready"
 
 
 def test_legacy_same_root_sidecar_is_repaired_from_unverified(cron_env, monkeypatch):
