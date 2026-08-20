@@ -203,14 +203,22 @@ def build_gateway_command(runtime: AgentCliInvocation, profile: dict, action: st
     return runtime.command(*args)
 
 
-def build_gateway_run_command(runtime: AgentCliInvocation, profile: dict) -> list[str]:
+def build_gateway_run_command(
+    runtime: AgentCliInvocation,
+    profile: dict,
+    *,
+    replace_existing: bool = False,
+) -> list[str]:
     """Build the fixed foreground command for a WebUI-owned Gateway.
 
     ``--external-supervisor`` keeps Agent-planned restarts under WebUI process
-    management.  Deliberately do not add ``--force`` or ``--replace``: both
-    bypass the Agent's normal duplicate-instance protection.
+    management. ``--replace`` is only used when a plain container needs to
+    take ownership of an existing Gateway and forward its output.
     """
-    return [*build_gateway_command(runtime, profile, "run"), "-v", "--external-supervisor"]
+    command = [*build_gateway_command(runtime, profile, "run"), "-v", "--external-supervisor"]
+    if replace_existing:
+        command.append("--replace")
+    return command
 
 
 def build_agent_python_command(runtime: AgentCliInvocation, *args: str) -> list[str] | None:

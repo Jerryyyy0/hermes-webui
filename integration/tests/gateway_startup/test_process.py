@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import threading
 
 import pytest
 
@@ -61,6 +62,81 @@ def test_unknown_gateway_state_fails_closed_without_creating_process(tmp_path):
     assert result == {"profile": "default", "status": "state_unknown"}
 
 
+def test_running_gateway_is_not_replaced_by_default(monkeypatch, tmp_path):
+    followed = []
+
+    def must_not_run(*_args, **_kwargs):
+        pytest.fail("must not replace an externally owned Gateway")
+
+    monkeypatch.setattr(
+        process,
+        "follow_external_gateway_logs",
+        lambda profile: followed.append(profile) or True,
+    )
+    result = process.start_gateway_process(
+        {"name": "default", "path": str(tmp_path)},
+        runtime=_runtime(tmp_path),
+        popen_factory=must_not_run,
+        state_probe=lambda _profile, _runtime: "running",
+    )
+
+    assert result == {"profile": "default", "status": "already_running"}
+    assert followed == [{"name": "default", "path": str(tmp_path)}]
+
+
+def test_external_gateway_follower_forwards_new_lines_without_replaying_history(monkeypatch, tmp_path):
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    gateway_log = logs / "gateway.log"
+    error_log = logs / "gateway.error.log"
+    gateway_log.write_text("INFO historical line\n", encoding="utf-8")
+    error_log.write_text("WARNING historical warning\n", encoding="utf-8")
+    lines = []
+    seen = threading.Event()
+
+    def capture(_level, line):
+        lines.append(line)
+        if len(lines) == 3:
+            seen.set()
+
+    monkeypatch.setattr(process, "log_gateway_line", capture)
+    monkeypatch.setattr(process, "_EXTERNAL_LOG_POLL_SECONDS", 0.01)
+
+    assert process.follow_external_gateway_logs({"name": "default", "path": str(tmp_path)})
+    with gateway_log.open("a", encoding="utf-8") as log_file:
+        log_file.write("INFO newly written\n")
+    with error_log.open("a", encoding="utf-8") as log_file:
+        log_file.write("ERROR newly written error\n")
+
+    assert seen.wait(timeout=2)
+    assert lines == [
+        "[gateway:default] INFO WebUI attached to externally managed Gateway logs",
+        "[gateway:default] INFO newly written",
+        "[gateway:default] ERROR newly written error",
+    ]
+
+
+def test_running_gateway_is_replaced_when_requested(monkeypatch, tmp_path):
+    command = "import sys; print('INFO replacement complete')"
+    replacements = []
+
+    def build_command(_runtime, _profile, *, replace_existing=False):
+        replacements.append(replace_existing)
+        return [sys.executable, "-u", "-c", command]
+
+    monkeypatch.setattr(process, "build_gateway_run_command", build_command)
+
+    result = process.start_gateway_process(
+        {"name": "default", "path": str(tmp_path)},
+        runtime=_runtime(tmp_path),
+        state_probe=lambda _profile, _runtime: "running",
+        replace_existing=True,
+    )
+
+    assert result["status"] == "started"
+    assert replacements == [True]
+
+
 def test_authoritative_probe_uses_agent_runtime_not_webui_import(monkeypatch, tmp_path):
     invocation = AgentCliInvocation(("/agent-python", "-m", "hermes_cli.main"), str(tmp_path), {"X": "1"}, "source_python")
     captured = {}
@@ -74,6 +150,25 @@ def test_authoritative_probe_uses_agent_runtime_not_webui_import(monkeypatch, tm
 
     assert process.probe_profile_gateway_state({"path": str(tmp_path)}, invocation) == "not_running"
     assert captured["command"][:2] == ["/agent-python", "-c"]
+    assert captured["cwd"] == str(tmp_path)
+    assert captured["env"] == {"X": "1"}
+
+
+def test_owner_probe_uses_the_profile_home(monkeypatch, tmp_path):
+    invocation = AgentCliInvocation(("/agent-python", "-m", "hermes_cli.main"), str(tmp_path), {"X": "1"}, "source_python")
+    captured = {}
+
+    def runner(command, **kwargs):
+        captured["command"] = command
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(command, 0, stdout="managed\n", stderr="")
+
+    monkeypatch.setattr(process.subprocess, "run", runner)
+
+    assert process.probe_profile_gateway_owner({"path": str(tmp_path)}, invocation) == "managed"
+    assert captured["command"][:2] == ["/agent-python", "-c"]
+    assert captured["command"][-1] == str(tmp_path)
+    assert "get_gateway_runtime_snapshot" in captured["command"][2]
     assert captured["cwd"] == str(tmp_path)
     assert captured["env"] == {"X": "1"}
 

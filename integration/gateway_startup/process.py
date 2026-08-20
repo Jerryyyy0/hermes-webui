@@ -11,6 +11,7 @@ import subprocess
 import sys
 import threading
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable, Literal
 
 from integration.gateway_startup.redaction import redact_gateway_console_line
@@ -25,6 +26,7 @@ from integration.project_logging.formatting import one_line
 logger = logging.getLogger(__name__)
 
 GatewayState = Literal["running", "not_running", "unknown"]
+GatewayOwnerState = Literal["managed", "unmanaged", "unknown"]
 
 _READ_CHUNK_BYTES = 64 * 1024
 _MAX_PENDING_LINE_BYTES = 64 * 1024
@@ -39,6 +41,7 @@ _LEVELS = {
     "CRITICAL": logging.CRITICAL,
 }
 _PLANNED_RESTART_EXIT_CODE = 75
+_EXTERNAL_LOG_POLL_SECONDS = 0.25
 
 
 @dataclass
@@ -51,8 +54,19 @@ class GatewayProcess:
     stopping: threading.Event = field(default_factory=threading.Event)
 
 
+@dataclass
+class GatewayLogFollower:
+    profile: dict
+    offsets: dict[Path, int]
+    identities: dict[Path, tuple[int, int] | None]
+    pending: dict[Path, str] = field(default_factory=dict)
+    thread: threading.Thread | None = None
+    stopping: threading.Event = field(default_factory=threading.Event)
+
+
 _registry_lock = threading.RLock()
 _registry: dict[str, GatewayProcess] = {}
+_follower_registry: dict[str, GatewayLogFollower] = {}
 _manager_stopping = threading.Event()
 
 
@@ -71,6 +85,13 @@ _STATE_PROBE_SCRIPT = (
     "from gateway.status import get_running_pid; "
     "pid = get_running_pid(Path(sys.argv[1]) / 'gateway.pid', cleanup_stale=False); "
     "print('running' if pid else 'not_running')"
+)
+_OWNER_PROBE_SCRIPT = (
+    "import os, sys; "
+    "os.environ['HERMES_HOME'] = sys.argv[1]; "
+    "from hermes_cli.gateway import get_gateway_runtime_snapshot; "
+    "snapshot = get_gateway_runtime_snapshot(); "
+    "print('managed' if snapshot.service_running else 'unmanaged')"
 )
 
 
@@ -100,6 +121,32 @@ def probe_profile_gateway_state(profile: dict, runtime: AgentCliInvocation) -> G
         return "unknown"
 
 
+def probe_profile_gateway_owner(profile: dict, runtime: AgentCliInvocation) -> GatewayOwnerState:
+    """Determine whether the Agent service manager owns this running Gateway."""
+    path = str(profile.get("path") or "").strip()
+    if not path:
+        return "unknown"
+    command = build_agent_python_command(runtime, "-c", _OWNER_PROBE_SCRIPT, path)
+    if command is None:
+        return "unknown"
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=runtime.cwd,
+            env=runtime.env,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if completed.returncode != 0:
+            return "unknown"
+        status = completed.stdout.strip()
+        return status if status in {"managed", "unmanaged"} else "unknown"
+    except Exception:
+        return "unknown"
+
+
 def _sanitize_line(line: str) -> str:
     line = _ANSI_RE.sub("", line)
     line = "".join(ch for ch in line if ch == "\t" or ord(ch) >= 32)
@@ -114,6 +161,18 @@ def _emit_line(profile: dict, line: str, **flags: bool) -> None:
     match = _LEVEL_RE.search(clean)
     level = _LEVELS.get(match.group(1), logging.INFO) if match else logging.INFO
     log_gateway_line(level, f"[gateway:{_profile_name(profile)}] {clean}{suffix}")
+
+
+def _emit_text_lines(profile: dict, text: str, pending: str) -> str:
+    """Emit complete lines and retain a bounded unfinished tail."""
+    pending += text
+    while "\n" in pending:
+        line, pending = pending.split("\n", 1)
+        _emit_line(profile, line)
+    if len(pending.encode("utf-8", errors="replace")) >= _MAX_PENDING_LINE_BYTES:
+        _emit_line(profile, pending, truncated=True)
+        return ""
+    return pending
 
 
 def _reader_loop(entry: GatewayProcess) -> None:
@@ -161,6 +220,83 @@ def _reader_loop(entry: GatewayProcess) -> None:
             pipe.close()
         except Exception:
             pass
+
+
+def _external_gateway_log_paths(profile: dict) -> tuple[Path, Path]:
+    home = Path(str(profile.get("path") or "")).expanduser()
+    return home / "logs" / "gateway.log", home / "logs" / "gateway.error.log"
+
+
+def _log_identity(path: Path) -> tuple[int, int] | None:
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return stat.st_dev, stat.st_ino
+
+
+def _follow_external_logs(entry: GatewayLogFollower) -> None:
+    paths = tuple(entry.offsets)
+    while not entry.stopping.wait(_EXTERNAL_LOG_POLL_SECONDS):
+        for path in paths:
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            identity = stat.st_dev, stat.st_ino
+            offset = entry.offsets[path]
+            if entry.identities[path] != identity or stat.st_size < offset:
+                entry.identities[path] = identity
+                offset = 0
+            if stat.st_size <= offset:
+                continue
+            try:
+                with path.open("rb") as log_file:
+                    log_file.seek(offset)
+                    chunk = log_file.read()
+                    entry.offsets[path] = log_file.tell()
+            except OSError:
+                continue
+            if chunk:
+                text = chunk.decode("utf-8", errors="replace")
+                entry.pending[path] = _emit_text_lines(
+                    entry.profile,
+                    text,
+                    entry.pending.get(path, ""),
+                )
+
+
+def follow_external_gateway_logs(profile: dict) -> bool:
+    """Forward new lines from an externally owned Gateway without restarting it."""
+    key = _profile_key(profile)
+    if not key or _manager_stopping.is_set():
+        return False
+    paths = _external_gateway_log_paths(profile)
+    offsets = {}
+    identities = {}
+    for path in paths:
+        try:
+            offsets[path] = path.stat().st_size
+        except OSError:
+            offsets[path] = 0
+        identities[path] = _log_identity(path)
+    with _registry_lock:
+        if key in _registry or key in _follower_registry:
+            return False
+        entry = GatewayLogFollower(profile=profile, offsets=offsets, identities=identities)
+        entry.thread = threading.Thread(
+            target=_follow_external_logs,
+            args=(entry,),
+            name=f"gateway-log-follow-{_profile_name(profile)}",
+            daemon=True,
+        )
+        _follower_registry[key] = entry
+    entry.thread.start()
+    log_gateway_line(
+        logging.INFO,
+        f"[gateway:{_profile_name(profile)}] INFO WebUI attached to externally managed Gateway logs",
+    )
+    return True
 
 
 def _wait_for_exit(entry: GatewayProcess) -> None:
@@ -217,6 +353,7 @@ def start_gateway_process(
     runtime: AgentCliInvocation,
     popen_factory: Callable = subprocess.Popen,
     state_probe: Callable[[dict, AgentCliInvocation], GatewayState] = probe_profile_gateway_state,
+    replace_existing: bool = False,
 ) -> dict:
     """Start one foreground Gateway and connect its output to WebUI logging."""
     key = _profile_key(profile)
@@ -228,12 +365,18 @@ def start_gateway_process(
             return {"profile": name, "status": "already_owned"}
     state = state_probe(profile, runtime)
     if state == "running":
-        return {"profile": name, "status": "already_running"}
-    if state != "not_running":
+        if not replace_existing:
+            follow_external_gateway_logs(profile)
+            return {"profile": name, "status": "already_running"}
+    elif state != "not_running":
         return {"profile": name, "status": "state_unknown"}
     try:
+        if replace_existing and state == "running":
+            command = build_gateway_run_command(runtime, profile, replace_existing=True)
+        else:
+            command = build_gateway_run_command(runtime, profile)
         process = popen_factory(
-            build_gateway_run_command(runtime, profile),
+            command,
             cwd=runtime.cwd,
             env=runtime.env,
             **_popen_kwargs(),
@@ -269,10 +412,13 @@ def _terminate(entry: GatewayProcess) -> None:
 
 
 def stop_gateway_processes(timeout: float = 8.0) -> None:
-    """Stop only child process groups owned by this WebUI process."""
+    """Stop owned child processes and detach external-Gateway log followers."""
     _manager_stopping.set()
     with _registry_lock:
         entries = list(_registry.values())
+        followers = list(_follower_registry.values())
+    for follower in followers:
+        follower.stopping.set()
     for entry in entries:
         _terminate(entry)
     for entry in entries:
@@ -288,9 +434,14 @@ def stop_gateway_processes(timeout: float = 8.0) -> None:
                 pass
     with _registry_lock:
         _registry.clear()
+        _follower_registry.clear()
+    for follower in followers:
+        if follower.thread is not None:
+            follower.thread.join(timeout=timeout)
 
 
 def _reset_process_manager_for_tests() -> None:
     _manager_stopping.clear()
     with _registry_lock:
         _registry.clear()
+        _follower_registry.clear()

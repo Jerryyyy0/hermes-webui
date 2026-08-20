@@ -248,6 +248,23 @@ def test_gateway_run_command_uses_info_console_logging_without_force():
     ) == ["/hermes", "-p", "abc", "gateway", "run", "-v", "--external-supervisor"]
 
 
+def test_gateway_run_command_can_replace_an_existing_gateway():
+    invocation = runtime.AgentCliInvocation(("/hermes",), "/home", {}, "launcher")
+
+    assert runtime.build_gateway_run_command(
+        invocation, {"name": "abc", "is_default": False}, replace_existing=True
+    ) == [
+        "/hermes",
+        "-p",
+        "abc",
+        "gateway",
+        "run",
+        "-v",
+        "--external-supervisor",
+        "--replace",
+    ]
+
+
 def test_agent_python_probe_uses_verified_python_runtime():
     invocation = runtime.AgentCliInvocation(("/agent-python", "-m", "hermes_cli.main"), "/home", {}, "source_python")
 

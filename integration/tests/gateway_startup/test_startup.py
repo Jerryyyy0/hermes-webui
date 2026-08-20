@@ -62,6 +62,111 @@ def test_plain_container_uses_webui_gateway_coordinator(monkeypatch):
     assert result["counts"] == {"started": 2}
 
 
+def test_plain_container_replaces_existing_gateway(monkeypatch):
+    from integration.gateway_startup import runtime as agent_cli_runtime
+
+    monkeypatch.setattr(startup, "_running_in_container", lambda: True)
+    monkeypatch.setattr(startup, "_s6_service_manager_available", lambda: False)
+    invocation = agent_cli_runtime.AgentCliInvocation(("/hermes",), "/tmp", {}, "managed_launcher")
+    monkeypatch.setattr(agent_cli_runtime, "resolve_agent_cli_runtime", lambda: invocation)
+    captured = {}
+
+    def process_starter(profile, *, runtime, replace_existing=False):
+        captured.update(profile=profile, runtime=runtime, replace_existing=replace_existing)
+        return {"profile": profile["name"], "status": "started"}
+
+    result = startup._start_profile_gateway(profiles()[0], process_starter=process_starter)
+
+    assert result == {"profile": "default", "status": "started"}
+    assert captured["replace_existing"] is True
+
+
+def test_native_running_gateway_restarts_through_its_service_manager(monkeypatch):
+    from integration.gateway_startup import runtime as agent_cli_runtime
+
+    invocation = agent_cli_runtime.AgentCliInvocation(("/hermes",), "/tmp", {"X": "1"}, "managed_launcher")
+    followed = []
+    captured = {}
+
+    monkeypatch.setattr(startup, "_running_in_container", lambda: False)
+    monkeypatch.setattr("integration.gateway_startup.process.follow_external_gateway_logs", followed.append)
+
+    def runner(command, **kwargs):
+        captured["command"] = command
+        captured.update(kwargs)
+        return SimpleNamespace(returncode=0)
+
+    result = startup._start_profile_gateway(
+        profiles()[1],
+        runtime_resolver=lambda: invocation,
+        service_runner=runner,
+        state_probe=lambda _profile, _runtime: "running",
+        owner_probe=lambda _profile, _runtime: "managed",
+    )
+
+    assert result == {"profile": "abc", "status": "restarted", "owner": "external"}
+    assert followed == [profiles()[1]]
+    assert captured["command"] == ["/hermes", "-p", "abc", "gateway", "restart"]
+    assert captured["cwd"] == "/tmp"
+    assert captured["env"] == {"X": "1"}
+    assert captured["timeout"] == startup._EXTERNAL_SERVICE_RESTART_TIMEOUT_SECONDS
+    assert captured["check"] is False
+    assert "capture_output" not in captured
+
+
+def test_native_unmanaged_gateway_is_not_restarted_with_a_foreground_cli(monkeypatch):
+    from integration.gateway_startup import runtime as agent_cli_runtime
+
+    invocation = agent_cli_runtime.AgentCliInvocation(("/hermes",), "/tmp", {}, "managed_launcher")
+
+    result = startup._start_profile_gateway(
+        profiles()[0],
+        runtime_resolver=lambda: invocation,
+        service_runner=lambda *_args, **_kwargs: pytest.fail("must not run a foreground restart"),
+        state_probe=lambda _profile, _runtime: "running",
+        owner_probe=lambda _profile, _runtime: "unmanaged",
+    )
+
+    assert result == {"profile": "default", "status": "external_owner_unknown"}
+
+
+def test_native_unknown_gateway_state_fails_closed(monkeypatch):
+    from integration.gateway_startup import runtime as agent_cli_runtime
+
+    invocation = agent_cli_runtime.AgentCliInvocation(("/hermes",), "/tmp", {}, "managed_launcher")
+
+    result = startup._start_profile_gateway(
+        profiles()[0],
+        runtime_resolver=lambda: invocation,
+        service_runner=lambda *_args, **_kwargs: pytest.fail("must not restart an unknown Gateway"),
+        process_starter=lambda *_args, **_kwargs: pytest.fail("must not start an unknown Gateway"),
+        state_probe=lambda _profile, _runtime: "unknown",
+    )
+
+    assert result == {"profile": "default", "status": "state_unknown"}
+
+
+def test_native_starts_a_gateway_when_the_authoritative_state_is_not_running():
+    from integration.gateway_startup import runtime as agent_cli_runtime
+
+    invocation = agent_cli_runtime.AgentCliInvocation(("/hermes",), "/tmp", {}, "managed_launcher")
+    captured = {}
+
+    def process_starter(profile, *, runtime):
+        captured.update(profile=profile, runtime=runtime)
+        return {"profile": profile["name"], "status": "started"}
+
+    result = startup._start_profile_gateway(
+        profiles()[0],
+        runtime_resolver=lambda: invocation,
+        process_starter=process_starter,
+        state_probe=lambda _profile, _runtime: "not_running",
+    )
+
+    assert result == {"profile": "default", "status": "started"}
+    assert captured == {"profile": profiles()[0], "runtime": invocation}
+
+
 def test_s6_container_keeps_webui_gateway_coordinator_enabled(monkeypatch):
     monkeypatch.setattr(startup, "_running_in_container", lambda: True)
     monkeypatch.setattr(startup, "_s6_service_manager_available", lambda: True)
@@ -143,7 +248,11 @@ def test_start_uses_verified_runtime_and_does_not_mutate_home(monkeypatch):
         captured["runtime"] = runtime
         return {"profile": profile["name"], "status": "started", "pid": 42}
 
-    result = startup._start_profile_gateway(profiles()[0], process_starter=process_starter)
+    result = startup._start_profile_gateway(
+        profiles()[0],
+        process_starter=process_starter,
+        state_probe=lambda _profile, _runtime: "not_running",
+    )
 
     assert result["status"] == "started"
     assert captured["profile"] == profiles()[0]
@@ -208,6 +317,7 @@ def test_runtime_resolution_retries_transient_failure(monkeypatch):
             "profile": profile["name"],
             "status": "started",
         },
+        state_probe=lambda _profile, _runtime: "not_running",
     )
 
     assert result == {"profile": "default", "status": "started"}
@@ -227,6 +337,7 @@ def test_ui_gateway_running_flag_is_not_an_authoritative_process_probe(monkeypat
         runtime_resolver=lambda: invocation,
         process_starter=lambda got_profile, *, runtime: seen.append((got_profile, runtime))
         or {"profile": "default", "status": "state_unknown"},
+        state_probe=lambda _profile, _runtime: "not_running",
     )
 
     assert result == {"profile": "default", "status": "state_unknown"}

@@ -17,6 +17,7 @@ logger = get_logger(__name__)
 
 _DEFAULT_MAX_WORKERS = 4
 _EXTERNAL_SERVICE_START_TIMEOUT_SECONDS = 60.0
+_EXTERNAL_SERVICE_RESTART_TIMEOUT_SECONDS = 300.0
 _RUNTIME_RESOLUTION_ATTEMPTS = 3
 _RUNTIME_RESOLUTION_RETRY_SECONDS = 1.0
 _TRUE_VALUES = {"1", "true", "yes", "on"}
@@ -70,12 +71,15 @@ def _start_profile_gateway(
     runtime_resolver: Callable | None = None,
     process_starter: Callable | None = None,
     service_runner: Callable = subprocess.run,
+    state_probe: Callable | None = None,
+    owner_probe: Callable | None = None,
 ) -> dict:
     """Start a Gateway under the correct lifecycle owner.
 
-    Native WebUI launches are foreground children owned by this process.  An
-    s6 container remains owned by its service manager, so its existing
-    ``gateway start`` path is deliberately retained and is not log-forwarded.
+    Native hosts restart a running externally managed Gateway through its
+    Agent service manager, then follow its files into the WebUI console. Plain
+    containers use a WebUI-owned foreground child so its logs reach container
+    stdout. An s6 container remains owned by its service manager.
     """
     name = str(profile.get("name") or "").strip() or "default"
     try:
@@ -84,7 +88,12 @@ def _start_profile_gateway(
             build_gateway_command,
             resolve_agent_cli_runtime,
         )
-        from integration.gateway_startup.process import start_gateway_process
+        from integration.gateway_startup.process import (
+            follow_external_gateway_logs,
+            probe_profile_gateway_owner,
+            probe_profile_gateway_state,
+            start_gateway_process,
+        )
         resolver = runtime_resolver or resolve_agent_cli_runtime
         runtime = None
         runtime_error = None
@@ -98,7 +107,8 @@ def _start_profile_gateway(
                     time.sleep(_RUNTIME_RESOLUTION_RETRY_SECONDS)
         if runtime is None:
             return {"profile": name, "status": "runtime_unavailable", "error": str(runtime_error)}
-        if _running_in_container() and _s6_service_manager_available():
+        in_container = _running_in_container()
+        if in_container and _s6_service_manager_available():
             if profile.get("gateway_running") is True:
                 return {"profile": name, "status": "already_running"}
             completed = service_runner(
@@ -117,7 +127,35 @@ def _start_profile_gateway(
                 "status": "failed",
                 "error": f"gateway start exited with status {completed.returncode}",
             }
-        return (process_starter or start_gateway_process)(profile, runtime=runtime)
+
+        if not in_container:
+            state = (state_probe or probe_profile_gateway_state)(profile, runtime)
+            if state == "running":
+                owner = (owner_probe or probe_profile_gateway_owner)(profile, runtime)
+                if owner != "managed":
+                    return {"profile": name, "status": "external_owner_unknown"}
+                follow_external_gateway_logs(profile)
+                completed = service_runner(
+                    build_gateway_command(runtime, profile, "restart"),
+                    cwd=runtime.cwd,
+                    env=runtime.env,
+                    timeout=_EXTERNAL_SERVICE_RESTART_TIMEOUT_SECONDS,
+                    check=False,
+                )
+                if completed.returncode == 0:
+                    return {"profile": name, "status": "restarted", "owner": "external"}
+                return {
+                    "profile": name,
+                    "status": "failed",
+                    "error": f"gateway restart exited with status {completed.returncode}",
+                }
+            if state != "not_running":
+                return {"profile": name, "status": "state_unknown"}
+
+        starter = process_starter or start_gateway_process
+        if in_container:
+            return starter(profile, runtime=runtime, replace_existing=True)
+        return starter(profile, runtime=runtime)
     except subprocess.TimeoutExpired:
         return {"profile": name, "status": "timed_out"}
     except Exception as exc:
