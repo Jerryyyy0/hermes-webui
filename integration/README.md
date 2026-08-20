@@ -531,7 +531,7 @@ Response includes global `stats`: `{ hub, installed, not_installed, custom }` ac
 | Path | Role |
 |------|------|
 | `config.py` | `HERMES_INTEGRATION`, `SKILLHUB_URL`, `KNOWLEDGE_BASE_URL`, `ZHILING_CONTROL_PLANE_URL`, `ZHILING_LOGOUT_API_URL`, `ZHILING_IDENTITY_CACHE_TTL_SECONDS`, `skillhub_enabled()`, `knowledge_base_enabled()`, `identity_lookup_enabled()`, `zhiling_identity_cache_ttl_seconds()`, `zhiling_logout_enabled()` |
-| `knowledge_base/` | `/api/integration/knowledge_base/*` → `{KNOWLEDGE_BASE_URL}/knowledge_base/*` |
+| `knowledge_base/` | `/api/integration/knowledge_base/*` → `{KNOWLEDGE_BASE_URL}/knowledge_base/*`; `turn_references.py` normalizes the two IThink KB MCP search results for Session Manifest. `api/session_manifest.py` keeps only the extraction/serialization seam. |
 | `notifications/` | `/api/integration/notifications/*` — 通知存储（`notifications.db`）与知识库消息聚合 |
 | `webui_appearance/` | `GET /api/integration/webui_appearance` + `/file` — 读 `{HERMES_HOME}/webui-appearance/` 配置与资源 |
 | `identity/` | `GET /api/integration/webui_login` → Control Plane `/api/identity/lookup`；进程内身份缓存（`session_store.py`） |
@@ -559,7 +559,7 @@ Response includes global `stats`: `{ hub, installed, not_installed, custom }` ac
 - `api/background_process.py` — emits persisted async-delegation lifecycle envelopes and the aggregate idle signal through active streams and `SessionChannel`
 - `api/models.py` — Session sidecar persists the nullable `last_error_at` fact used to derive list status, the async-delegation activity version, and state.db reader restores durable context-anchor 语义字段
 - `api/profiles.py` — profile deletion best-effort removes that profile's global session read cursors
-- `api/session_manifest.py` — after sidecar/state.db merge, cron-only GET normalization delegates to `integration.crons.hooks.normalize_cron_manifest_messages`; semantic internal/context rows are skipped as turn anchors while every allocated `turn:N` remains reserved
+- `api/session_manifest.py` — after sidecar/state.db merge, cron-only GET normalization delegates to `integration.crons.hooks.normalize_cron_manifest_messages`; knowledge-base MCP reference normalization delegates to `integration.knowledge_base.turn_references`; semantic internal/context rows are skipped as turn anchors while every allocated `turn:N` remains reserved
 - `static/index.html` — integration scripts + SkillHub panel markup
 - `static/panels.js` — `HermesProfiles` guard (`loadProfilesPanel`, `toggleProfileDropdown`, `renderProfileDetail`, `renderProfileForm`, `saveProfileForm`)
 - `requirements.txt` — `httpx`

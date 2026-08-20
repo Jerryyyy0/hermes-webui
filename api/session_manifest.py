@@ -1439,11 +1439,39 @@ def _merge_skill_records(
     records[skill_name] = payload
 
 
+def _merge_knowledge_base_records(
+    records: dict[str, dict],
+    candidates: list[dict[str, Any]],
+) -> None:
+    """Merge fork-owned knowledge-base candidates by their public document identity."""
+    from integration.knowledge_base.turn_references import merge_reference_rows, reference_key
+
+    for candidate in candidates:
+        key = reference_key(candidate)
+        if not key or key == '\0':
+            continue
+        record_key = f'knowledge_base_document\0{key}'
+        existing = records.get(record_key)
+        merged = merge_reference_rows([existing] if existing else [], [candidate])
+        if merged:
+            records[record_key] = merged[0]
+
+
 def _clean_record_keys(rows: list[dict]) -> list[dict]:
     for row in rows:
         for hit in row.get('hits') or []:
             hit.pop('_key', None)
     return rows
+
+
+def _reference_sort_key(row: dict) -> tuple[str, str, str]:
+    if str(row.get('resource_type') or '') == 'knowledge_base_document':
+        return (
+            'knowledge_base_document',
+            str(row.get('kb_name') or ''),
+            str(row.get('file_name') or ''),
+        )
+    return ('skill', str(row.get('path') or ''), '')
 
 
 def _next_turn_key(messages: list) -> str:
@@ -1675,6 +1703,25 @@ def _extract_manifest_records(
                 if turn is not None:
                     _merge_skill_records(turn['references'], skill_name=skill_name, event=event)
 
+        if tool_succeeded:
+            try:
+                from integration.knowledge_base.turn_references import extract_references
+
+                knowledge_base_references = extract_references(
+                    name=event.name,
+                    args=event.args,
+                    result=event.result,
+                    status=event.status,
+                    tid=event.tid,
+                )
+            except Exception:
+                logger.debug('failed to extract knowledge-base turn references', exc_info=True)
+                knowledge_base_references = []
+            if knowledge_base_references:
+                _merge_knowledge_base_records(references, knowledge_base_references)
+                if turn is not None and not replayed_execution:
+                    _merge_knowledge_base_records(turn['references'], knowledge_base_references)
+
         if _is_skill_manage_mutation_event(event) and _tool_event_succeeded(event):
             skill_name = _skill_manifest_name_from_manage_event(event, skills_dir)
             if skill_name:
@@ -1695,12 +1742,12 @@ def _extract_manifest_records(
                 }
 
     artifact_list = sorted(artifacts.values(), key=lambda row: row['path'])
-    reference_list = sorted(references.values(), key=lambda row: row['path'])
+    reference_list = sorted(references.values(), key=_reference_sort_key)
     _clean_record_keys(artifact_list + reference_list)
     turn_list: list[dict] = []
     for turn in turn_rows.values():
         turn_artifacts = sorted(turn.get('artifacts', {}).values(), key=lambda row: row['path'])
-        turn_references = sorted(turn.get('references', {}).values(), key=lambda row: row['path'])
+        turn_references = sorted(turn.get('references', {}).values(), key=_reference_sort_key)
         _clean_record_keys(turn_artifacts + turn_references)
         turn_list.append({
             'turn_key': turn.get('turn_key'),
@@ -2447,7 +2494,11 @@ def _row_to_wire(
     *,
     default_profile: str = '',
     collection: str = 'artifacts',
-) -> dict[str, str] | None:
+) -> dict[str, Any] | None:
+    if collection == 'references' and str(row.get('resource_type') or '') == 'knowledge_base_document':
+        from integration.knowledge_base.turn_references import to_wire
+
+        return to_wire(row)
     source_tool = str(row.get('source_tool') or '').strip()
     if not source_tool:
         return None
@@ -2466,6 +2517,30 @@ def _row_to_wire(
             return None
         if str(row.get('status') or '').strip().lower() == 'in_progress':
             return None
+        if collection == 'references':
+            sources: list[dict[str, str]] = []
+            seen_sources: set[tuple[str, str]] = set()
+            for hit in [row, *(row.get('hits') or [])]:
+                if not isinstance(hit, dict):
+                    continue
+                tool = str(hit.get('source_tool') or '').strip()
+                tid = str(hit.get('tid') or '').strip()
+                key = (tool, tid)
+                if tool and key not in seen_sources:
+                    sources.append({'tool': tool, 'tid': tid})
+                    seen_sources.add(key)
+            if not sources:
+                return None
+            wire: dict[str, Any] = {
+                'kind': 'skill',
+                'source': sources,
+                'metadata': {'path': skill_name},
+            }
+            if not _skill_exists_in_dir(skills_dir, skill_name):
+                if not _skill_row_has_provenance(row, collection):
+                    return None
+                wire['status'] = MANIFEST_STATUS_EXPIRED
+            return wire
         if _skill_exists_in_dir(skills_dir, skill_name):
             return _serialize_manifest_row(
                 skill_name, MANIFEST_PREVIEW_SKILL, source_tool, profile=profile,
@@ -2550,8 +2625,8 @@ def _rows_to_wire(
     *,
     default_profile: str = '',
     collection: str = 'artifacts',
-) -> list[dict[str, str]]:
-    out: list[dict[str, str]] = []
+) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
     seen: set[str] = set()
     for row in rows or []:
         wire = _row_to_wire(
@@ -2563,6 +2638,23 @@ def _rows_to_wire(
         )
         if wire is None:
             continue
+        if collection == 'references':
+            kind = str(wire.get('kind') or '').strip()
+            metadata = wire.get('metadata') if isinstance(wire.get('metadata'), dict) else {}
+            if kind == 'skill':
+                key = f'skill\0{str(metadata.get("path") or "").strip()}'
+            elif kind == 'knowledge_base_document':
+                key = 'knowledge_base_document\0{}\0{}'.format(
+                    str(metadata.get('kbName') or '').strip(),
+                    str(metadata.get('fileName') or '').strip(),
+                )
+            else:
+                continue
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(wire)
+            continue
         path = wire['path']
         profile = str(wire.get('profile') or '').strip()
         key = f'{profile}\0{path}'
@@ -2570,6 +2662,15 @@ def _rows_to_wire(
             continue
         seen.add(key)
         out.append(wire)
+    if collection == 'references':
+        return sorted(
+            out,
+            key=lambda item: (
+                str(item.get('kind') or ''),
+                str((item.get('metadata') or {}).get('kbName') or (item.get('metadata') or {}).get('path') or ''),
+                str((item.get('metadata') or {}).get('fileName') or ''),
+            ),
+        )
     return sorted(out, key=lambda item: (str(item.get('profile') or ''), item['path']))
 
 
@@ -2631,6 +2732,63 @@ def _merge_rows_by_path(existing_rows: list | None, incoming_rows: list | None) 
     return _merge_rows_by_identity(existing_rows, incoming_rows)
 
 
+def _merge_reference_wire_rows(existing_rows: list | None, incoming_rows: list | None) -> list[dict]:
+    """Merge the public reference wire without treating it as a file row."""
+    rows: dict[str, dict] = {}
+    for row in list(existing_rows or []) + list(incoming_rows or []):
+        if not isinstance(row, dict):
+            continue
+        kind = str(row.get('kind') or '').strip()
+        metadata = row.get('metadata') if isinstance(row.get('metadata'), dict) else {}
+        if kind == 'skill':
+            path = str(metadata.get('path') or '').strip()
+            if not path:
+                continue
+            key = f'skill\0{path}'
+            current = rows.setdefault(key, {'kind': 'skill', 'source': [], 'metadata': {'path': path}})
+        elif kind == 'knowledge_base_document':
+            kb_name = str(metadata.get('kbName') or '').strip()
+            file_name = str(metadata.get('fileName') or '').strip()
+            if not kb_name or not file_name:
+                continue
+            key = f'knowledge_base_document\0{kb_name}\0{file_name}'
+            current = rows.setdefault(key, {
+                'kind': 'knowledge_base_document',
+                'source': [],
+                'metadata': {'kbName': kb_name, 'fileName': file_name, 'page_content': []},
+            })
+            contents = current['metadata']['page_content']
+            for content in metadata.get('page_content') or []:
+                if isinstance(content, str) and content and content not in contents:
+                    contents.append(content)
+        else:
+            continue
+        source_keys = {
+            (str(source.get('tool') or '').strip(), str(source.get('tid') or '').strip())
+            for source in current['source']
+            if isinstance(source, dict)
+        }
+        for source in row.get('source') or []:
+            if not isinstance(source, dict):
+                continue
+            tool = str(source.get('tool') or '').strip()
+            tid = str(source.get('tid') or '').strip()
+            source_key = (tool, tid)
+            if tool and source_key not in source_keys:
+                current['source'].append({'tool': tool, 'tid': tid})
+                source_keys.add(source_key)
+        if str(row.get('status') or '').strip() == MANIFEST_STATUS_EXPIRED:
+            current['status'] = MANIFEST_STATUS_EXPIRED
+    return sorted(
+        rows.values(),
+        key=lambda row: (
+            str(row.get('kind') or ''),
+            str((row.get('metadata') or {}).get('kbName') or (row.get('metadata') or {}).get('path') or ''),
+            str((row.get('metadata') or {}).get('fileName') or ''),
+        ),
+    )
+
+
 def _merge_turn_rows(existing_turns: list | None, incoming_turns: list | None) -> list[dict]:
     turns: dict[str, dict] = {}
     for turn in list(existing_turns or []) + list(incoming_turns or []):
@@ -2643,40 +2801,38 @@ def _merge_turn_rows(existing_turns: list | None, incoming_turns: list | None) -
         turns[key] = {
             'turn_key': key,
             'artifacts': _merge_rows_by_path(current.get('artifacts'), turn.get('artifacts')),
-            'references': _merge_rows_by_path(current.get('references'), turn.get('references')),
+            'references': _merge_reference_wire_rows(current.get('references'), turn.get('references')),
         }
     return sorted(turns.values(), key=lambda turn: _turn_sort_key(turn.get('turn_key')))
 
 
 def _drop_wire_skill_references_in_artifacts(manifest: dict[str, Any]) -> None:
     artifact_keys = {
-        (str(row.get('profile') or '').strip(), str(row.get('path') or '').strip())
+        str(row.get('path') or '').strip()
         for row in manifest.get('artifacts') or []
         if isinstance(row, dict) and row.get('preview') == MANIFEST_PREVIEW_SKILL
     }
+    def is_artifact_skill_reference(row: dict, keys: set[str]) -> bool:
+        if not isinstance(row, dict) or row.get('kind') != 'skill':
+            return False
+        metadata = row.get('metadata') if isinstance(row.get('metadata'), dict) else {}
+        return str(metadata.get('path') or '').strip() in keys
+
     manifest['references'] = [
         row for row in manifest.get('references') or []
-        if not (
-            isinstance(row, dict)
-            and row.get('preview') == MANIFEST_PREVIEW_SKILL
-            and (str(row.get('profile') or '').strip(), str(row.get('path') or '').strip()) in artifact_keys
-        )
+        if not is_artifact_skill_reference(row, artifact_keys)
     ]
     for turn in manifest.get('turns') or []:
         if not isinstance(turn, dict):
             continue
         turn_artifact_keys = {
-            (str(row.get('profile') or '').strip(), str(row.get('path') or '').strip())
+            str(row.get('path') or '').strip()
             for row in turn.get('artifacts') or []
             if isinstance(row, dict) and row.get('preview') == MANIFEST_PREVIEW_SKILL
         }
         turn['references'] = [
             row for row in turn.get('references') or []
-            if not (
-                isinstance(row, dict)
-                and row.get('preview') == MANIFEST_PREVIEW_SKILL
-                and (str(row.get('profile') or '').strip(), str(row.get('path') or '').strip()) in turn_artifact_keys
-            )
+            if not is_artifact_skill_reference(row, turn_artifact_keys)
         ]
 
 
@@ -2700,7 +2856,7 @@ def merge_manifest_delta(base: dict[str, Any] | None, delta: dict[str, Any] | No
         base_manifest.setdefault('todos', {'items': []})
 
     base_manifest['artifacts'] = _merge_rows_by_path(base_manifest.get('artifacts'), delta.get('artifacts'))
-    base_manifest['references'] = _merge_rows_by_path(base_manifest.get('references'), delta.get('references'))
+    base_manifest['references'] = _merge_reference_wire_rows(base_manifest.get('references'), delta.get('references'))
     incoming_turns = delta.get('turns')
     if not incoming_turns and delta.get('turn_key'):
         incoming_turns = [{
@@ -2910,6 +3066,7 @@ def build_session_manifest(session, source_info: dict[str, str] | None = None) -
 
     store_rows: list[dict[str, Any]] = []
     decided_turn_keys: set[str] = set()
+    artifact_manifest_disabled = False
     if source_info is not None:
         # The HTTP endpoint must be store-authoritative.  In particular, an
         # older session without a decision must not regain artifacts merely by
@@ -2946,17 +3103,12 @@ def build_session_manifest(session, source_info: dict[str, str] | None = None) -
             }
         if not store_rows and not decided_turn_keys:
             source_info['manifest_source'] = 'none'
-            return {
-                'todos': {'items': []},
-                'artifacts': [],
-                'references': [],
-                'turns': [],
-                'diagnostics': {
-                    'missing_turn_key_message_indices': [],
-                    'orphan_turn_keys': [],
-                },
-            }
-        source_info['manifest_source'] = 'db'
+            # References are transcript-derived and do not use the artifact
+            # store. Keep the artifact-store empty decision while still
+            # exposing completed reference evidence for historical sessions.
+            artifact_manifest_disabled = True
+        else:
+            source_info['manifest_source'] = 'db'
     messages = _load_display_messages(session)
     messages = _ensure_turn_keys(messages)
     has_stable_turn_keys = any(
@@ -3017,8 +3169,8 @@ def build_session_manifest(session, source_info: dict[str, str] | None = None) -
         except Exception:
             logger.debug("failed to read session manifest store", exc_info=True)
 
-    artifact_records = {} if decided_turn_keys else _records_by_path(artifacts)
-    if decided_turn_keys:
+    artifact_records = {} if decided_turn_keys or artifact_manifest_disabled else _records_by_path(artifacts)
+    if decided_turn_keys or artifact_manifest_disabled:
         for turn in turns:
             turn['artifacts'] = []
     else:
@@ -3037,7 +3189,7 @@ def build_session_manifest(session, source_info: dict[str, str] | None = None) -
     # those paths are more reliable than the reconcile pass (which can suffer
     # from cross-turn prose contamination — see docs/architecture/turn-key-backend.md §8.3).
     persisted = getattr(session, 'turn_artifacts', None)
-    if not decided_turn_keys and isinstance(persisted, dict) and persisted:
+    if not decided_turn_keys and not artifact_manifest_disabled and isinstance(persisted, dict) and persisted:
         default_profile = str(getattr(session, 'profile', None) or '').strip()
         for turn in turns:
             tk = turn.get('turn_key', '')
@@ -3103,6 +3255,10 @@ def build_session_manifest(session, source_info: dict[str, str] | None = None) -
             list(turn.get('artifacts') or []), workspace, artifact_workspace,
         )
     _drop_reference_skills_in_artifacts(artifacts, references, turns, skills_dir)
+    if artifact_manifest_disabled:
+        artifacts = []
+        for turn in turns:
+            turn['artifacts'] = []
     _clean_record_keys(artifacts + references)
     return {
         'todos': _wire_todos(todos),

@@ -42,6 +42,9 @@ def test_workspace_js_fetches_manifest():
     assert '_manifestFilePreviewUrl' in src
     assert 'api/media?path=' in src
     assert 'key.startsWith(\'turn:\')' in src
+    assert 'function _mergeManifestReferences' in src
+    assert "kind==='knowledge_base_document'" in src
+    assert 'metadata.page_content' in src
 
 
 def test_messages_js_listens_for_manifest_delta():
@@ -78,6 +81,8 @@ def test_session_manifest_module_has_extractors():
     assert 'def _collect_tool_events' in src
     assert 'def extract_manifest_delta_from_tool_event' in src
     assert 'def merge_manifest_delta' in src
+    assert 'integration.knowledge_base.turn_references' in src
+    assert 'def _merge_reference_wire_rows' in src
 
 
 def test_session_manifest_store_lifecycle_hooks_present():
@@ -160,6 +165,14 @@ def test_session_manifest_docs_separate_product_api_and_artifact_contracts():
     assert '"sequence": 7' in api
     assert '"turn_key": "turn:' in api
     assert '`tool_start`、`tool_complete` 或 `turn_complete`' in api
+    assert 'mcp__ithink_kb_mcp__searchKnowledgeBaseDocuments' in api
+    assert 'mcp__ithink_kb_mcp__searchKnowledgeBaseDocumentsAcross' in api
+    assert '"page_content"' in api
+    assert '无需新增数据库表' in api
+
+    assert 'Knowledge Base References' in product
+    assert '(kbName, fileName)' in product
+    assert '不新增数据库表' in product
 
     assert 'Decision-first 构建流程' in artifacts
     assert 'write_file' in artifacts

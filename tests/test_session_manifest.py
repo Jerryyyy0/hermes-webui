@@ -45,6 +45,17 @@ from api.session_manifest import (
 )
 
 
+def _skill_reference(path: str, tid: str = '', *, expired: bool = False) -> dict:
+    row = {
+        'kind': 'skill',
+        'source': [{'tool': 'skill_view', 'tid': tid}],
+        'metadata': {'path': path},
+    }
+    if expired:
+        row['status'] = 'expired'
+    return row
+
+
 @pytest.fixture(autouse=True)
 def _isolate_manifest_store(tmp_path, monkeypatch):
     monkeypatch.setattr('api.session_manifest_store.STATE_DIR', tmp_path / 'state')
@@ -515,6 +526,91 @@ def test_merge_manifest_delta_keeps_same_path_for_distinct_profiles():
     ]
 
 
+def test_manifest_delta_merges_knowledge_base_document_across_both_mcp_tools(tmp_path):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    across_result = json.dumps({'result': json.dumps([{
+        'page_content': 'first passage',
+        'metadata': {'kbName': 'share49', 'fileName': 'rules.docx'},
+    }])})
+    single_result = json.dumps({'result': json.dumps([{
+        'page_content': 'second passage',
+        'metadata': {'source': '/private/share49/content/rules.docx'},
+    }])})
+    first = extract_manifest_delta_from_tool_event(
+        ToolEvent(
+            name='mcp__ithink_kb_mcp__searchKnowledgeBaseDocumentsAcross',
+            result=across_result,
+            tid='across-call',
+        ),
+        workspace,
+        turn_key='turn:1',
+    )
+    second = extract_manifest_delta_from_tool_event(
+        ToolEvent(
+            name='mcp__ithink_kb_mcp__searchKnowledgeBaseDocuments',
+            args={'kbName': 'share49'},
+            result=single_result,
+            tid='single-call',
+        ),
+        workspace,
+        turn_key='turn:1',
+    )
+
+    merged = merge_manifest_delta(
+        merge_manifest_delta({'todos': {'items': []}, 'artifacts': [], 'references': [], 'turns': []}, first),
+        second,
+    )
+
+    assert merged['references'] == [{
+        'kind': 'knowledge_base_document',
+        'source': [
+            {'tool': 'mcp__ithink_kb_mcp__searchKnowledgeBaseDocumentsAcross', 'tid': 'across-call'},
+            {'tool': 'mcp__ithink_kb_mcp__searchKnowledgeBaseDocuments', 'tid': 'single-call'},
+        ],
+        'metadata': {
+            'kbName': 'share49',
+            'fileName': 'rules.docx',
+            'page_content': ['first passage', 'second passage'],
+        },
+    }]
+    assert merged['turns'][0]['references'] == merged['references']
+
+
+def test_historical_manifest_derives_knowledge_base_references_without_artifact_decision(tmp_path, monkeypatch):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    result = json.dumps({'result': json.dumps([{
+        'page_content': 'historical passage',
+        'metadata': {'kbName': 'share49', 'fileName': 'rules.docx'},
+    }])})
+    session = Session(
+        session_id='kb-historical-reference',
+        workspace=str(workspace),
+        messages=[
+            {'role': 'user', 'content': 'search', '_turn_key': 'turn:1'},
+            {'role': 'assistant', 'tool_calls': [{
+                'id': 'kb-call',
+                'function': {
+                    'name': 'mcp__ithink_kb_mcp__searchKnowledgeBaseDocumentsAcross',
+                    'arguments': '{}',
+                },
+            }]},
+            {'role': 'tool', 'tool_call_id': 'kb-call', 'content': result},
+        ],
+        tool_calls=[],
+    )
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    source_info = {}
+
+    manifest = build_session_manifest(session, source_info=source_info)
+
+    assert source_info['manifest_source'] == 'none'
+    assert manifest['artifacts'] == []
+    assert manifest['references'][0]['metadata']['page_content'] == ['historical passage']
+    assert manifest['turns'][0]['references'] == manifest['references']
+
+
 def test_rows_to_wire_keeps_same_path_for_distinct_profiles(tmp_path):
     workspace = tmp_path / 'ws'
     workspace.mkdir()
@@ -784,11 +880,7 @@ def test_skill_view_becomes_skill_reference(tmp_path, monkeypatch):
     _artifacts, references = _extract_artifacts_and_references(events, workspace, skills_dir=skills_dir)
     wire = _rows_to_wire(references, workspace, skills_dir, collection='references')
 
-    assert wire == [{
-        'path': 'my-skill',
-        'preview': MANIFEST_PREVIEW_SKILL,
-        'source_tool': 'skill_view',
-    }]
+    assert wire == [_skill_reference('my-skill')]
 
 
 def test_skill_view_reference_missing_marked_expired(tmp_path, monkeypatch):
@@ -813,12 +905,7 @@ def test_skill_view_reference_missing_marked_expired(tmp_path, monkeypatch):
     _artifacts, references = _extract_artifacts_and_references(events, workspace, skills_dir=skills_dir)
     wire = _rows_to_wire(references, workspace, skills_dir, collection='references')
 
-    assert wire == [{
-        'path': 'missing-skill',
-        'preview': MANIFEST_PREVIEW_SKILL,
-        'source_tool': 'skill_view',
-        'status': 'expired',
-    }]
+    assert wire == [_skill_reference('missing-skill', expired=True)]
 
 
 def test_build_session_manifest_skips_failed_ambiguous_skill_view_reference(tmp_path, monkeypatch):
@@ -878,11 +965,7 @@ def test_build_session_manifest_skips_failed_ambiguous_skill_view_reference(tmp_
 
     manifest = build_session_manifest(session)
 
-    assert manifest['references'] == [{
-        'path': 'ai-与机器学习/knowledge-base-service',
-        'preview': MANIFEST_PREVIEW_SKILL,
-        'source_tool': 'skill_view',
-    }]
+    assert manifest['references'] == [_skill_reference('ai-与机器学习/knowledge-base-service', 'c2')]
     assert manifest['turns'][0]['references'] == manifest['references']
 
 
@@ -1080,12 +1163,7 @@ def test_extract_manifest_delta_skill_reference_expired(tmp_path, monkeypatch):
         sequence=1,
         skills_dir=skills_dir,
     )
-    assert delta['references'] == [{
-        'path': 'missing-skill',
-        'preview': MANIFEST_PREVIEW_SKILL,
-        'source_tool': 'skill_view',
-        'status': 'expired',
-    }]
+    assert delta['references'] == [_skill_reference('missing-skill', expired=True)]
 
 
 def test_build_session_manifest_prefers_store_skill_artifact(tmp_path, monkeypatch):
@@ -2001,11 +2079,7 @@ def test_build_session_manifest_does_not_promote_skill_or_terminal_tool_result_t
     manifest = build_session_manifest(session)
 
     assert manifest['artifacts'] == []
-    assert manifest['references'] == [{
-        'path': 'diagnose',
-        'preview': MANIFEST_PREVIEW_SKILL,
-        'source_tool': 'skill_view',
-    }]
+    assert manifest['references'] == [_skill_reference('diagnose', 'toolu_skill')]
 
 
 def test_build_session_manifest_store_empty_decision_skips_reconcile(tmp_path, monkeypatch):
@@ -3886,9 +3960,9 @@ def test_build_session_manifest_groups_references_by_turn(tmp_path, monkeypatch)
     assert len(manifest['turns']) == 2
     first_refs = manifest['turns'][0]['references']
     second_refs = manifest['turns'][1]['references']
-    assert [row['path'] for row in first_refs] == ['skill-a']
-    assert [row['path'] for row in second_refs] == ['skill-b']
-    assert {row['path'] for row in manifest['references']} == {'skill-a', 'skill-b'}
+    assert [row['metadata']['path'] for row in first_refs] == ['skill-a']
+    assert [row['metadata']['path'] for row in second_refs] == ['skill-b']
+    assert {row['metadata']['path'] for row in manifest['references']} == {'skill-a', 'skill-b'}
 
 
 def test_persist_turn_artifact_paths_filters_missing_files(tmp_path, monkeypatch):
@@ -4024,7 +4098,7 @@ def test_persist_turn_artifact_paths_keeps_same_path_across_turns(tmp_path, monk
     assert session.turn_artifacts == {}
 
 
-def test_session_get_without_db_decision_does_not_rebuild_legacy_manifest(tmp_path, monkeypatch):
+def test_session_get_without_db_decision_keeps_artifacts_empty(tmp_path, monkeypatch):
     from urllib.parse import urlparse
 
     import api.routes as routes
@@ -4052,10 +4126,7 @@ def test_session_get_without_db_decision_does_not_rebuild_legacy_manifest(tmp_pa
     monkeypatch.setattr(routes, '_clear_stale_stream_state', lambda _s: None)
     monkeypatch.setattr(routes, 'redact_session_data', lambda payload: payload)
     monkeypatch.setattr(routes, 'j', lambda _handler, payload, status=200, extra_headers=None: payload)
-    def _unexpected_transcript_read(_session):
-        raise AssertionError('historical manifest reads must not rebuild from the transcript')
-
-    monkeypatch.setattr('api.session_manifest._load_display_messages', _unexpected_transcript_read)
+    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
     monkeypatch.setattr('api.session_manifest._skills_dir_for_session', lambda s: tmp_path / 'skills')
     monkeypatch.setattr('api.session_manifest._skillhub_preview_available', lambda: False)
     monkeypatch.setattr('api.session_manifest_store.STATE_DIR', tmp_path / 'state')
@@ -4077,7 +4148,10 @@ def test_session_get_without_db_decision_does_not_rebuild_legacy_manifest(tmp_pa
             'todos': {'items': []},
             'artifacts': [],
             'references': [],
-            'turns': [],
+            'turns': [
+                {'turn_key': 'turn:1', 'artifacts': [], 'references': []},
+                {'turn_key': 'turn:2', 'artifacts': [], 'references': []},
+            ],
             'diagnostics': {
                 'missing_turn_key_message_indices': [],
                 'orphan_turn_keys': [],
@@ -4236,7 +4310,7 @@ def test_build_session_manifest_multi_turn_mixed_artifacts_and_references(tmp_pa
     turn2_paths = [row['path'] for row in manifest_by_turn['turn:2']['artifacts']]
     assert turn2_paths == ['deliver.docx', 'make_docx.py']
     assert manifest_by_turn['turn:2']['artifacts'][1]['status'] == 'expired'
-    assert manifest_by_turn['turn:2']['references'][0]['path'] == 'docx-generation'
+    assert manifest_by_turn['turn:2']['references'][0]['metadata']['path'] == 'docx-generation'
 
 
 def test_persist_turn_artifact_paths_includes_skill_manage(tmp_path, monkeypatch):
@@ -4430,11 +4504,32 @@ def test_build_session_manifest_skill_view_deduped_when_artifact(tmp_path, monke
     manifest = build_session_manifest(session)
 
     artifact_paths = {row['path'] for row in manifest['artifacts']}
-    reference_paths = {row['path'] for row in manifest['references']}
+    reference_paths = {row['metadata']['path'] for row in manifest['references']}
     assert 'research/ai-news-top10' in artifact_paths
     assert 'ai-news-top10' not in reference_paths
     assert 'research/ai-news-top10' not in reference_paths
     assert 'hermes-agent-skill-authoring' in reference_paths
+
+
+def test_merge_manifest_delta_prefers_profiled_skill_artifact_over_reference():
+    manifest = merge_manifest_delta(
+        {'todos': {'items': []}, 'artifacts': [], 'references': [], 'turns': []},
+        {
+            'artifacts': [{
+                'path': 'research/ai-news-top10',
+                'preview': MANIFEST_PREVIEW_SKILL,
+                'source_tool': 'skill_manage',
+                'profile': 'default',
+            }],
+            'references': [{
+                'kind': 'skill',
+                'source': [{'tool': 'skill_view', 'tid': 'call-1'}],
+                'metadata': {'path': 'research/ai-news-top10'},
+            }],
+        },
+    )
+
+    assert manifest['references'] == []
 
 
 def test_extract_manifest_records_skips_skill_scan_for_file_artifact_keys(tmp_path, monkeypatch):
@@ -4730,11 +4825,7 @@ def test_skill_view_success_keeps_canonical_skill_reference(tmp_path, monkeypatc
 
     manifest = build_session_manifest(session)
 
-    assert manifest['references'] == [{
-        'path': 'creative/excalidraw',
-        'preview': MANIFEST_PREVIEW_SKILL,
-        'source_tool': 'skill_view',
-    }]
+    assert manifest['references'] == [_skill_reference('creative/excalidraw', 'c1')]
 
 
 def test_skill_view_dedupes_bare_and_skill_md_paths_to_one_canonical_reference(tmp_path, monkeypatch):
@@ -4816,10 +4907,6 @@ def test_skill_view_dedupes_bare_and_skill_md_paths_to_one_canonical_reference(t
 
     manifest = build_session_manifest(session)
 
-    assert manifest['references'] == [{
-        'path': 'creative/excalidraw',
-        'preview': MANIFEST_PREVIEW_SKILL,
-        'source_tool': 'skill_view',
-    }]
-    assert all('SKILL.md' not in row['path'] for row in manifest['references'])
-    assert all(row['path'] != 'excalidraw' for row in manifest['references'])
+    assert manifest['references'] == [_skill_reference('creative/excalidraw', 'c2')]
+    assert all('SKILL.md' not in row['metadata']['path'] for row in manifest['references'])
+    assert all(row['metadata']['path'] != 'excalidraw' for row in manifest['references'])

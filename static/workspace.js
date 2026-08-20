@@ -424,6 +424,83 @@ function _mergeManifestRows(existing, incoming){
   });
 }
 
+function _normalizeManifestReference(row){
+  if(!row||typeof row!=='object') return null;
+  const kind = String(row.kind||'').trim();
+  const metadata = row.metadata && typeof row.metadata==='object' ? row.metadata : {};
+  const source = Array.isArray(row.source) ? row.source : [];
+  const cleanSources = [];
+  const seenSources = new Set();
+  source.forEach(item=>{
+    if(!item||typeof item!=='object') return;
+    const tool = String(item.tool||'').trim();
+    const tid = String(item.tid||'').trim();
+    const key = `${tool}\u0000${tid}`;
+    if(tool&&!seenSources.has(key)){
+      cleanSources.push({tool, tid});
+      seenSources.add(key);
+    }
+  });
+  if(kind==='skill'){
+    const path = String(metadata.path||'').trim();
+    if(!path||!cleanSources.length) return null;
+    const out = {kind:'skill', source:cleanSources, metadata:{path}};
+    if(row.status==='expired') out.status='expired';
+    return out;
+  }
+  if(kind==='knowledge_base_document'){
+    const kbName = String(metadata.kbName||'').trim();
+    const fileName = String(metadata.fileName||'').trim();
+    const page_content = [...new Set((Array.isArray(metadata.page_content)?metadata.page_content:[])
+      .filter(value=>typeof value==='string'&&value))];
+    if(!kbName||!fileName||!cleanSources.length||!page_content.length) return null;
+    return {kind:'knowledge_base_document', source:cleanSources, metadata:{kbName, fileName, page_content}};
+  }
+  return null;
+}
+
+function _referenceIdentity(row){
+  if(!row) return '';
+  if(row.kind==='skill') return `skill\u0000${row.metadata.path}`;
+  if(row.kind==='knowledge_base_document') return `knowledge_base_document\u0000${row.metadata.kbName}\u0000${row.metadata.fileName}`;
+  return '';
+}
+
+function _mergeManifestReferences(existing, incoming){
+  const byKey = new Map();
+  const add = row => {
+    const normalized = _normalizeManifestReference(row);
+    if(!normalized) return;
+    const key = _referenceIdentity(normalized);
+    const current = byKey.get(key);
+    if(!current){
+      byKey.set(key, normalized);
+      return;
+    }
+    const sourceKeys = new Set(current.source.map(item=>`${item.tool}\u0000${item.tid}`));
+    normalized.source.forEach(item=>{
+      const sourceKey = `${item.tool}\u0000${item.tid}`;
+      if(!sourceKeys.has(sourceKey)){
+        current.source.push(item);
+        sourceKeys.add(sourceKey);
+      }
+    });
+    if(current.kind==='knowledge_base_document'){
+      const contents = new Set(current.metadata.page_content);
+      normalized.metadata.page_content.forEach(content=>{
+        if(!contents.has(content)){
+          current.metadata.page_content.push(content);
+          contents.add(content);
+        }
+      });
+    }
+    if(normalized.status==='expired') current.status='expired';
+  };
+  (existing||[]).forEach(add);
+  (incoming||[]).forEach(add);
+  return [...byKey.values()].sort((a,b)=>_referenceIdentity(a).localeCompare(_referenceIdentity(b)));
+}
+
 function _normalizeDeltaTurnKey(delta){
   const key = String(delta && delta.turn_key || '').trim();
   return key.startsWith('turn:') ? key : '';
@@ -446,7 +523,7 @@ function _mergeManifestTurns(existingTurns, incomingTurns){
     byKey.set(key, {
       turn_key: key,
       artifacts: _mergeManifestRows(current.artifacts, turn.artifacts),
-      references: _mergeManifestRows(current.references, turn.references),
+      references: _mergeManifestReferences(current.references, turn.references),
     });
   };
   (existingTurns||[]).forEach(add);
@@ -487,7 +564,7 @@ function applySessionManifestDelta(delta){
     _sessionManifest.todos = {items: _cloneManifestValue(delta.todos.items)};
   }
   _sessionManifest.artifacts = _mergeManifestRows(_sessionManifest.artifacts, delta.artifacts);
-  _sessionManifest.references = _mergeManifestRows(_sessionManifest.references, delta.references);
+  _sessionManifest.references = _mergeManifestReferences(_sessionManifest.references, delta.references);
   _sessionManifest.turns = _mergeManifestTurns(_sessionManifest.turns, incomingTurns);
   _sessionManifest.live = delta.stream_id ? {stream_id: delta.stream_id, source:'sse'} : _sessionManifest.live;
   renderSessionInspector();
@@ -550,7 +627,7 @@ function _manifestRowByPath(path, collection){
   const manifest = _manifestForActiveSession();
   if(!manifest || !path) return null;
   const rows = Array.isArray(manifest[collection]) ? manifest[collection] : [];
-  return rows.find(item=>item && item.path === path) || null;
+  return rows.find(item=>item && (item.path === path || (item.metadata && item.metadata.path === path))) || null;
 }
 
 function isManifestExpired(item){
@@ -559,7 +636,7 @@ function isManifestExpired(item){
 
 function isManifestPreviewable(item){
   if(isManifestExpired(item)) return false;
-  return item?.preview === 'file' || item?.preview === 'skill';
+  return item?.kind === 'skill' || item?.preview === 'file' || item?.preview === 'skill';
 }
 
 function _manifestExpiredLabel(){
@@ -650,13 +727,30 @@ function renderSessionReferences(){
   const manifest = _manifestForActiveSession();
   const items = manifest && Array.isArray(manifest.references) ? manifest.references : [];
   if(count) count.textContent = String(items.length);
-  _renderInspectorFileList(
-    root,
-    items,
-    'workspace_references_empty',
-    'No referenced files yet. Files read or searched during this session will appear here.',
-  );
-  _bindInspectorFileList(root, items);
+  if(!root) return;
+  if(!S.session){
+    root.innerHTML = `<div class="workspace-inspector-empty">${esc(_workspaceInspectorLabel('workspace_inspector_no_session', 'Open a conversation to inspect session files.'))}</div>`;
+    return;
+  }
+  if(!items.length){
+    root.innerHTML = `<div class="workspace-inspector-empty">${esc(_workspaceInspectorLabel('workspace_references_empty', 'No referenced files yet.'))}</div>`;
+    return;
+  }
+  root.innerHTML = items.map((item, idx)=>{
+    const metadata = item.metadata || {};
+    if(item.kind==='knowledge_base_document'){
+      const passages = Array.isArray(metadata.page_content) ? metadata.page_content : [];
+      return `<div class="workspace-inspector-item"><div class="workspace-inspector-path">${esc(metadata.fileName||'')}</div><div class="workspace-inspector-meta">${esc(metadata.kbName||'')}</div><details><summary>${esc(String(passages.length))}</summary>${passages.map(content=>`<div class="workspace-inspector-meta">${esc(content)}</div>`).join('')}</details></div>`;
+    }
+    const path = metadata.path || '';
+    const expired = isManifestExpired(item);
+    const disabledCls = expired ? ' is-disabled' : '';
+    return `<button type="button" class="workspace-inspector-item${disabledCls}" data-reference-idx="${idx}"><div class="workspace-inspector-path">${esc(path)}</div><div class="workspace-inspector-meta">${esc(_inspectorFileMeta(item))}</div></button>`;
+  }).join('');
+  root.querySelectorAll('[data-reference-idx]').forEach(btn=>{
+    const item = items[Number(btn.dataset.referenceIdx)];
+    btn.onclick = ()=>openManifestPreview(item);
+  });
 }
 
 function renderSessionInspector(){
@@ -677,11 +771,13 @@ async function openInspectorReferencePath(path){
 }
 
 async function openManifestPreview(item){
-  if(!item || !item.path || !item.preview) return;
+  if(!item) return;
   if(isManifestExpired(item)){
     if(typeof showToast === 'function') showToast(_manifestExpiredLabel());
     return;
   }
+  if(item.kind === 'skill') return openSkillContentPreview(item.metadata?.path);
+  if(!item.path || !item.preview) return;
   if(item.preview === 'skill') return openSkillContentPreview(item.path, item.profile);
   if(item.preview === 'file') return openIntegrationFilePreview(item.path);
 }

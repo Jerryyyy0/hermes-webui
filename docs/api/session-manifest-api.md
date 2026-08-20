@@ -36,9 +36,25 @@ GET /api/session/manifest?session_id=abc123
     ],
     "references": [
       {
-        "path": "research-skill",
-        "preview": "skill",
-        "source_tool": "skill_view"
+        "kind": "skill",
+        "source": [
+          { "tool": "skill_view", "tid": "call-skill-1" }
+        ],
+        "metadata": { "path": "research-skill" }
+      },
+      {
+        "kind": "knowledge_base_document",
+        "source": [
+          {
+            "tool": "mcp__ithink_kb_mcp__searchKnowledgeBaseDocumentsAcross",
+            "tid": "call-kb-1"
+          }
+        ],
+        "metadata": {
+          "kbName": "share49",
+          "fileName": "电力市场运行基本规则.docx",
+          "page_content": ["第一章 总则……"]
+        }
       }
     ],
     "turns": [
@@ -64,10 +80,10 @@ GET /api/session/manifest?session_id=abc123
 | 值 | 含义 |
 | --- | --- |
 | `db` | 使用 artifact store 中的非空或 empty decision |
-| `none` | 当前 lineage 无 store decision；返回空 Manifest，不读取 transcript、tool calls 或 legacy sidecar 重建 |
+| `none` | 当前 lineage 无 artifact store decision；`artifacts` 保持空，但仍从已完成工具事件派生 references |
 | `unknown` | 异常或无法判断 |
 
-GET 是只读的：不得执行 artifact backfill 或 empty-decision repair，不得更新 session `updated_at`、sidebar recency，也不得发布 session-list 变更事件。没有 store decision 时也不重建历史 Manifest。
+GET 是只读的：不得执行 artifact backfill 或 empty-decision repair，不得更新 session `updated_at`、sidebar recency，也不得发布 session-list 变更事件。没有 artifact store decision 时不重建历史 artifacts；references 不依赖该 store。
 
 ### 错误响应
 
@@ -97,9 +113,7 @@ GET 是只读的：不得执行 artifact backfill 或 empty-decision repair，�
 
 Todos 是当前轮最新快照，不是历史流水。GET 中不包含 SSE 专用的 `mode`。
 
-### Artifact/reference row
-
-References 仅允许 canonical skill row：`preview="skill"`、`source_tool="skill_view"`。文件读取不进入 GET/SSE/per-turn references，也不产生 file reference `expired`。
+### Artifact row
 
 基础字段：
 
@@ -114,13 +128,48 @@ References 仅允许 canonical skill row：`preview="skill"`、`source_tool="ski
 | 字段 | 适用范围 | 说明 |
 | --- | --- | --- |
 | `profile` | artifacts | 来自 `session.profile`；无明确值时省略 |
-| `status` | artifacts/references | 当前仅 `expired`，表示有历史 provenance 但不可预览 |
+| `status` | artifacts | 当前仅 `expired`，表示有历史 provenance 但不可预览 |
 
 **`preview=file` 的 `path` 语义（wire）：** 持久化 artifact 以自身的 `workspace_root` 解析；历史 `workspace_root=""` 在运行时解释为启动时的 `HERMES_WEBUI_DEFAULT_WORKSPACE`，数据库原值不回填。当该根位于 integration 根之下时，GET/SSE 返回**相对 integration 根**的路径，以便直接调用 `GET /api/integration/workspace/file?path=...`：历史默认根为 `report.md`，新 managed 会话为 `sessions/<session_id>/report.md`，base 子目录 external workspace 为 `project-a/report.md`。根位于 integration 根之外的持久化 artifact 不返回 `preview=file`，不能退回裸相对路径或绝对路径。仅尚未持久化的 transcript/SSE 临时行沿用当前 session workspace 的既有投影。`preview=skill` 与 workspace 外绝对 `MEDIA:` path 不改写。
 
 Manifest 不返回文件或技能正文。非 expired 且 `preview` 为 `file`/`skill` 的条目可由 `HermesSessionInspector.openManifestPreview(item)` 打开；expired 条目不可预览。
 
 文件预览使用 integration workspace file API（path 为上表 wire 语义），skill 预览使用 SkillHub content API，workspace 外 `MEDIA:` 使用 session media API。具体接口与部署约束见 [integration/README.md](../integration/README.md)。
+
+### Reference row
+
+文件读取、搜索命中、目录列表与助手正文提及均不进入 references。当前仅有两类：成功 completed 的 `skill_view`，以及以下两个 MCP 工具的成功 completed 调用：
+
+- `mcp__ithink_kb_mcp__searchKnowledgeBaseDocuments`
+- `mcp__ithink_kb_mcp__searchKnowledgeBaseDocumentsAcross`
+
+```json
+{
+  "kind": "knowledge_base_document",
+  "source": [
+    {
+      "tool": "mcp__ithink_kb_mcp__searchKnowledgeBaseDocuments",
+      "tid": "call-01"
+    }
+  ],
+  "metadata": {
+    "kbName": "share49",
+    "fileName": "电力市场运行基本规则.docx",
+    "page_content": ["第一章 总则……"]
+  }
+}
+```
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `kind` | string | `skill` 或 `knowledge_base_document` |
+| `source` | object[] | 来源工具与工具调用 ID；`skill` 使用 `skill_view` |
+| `metadata.path` | string | `kind=skill` 时的 canonical skill 名 |
+| `metadata.kbName` | string | `kind=knowledge_base_document` 时的知识库名 |
+| `metadata.fileName` | string | 文档文件名；单库工具从其私有 `metadata.source` 仅取 basename，不向浏览器透传原路径 |
+| `metadata.page_content` | string[] | 文档命中片段，保留工具返回顺序并去重 |
+
+知识库工具结果仅接受最多 50 条、总编码不超过 1 MiB 的 JSON 列表；畸形、失败、未知工具或超限结果一律跳过。Reference 是 transcript/tool-call 派生索引，不写入 artifact store，因此无需新增数据库表。
 
 ### `turns[]`
 
@@ -134,7 +183,22 @@ Manifest 不返回文件或技能正文。非 expired 且 `preview` 为 `file`/`
       "source_tool": "write_file"
     }
   ],
-  "references": []
+  "references": [
+    {
+      "kind": "knowledge_base_document",
+      "source": [
+        {
+          "tool": "mcp__ithink_kb_mcp__searchKnowledgeBaseDocumentsAcross",
+          "tid": "call-kb-1"
+        }
+      ],
+      "metadata": {
+        "kbName": "share49",
+        "fileName": "电力市场运行基本规则.docx",
+        "page_content": ["第一章 总则……"]
+      }
+    }
+  ]
 }
 ```
 
@@ -197,12 +261,28 @@ Orphan artifact 仍保留在顶层 `artifacts`，但不进入正常 `turns[]`。
 
 `todos`、`artifacts`、`references` 均为空时不发送 delta。
 
+### 知识库 MCP 示例
+
+以下是 `searchKnowledgeBaseDocuments` 成功完成时的完整 SSE 帧。`source` 描述本次
+delta 的触发事件，因此 `source.tool` 使用内部规范化的小写工具名；具体文档的来源保留在
+`references[].source[]`，使用完整的 MCP 工具名和调用 ID。
+
+```text
+event: manifest_delta
+data: {"version":1,"session_id":"5ccfb09bb7a7","stream_id":"stream-xyz","turn_key":"turn:4","sequence":12,"source":{"kind":"tool_complete","tool":"mcp__ithink_kb_mcp__searchknowledgebasedocuments","tid":"call_00_nvU4eugjt9ji9RA6gxWu6032","status":"completed"},"artifacts":[],"references":[{"kind":"knowledge_base_document","source":[{"tool":"mcp__ithink_kb_mcp__searchKnowledgeBaseDocuments","tid":"call_00_nvU4eugjt9ji9RA6gxWu6032"}],"metadata":{"kbName":"share49","fileName":"电力市场运行基本规则.docx","page_content":["第一章 总则……"]}}]}
+
+```
+
+同一调用返回多个文档时，`references[]` 包含多条行；同一 turn 内两个受支持工具命中同一
+`(kbName, fileName)` 时，客户端按既有合并规则合并为一条，追加不重复的
+`source[]` 与 `metadata.page_content[]`。
+
 ### 发射阶段
 
 | 阶段 | Tasks | Artifacts | References |
 | --- | --- | --- | --- |
 | `tool_start` | 不发射 | 不发射工具 artifact | 不发射 |
-| `tool_complete` | 成功 `todo` 顶层 `todos[]` | 仅成功工具的参数、结果、diff 或 terminal 输出操作数 | 仅明确 `success: true` 的 `skill_view` |
+| `tool_complete` | 成功 `todo` 顶层 `todos[]` | 仅成功工具的参数、结果、diff 或 terminal 输出操作数 | 成功 `skill_view`，或两个受支持知识库 MCP 工具的有效结果 |
 | `turn_complete` | 不发射 | 工具强证据、`MEDIA:` 与最后一条 assistant 的严格 workspace 文件提取 | 不发射 |
 
 `tool_start` 只可携带待配对的工具参数，永不产生 artifact/reference。`tool_complete` 仅在与同一 `stream_id + tid` 的 start 配对且成功时解析工具参数；complete 缺参数且没有对应 start、或配对身份不一致时不产生工具 artifact。`turn_complete` 中的最终 assistant 裸文件名按当前 turn 强证据、此前 turn 已确认 artifacts、workspace 根目录的唯一 exact-basename 顺序解析；因此后续纯问答 turn 明确列出可唯一解析的既有文件时，可产生该 turn 的 `assistant_prose` artifact。
@@ -214,8 +294,9 @@ SSE 是乐观派生状态，不写入 transcript，不进入模型上下文，�
 | 对象 | 规则 |
 | --- | --- |
 | Session artifacts | 按 profile + canonical path 去重 |
-| Session references | 只接受 canonical skill identity |
-| Turn artifacts/references | 按 `turn_key` 合并；artifact 按 path、reference 按 canonical skill 去重 |
+| Session references | Skill 按 canonical skill path；知识库文档按 `(kbName, fileName)` 去重 |
+| Turn artifacts/references | 按 `turn_key` 合并；artifact 按 path，reference 按其身份键去重 |
+| 知识库文档 | 同文档合并 `source[]` 与 `metadata.page_content[]`，均保持首次出现顺序 |
 | Skills | 同技能 artifact 优先于 skill reference |
 | Todos | 当前轮按 `id` 合并；出站前过滤无展示内容项 |
 | 缺失字段 | 保持空或跳过，不跨字段推断 |
