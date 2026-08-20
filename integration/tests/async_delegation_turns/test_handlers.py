@@ -38,7 +38,7 @@ def test_cancel_post_snapshots_then_returns_accepted(monkeypatch):
     captured = {}
     interrupts = []
 
-    monkeypatch.setattr(handlers, "_session_or_error", lambda *_: session)
+    monkeypatch.setattr(handlers, "_session_or_error", lambda *_args, **_kwargs: session)
     monkeypatch.setattr(handlers, "_get_session_agent_lock", lambda *_: _NoopLock())
     monkeypatch.setattr(
         handlers,
@@ -62,7 +62,9 @@ def test_cancel_post_snapshots_then_returns_accepted(monkeypatch):
     monkeypatch.setattr(handlers.threading, "Thread", _Thread)
 
     assert handlers.try_handle_post(
-        object(), SimpleNamespace(path="/api/sessions/background_tasks/cancel"), {"session_id": "session-1"}
+        SimpleNamespace(headers={}),
+        SimpleNamespace(path="/api/sessions/background_tasks/cancel"),
+        {"session_id": "session-1"},
     ) is True
 
     assert captured == {
@@ -83,7 +85,7 @@ def test_cancel_get_reads_status_without_starting_an_interrupt(monkeypatch):
 
     session = _session()
     captured = {}
-    monkeypatch.setattr(handlers, "_session_or_error", lambda *_: session)
+    monkeypatch.setattr(handlers, "_session_or_error", lambda *_args, **_kwargs: session)
     monkeypatch.setattr(
         handlers,
         "j",
@@ -91,7 +93,8 @@ def test_cancel_get_reads_status_without_starting_an_interrupt(monkeypatch):
     )
 
     assert handlers.try_handle_get(
-        object(), SimpleNamespace(path="/api/sessions/background_tasks/cancel", query="session_id=session-1")
+        SimpleNamespace(headers={}),
+        SimpleNamespace(path="/api/sessions/background_tasks/cancel", query="session_id=session-1"),
     ) is True
     assert captured == {
         "status": 200,
@@ -103,3 +106,34 @@ def test_cancel_get_reads_status_without_starting_an_interrupt(monkeypatch):
             "settled_at": None,
         },
     }
+
+
+def test_cancel_accepts_explicit_profile_without_cookie(monkeypatch):
+    from integration.async_delegation_turns import handlers
+
+    session = _session()
+    captured = {}
+    seen = {}
+    monkeypatch.setattr(
+        handlers,
+        "_session_or_error",
+        lambda _handler, session_id, *, profile_override=None: (
+            seen.update(session_id=session_id, profile=profile_override) or session
+        ),
+    )
+    monkeypatch.setattr(
+        handlers,
+        "j",
+        lambda _handler, payload, status=200: captured.update(payload=payload, status=status),
+    )
+
+    assert handlers.try_handle_get(
+        SimpleNamespace(headers={}),
+        SimpleNamespace(
+            path="/api/sessions/background_tasks/cancel",
+            query="session_id=session-1&profile=abc",
+        ),
+    ) is True
+
+    assert seen == {"session_id": "session-1", "profile": "abc"}
+    assert captured["status"] == 200

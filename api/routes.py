@@ -15945,7 +15945,15 @@ def _handle_sse_stream(handler, parsed):
 
 
 def _handle_session_run_journal_stream_for_session(handler, parsed, session_id):
-    if not _session_id_visible_to_request_profile(handler, session_id):
+    # External clients may not have a WebUI profile cookie yet.  Match the
+    # explicit-profile convention used by /api/chat/cancel, but never let a
+    # query value override an established cookie-scoped profile.
+    requested_profile = _query_profile_override(handler, parse_qs(parsed.query))
+    if not _session_id_visible_to_request_profile(
+        handler,
+        session_id,
+        active_profile_override=requested_profile,
+    ):
         return True
     try:
         session = get_session(session_id, metadata_only=True)

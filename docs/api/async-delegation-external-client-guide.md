@@ -23,6 +23,10 @@
 | 聊天流 | `GET /api/chat/stream?stream_id={stream_id}` | 每次已知一个 Agent run 的 `stream_id` 时 | token、工具事件、run 终态，以及派发通知 | 对应 run 的 `done` / `stream_end` / 错误终态后 |
 | 会话事件流 | `GET /api/sessions/{session_id}/events` | 收到 chat SSE 的 `background_task_dispatched` 后，或刷新恢复本地待跟踪 session 后，按 session 建立或复用 | 状态快照、后台任务状态、服务端启动 wakeup run、可关闭通知；不发送派发通知 | 收到空快照或 `background_tasks_idle` 后，或应用主动销毁时 |
 
+会话属于一个 profile。若前端没有 WebUI 的 `hermes_profile` cookie，应在会话事件流 URL 中带上
+`?profile=<profile_name>`，例如 `/api/sessions/session_123/events?profile=abc`。已有有效 cookie 时 cookie
+优先，query 参数会被忽略；profile 与 session 不匹配时接口返回 `404`。
+
 会话事件流的**对外契约**不把 wakeup 的 assistant token 作为可消费内容。由于该 endpoint
 保留上游 run-journal 回放和活跃 stream 兼容路径，实际连接可能出现 token 等 run 事件；外部
 前端必须忽略它们，避免与 chat stream 重复渲染。若需要实时显示 wakeup 回复，消费
@@ -70,9 +74,13 @@ POST /api/sessions/background_tasks/cancel
 Content-Type: application/json
 
 {
-  "session_id": "session_123"
+  "session_id": "session_123",
+  "profile": "abc"
 }
 ```
+
+`profile` 可选。没有 `hermes_profile` cookie 的外部前端应使用从 `GET /api/session` 返回的
+`session.profile` 填写它；已有有效 cookie 时 cookie 优先，`profile` 会被忽略。
 
 `session_id` 决定取消范围。服务端在 session 锁内固定当时未结算的 delegation，并在 Session sidecar 持久化 `state`、`delegation_ids` 与 `requested_at` 后才请求 Agent 中断。重复调用在 `cancelling` 期间返回同一范围；收口后再次调用才重新快照。
 
@@ -117,7 +125,7 @@ delegation 不会出现在其中：
 取消 `POST` 不是轮询接口。确认它是否完成时，轮询只读查询接口：
 
 ```http
-GET /api/sessions/background_tasks/cancel?session_id=session_123
+GET /api/sessions/background_tasks/cancel?session_id=session_123&profile=abc
 ```
 
 ```json

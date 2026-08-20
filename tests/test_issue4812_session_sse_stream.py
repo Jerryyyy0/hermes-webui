@@ -580,6 +580,26 @@ def test_session_route_blocks_hidden_sessions_before_replay_or_live_attach(monke
     assert cap["bad"] == ("Session not found", 404)
 
 
+def test_session_route_accepts_explicit_profile_without_cookie(monkeypatch):
+    import api.routes as routes
+
+    seen = {}
+
+    def _visible(_handler, session_id, **kwargs):
+        seen["session_id"] = session_id
+        seen["profile"] = kwargs.get("active_profile_override")
+        return False
+
+    monkeypatch.setattr(routes, "_session_id_visible_to_request_profile", _visible)
+
+    routes.handle_get(
+        _FakeHandler(),
+        urlparse("/api/sessions/session_abc/events?profile=abc"),
+    )
+
+    assert seen == {"session_id": "session_abc", "profile": "abc"}
+
+
 def test_session_route_live_delivery_skips_replayed_active_run_items(monkeypatch):
     import api.routes as routes
 

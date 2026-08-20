@@ -8,6 +8,7 @@ from urllib.parse import parse_qs
 from api.helpers import bad, j
 from api.models import get_session
 from api.config import _get_session_agent_lock
+from api.profiles import profile_override_for_request
 
 from .state import begin_async_delegation_cancellation, cancellation_status
 
@@ -15,22 +16,26 @@ from .state import begin_async_delegation_cancellation, cancellation_status
 _CANCEL_PATH = "/api/sessions/background_tasks/cancel"
 
 
-def _visible_session(session, handler) -> bool:
+def _visible_session(session, handler, *, profile_override: str | None = None) -> bool:
     try:
-        from api.routes import _session_visible_to_active_profile
+        from api.routes import _session_id_visible_to_request_profile
 
-        return _session_visible_to_active_profile(getattr(session, "profile", None), handler)
+        return _session_id_visible_to_request_profile(
+            handler,
+            str(getattr(session, "session_id", "") or ""),
+            active_profile_override=profile_override,
+        )
     except Exception:
         return False
 
 
-def _session_or_error(handler, session_id: str):
+def _session_or_error(handler, session_id: str, *, profile_override: str | None = None):
     try:
         session = get_session(session_id)
     except KeyError:
         bad(handler, "会话不存在", status=404)
         return None
-    if not _visible_session(session, handler):
+    if not _visible_session(session, handler, profile_override=profile_override):
         bad(handler, "会话不存在", status=404)
         return None
     return session
@@ -58,7 +63,8 @@ def try_handle_get(handler, parsed) -> bool:
     if not session_id:
         bad(handler, "session_id 必填", status=400)
         return True
-    session = _session_or_error(handler, session_id)
+    profile_override = profile_override_for_request(handler, (query.get("profile") or [""])[0])
+    session = _session_or_error(handler, session_id, profile_override=profile_override)
     if session is None:
         return True
     payload = cancellation_status(session)
@@ -74,7 +80,8 @@ def try_handle_post(handler, parsed, body) -> bool:
     if not session_id:
         bad(handler, "session_id 必填", status=400)
         return True
-    session = _session_or_error(handler, session_id)
+    profile_override = profile_override_for_request(handler, (body or {}).get("profile"))
+    session = _session_or_error(handler, session_id, profile_override=profile_override)
     if session is None:
         return True
     try:

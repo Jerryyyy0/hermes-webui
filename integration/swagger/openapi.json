@@ -244,6 +244,13 @@
             "required": true,
             "schema": { "type": "string" },
             "description": "会话 ID"
+          },
+          {
+            "name": "profile",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" },
+            "description": "未携带 hermes_profile cookie 时的会话所属 Profile；已有 cookie 时忽略"
           }
         ],
         "responses": {
@@ -5442,7 +5449,8 @@
         "type": "object",
         "required": ["session_id"],
         "properties": {
-          "session_id": { "type": "string" }
+          "session_id": { "type": "string" },
+          "profile": { "type": "string", "description": "未携带 hermes_profile cookie 时的会话所属 Profile；已有 cookie 时忽略" }
         },
         "additionalProperties": false
       },

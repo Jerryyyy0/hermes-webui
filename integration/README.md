@@ -461,8 +461,8 @@ curl -sS -X POST 'http://127.0.0.1:8787/api/integration/notifications/read' \
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| POST | `/api/sessions/background_tasks/cancel` | 固定并异步中断指定 session 当前未结算的 delegation；请求体为必填 `session_id`，受理后返回 `202`。 |
-| GET | `/api/sessions/background_tasks/cancel?session_id=` | 查询当前或最近一次取消记录；轮询至 `state=settled` 即表示该固定范围已收口。 |
+| POST | `/api/sessions/background_tasks/cancel` | 固定并异步中断指定 session 当前未结算的 delegation；请求体必填 `session_id`，无 profile cookie 时可附带可选 `profile`，受理后返回 `202`。 |
+| GET | `/api/sessions/background_tasks/cancel?session_id=&profile=` | 查询当前或最近一次取消记录；无 profile cookie 时可附带可选 `profile`，轮询至 `state=settled` 即表示该固定范围已收口。 |
 
 ### SkillHub proxy (`integration/skills/handlers.py` → `SKILLHUB_URL`)
 

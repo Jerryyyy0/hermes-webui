@@ -66,8 +66,8 @@ child task；Agent 等所有 child task 都结束后只投递一条 completion�
 | `GET /api/chat/stream?stream_id=…` | 每个 Agent run 一条 | 接收该 run 的 token、工具、`done`、`stream_end`。后台 wakeup 的回复也走这里。 |
 | `GET /api/sessions/{session_id}/events` | 每个存在未结算后台任务的 session 一条 | 接收后台任务生命周期及服务端启动新 run 的通知；新的实时 assistant token 不承载于此，仍以 chat stream 为准。 |
 | `GET /api/session?session_id=…` | 重连/切换时按需调用 | 用持久化 session 结果恢复显示，作为 SSE 缺口或已完成 run 的兜底。 |
-| `POST /api/sessions/background_tasks/cancel` | 用户显式取消时 | 在请求体中指定 session，快照并取消该 session 当时全部未结算 delegation；不取消主会话或之后新派发的任务。 |
-| `GET /api/sessions/background_tasks/cancel?session_id=…` | 查询取消请求的收口状态 | 读取该 session 当前或最近一次取消记录；用于轮询确认取消已完成。 |
+| `POST /api/sessions/background_tasks/cancel` | 用户显式取消时 | 在请求体中指定 session；无 profile cookie 时可附带 `profile`，快照并取消该 session 当时全部未结算 delegation；不取消主会话或之后新派发的任务。 |
+| `GET /api/sessions/background_tasks/cancel?session_id=…&profile=…` | 查询取消请求的收口状态 | 读取该 session 当前或最近一次取消记录；无 profile cookie 时传 `profile`，用于轮询确认取消已完成。 |
 
 `GET /api/sessions/events` 是全局 session-list invalidation 流，不能替代按会话的 `GET /api/sessions/{session_id}/events`。
 
@@ -240,6 +240,9 @@ Accept: text/event-stream
 Last-Event-ID: <可选，最后已处理的 event id>
 ```
 
+- 若调用方尚未携带 `hermes_profile` cookie，可附加 `?profile=<profile_name>`，例如
+  `GET /api/sessions/session_123/events?profile=abc`。它只用于该次请求的 session 可见性校验；
+  已有有效 cookie 时 cookie 优先，忽略 query 参数。profile 不匹配、不可见或 session 不存在均返回 `404`。
 - 订阅方以 `session_id` 为 key 管理连接；同一订阅方对同一 session 最多一条订阅。
 - 事件只描述其所属 session 的后台状态；呈现、通知及跨会话处理均由具体接入方决定。
 - 重连后订阅方按事件 ID 去重；无法安全回放时，服务端发送 session snapshot，订阅方用 `GET /api/session` 或 snapshot 重建本地状态。
@@ -468,9 +471,13 @@ POST /api/sessions/background_tasks/cancel
 Content-Type: application/json
 
 {
-  "session_id": "session_123"
+  "session_id": "session_123",
+  "profile": "abc"
 }
 ```
+
+`profile` 可选。调用方未携带 `hermes_profile` cookie 时，应使用 `GET /api/session` 中的
+`session.profile`；已有有效 cookie 时 cookie 优先，忽略请求体的 `profile`。
 
 `session_id` 必填。服务端必须在 session agent lock 内读取未结算 delegation，并先持久化下列取消屏障，再向 Agent 请求中断：
 
@@ -513,7 +520,7 @@ HTTP `202` 只表示服务端已持久化取消范围并接受中断请求，不
 客户端不得轮询 `POST`。它可能在既有取消已收口后开启新的取消周期；确认本次取消状态必须读取下面的 `GET` 接口：
 
 ```http
-GET /api/sessions/background_tasks/cancel?session_id=session_123
+GET /api/sessions/background_tasks/cancel?session_id=session_123&profile=abc
 ```
 
 ```json
