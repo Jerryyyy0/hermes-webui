@@ -1633,7 +1633,11 @@ def delete_local_skill(name: str, dir_name: str = "") -> dict:
 
 
 def save_skill_detail(name: str, detail: dict, dir_name: str = "", profile: str = "default") -> dict:
-    """Write .detail.json into the skill directory."""
+    """Write .detail.json into the skill directory.
+
+    If detail contains a ``category`` field that differs from the current
+    ``.category`` marker file, the marker file is updated as well.
+    """
     skill_name = str(name or "").strip()
     if not skill_name:
         return {"error": "缺少 name", "status": 400}
@@ -1647,6 +1651,15 @@ def save_skill_detail(name: str, detail: dict, dir_name: str = "", profile: str 
         dest = skill_dir / ".detail.json"
         with open(dest, "w", encoding="utf-8") as f:
             json.dump(detail, f, ensure_ascii=False, indent=2)
+
+        new_category = str(detail.get("category") or "").strip()
+        if new_category:
+            cat_file = skill_dir / ".category"
+            current = ""
+            if cat_file.is_file():
+                current = cat_file.read_text(encoding="utf-8").strip()
+            if current != new_category:
+                cat_file.write_text(new_category, encoding="utf-8")
     except Exception as exc:
         _log.warning("save_skill_detail: failed to write %s: %s", dest, exc)
         return {"error": str(exc), "status": 500}

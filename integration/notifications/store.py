@@ -6,6 +6,7 @@ for future local notification types.
 
 import json
 import sqlite3
+import time
 from contextlib import closing
 from pathlib import Path
 from typing import Any, Optional
@@ -208,7 +209,7 @@ def mark_read(
     """Mark a single notification as read. Returns True if updated."""
     with closing(_connect(db_path)) as conn:
         _ensure_schema(conn)
-        updated_at = sqlite3.Timestamp.now().timestamp()
+        updated_at = time.time()
         cursor = conn.execute(
             """
             UPDATE notifications
@@ -231,7 +232,7 @@ def mark_read_batch(
     
     with closing(_connect(db_path)) as conn:
         _ensure_schema(conn)
-        updated_at = sqlite3.Timestamp.now().timestamp()
+        updated_at = time.time()
         placeholders = ", ".join("?" * len(ids))
         cursor = conn.execute(
             f"""

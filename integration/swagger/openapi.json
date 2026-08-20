@@ -26,10 +26,11 @@
     { "name": "Health",      "description": "健康检查" },
     { "name": "System",      "description": "系统与工具" },
     { "name": "SkillHub",    "description": "SkillHub 远程技能市场代理（需 HERMES_INTEGRATION=1；市场类接口另需 SKILLHUB_URL）。安装/卸载/custom 读写均使用 shared_skills_dir（{HERMES_HOME}/skills，与 WebUI profile 无关）。" },
+    { "name": "SkillPublish", "description": "技能发布申请（上架/下架，需 HERMES_INTEGRATION=1）。申请单数据存于 STATE_DIR/session_manifest.db；提交时打包临时 zip 调上游 SkillHub（auto_approve=false）；审核事件在通知/详情查询时增量拉取并回写状态。" },
     { "name": "IntegrationCrons", "description": "跨 Profile 定时任务（需 HERMES_INTEGRATION=1）。列表/轮询用 GET /api/crons?all_profiles=1；创建用一个 profile 同时作为存储与执行 Profile；编辑/运行/删除/读取历史均用 profile 定位任务。" },
     { "name": "IntegrationKnowledgeBase", "description": "知识库下游 BFF 代理（需 HERMES_INTEGRATION=1 且 KNOWLEDGE_BASE_URL）。`account`/`uuid` 由调用方在请求体传入；成功时返回下游 `data` 字段内容。" },
     { "name": "IntegrationRecordScripts", "description": "录制脚本与关联 CSV（需 HERMES_INTEGRATION=1）。`relate_name` 由前端生成，一个 relate_name 对应一份脚本 JSON 字符串和一份 CSV，存储于 {HERMES_WEBUI_STATE_DIR}/attachments/record_scripts/<relate_name>/。" },
-    { "name": "IntegrationNotifications", "description": "通知系统（需 HERMES_INTEGRATION=1 且 KNOWLEDGE_BASE_URL）。知识库通知从下游 get_user_messages 实时聚合；notifications.db 表结构预留，HTTP 层当前不读写本地存储。" },
+    { "name": "IntegrationNotifications", "description": "通知系统（混合模式：kb_apply 实时聚合自下游 get_user_messages；skill_publish 实时聚合自上游 external/notifications，不持久化本地）。read/delete 按 ID 前缀路由：kb: 透传下游，skill_publish: 转发上游。" },
     { "name": "IntegrationMemory",   "description": "记忆统计（需 HERMES_INTEGRATION=1）。聚合展示会话天数、定时任务和记忆文件。" },
     { "name": "IntegrationAssistantBubbles", "description": "Profile 助理气泡（需 HERMES_INTEGRATION=1）。读取 `<profile.path>/assistant_bubbles.json` 独立缓存；定时任务槽位实时统计，不写回。" },
     { "name": "IntegrationWebuiAppearance", "description": "WebUI 外观配置（需 HERMES_INTEGRATION=1）。只读读取进程级 `{HERMES_HOME}/webui-appearance/` 下的 JSON 与资源文件；不做 schema 校验或写入。" }
@@ -2365,6 +2366,201 @@
       }
     },
 
+    "/api/skillhub/publish/applications": {
+      "get": {
+        "tags": ["SkillPublish"],
+        "summary": "技能发布申请单列表",
+        "description": "分页查询当前账号的技能上架/下架申请单（hidden=0），支持 q（五字段 LIKE）、status、application_type 过滤，返回 items + stats 统计。需 HERMES_INTEGRATION=1 且 SKILL_PUBLISH_ENABLED。",
+        "parameters": [
+          { "name": "account", "in": "query", "required": true, "schema": { "type": "string" }, "description": "用户账号" },
+          { "name": "page", "in": "query", "schema": { "type": "integer", "default": 1, "minimum": 1 }, "description": "页码" },
+          { "name": "page_size", "in": "query", "schema": { "type": "integer", "default": 20 }, "description": "每页数量（1-50）" },
+          { "name": "q", "in": "query", "schema": { "type": "string" }, "description": "关键字搜索" },
+          { "name": "status", "in": "query", "schema": { "type": "string", "enum": ["draft", "pending", "approved", "rejected"] }, "description": "状态过滤" },
+          { "name": "application_type", "in": "query", "schema": { "type": "string", "enum": ["publish", "unpublish"] }, "description": "类型过滤" },
+          { "name": "uuid", "in": "query", "schema": { "type": "string" }, "description": "用户 UUID（可选）" }
+        ],
+        "responses": {
+          "200": { "description": "申请单列表 + stats" },
+          "400": { "description": "缺少 account / 分页参数无效" }
+        }
+      },
+      "post": {
+        "tags": ["SkillPublish"],
+        "summary": "创建申请单（草稿）",
+        "description": "publish：从本地 shared_skills_dir 读取技能元数据回填快照（本地不存在 404）；unpublish：校验归属（403）与 upstream_status=2（否则 409），必填 reason。同账号同技能同类型存在活跃申请单时 409。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "skill_name": { "type": "string", "description": "技能英文名" },
+                  "account": { "type": "string", "description": "用户账号" },
+                  "uuid": { "type": "string", "description": "用户 UUID" },
+                  "application_type": { "type": "string", "enum": ["publish", "unpublish"], "description": "默认 publish" },
+                  "reason": { "type": "string", "description": "申请说明（unpublish 必填）" }
+                },
+                "required": ["skill_name", "account"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "创建成功，返回 application" },
+          "400": { "description": "参数缺失/无效" },
+          "403": { "description": "无权下架该技能" },
+          "404": { "description": "本地技能不存在" },
+          "409": { "description": "已存在活跃申请单或技能非上架状态" }
+        }
+      }
+    },
+
+    "/api/skillhub/publish/applications/{id}": {
+      "get": {
+        "tags": ["SkillPublish"],
+        "summary": "申请单详情",
+        "description": "按申请单 ID 查询详情（含 tags/detail_json 解析与 audit_log 审批流水）。pending 状态先尝试增量同步上游审核事件。仅提交人可查看。",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" }, "description": "申请单 ID（skp- 前缀）" },
+          { "name": "account", "in": "query", "required": true, "schema": { "type": "string" }, "description": "用户账号（须为提交人）" }
+        ],
+        "responses": {
+          "200": { "description": "申请单详情 + audit_log" },
+          "403": { "description": "无权限查看" },
+          "404": { "description": "申请单不存在" }
+        }
+      },
+      "delete": {
+        "tags": ["SkillPublish"],
+        "summary": "删除申请单",
+        "description": "pending：软删除（hidden=1，审核结果回流时自动恢复 hidden=0）；draft/approved/rejected：硬删除（连带审批流水）。",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" }, "description": "申请单 ID" },
+          { "name": "account", "in": "query", "required": true, "schema": { "type": "string" }, "description": "用户账号（须为提交人）" }
+        ],
+        "responses": {
+          "200": { "description": "删除成功（delete_type=soft|hard）" },
+          "403": { "description": "无权删除" },
+          "404": { "description": "申请单不存在" }
+        }
+      }
+    },
+
+    "/api/skillhub/publish/applications/{id}/submit": {
+      "post": {
+        "tags": ["SkillPublish"],
+        "summary": "提交审核",
+        "description": "仅 draft/rejected 可提交。计算下一版本、刷新本地技能快照、打包临时 zip（系统临时目录）调上游 SkillHub（auto_approve=false），成功回填 upstream_* 并写 submit/re_submit 流水；409/上游异常回滚为 draft。临时 zip 在 finally 中删除。",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" }, "description": "申请单 ID" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "account": { "type": "string", "description": "用户账号（须为提交人）" },
+                  "applicant_name": { "type": "string", "description": "申请人姓名" },
+                  "applicant_org": { "type": "string", "description": "申请人单位" },
+                  "applicant_title": { "type": "string", "description": "申请人职务" }
+                },
+                "required": ["account"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "提交成功，返回 application" },
+          "403": { "description": "无权操作 / 无权更新该技能" },
+          "404": { "description": "申请单或本地技能不存在" },
+          "409": { "description": "状态不允许 / 已有待审单 / 上游名称版本冲突" },
+          "502": { "description": "上游服务不可用（已回滚 draft）" }
+        }
+      }
+    },
+
+    "/api/skillhub/publish/applications/{id}/withdraw": {
+      "post": {
+        "tags": ["SkillPublish"],
+        "summary": "撤回审核",
+        "description": "仅 pending 可撤回。调上游撤回审批接口，成功后回到 draft（清空 upstream_status/submitted_at）并写 withdraw 流水；失败状态不变。",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" }, "description": "申请单 ID" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "account": { "type": "string", "description": "用户账号（须为提交人）" }
+                },
+                "required": ["account"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "撤回成功" },
+          "403": { "description": "无权操作" },
+          "404": { "description": "申请单不存在" },
+          "409": { "description": "非审批中 / 缺上游审批单 ID / 上游拒绝" },
+          "502": { "description": "上游服务不可用（状态不变）" }
+        }
+      }
+    },
+
+    "/api/skillhub/publish/applications/{id}/versions": {
+      "get": {
+        "tags": ["SkillPublish"],
+        "summary": "申请单版本轨迹",
+        "description": "按 skill_name 查询全部版本轨迹（申请单表全状态）。",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" }, "description": "申请单 ID" },
+          { "name": "skill_name", "in": "query", "required": true, "schema": { "type": "string" }, "description": "技能英文名" }
+        ],
+        "responses": {
+          "200": { "description": "版本轨迹列表（version/status/submitted_at/audited_at 等）" },
+          "400": { "description": "缺少 skill_name" }
+        }
+      }
+    },
+
+    "/api/skillhub/publish/my-published-skills": {
+      "get": {
+        "tags": ["SkillPublish"],
+        "summary": "我已发布的技能",
+        "description": "查询当前账号 upstream_status=2（已上架）的技能及最新版本。",
+        "parameters": [
+          { "name": "account", "in": "query", "required": true, "schema": { "type": "string" }, "description": "用户账号" }
+        ],
+        "responses": {
+          "200": { "description": "已发布技能列表" },
+          "400": { "description": "缺少 account" }
+        }
+      }
+    },
+
+    "/api/skillhub/publish/skill-versions": {
+      "get": {
+        "tags": ["SkillPublish"],
+        "summary": "技能版本查询",
+        "description": "查询指定技能最新发布版本（is_latest=1），返回 exists/latest_version/next_version。",
+        "parameters": [
+          { "name": "skill_name", "in": "query", "required": true, "schema": { "type": "string" }, "description": "技能英文名" }
+        ],
+        "responses": {
+          "200": { "description": "exists / latest_version / next_version / last_application_id" },
+          "400": { "description": "缺少 skill_name" }
+        }
+      }
+    },
+
     "/api/skillhub/skills": {
       "get": {
         "tags": ["SkillHub"],
@@ -2750,8 +2946,8 @@
     "/api/integration/notifications": {
       "get": {
         "tags": ["IntegrationNotifications"],
-        "summary": "获取知识库通知列表",
-        "description": "从下游 get_user_messages 实时聚合知识库通知（kb_apply），支持 read_type、action_status 过滤与游标分页。永久排除 massType=3 且 state=2 的申请人「结果待处理」消息。",
+        "summary": "获取通知列表",
+        "description": "混合模式聚合通知列表：kb_apply 来自下游 get_user_messages 实时拉取；skill_publish 来自上游 external/notifications 实时拉取（不持久化本地）。支持 read_type、action_status 过滤与游标分页（created_at DESC 合并排序）。永久排除 massType=3 且 state=2 的申请人「结果待处理」消息。",
         "parameters": [
           {
             "name": "account",
@@ -2824,7 +3020,7 @@
       "get": {
         "tags": ["IntegrationNotifications"],
         "summary": "获取通知摘要",
-        "description": "返回知识库通知总数与未读计数（按 read_type 过滤）。永久排除 massType=3 且 state=2 的「结果待处理」消息，计数与列表一致。用于前端通知铃铛角标。",
+        "description": "返回合并通知摘要：下游 kb_apply 与上游 skill_publish 两方的 total/unread/by_category 合并，附带最近未读（recent_unread）。skill_publish 通知从上游实时拉取，不持久化本地。用于前端通知铃铛角标。",
         "parameters": [
           {
             "name": "account",
@@ -2864,7 +3060,7 @@
       "post": {
         "tags": ["IntegrationNotifications"],
         "summary": "标记通知已读",
-        "description": "批量标记知识库通知为已读（kb: 前缀 ID 批量转发到下游 mark_message_read）。",
+        "description": "批量标记通知已读，按 ID 前缀路由：kb: 转发下游 mark_message_read；skill_publish: 转发上游 /api/external/notifications/read。updated 为两者合计。",
         "requestBody": {
           "required": true,
           "content": {
@@ -2915,7 +3111,7 @@
       "post": {
         "tags": ["IntegrationNotifications"],
         "summary": "删除通知",
-        "description": "批量删除知识库通知（kb: 前缀 ID 批量转发到下游 delete_readed_message）。",
+        "description": "批量删除通知，按 ID 前缀路由：kb: 转发下游 delete_readed_message；skill_publish: 不支持删除（上游无删除接口，通过标记已读管理）。deleted 仅统计 kb 通知。",
         "requestBody": {
           "required": true,
           "content": {
@@ -6632,8 +6828,8 @@
         "type": "object",
         "required": ["id", "category", "title", "created_at"],
         "properties": {
-          "id": { "type": "string", "description": "通知 ID（kb: 前缀）" },
-          "category": { "type": "string", "description": "通知分类", "enum": ["kb_apply"] },
+          "id": { "type": "string", "description": "通知 ID（kb: 或 skill_publish: 前缀）" },
+          "category": { "type": "string", "description": "通知分类", "enum": ["kb_apply", "skill_publish"] },
           "title": { "type": "string", "description": "通知标题" },
           "body": { "type": "string", "description": "通知正文" },
           "source": { "type": "string", "description": "来源标识" },

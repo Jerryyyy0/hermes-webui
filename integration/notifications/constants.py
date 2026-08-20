@@ -21,6 +21,12 @@ class KbMassType:
 
 class NotificationCategory:
     KB_APPLY = "kb_apply"
+    SKILL_PUBLISH = "skill_publish"
+
+
+class NotificationIdPrefix:
+    KB = "kb:"
+    SKILL_PUBLISH = "skill_publish:"
 
 
 class NotificationStatus:
