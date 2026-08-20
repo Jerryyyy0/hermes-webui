@@ -779,13 +779,13 @@
         <div class="integration-cron-session-header">
           <div>
             <div class="detail-card-title">${esc(session.title || T('cron_session_steps') || 'Session steps')}</div>
-            <div class="integration-cron-session-sub">${esc(sessionId)}${session.message_count ? ` · ${esc(session.message_count)} messages` : ''}${workspaceUnverified ? ` · ${esc(tr('integration_cron_workspace_unverified', 'Workspace unavailable'))}` : ''}</div>
+            <div class="integration-cron-session-sub">${esc(sessionId)}${session.message_count ? ` · ${esc(session.message_count)} messages` : ''}${workspaceUnverified ? ` · ${esc(tr('integration_cron_workspace_unverified', 'Original workspace unavailable; using default workspace'))}` : ''}</div>
           </div>
-          <button type="button" class="btn secondary" data-action="open-full-session"${workspaceUnverified ? ' disabled' : ''}>${esc(T('cron_open_session') || 'Open session')}</button>
+          <button type="button" class="btn secondary" data-action="open-full-session">${esc(T('cron_open_session') || 'Open session')}</button>
         </div>
         <div class="integration-cron-session-messages">${renderSessionMessages(session)}</div>
       </div>`;
-      host.querySelector('[data-action="open-full-session"]:not([disabled])')?.addEventListener('click', ev => {
+      host.querySelector('[data-action="open-full-session"]')?.addEventListener('click', ev => {
         ev.stopPropagation();
         openSession(sessionId);
       });

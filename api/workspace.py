@@ -925,7 +925,12 @@ def resolve_session_workspace(
     source_tag = str(getattr(session, "source_tag", "") or "").strip().lower()
     workspace_state = str(getattr(session, "workspace_state", "ready") or "ready").strip().lower()
     if source_tag == "cron" and workspace_state == "workspace_unverified":
-        raise ValueError("Cron session workspace is unverified")
+        # The V1 execution root was not proven, so never use the sidecar's
+        # path as though it were that root. A user may nevertheless continue
+        # the transcript safely in the current WebUI default workspace.
+        from api.config import DEFAULT_WORKSPACE
+
+        return resolve_trusted_workspace(DEFAULT_WORKSPACE)
     is_managed = str(getattr(session, "workspace_mode", "") or "").strip().lower() in {"managed", "worktree"}
     # Managed roots are durable identity state, so validate them even when a
     # worker receives an already-validated workspace from its route boundary.

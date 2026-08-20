@@ -10,8 +10,9 @@ Hub 状态。允许修改的上游接缝如下：
 
 - `api/routes.py`：Cron handler 与运行完成钩子的薄委派。
 - `api/models.py`：`import_cli_session()` 接收显式 workspace binding。
-- `api/workspace.py`：通过 `resolve_session_workspace()` 集中拒绝 V1 未验证的 Cron
-  workspace；legacy `external/legacy_shared` 绑定可继续使用其已批准的共享目录。
+- `api/workspace.py`：通过 `resolve_session_workspace()` 集中将 V1 未验证 Cron
+  workspace 降级为 WebUI 已批准的默认 workspace，而不使用未验证 root；legacy
+  `external/legacy_shared` 绑定可继续使用其已批准的共享目录。
 
 Cron 专属路径解析、policy 判断、清理逻辑和 UI 状态不得复制到这些接缝文件。
 

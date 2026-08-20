@@ -227,9 +227,14 @@ def test_internal_worker_can_reuse_prevalidated_external_workspace(tmp_path):
     ) == workspace.resolve()
 
 
-def test_chat_start_rejects_unverified_cron_workspace(tmp_path):
-    workspace = tmp_path / "workspace"
+def test_chat_start_uses_default_workspace_for_unverified_cron_session(tmp_path, monkeypatch):
+    workspace = tmp_path / "unverified-workspace"
+    default_workspace = tmp_path / "default-workspace"
     workspace.mkdir()
+    default_workspace.mkdir()
+    import api.config as config
+
+    monkeypatch.setattr(config, "DEFAULT_WORKSPACE", default_workspace)
     session = SimpleNamespace(
         workspace=str(workspace),
         workspace_mode="external",
@@ -237,5 +242,4 @@ def test_chat_start_rejects_unverified_cron_workspace(tmp_path):
         source_tag="cron",
     )
 
-    with pytest.raises(ValueError, match="unverified"):
-        routes._resolve_chat_workspace_with_recovery(session, None)
+    assert routes._resolve_chat_workspace_with_recovery(session, None) == str(default_workspace.resolve())

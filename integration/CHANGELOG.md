@@ -17,12 +17,17 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 - **Cron execution workspaces** — 新建 Cron Hub 任务会持久化 V1 managed
   workspace policy；可显式选择 detached Git worktree。每次运行使用独立
   `cron_*` workspace，WebUI 仅在 Agent 当前运行提供一致的 canonical `cwd`
-  时开放继续会话、终端和文件操作。历史任务保持原 `workdir` 行为，删除任务时
-  仅清理已验证的 execution root。
+  时将其作为 execution root。缺少该交接的记录仍可继续会话，但固定使用 WebUI
+  默认 workspace；历史任务保持原 `workdir` 行为，删除任务时仅清理已验证的
+  execution root。
 
 - **Unified Profile Gateway ownership** — `server.py` 现在同时在原生主机和普通 Docker 容器中持有 Profile Gateway；所有 WebUI-owned Gateway 都以前台 `gateway run -v --external-supervisor` 子进程运行，将合并 stdout/stderr 以 `[gateway:<profile>]` 前缀写入 WebUI 控制台及同一持久化日志。普通容器发现遗留 Gateway 时使用 Agent 的 `--replace` 协议接管，确保新 WebUI 继续转发日志；原生主机保留已运行 Gateway 的外部所有权，避免与 launchd 抢占，同时持续跟随各 Profile 新写入的 `gateway.log` 与 `gateway.error.log` 到 WebUI 控制台。转发行不受 `HERMES_WEBUI_LOG_LEVEL` 过滤，敏感字段在输出前脱敏；WebUI 退出时只终止自身创建的 Gateway。s6 仍保留 service-manager 生命周期。
 
 ### Fixed
+
+- **Unverified Cron continuation** — V1 Cron session 缺少可验证的 execution
+  workspace 时，`workspace_unverified` 不再阻止继续聊天、终端或文件操作；这些操作
+  固定使用 WebUI 已批准的默认 workspace，且不会将该目录声明为历史执行 cwd。
 
 - **Legacy Cron continuation** — 历史 Cron session 缺少 Agent `cwd` 时不再一律标记
   `workspace_unverified`。无 V1 policy 的记录会绑定 Profile 已批准的共享继续目录并标记

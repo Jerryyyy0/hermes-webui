@@ -20,7 +20,7 @@ Cron Hub 会把 Hermes Agent 的 `source=cron` 运行物化为 WebUI 会话，�
 2. Cron Agent 运行、Agent `state.db`、WebUI Session sidecar、后续聊天、终端和 Manifest 使用同一个已解析 workspace 值。
 3. 默认不让两个执行共享可写目录；运行一个 Git 项目任务时，使用每次执行独立的 Git worktree。
 4. `no_agent`、成功、模型/脚本失败、手工执行、调度执行、跨 Profile、重启后物化和 WebUI follow-up 都保持相同契约。
-5. 不能证明 workspace 时 fail closed：不回退到 `last_workspace`、进程 cwd 或其他 Profile 的目录。
+5. 不能证明 execution workspace 时，不将 `last_workspace`、进程 cwd 或其他 Profile 的目录误称为该次运行 root；用户的后续会话固定使用 WebUI 已批准的默认 workspace。
 6. 删除 Cron job 时，精确清理由该 job 的运行拥有的 workspace，而不按模糊路径或 job ID 猜测删除。
 
 ## 实现边界：第一期功能完整，WebUI 最小接缝
@@ -42,8 +42,9 @@ Hub 的状态展示；这些不是后续阶段的功能。最小侵入指的是�
   `api/streaming.py`、`api/gateway_chat.py`、`api/terminal.py`、`api/upload.py` 等
   文件各自复制 cron 判断。
 - **统一 gate**：所有会话消费入口已经或应经 `resolve_session_workspace()` 解析
-  `Session.workspace`。该函数按 `source_tag="cron"` 与 `workspace_state` 拒绝
-  unverified cron session；调用方不读取 policy，也不各自添加 condition。若某个
+  `Session.workspace`。对 `source_tag="cron"` 且 `workspace_state="workspace_unverified"`
+  的会话，该函数忽略 sidecar 路径并返回 WebUI 已批准的默认 workspace；调用方不读取
+  policy，也不各自添加 condition。若某个
   入口未经过该函数，应修复为调用该函数，而不是在该入口实现 cron 专用逻辑。
 - **删除**：`integration/crons/` 从已验证的 Agent record 收集 root，并调用 Agent
   cron cleanup/worktree API；WebUI 不在 `api/routes.py`、普通 session 删除或通用
@@ -166,7 +167,7 @@ workspace 语义。迁移不得修改历史 execution、历史 `cwd` 或既有 s
 
 - workspace policy 非法、base 不可访问、worktree 创建失败或 `cwd` 不能持久化时，本次 execution 不得落回共享 cwd 执行。
 - 有可写 `state.db` 时，写入同一 cron session 的失败消息与 `end_reason="cron_error"`。
-- V1 `state.db` 不可用时，调度器保留其现有的运行错误日志/执行记录，但 WebUI 不得将该运行物化为带猜测 workspace 的可交互 session；它只能显示为 `workspace_unverified` 的只读历史项，直到存在可验证的 Agent record。legacy job 不使用这条 V1 规则：它可绑定到 Profile 已批准的共享继续 workspace。
+- V1 `state.db` 不可用时，调度器保留其现有的运行错误日志/执行记录。WebUI 将该运行标记为 `workspace_unverified`，不把猜测路径作为 execution root；用户仍可在已批准的 WebUI 默认 workspace 中继续该 transcript。legacy job 不使用这条 V1 规则：它可绑定到 Profile 已批准的共享继续 workspace。
 
 `no_agent` 不再在身份分配之前短路。它同样分配 session、root、`cwd`，然后以该 root 作为脚本进程 cwd；脚本成功、静默、超时和失败均拥有可追溯 session。这样 WebUI 不需要由输出文件名或最新 job 状态推测 workspace。
 
@@ -193,7 +194,7 @@ WebUI 的 materializer 必须在查询 Agent session 时读取 `cwd`，并将其
 
 对新 cron session：
 
-- `cwd` 缺失、不是绝对目录、目录不再存在、越出已批准 base，或与已持久化 sidecar workspace 不一致时，标记 `workspace_unverified` 并拒绝 workspace 文件操作、terminal 和 follow-up。
+- `cwd` 缺失、不是绝对目录、目录不再存在、越出已批准 base，或与已持久化 sidecar workspace 不一致时，标记 `workspace_unverified`。后续 Chat、Workspace、Terminal 和文件操作固定使用 WebUI 已批准的默认 workspace，而不使用或声称该 sidecar 路径是 execution root。
 - `cwd` 验证通过时，sidecar 写入相同路径及 `workspace_mode`；后续 `resolve_session_workspace()` 沿用现有 managed/worktree 的不可替换规则。
 - 已存在的 sidecar 只允许幂等重放相同 canonical root。任何不同 root 都是完整性冲突：不覆盖旧值、不刷新 Manifest artifact root，并记录可诊断错误。
 
@@ -215,9 +216,10 @@ immutable workspace，不得另建 workspace 或改写为其他执行的 root。
 follow-up 当成下一次调度的输入。需要跨运行传递结果时，仍使用既有 `context_from` 或
 显式输出/输入机制，而不是依赖共享 workspace 或 session continuation。
 
-`workspace_unverified` 的 Cron session 仍可查看 transcript/output，但必须禁用
-follow-up、Workspace、Terminal、上传和文件操作。这只适用于 V1 当前运行缺少或
-不匹配其显式 hand-off 的情形，不影响该 job 后续按其既有或 V1 调度规则继续运行。
+`workspace_unverified` 的 Cron session 仍可查看 transcript/output，并可继续聊天、使用
+Workspace、Terminal、上传和文件操作；这些操作固定使用 WebUI 已批准的默认 workspace，
+不属于也不反向声明为该次 execution 的历史 cwd。这只适用于 V1 当前运行缺少或不匹配其
+显式 hand-off 的情形，不影响该 job 后续按其既有或 V1 调度规则继续运行。
 
 legacy session 使用 `legacy_shared`：它允许 follow-up、Workspace、Terminal、上传和
 文件操作，并将 workspace 标记为 `external`。该 root 是 Profile 明确批准的后续继续
@@ -335,7 +337,7 @@ Cron Hub 的新建请求可省略 `workspace_policy`；服务端必须在写入�
 | P0 | `api/routes.py`：`_handle_cron_create()`、`_handle_cron_run()`、`_run_cron_tracked()`、`_cron_job_subprocess_main()` | **修改（薄接线）**：使上游单 Profile API 与 Cron Hub API 都携带相同 policy；手工 run 的内存 job copy 必须带 session ID/policy 到子进程；run 完成仍经 `materialize_after_cron_run()`。不要在此文件实现目录创建、验证或删除算法。 | 自动/手工、上游/Cron Hub 入口不会产生不同的 workspace 语义。 |
 | P0 | `integration/crons/session_bridge.py`：`_materialize_cron_session_found()`、`materialize_cron_session()`、`materialize_cron_session_run()`、批量 history 物化 | **修改**：当前 run 路径接收 policy/session ID/cwd 并调用 `CronWorkspaceBinding`；已存在 sidecar 只允许幂等重放同一 root；history/output fallback 不带当前 V1 输入时只能复用 sidecar 或生成只读记录。 | sidecar workspace 只能来自当前 V1 run 的显式输入或其自身既有值；相同 session ID 重放幂等，不同 root 不覆盖。 |
 | P0 | `api/models.py`：`import_cli_session()`；外部 session fallback `get_session_for_file_ops()` / `_ExternalSessionView` | **修改**：`import_cli_session()` 接收显式 `workspace`、`workspace_mode`、`workspace_state`；普通 CLI 调用维持当前 fallback，cron 调用必须声明 `require_workspace_binding=True`。外部 session file-op fallback 不得给 unverified cron session 返回 `get_last_workspace()`。 | 消除 cron materialization 到 `last_workspace` 的隐式回退。 |
-| P1 | `api/workspace.py`：`create_managed_workspace()`、`resolve_session_workspace()` | **修改**：抽出可复用的受锚定 root 创建/验证/删除 primitive，供 integration Cron helper 使用；在此唯一 shared resolver 对 `workspace_state != ready` 的 cron session 拒绝请求。 | root 不可替换；路径验证与普通 managed workspace 共用安全实现；其它会话管线文件无 cron 分支。 |
+| P1 | `api/workspace.py`：`create_managed_workspace()`、`resolve_session_workspace()` | **修改**：抽出可复用的受锚定 root 创建/验证/删除 primitive，供 integration Cron helper 使用；对 `workspace_unverified` Cron session 固定返回 WebUI 默认 workspace，绝不使用未验证 sidecar root。 | verified root 不可替换；未验证 session 可继续会话但不会访问猜测 execution root；其它会话管线文件无 cron 分支。 |
 | P1 | `integration/crons/worktree.py`（**新增**） | **新增**：调用 Agent 的 cron 专用 worktree API；删除时将已验证的 execution binding 传给 Agent。不得复用或修改普通 `api/worktrees.py` 的 session lifecycle。 | 只移除归属该 execution 的 worktree，普通 WebUI worktree 行为不变。 |
 | P1 | `integration/crons/hooks.py`：`materialize_after_cron_run()` | **修改**：将当前 job copy 的 V1 policy、execution session ID、canonical cwd 和 Agent result 一起传入 materializer；不允许仅靠 output filename 或当前 `jobs.json` 生成可交互 workspace session。 | output fallback 只能复用既有 verified sidecar，或生成只读 unverified 历史。 |
 | P1 | `integration/crons/session_bridge.py`：`delete_materialized_cron_session_source()`、`delete_cron_job_history()` | **修改**：在删除 Agent state rows 前从已验证的 materialized sidecar 收集每个 binding；调用 managed/worktree 清理；返回 `workspace_cleanup` 的逐项结果。 | 单 session delete 不删除 root；job delete 仅删除受控 cron namespace 内、确属该 job/session 的 root；无法证明归属的 root 保留为 orphan。 |
@@ -345,7 +347,7 @@ Cron Hub 的新建请求可省略 `workspace_policy`；服务端必须在写入�
 
 | 优先级 | 文件/入口 | 改动 | 验证重点 |
 | --- | --- | --- | --- |
-| P2 | `static/hermes_integration_crons.js`（Cron Hub）及相邻 integration CSS | **修改**：新建/编辑表单传递 `workspace_policy`；渲染 `ready`、`legacy_shared`、`workspace_unverified`、`cleanup_failed`，并在 unverified 时禁用 Workspace/Terminal/继续聊天。 | 桌面、窄屏、移动端；不增加侧栏常驻控件。 |
+| P2 | `static/hermes_integration_crons.js`（Cron Hub）及相邻 integration CSS | **修改**：新建/编辑表单传递 `workspace_policy`；渲染 `ready`、`legacy_shared`、`workspace_unverified`、`cleanup_failed`，并在 unverified 时说明后续会话使用默认 workspace。 | 桌面、窄屏、移动端；不增加侧栏常驻控件。 |
 | P2 | `integration/swagger/openapi.json`、`integration/README.md` | **修改**：create/update request schema，job/history/session response 的 workspace strategy/state，删除的 partial cleanup response。 | API 文档和实际错误/状态码一致；错误文案为中文。 |
 | P0 | `integration/tests/crons/test_handlers.py`、`test_session_bridge.py`、`test_hooks.py`、`test_execution_model.py`、`test_manifest_turns.py` | **修改/新增**：创建/更新 policy 校验、state.db cwd → sidecar mapping、重复物化、缺失/冲突 cwd、manual run、history/output fallback、job cleanup。 | WebUI 负责证明“展示与 follow-up root”等于 Agent 记录。 |
 | P1 | `tests/test_session_managed_workspace.py`、`tests/test_session_import_workspace_validation.py`、`tests/test_cron_manual_run_persistence.py`、`tests/test_cron_history_database.py`、`tests/test_issue3975_cron_reply_materialization.py`、`tests/test_worktree_remove.py` | **修改/新增**：immutable follow-up、legacy 行为、删除范围、worktree 生命周期与 error path。 | 不能回归普通 session/import/worktree 行为。 |
@@ -369,7 +371,7 @@ Cron Hub 的新建/编辑表单增加“执行工作区”选择：
 - **新建独立目录**：`managed`，说明“本次任务文件仅属于该次运行”。
 - **从 Git 项目创建独立 worktree**：`worktree`，选择一个已登记 workspace；不可用时在表单提交前显示原因。
 
-会话详情与 Cron history 显示 strategy、实际 root 的友好名称和状态：`ready`、`legacy_shared`、`workspace_unverified`、`cleanup_failed`。`workspace_unverified` 只保留 transcript/output 入口，并禁用 Workspace、Terminal、上传与“继续聊天”。
+会话详情与 Cron history 显示 strategy、实际 root 的友好名称和状态：`ready`、`legacy_shared`、`workspace_unverified`、`cleanup_failed`。`workspace_unverified` 保留“原 execution workspace 未验证”的提示，并允许打开会话；后续操作使用 WebUI 默认 workspace。
 
 不在侧栏热区额外增加常驻控件；这是低频的任务配置，应放入 Cron Hub 创建/编辑表单和任务详情溢出菜单。实现 UI 时需提供桌面、窄屏、移动端前后截图。
 

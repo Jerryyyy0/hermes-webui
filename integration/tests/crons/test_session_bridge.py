@@ -33,6 +33,7 @@ def cron_env(tmp_path, monkeypatch):
 
     monkeypatch.setattr(webui_config, "SESSION_DIR", sessions_dir)
     monkeypatch.setattr(webui_config, "STATE_DIR", state_dir)
+    monkeypatch.setattr(webui_config, "DEFAULT_WORKSPACE", workspace)
     monkeypatch.setattr(models, "SESSION_DIR", sessions_dir)
     monkeypatch.setattr(workspace_api, "_BOOT_DEFAULT_WORKSPACE", workspace)
 
@@ -404,17 +405,16 @@ def test_v1_missing_current_workspace_handoff_remains_unverified(cron_env):
     assert Session.load(sid).workspace_state == "workspace_unverified"
 
 
-def test_unverified_cron_workspace_is_rejected_by_shared_resolver(cron_env):
+def test_unverified_cron_workspace_uses_shared_default_for_continuation(cron_env):
     from api.workspace import resolve_session_workspace
 
     session = SimpleNamespace(
-        workspace=str(cron_env["workspace"]),
+        workspace=str(cron_env["home"]),
         workspace_mode="external",
         workspace_state="workspace_unverified",
         source_tag="cron",
     )
-    with pytest.raises(ValueError, match="unverified"):
-        resolve_session_workspace(session)
+    assert resolve_session_workspace(session) == cron_env["workspace"].resolve()
 
 
 def test_materialize_selects_session_for_run_mtime(cron_env, monkeypatch):
