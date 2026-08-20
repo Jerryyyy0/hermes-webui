@@ -579,7 +579,7 @@ def _post_submit(handler, app_id: str, body: dict) -> bool:
             },
             db_path=_DB_PATH,
         )
-        error_msg = _friendly_upstream_error(str(exc))
+        error_msg = _friendly_upstream_error(str(exc), app=app)
         return _respond_bad(handler, error_msg, 502)
     finally:
         if tmp_zip is not None:
@@ -599,16 +599,26 @@ def _platform() -> str:
     return skill_publish_platform()
 
 
-def _friendly_upstream_error(exc_msg: str) -> str:
+def _friendly_upstream_error(exc_msg: str, app: dict | None = None) -> str:
     """Convert upstream error messages to user-friendly Chinese messages."""
     msg_lower = exc_msg.lower()
     if "already exists" in msg_lower:
-        # Extract skill name if present in the error message
-        import re
-        match = re.search(r"skill\s+name\s+'([^']+)'", exc_msg, re.IGNORECASE)
-        if match:
-            skill_name = match.group(1)
-            return f"技能 '{skill_name}' 已在技能市场存在，请勿重复发布"
+        display_name = (app or {}).get("display_name") or ""
+        skill_name = (app or {}).get("skill_name") or ""
+        if not skill_name:
+            import re
+
+            match = re.search(r"skill\s+name\s+'([^']+)'", exc_msg, re.IGNORECASE)
+            if match:
+                skill_name = match.group(1)
+        if display_name and skill_name:
+            label = f"{display_name}（{skill_name}）"
+        elif skill_name:
+            label = skill_name
+        else:
+            label = ""
+        if label:
+            return f"技能 '{label}' 已在技能市场存在，请勿重复发布"
         return "该技能已在技能市场存在，请勿重复发布"
     return f"上游服务不可用: {exc_msg}"
 
@@ -639,7 +649,7 @@ def _post_withdraw(handler, app_id: str, body: dict) -> bool:
     except SkillHubConflictError as exc:
         return _respond_bad(handler, f"上游拒绝撤回: {exc}", 409)
     except SkillHubUpstreamError as exc:
-        error_msg = _friendly_upstream_error(str(exc))
+        error_msg = _friendly_upstream_error(str(exc), app=app)
         return _respond_bad(handler, error_msg, 502)
     store.update_application(
         app_id,
