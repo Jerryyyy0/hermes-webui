@@ -366,7 +366,7 @@ def _parse_frontmatter(text: str):
 # ── POST update (draft only) ─────────────────────────────────────────────────
 
 
-_UPDATABLE_FIELDS = ("application_type", "reason", "category")
+_UPDATABLE_FIELDS = ("application_type", "reason")
 
 
 def _post_update(handler, app_id: str, body: dict) -> bool:
@@ -387,12 +387,9 @@ def _post_update(handler, app_id: str, body: dict) -> bool:
             update_fields["application_type"] = new_type
     if "reason" in body:
         update_fields["reason"] = str(body.get("reason") or "").strip()
-    if "category" in body:
-        update_fields["category"] = str(body.get("category") or "").strip()
-
     if not update_fields:
         return _respond_bad(
-            handler, "无可更新字段，仅支持 application_type / reason / category", 400
+            handler, "无可更新字段，仅支持 application_type / reason", 400
         )
 
     resulting_type = (
