@@ -44,6 +44,38 @@ def skillhub_enabled() -> bool:
     return integration_enabled() and bool(skillhub_url())
 
 
+def skill_publish_enabled() -> bool:
+    """Skill publish application flow master switch (docs/integration/skill-publish-flow设计方案.md)."""
+    if not integration_enabled() or not skillhub_url():
+        return False
+    raw = os.getenv("SKILL_PUBLISH_ENABLED", "").strip().lower()
+    if not raw:
+        return True
+    return raw in ("1", "true", "yes", "on")
+
+
+def skill_publish_platform() -> str:
+    """Third-party platform marker sent to upstream SkillHub (B2 upload)."""
+    return os.getenv("SKILL_PUBLISH_PLATFORM", "").strip() or "hermes-webui"
+
+
+def skill_publish_user_account() -> str:
+    """Current project user account (one project = one user)."""
+    return os.getenv("SKILL_PUBLISH_USER_ACCOUNT", "").strip() or os.getenv(
+        "USER", "user"
+    )
+
+
+def skill_publish_user_uuid() -> str:
+    """Current project user UUID (one project = one user).
+
+    Used as externalUserId for upstream SkillHub API calls.
+    """
+    return os.getenv("SKILL_PUBLISH_USER_UUID", "").strip() or os.getenv(
+        "SKILL_PUBLISH_USER_ACCOUNT", ""
+    )
+
+
 def cron_all_profiles_enabled() -> bool:
     return integration_enabled()
 

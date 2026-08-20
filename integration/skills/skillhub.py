@@ -34,6 +34,38 @@ _TIMEOUT = 150.0
 _HUB_CATALOG_NAME_SIDECAR = ".hub_catalog_name"
 
 
+def _camel_to_snake(name: str) -> str:
+    """Convert camelCase / PascalCase to snake_case."""
+    result: list[str] = []
+    for i, ch in enumerate(name):
+        if ch.isupper():
+            if i > 0 and name[i - 1] != "_":
+                result.append("_")
+            result.append(ch.lower())
+        else:
+            result.append(ch)
+    return "".join(result)
+
+
+def _map_upstream_fields(data: dict | list) -> dict | list:
+    """Recursively convert upstream camelCase keys to internal snake_case.
+
+    Applied to dicts and lists of dicts; scalar values pass through unchanged.
+    """
+    if isinstance(data, list):
+        return [_map_upstream_fields(item) for item in data]
+    if not isinstance(data, dict):
+        return data
+    result: dict[str, Any] = {}
+    for key, value in data.items():
+        new_key = _camel_to_snake(str(key))
+        if isinstance(value, (dict, list)):
+            result[new_key] = _map_upstream_fields(value)
+        else:
+            result[new_key] = value
+    return result
+
+
 def _client() -> httpx.Client:
     return httpx.Client(timeout=_TIMEOUT, follow_redirects=True)
 
@@ -73,7 +105,7 @@ def fetch_catalog(
     if page is not None:
         params["page"] = page
     if page_size is not None:
-        params["page_size"] = page_size
+        params["pageSize"] = page_size
 
     with _client() as client:
         resp = client.get(f"{_hub_base()}/api/skills", params=params)
@@ -83,7 +115,7 @@ def fetch_catalog(
     skills = data.get("skills") if isinstance(data, dict) else data
     if not isinstance(skills, list):
         skills = []
-    mapped = [dict(s) for s in skills if isinstance(s, dict)]
+    mapped = [_map_upstream_fields(dict(s)) for s in skills if isinstance(s, dict)]
     result: dict[str, Any] = {
         "skills": mapped,
         "total": data.get("total", len(mapped)) if isinstance(data, dict) else len(mapped),
@@ -91,8 +123,8 @@ def fetch_catalog(
     if isinstance(data, dict):
         if data.get("page") is not None:
             result["page"] = data["page"]
-        if data.get("page_size") is not None:
-            result["page_size"] = data["page_size"]
+        if data.get("pageSize") is not None:
+            result["page_size"] = data["pageSize"]
     return result
 
 
@@ -101,7 +133,7 @@ def fetch_skill_detail(name: str) -> dict:
         resp = client.get(f"{_hub_base()}/api/skills/{_skill_path(name)}")
         resp.raise_for_status()
         data = resp.json()
-    return data if isinstance(data, dict) else {"name": name}
+    return _map_upstream_fields(data) if isinstance(data, dict) else {"name": name}
 
 
 def fetch_doc(name: str) -> dict:
@@ -125,7 +157,7 @@ def fetch_structure(name: str) -> dict:
         resp = client.get(f"{_hub_base()}/api/skills/{_skill_path(name)}/structure")
         resp.raise_for_status()
         data = resp.json()
-    return data if isinstance(data, dict) else {"name": name, "scripts": [], "references": []}
+    return _map_upstream_fields(data) if isinstance(data, dict) else {"name": name, "scripts": [], "references": []}
 
 
 def fetch_file(name: str, path: str) -> dict:
@@ -1048,9 +1080,9 @@ def extract_ai_meta(skill_md_content: str, name: str = "", description: str = ""
     return {
         "name": name or None,
         "description": description or None,
-        "skillName": data.get("skill_name", ""),
-        "displayDescription": data.get("display_description", ""),
-        "detailJson": data.get("detail_json"),
+        "skillName": data.get("skillName", ""),
+        "displayDescription": data.get("displayDescription", ""),
+        "detailJson": data.get("detailJson"),
     }
 
 
