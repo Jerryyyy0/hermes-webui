@@ -359,52 +359,24 @@ Implementation: [`integration/webui_appearance/`](webui_appearance/). Route seam
 
 ### 知识库 BFF 代理（`KNOWLEDGE_BASE_URL`）
 
-在用户容器或门户内，前端将 `account` / `uuid` 放入请求体，经 WebUI 转发至下游知识库服务（`POST {KNOWLEDGE_BASE_URL}/knowledge_base/*`）。后端不调用 Zhiling identity lookup。
+前端将身份字段和业务字段放入请求体，经 WebUI 转发至下游知识库服务
+（`POST {KNOWLEDGE_BASE_URL}/knowledge_base/*`）。后端不调用 Zhiling identity lookup。
 
 启用：
 
 ```bash
 export HERMES_INTEGRATION=1
-export KNOWLEDGE_BASE_URL=http://192.168.1.132:17861
+export KNOWLEDGE_BASE_URL=http://knowledge-base.example
 ```
 
-| Method | Path | 下游 | 下游常用字段 |
-|--------|------|------|-----------|
-| POST | `/api/integration/knowledge_base/list_ps_knowledge_bases` | `list_ps_knowledge_bases` | `account`, `uuid`, `isPersonal` |
-| POST | `/api/integration/knowledge_base/user_joined_shkbs` | `user_joined_shkbs` | `account`, `uuid` |
-| POST | `/api/integration/knowledge_base/create_ps_kb` | `create_ps_kb` | `account`, `uuid`, `showName`, `isPersonal` |
-| POST | `/api/integration/knowledge_base/show_ps_kb_info` | `show_ps_kb_info` | `kbName` |
-| POST | `/api/integration/knowledge_base/edit_kb_information` | `edit_kb_information` | `kbName`, `showName` |
-| POST | `/api/integration/knowledge_base/delete_ps_kb` | `delete_ps_kb` | `account`, `kbName` |
-| POST | `/api/integration/knowledge_base/available_shkbs` | `available_shkbs` | `account`, `uuid`, `page`, `size` |
-| POST | `/api/integration/knowledge_base/apply_join_shkb` | `apply_join_shkb` | `account`, `uuid`, `kbName` |
-| POST | `/api/integration/knowledge_base/get_user_inshkb` | `get_user_inshkb` | `uuid`, `kbName`, `page`, `size` |
-| POST | `/api/integration/knowledge_base/list_knowledge_bases_details` | `list_knowledge_bases_details` | `kbName`, `page`, `size` |
-| POST | `/api/integration/knowledge_base/upload_docs` | `upload_docs` | multipart 透传，无字段校验 |
-| POST | `/api/integration/knowledge_base/upload_artifacts` | `upload_docs`（编排；单文件最大 50 MiB、最多 20 个文件，不限制单次同步总大小） | `uuid`, `kbName`, `fileProperties`, `paths` |
-| POST | `/api/integration/knowledge_base/update_docs` | `update_docs` | `kbName`, `fileNames`, `fileProperties` |
-| POST | `/api/integration/knowledge_base/delete_docs` | `delete_docs` | `kbName`, `fileNames` |
-| POST | `/api/integration/knowledge_base/show_pdf` | `show_pdf` | 透传，无字段校验（二进制或 JSON） |
-| POST | `/api/integration/knowledge_base/search_docs` | `search_docs` | `query`, `kbName`（可选 `topK`, `scoreThreshold`） |
-| POST | `/api/integration/knowledge_base/search_docs_xcore` | `search_docs_xcore` | `query`, `kbNames`（非空数组；可选 `topK`, `scoreThreshold`） |
-| POST | `/api/integration/knowledge_base/creater_handle_application` | `creater_handle_application` | 透传，无字段校验 |
-| POST | `/api/integration/knowledge_base/get_joinkb_applications` | `get_joinkb_applications` | 透传，无字段校验 |
-| POST | `/api/integration/knowledge_base/get_user_messages` | `get_user_messages` | 透传，无字段校验 |
-| POST | `/api/integration/knowledge_base/mark_message_read` | `mark_message_read` | 透传，无字段校验 |
-| POST | `/api/integration/knowledge_base/user_exit_shkb` | `user_exit_shkb` | 透传，无字段校验 |
-| POST | `/api/integration/knowledge_base/remove_from_myshkb` | `remove_from_myshkb` | 透传，无字段校验 |
-| POST | `/api/integration/knowledge_base/delete_readed_message` | `delete_readed_message` | 透传，无字段校验 |
-| POST | `/api/integration/knowledge_base/download_doc` | `download_doc` | 透传，无字段校验（二进制或 JSON） |
+知识库路由、请求参数和响应格式统一维护在
+[`docs/integration/integration-knowledge-base-api.md`](../docs/integration/integration-knowledge-base-api.md)
+与 Swagger 的 `IntegrationKnowledgeBase` tag 中。普通接口的公开路径、内部路由名与
+下游接口名一致；JSON 请求与响应原样透传。
 
-除 `upload_artifacts` 外，所有 JSON 请求体均**原样透传**：WebUI 不校验、重命名、筛选字段或注入默认值。下游已返回 HTTP 响应时，HTTP 状态码与 JSON body 也**原样透传**（包括下游 HTTP `200` 但业务 `code` 失败的情况）。`show_pdf` 与 `download_doc` 的下游请求超时均为 180 秒，且在下游返回文件时透传二进制。文档列表筛选请使用 `/list_knowledge_bases_details`。下游不可达、未配置、超时或未返回有效 JSON 时，WebUI 返回 HTTP `500`，响应为 `{"error":"知识库服务异常","message":"知识库服务异常，请稍后重试"}`；`upload_docs` 请求体和 `upload_artifacts` 本地安全校验的错误文案使用中文；原始异常仅记录在服务端日志中。
-
-文档上传须两步串联：`upload_docs` 成功后再 `update_docs`。
-
-```bash
-curl -sS -X POST http://127.0.0.1:8787/api/integration/knowledge_base/list_ps_knowledge_bases \
-  -H "Content-Type: application/json" \
-  -d '{"account":"admin","uuid":"aaaaaaaa0000aaaa0000aaaaaaaaaaaa","isPersonal":1}'
-```
+`upload_artifacts` 是唯一例外：它读取 workspace 文件并转为 multipart 调用下游
+`upload_docs`。其余约束、调用示例与历史迁移记录均以知识库 API 文档为准，避免在本
+README 重复维护。
 
 ### 录制脚本（`HERMES_INTEGRATION=1`）
 

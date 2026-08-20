@@ -8,8 +8,8 @@ import pytest
 
 from integration.knowledge_base import client
 from integration.knowledge_base.client import KnowledgeBaseUpstreamError
-from integration.knowledge_base.constants import DOWNSTREAM_PATHS, WEBUI_ROUTE_PREFIX
-from integration.knowledge_base.handlers import _route_key, try_handle_post, try_handle_post_early
+from integration.knowledge_base.constants import DOWNSTREAM_ROUTE_NAMES, WEBUI_ROUTE_PREFIX
+from integration.knowledge_base.handlers import _route_name, try_handle_post, try_handle_post_early
 
 
 def _json_payload(handler: MagicMock) -> dict:
@@ -17,29 +17,25 @@ def _json_payload(handler: MagicMock) -> dict:
     return json.loads(raw)
 
 
-@pytest.mark.parametrize(("route_key", "public_route"), DOWNSTREAM_PATHS.items())
-def test_downstream_named_routes_resolve(route_key, public_route):
-    parsed = urlparse(f"{WEBUI_ROUTE_PREFIX}{public_route}")
+@pytest.mark.parametrize("route_name", sorted(DOWNSTREAM_ROUTE_NAMES))
+def test_downstream_named_routes_resolve(route_name):
+    parsed = urlparse(f"{WEBUI_ROUTE_PREFIX}{route_name}")
 
-    assert _route_key(parsed) == route_key
+    assert _route_name(parsed) == route_name
 
 
 @pytest.mark.parametrize(
     "legacy_route",
-    [
-        route_key
-        for route_key, downstream_path in DOWNSTREAM_PATHS.items()
-        if route_key != downstream_path
-    ],
+    ["list", "joined", "create", "info", "edit", "delete", "available", "apply_join", "members", "documents"],
 )
 def test_legacy_route_aliases_are_rejected(legacy_route):
     parsed = urlparse(f"{WEBUI_ROUTE_PREFIX}{legacy_route}")
 
-    assert _route_key(parsed) is None
+    assert _route_name(parsed) is None
 
 
 def test_upload_artifacts_route_resolves():
-    assert _route_key(urlparse(f"{WEBUI_ROUTE_PREFIX}upload_artifacts")) == "upload_artifacts"
+    assert _route_name(urlparse(f"{WEBUI_ROUTE_PREFIX}upload_artifacts")) == "upload_artifacts"
 
 
 def test_disabled_returns_false():
@@ -49,14 +45,14 @@ def test_disabled_returns_false():
         assert try_handle_post(handler, parsed, {}) is False
 
 
-@pytest.mark.parametrize(("route_key", "public_route"), DOWNSTREAM_PATHS.items())
-def test_json_routes_forward_body_verbatim(route_key, public_route):
-    if route_key in {"upload_docs", "show_pdf", "download_doc"}:
+@pytest.mark.parametrize("route_name", sorted(DOWNSTREAM_ROUTE_NAMES))
+def test_json_routes_forward_body_verbatim(route_name):
+    if route_name in {"upload_docs", "show_pdf", "download_doc"}:
         pytest.skip("handled by dedicated raw or binary paths")
 
     handler = MagicMock()
-    parsed = urlparse(f"{WEBUI_ROUTE_PREFIX}{public_route}")
-    body = {"downstream_only": {"route": route_key}, "nullable": None}
+    parsed = urlparse(f"{WEBUI_ROUTE_PREFIX}{route_name}")
+    body = {"downstream_only": {"route": route_name}, "nullable": None}
     with patch("integration.knowledge_base.handlers.knowledge_base_enabled", return_value=True):
         with patch(
             "integration.knowledge_base.handlers.client.post_json",
@@ -64,7 +60,7 @@ def test_json_routes_forward_body_verbatim(route_key, public_route):
         ) as mock_post:
             assert try_handle_post(handler, parsed, body) is True
 
-    mock_post.assert_called_once_with(route_key, body)
+    mock_post.assert_called_once_with(route_name, body)
 
 
 def test_upstream_business_error():

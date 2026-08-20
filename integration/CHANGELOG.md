@@ -8,6 +8,8 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Added
 
+- **QA 公开知识库列表代理** — 新增 `POST /api/integration/knowledge_base/list_qa_knowledge_bases`，将 JSON 请求体与下游 `{code, msg, data}` 响应原样转发。
+
 - **Knowledge base MCP session references** — `mcp__ithink_kb_mcp__searchKnowledgeBaseDocuments` 与 `mcp__ithink_kb_mcp__searchKnowledgeBaseDocumentsAcross` 的成功 completed 结果现在进入既有 Session Manifest 的 `references[]`，并复用 `manifest_delta` SSE。相同 `(kbName, fileName)` 合并来源和 `page_content[]`；解析逻辑位于 `integration/knowledge_base/turn_references.py`，不新增数据库表或 sidecar 状态，且不向浏览器透传单库搜索返回的私有源路径。
 
 - **异步委派会话取消与恢复** — session SSE 每次建连均先发送 `background_tasks_snapshot`（包括空快照）；真实 user message 持久化其 `async_delegations` 生命周期。新增 `POST` / `GET /api/sessions/background_tasks/cancel`：取消范围先写入 Session sidecar，再并行请求 Agent 中断，客户端轮询至 `state=settled` 确认该固定范围已收口。归属映射耗尽重试后发送 `background_task_unresolved`，取消范围内的完成结果不会启动新的 wakeup stream。

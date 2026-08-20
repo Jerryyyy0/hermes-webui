@@ -1292,6 +1292,33 @@
         }
       }
     },
+    "/api/integration/knowledge_base/list_qa_knowledge_bases": {
+      "post": {
+        "tags": ["IntegrationKnowledgeBase"],
+        "summary": "QA 公开知识库列表",
+        "description": "代理 `POST {KNOWLEDGE_BASE_URL}/knowledge_base/list_qa_knowledge_bases`。请求体与下游 JSON 响应均原样转发。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["uuid", "location"],
+                "properties": {
+                  "uuid": { "type": "string", "description": "用户 UUID" },
+                  "location": { "type": "string", "description": "位置标识，例如 1000" }
+                },
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "下游 QA 公开知识库列表响应", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseQaKnowledgeBasesResponse" } } } },
+          "500": { "description": "下游未返回有效响应", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
+        }
+      }
+    },
     "/api/integration/knowledge_base/user_joined_shkbs": {
       "post": {
         "tags": ["IntegrationKnowledgeBase"],
@@ -1320,9 +1347,10 @@
       "post": {
         "tags": ["IntegrationKnowledgeBase"],
         "summary": "知识库详情",
+        "description": "代理 `POST {KNOWLEDGE_BASE_URL}/knowledge_base/show_ps_kb_info`。请求体与下游 JSON 响应均原样转发。",
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughRequest" } } } },
         "responses": {
-          "200": { "description": "知识库对象", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseEntry" } } } },
+          "200": { "description": "下游知识库详情响应", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseInfoResponse" } } } },
           "400": { "description": "缺参或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
           "500": { "description": "下游未返回有效响应", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
         }
@@ -6229,6 +6257,47 @@
         "type": "object",
         "additionalProperties": true,
         "description": "透传接口请求体：字段原样转发至下游，WebUI 不做校验或构建。"
+      },
+      "KnowledgeBaseQaKnowledgeBasesResponse": {
+        "type": "object",
+        "required": ["code", "msg", "data"],
+        "properties": {
+          "code": { "type": "integer", "description": "下游业务状态码" },
+          "msg": { "type": "string", "description": "下游消息" },
+          "data": {
+            "type": "object",
+            "required": ["kbName", "showName", "isDefault"],
+            "properties": {
+              "kbName": { "type": "array", "items": { "type": "string" }, "description": "知识库名称列表" },
+              "showName": { "type": "array", "items": { "type": "string" }, "description": "展示名称列表，与 kbName 按索引对应" },
+              "isDefault": { "type": "array", "items": { "type": "boolean" }, "description": "默认标记列表，与 kbName 按索引对应" }
+            }
+          }
+        }
+      },
+      "KnowledgeBaseInfoResponse": {
+        "type": "object",
+        "required": ["code", "msg", "data"],
+        "properties": {
+          "code": { "type": "integer", "description": "下游业务状态码" },
+          "msg": { "type": "string", "description": "下游消息" },
+          "data": {
+            "type": "object",
+            "required": ["kbName", "showName", "kbIntro", "createdTime", "iconType", "vsType", "embedModel", "fileCount", "edition", "location"],
+            "properties": {
+              "kbName": { "type": "string" },
+              "showName": { "type": "string" },
+              "kbIntro": { "type": "string" },
+              "createdTime": { "type": "string" },
+              "iconType": { "type": "integer" },
+              "vsType": { "type": "string" },
+              "embedModel": { "type": "string" },
+              "fileCount": { "type": "integer" },
+              "edition": { "type": "string" },
+              "location": { "type": "array", "items": { "type": "integer" } }
+            }
+          }
+        }
       },
       "KnowledgeBasePassthroughResponse": {
         "type": "object",

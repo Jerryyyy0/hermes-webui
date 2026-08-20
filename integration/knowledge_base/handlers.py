@@ -10,8 +10,8 @@ from api.helpers import bad, j
 from integration.config import knowledge_base_enabled
 from integration.knowledge_base.constants import (
     BINARY_PASSTHROUGH_ROUTES,
+    DOWNSTREAM_ROUTE_NAMES,
     WEBUI_ROUTE_PREFIX,
-    WEBUI_ROUTE_TO_ROUTE_KEY,
 )
 from integration.knowledge_base import client
 
@@ -32,14 +32,14 @@ def _validation_error_cn(code: str) -> str:
     return _VALIDATION_ERROR_CN.get(code, "请求参数无效")
 
 
-def _route_key(parsed) -> str | None:
+def _route_name(parsed) -> str | None:
     path = parsed.path
     if not path.startswith(WEBUI_ROUTE_PREFIX):
         return None
     route = path[len(WEBUI_ROUTE_PREFIX) :]
     if route == "upload_artifacts":
         return route
-    return WEBUI_ROUTE_TO_ROUTE_KEY.get(route)
+    return route if route in DOWNSTREAM_ROUTE_NAMES else None
 
 
 def _respond(handler, payload, status: int = 200, *, exc_info=None) -> bool:
@@ -96,11 +96,11 @@ def _missing_field(body: dict[str, Any], field: str) -> bool:
     return False
 
 
-def _validate_required(body: dict[str, Any], route_key: str) -> str | None:
-    for field in _REQUIRED_FIELDS.get(route_key, ()):
+def _validate_required(body: dict[str, Any], route_name: str) -> str | None:
+    for field in _REQUIRED_FIELDS.get(route_name, ()):
         if _missing_field(body, field):
             return f"missing_{field}"
-    if route_key == "upload_artifacts":
+    if route_name == "upload_artifacts":
         file_properties = body.get("fileProperties")
         if not isinstance(file_properties, list) or not file_properties:
             return "missing_fileProperties"
@@ -112,9 +112,9 @@ def _validate_required(body: dict[str, Any], route_key: str) -> str | None:
     return None
 
 
-def _handle_upstream(handler, route_key: str, upstream_body: dict[str, Any]) -> bool:
+def _handle_upstream(handler, route_name: str, upstream_body: dict[str, Any]) -> bool:
     try:
-        status, payload = client.post_json(route_key, upstream_body)
+        status, payload = client.post_json(route_name, upstream_body)
     except client.KnowledgeBaseUpstreamError as exc:
         return _respond(
             handler,
@@ -125,9 +125,9 @@ def _handle_upstream(handler, route_key: str, upstream_body: dict[str, Any]) -> 
     return _respond(handler, payload, status=status)
 
 
-def _handle_binary_passthrough(handler, route_key: str, upstream_body: dict[str, Any]) -> bool:
+def _handle_binary_passthrough(handler, route_name: str, upstream_body: dict[str, Any]) -> bool:
     try:
-        result = client.post_binary_or_json(route_key, upstream_body)
+        result = client.post_binary_or_json(route_name, upstream_body)
     except client.KnowledgeBaseUpstreamError as exc:
         return _respond(
             handler,
@@ -149,8 +149,8 @@ def _handle_binary_passthrough(handler, route_key: str, upstream_body: dict[str,
 def try_handle_post_early(handler, parsed) -> bool:
     if not knowledge_base_enabled():
         return False
-    route_key = _route_key(parsed)
-    if route_key != "upload_docs":
+    route_name = _route_name(parsed)
+    if route_name != "upload_docs":
         return False
     return _handle_upload_docs(handler)
 
@@ -188,22 +188,22 @@ def _handle_upload_docs(handler) -> bool:
 def try_handle_post(handler, parsed, body) -> bool:
     if not knowledge_base_enabled():
         return False
-    route_key = _route_key(parsed)
-    if not route_key or route_key == "upload_docs":
+    route_name = _route_name(parsed)
+    if not route_name or route_name == "upload_docs":
         return False
 
     payload_body = _body_dict(body)
 
-    if route_key in BINARY_PASSTHROUGH_ROUTES:
-        return _handle_binary_passthrough(handler, route_key, payload_body)
+    if route_name in BINARY_PASSTHROUGH_ROUTES:
+        return _handle_binary_passthrough(handler, route_name, payload_body)
 
-    if route_key == "upload_artifacts":
-        missing = _validate_required(payload_body, route_key)
+    if route_name == "upload_artifacts":
+        missing = _validate_required(payload_body, route_name)
         if missing:
             return _respond_bad(handler, _validation_error_cn(missing), 400)
         return _handle_upload_artifacts(handler, payload_body)
 
-    return _handle_upstream(handler, route_key, payload_body)
+    return _handle_upstream(handler, route_name, payload_body)
 
 
 def _handle_upload_artifacts(handler, body: dict[str, Any]) -> bool:

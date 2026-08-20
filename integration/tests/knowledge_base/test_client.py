@@ -150,7 +150,7 @@ def test_post_json_upstream_unreachable():
             mock_client.post.side_effect = httpx.ConnectError("connection refused")
             mock_client_cls.return_value = mock_client
             with pytest.raises(client.KnowledgeBaseUpstreamError):
-                client.post_json("list", {"account": "a", "uuid": "u", "isPersonal": 1})
+                client.post_json("list_ps_knowledge_bases", {"account": "a", "uuid": "u", "isPersonal": 1})
 
 
 def test_post_raw_body_forwards_bytes():
@@ -183,7 +183,22 @@ def test_post_raw_body_forwards_bytes():
     assert captured["headers"]["Content-Type"] == content_type
 
 
-def test_post_json_forwards_body():
+@pytest.mark.parametrize(
+    ("route_name", "request_body", "expected_url"),
+    [
+        (
+            "list_ps_knowledge_bases",
+            {"account": "admin", "uuid": "uuid-1", "isPersonal": 1},
+            "http://kb.test/knowledge_base/list_ps_knowledge_bases",
+        ),
+        (
+            "list_qa_knowledge_bases",
+            {"uuid": "uuid-1", "location": "1000"},
+            "http://kb.test/knowledge_base/list_qa_knowledge_bases",
+        ),
+    ],
+)
+def test_post_json_forwards_body(route_name, request_body, expected_url):
     captured = {}
 
     def _fake_post(url, json=None, **kwargs):
@@ -200,12 +215,8 @@ def test_post_json_forwards_body():
             mock_client.__enter__.return_value = mock_client
             mock_client.post.side_effect = _fake_post
             mock_client_cls.return_value = mock_client
-            status, body = client.post_json(
-                "list",
-                {"account": "admin", "uuid": "uuid-1", "isPersonal": 1},
-            )
+            status, body = client.post_json(route_name, request_body)
     assert status == 200
     assert body == {"code": 200, "msg": "ok", "data": []}
-    assert captured["url"] == "http://kb.test/knowledge_base/list_ps_knowledge_bases"
-    assert captured["json"]["account"] == "admin"
-    assert captured["json"]["uuid"] == "uuid-1"
+    assert captured["url"] == expected_url
+    assert captured["json"] == request_body

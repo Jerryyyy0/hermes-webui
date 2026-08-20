@@ -12,7 +12,7 @@ from integration.knowledge_base.constants import (
     DEFAULT_CHUNK_OVERLAP,
     DEFAULT_CHUNK_SIZE,
     API_PREFIX,
-    DOWNSTREAM_PATHS,
+    DOWNSTREAM_ROUTE_NAMES,
 )
 
 _TIMEOUT = 30.0
@@ -51,11 +51,10 @@ def _client(timeout: float = _TIMEOUT) -> httpx.Client:
     return httpx.Client(timeout=timeout, follow_redirects=True)
 
 
-def _downstream_url(route_key: str) -> str:
-    path = DOWNSTREAM_PATHS.get(route_key)
-    if not path:
-        raise ValueError(f"unknown route key: {route_key}")
-    return f"{_base_url()}{API_PREFIX}/{path}"
+def _downstream_url(route_name: str) -> str:
+    if route_name not in DOWNSTREAM_ROUTE_NAMES:
+        raise ValueError(f"unknown downstream route: {route_name}")
+    return f"{_base_url()}{API_PREFIX}/{route_name}"
 
 
 def parse_upstream_response(resp: httpx.Response) -> tuple[int, Any]:
@@ -85,9 +84,9 @@ def _is_json_upstream_response(resp: httpx.Response) -> bool:
     return content.lstrip().startswith((b"{", b"["))
 
 
-def post_binary_or_json(route_key: str, body: dict[str, Any]) -> KnowledgeBaseShowPdfResult:
-    url = _downstream_url(route_key)
-    timeout = _SHOW_PDF_TIMEOUT if route_key in _LONG_BINARY_TIMEOUT_ROUTES else _TIMEOUT
+def post_binary_or_json(route_name: str, body: dict[str, Any]) -> KnowledgeBaseShowPdfResult:
+    url = _downstream_url(route_name)
+    timeout = _SHOW_PDF_TIMEOUT if route_name in _LONG_BINARY_TIMEOUT_ROUTES else _TIMEOUT
     try:
         with _client(timeout=timeout) as client:
             resp = client.post(url, json=body)
@@ -121,8 +120,8 @@ def post_show_pdf(body: dict[str, Any]) -> KnowledgeBaseShowPdfResult:
     return post_binary_or_json("show_pdf", body)
 
 
-def post_json(route_key: str, body: dict[str, Any]) -> tuple[int, Any]:
-    url = _downstream_url(route_key)
+def post_json(route_name: str, body: dict[str, Any]) -> tuple[int, Any]:
+    url = _downstream_url(route_name)
     try:
         with _client() as client:
             resp = client.post(url, json=body)
@@ -132,12 +131,12 @@ def post_json(route_key: str, body: dict[str, Any]) -> tuple[int, Any]:
 
 
 def post_multipart(
-    route_key: str,
+    route_name: str,
     *,
     files: list[tuple[str, tuple[str, bytes, str | None]]],
     data: dict[str, str],
 ) -> tuple[int, Any]:
-    url = _downstream_url(route_key)
+    url = _downstream_url(route_name)
     try:
         with _client(timeout=_UPLOAD_TIMEOUT) as client:
             resp = client.post(url, data=data, files=files)
@@ -147,13 +146,13 @@ def post_multipart(
 
 
 def post_raw_body(
-    route_key: str,
+    route_name: str,
     *,
     body: bytes,
     content_type: str,
 ) -> tuple[int, Any]:
     """Forward request body bytes to downstream unchanged."""
-    url = _downstream_url(route_key)
+    url = _downstream_url(route_name)
     headers: dict[str, str] = {}
     if content_type:
         headers["Content-Type"] = content_type
