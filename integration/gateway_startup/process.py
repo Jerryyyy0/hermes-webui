@@ -368,10 +368,10 @@ def start_gateway_process(
         if not replace_existing:
             follow_external_gateway_logs(profile)
             return {"profile": name, "status": "already_running"}
-    elif state != "not_running":
+    elif state != "not_running" and not replace_existing:
         return {"profile": name, "status": "state_unknown"}
     try:
-        if replace_existing and state == "running":
+        if replace_existing:
             command = build_gateway_run_command(runtime, profile, replace_existing=True)
         else:
             command = build_gateway_run_command(runtime, profile)

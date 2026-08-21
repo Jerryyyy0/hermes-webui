@@ -21,7 +21,7 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
   默认 workspace；历史任务保持原 `workdir` 行为，删除任务时仅清理已验证的
   execution root。
 
-- **Unified Profile Gateway ownership** — `server.py` 现在同时在原生主机和普通 Docker 容器中持有 Profile Gateway；所有 WebUI-owned Gateway 都以前台 `gateway run -v --external-supervisor` 子进程运行，将合并 stdout/stderr 以 `[gateway:<profile>]` 前缀写入 WebUI 控制台及同一持久化日志。普通容器发现遗留 Gateway 时使用 Agent 的 `--replace` 协议接管，确保新 WebUI 继续转发日志；原生主机保留已运行 Gateway 的外部所有权，避免与 launchd 抢占，同时持续跟随各 Profile 新写入的 `gateway.log` 与 `gateway.error.log` 到 WebUI 控制台。转发行不受 `HERMES_WEBUI_LOG_LEVEL` 过滤，敏感字段在输出前脱敏；WebUI 退出时只终止自身创建的 Gateway。s6 仍保留 service-manager 生命周期。
+- **Unified Profile Gateway ownership** — `server.py` 启动时会重启每个可见 Profile Gateway：原生主机中确认由 launchd/systemd 管理的 Gateway 仍通过 Agent service manager 重启，并持续跟随各 Profile 新写入的 `gateway.log` 与 `gateway.error.log` 到 WebUI 控制台；未受管、所有权不明或状态探测不明的原生 Gateway，以及普通容器中的遗留 Gateway，统一使用 Agent 的 `--replace` 协议接管，确保新 WebUI 继续转发日志。所有 WebUI-owned Gateway 都以前台 `gateway run -v --external-supervisor` 子进程运行，将合并 stdout/stderr 以 `[gateway:<profile>]` 前缀写入 WebUI 控制台及同一持久化日志。转发行不受 `HERMES_WEBUI_LOG_LEVEL` 过滤，敏感字段在输出前脱敏；WebUI 退出时只终止自身创建的 Gateway。s6 通过 service manager 执行 `gateway restart`，不由 WebUI 替换。
 
 ### Fixed
 

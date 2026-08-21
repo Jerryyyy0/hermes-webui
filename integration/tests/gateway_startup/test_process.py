@@ -62,6 +62,27 @@ def test_unknown_gateway_state_fails_closed_without_creating_process(tmp_path):
     assert result == {"profile": "default", "status": "state_unknown"}
 
 
+def test_unknown_gateway_state_is_replaced_when_requested(monkeypatch, tmp_path):
+    command = "import sys; print('INFO replacement after unknown state')"
+    replacements = []
+
+    def build_command(_runtime, _profile, *, replace_existing=False):
+        replacements.append(replace_existing)
+        return [sys.executable, "-u", "-c", command]
+
+    monkeypatch.setattr(process, "build_gateway_run_command", build_command)
+
+    result = process.start_gateway_process(
+        {"name": "default", "path": str(tmp_path)},
+        runtime=_runtime(tmp_path),
+        state_probe=lambda _profile, _runtime: "unknown",
+        replace_existing=True,
+    )
+
+    assert result["status"] == "started"
+    assert replacements == [True]
+
+
 def test_running_gateway_is_not_replaced_by_default(monkeypatch, tmp_path):
     followed = []
 

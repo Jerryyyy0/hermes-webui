@@ -16,7 +16,6 @@ from integration.project_logging import get_logger
 logger = get_logger(__name__)
 
 _DEFAULT_MAX_WORKERS = 4
-_EXTERNAL_SERVICE_START_TIMEOUT_SECONDS = 60.0
 _EXTERNAL_SERVICE_RESTART_TIMEOUT_SECONDS = 300.0
 _RUNTIME_RESOLUTION_ATTEMPTS = 3
 _RUNTIME_RESOLUTION_RETRY_SECONDS = 1.0
@@ -76,10 +75,11 @@ def _start_profile_gateway(
 ) -> dict:
     """Start a Gateway under the correct lifecycle owner.
 
-    Native hosts restart a running externally managed Gateway through its
-    Agent service manager, then follow its files into the WebUI console. Plain
-    containers use a WebUI-owned foreground child so its logs reach container
-    stdout. An s6 container remains owned by its service manager.
+    Native hosts restart a running service-managed Gateway through its Agent
+    service manager, then follow its files into the WebUI console. Other
+    running Gateway processes are replaced by a WebUI-owned foreground child.
+    Plain containers use the same WebUI-owned path, while s6 remains owned by
+    its service manager.
     """
     name = str(profile.get("name") or "").strip() or "default"
     try:
@@ -109,50 +109,48 @@ def _start_profile_gateway(
             return {"profile": name, "status": "runtime_unavailable", "error": str(runtime_error)}
         in_container = _running_in_container()
         if in_container and _s6_service_manager_available():
-            if profile.get("gateway_running") is True:
-                return {"profile": name, "status": "already_running"}
             completed = service_runner(
-                build_gateway_command(runtime, profile, "start"),
+                build_gateway_command(runtime, profile, "restart"),
                 cwd=runtime.cwd,
                 env=runtime.env,
                 capture_output=True,
                 text=True,
-                timeout=_EXTERNAL_SERVICE_START_TIMEOUT_SECONDS,
+                timeout=_EXTERNAL_SERVICE_RESTART_TIMEOUT_SECONDS,
                 check=False,
             )
             if completed.returncode == 0:
-                return {"profile": name, "status": "started", "owner": "s6"}
+                return {"profile": name, "status": "restarted", "owner": "s6"}
             return {
                 "profile": name,
                 "status": "failed",
-                "error": f"gateway start exited with status {completed.returncode}",
+                "error": f"gateway restart exited with status {completed.returncode}",
             }
 
+        starter = process_starter or start_gateway_process
         if not in_container:
             state = (state_probe or probe_profile_gateway_state)(profile, runtime)
             if state == "running":
                 owner = (owner_probe or probe_profile_gateway_owner)(profile, runtime)
-                if owner != "managed":
-                    return {"profile": name, "status": "external_owner_unknown"}
-                follow_external_gateway_logs(profile)
-                completed = service_runner(
-                    build_gateway_command(runtime, profile, "restart"),
-                    cwd=runtime.cwd,
-                    env=runtime.env,
-                    timeout=_EXTERNAL_SERVICE_RESTART_TIMEOUT_SECONDS,
-                    check=False,
-                )
-                if completed.returncode == 0:
-                    return {"profile": name, "status": "restarted", "owner": "external"}
-                return {
-                    "profile": name,
-                    "status": "failed",
-                    "error": f"gateway restart exited with status {completed.returncode}",
-                }
-            if state != "not_running":
-                return {"profile": name, "status": "state_unknown"}
+                if owner == "managed":
+                    follow_external_gateway_logs(profile)
+                    completed = service_runner(
+                        build_gateway_command(runtime, profile, "restart"),
+                        cwd=runtime.cwd,
+                        env=runtime.env,
+                        timeout=_EXTERNAL_SERVICE_RESTART_TIMEOUT_SECONDS,
+                        check=False,
+                    )
+                    if completed.returncode == 0:
+                        return {"profile": name, "status": "restarted", "owner": "external"}
+                    return {
+                        "profile": name,
+                        "status": "failed",
+                        "error": f"gateway restart exited with status {completed.returncode}",
+                    }
+                return starter(profile, runtime=runtime, replace_existing=True)
+            if state == "unknown":
+                return starter(profile, runtime=runtime, replace_existing=True)
 
-        starter = process_starter or start_gateway_process
         if in_container:
             return starter(profile, runtime=runtime, replace_existing=True)
         return starter(profile, runtime=runtime)

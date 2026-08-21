@@ -114,36 +114,56 @@ def test_native_running_gateway_restarts_through_its_service_manager(monkeypatch
     assert "capture_output" not in captured
 
 
-def test_native_unmanaged_gateway_is_not_restarted_with_a_foreground_cli(monkeypatch):
+def test_native_unmanaged_gateway_is_replaced_by_webui(monkeypatch):
     from integration.gateway_startup import runtime as agent_cli_runtime
 
     invocation = agent_cli_runtime.AgentCliInvocation(("/hermes",), "/tmp", {}, "managed_launcher")
+    captured = {}
+
+    def process_starter(profile, *, runtime, replace_existing=False):
+        captured.update(profile=profile, runtime=runtime, replace_existing=replace_existing)
+        return {"profile": profile["name"], "status": "started"}
 
     result = startup._start_profile_gateway(
         profiles()[0],
         runtime_resolver=lambda: invocation,
-        service_runner=lambda *_args, **_kwargs: pytest.fail("must not run a foreground restart"),
+        process_starter=process_starter,
+        service_runner=lambda *_args, **_kwargs: pytest.fail("must not run a managed restart"),
         state_probe=lambda _profile, _runtime: "running",
         owner_probe=lambda _profile, _runtime: "unmanaged",
     )
 
-    assert result == {"profile": "default", "status": "external_owner_unknown"}
+    assert result == {"profile": "default", "status": "started"}
+    assert captured == {
+        "profile": profiles()[0],
+        "runtime": invocation,
+        "replace_existing": True,
+    }
 
 
-def test_native_unknown_gateway_state_fails_closed(monkeypatch):
+def test_native_unknown_gateway_state_is_replaced_by_webui(monkeypatch):
     from integration.gateway_startup import runtime as agent_cli_runtime
 
     invocation = agent_cli_runtime.AgentCliInvocation(("/hermes",), "/tmp", {}, "managed_launcher")
+    captured = {}
+
+    def process_starter(profile, *, runtime, replace_existing=False):
+        captured.update(profile=profile, runtime=runtime, replace_existing=replace_existing)
+        return {"profile": profile["name"], "status": "started"}
 
     result = startup._start_profile_gateway(
         profiles()[0],
         runtime_resolver=lambda: invocation,
-        service_runner=lambda *_args, **_kwargs: pytest.fail("must not restart an unknown Gateway"),
-        process_starter=lambda *_args, **_kwargs: pytest.fail("must not start an unknown Gateway"),
+        process_starter=process_starter,
         state_probe=lambda _profile, _runtime: "unknown",
     )
 
-    assert result == {"profile": "default", "status": "state_unknown"}
+    assert result == {"profile": "default", "status": "started"}
+    assert captured == {
+        "profile": profiles()[0],
+        "runtime": invocation,
+        "replace_existing": True,
+    }
 
 
 def test_native_starts_a_gateway_when_the_authoritative_state_is_not_running():
@@ -277,8 +297,8 @@ def test_s6_keeps_service_manager_lifecycle(monkeypatch):
         profiles()[0], runtime_resolver=lambda: invocation, service_runner=runner
     )
 
-    assert result == {"profile": "default", "status": "started", "owner": "s6"}
-    assert captured["command"] == ["/hermes", "gateway", "start"]
+    assert result == {"profile": "default", "status": "restarted", "owner": "s6"}
+    assert captured["command"] == ["/hermes", "gateway", "restart"]
     assert captured["cwd"] == str(Path.home())
     assert captured["env"] == {"X": "1"}
 
