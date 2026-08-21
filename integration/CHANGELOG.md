@@ -25,6 +25,8 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Fixed
 
+- **Profile auxiliary model routing** — 助理气泡与常用任务现在继承 Profile `model.base_url`；旧配置未填写 `model.provider` 时会明确路由到 `custom`，不再因辅助路由丢失自定义网关而自动请求第一方 DeepSeek。已配置命名 `custom_providers` 的 Profile 仍交由 Agent 解析其专属 endpoint 与 `api_mode`。
+
 - **Unverified Cron continuation** — V1 Cron session 缺少可验证的 execution
   workspace 时，`workspace_unverified` 不再阻止继续聊天、终端或文件操作；这些操作
   固定使用 WebUI 已批准的默认 workspace，且不会将该目录声明为历史执行 cwd。

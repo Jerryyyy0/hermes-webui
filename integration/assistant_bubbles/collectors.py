@@ -146,11 +146,15 @@ def model_route(profile_path: Path) -> dict[str, str | None]:
     model_cfg = cfg.get("model")
     provider = None
     model = None
+    configured_provider = None
+    model_base_url = None
     if isinstance(model_cfg, str):
         model = model_cfg.strip() or None
     elif isinstance(model_cfg, dict):
         provider = str(model_cfg.get("provider") or "").strip() or None
+        configured_provider = provider
         model = str(model_cfg.get("default") or model_cfg.get("name") or "").strip() or None
+        model_base_url = str(model_cfg.get("base_url") or "").strip() or None
     try:
         from api.profiles import _split_webui_provider_model_value
 
@@ -163,6 +167,21 @@ def model_route(profile_path: Path) -> dict[str, str | None]:
         provider_cfg = providers_cfg.get(provider)
         if isinstance(provider_cfg, dict):
             base_url = str(provider_cfg.get("base_url") or "").strip() or None
+    if not base_url and model_base_url:
+        if provider is None:
+            # Legacy configs with only model.base_url describe an
+            # OpenAI-compatible custom endpoint, not the first-party provider
+            # inferred from the model name by the auxiliary auto chain.
+            provider = "custom"
+            base_url = model_base_url
+        elif configured_provider and provider == configured_provider:
+            # Keep named custom-provider resolution inside Hermes Agent. It
+            # may need the custom_providers entry's api_mode/base_url rather
+            # than an explicit URL passed by this integration layer.
+            custom_providers = cfg.get("custom_providers")
+            is_named_custom = provider == "custom" or provider.startswith("custom:")
+            if not (is_named_custom and isinstance(custom_providers, list) and custom_providers):
+                base_url = model_base_url
     return {"provider": provider, "model": model, "base_url": base_url}
 
 

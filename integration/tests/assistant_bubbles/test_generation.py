@@ -350,6 +350,63 @@ def test_model_route_reads_profile_default_model(tmp_path):
     }
 
 
+def test_model_route_uses_model_base_url_as_custom_route_without_provider(tmp_path):
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    (profile / "config.yaml").write_text(
+        "model:\n"
+        "  default: deepseek-v4-flash\n"
+        "  base_url: https://www.packyapi.ai/v1\n",
+        encoding="utf-8",
+    )
+
+    assert collectors.model_route(profile) == {
+        "provider": "custom",
+        "model": "deepseek-v4-flash",
+        "base_url": "https://www.packyapi.ai/v1",
+    }
+
+
+def test_model_route_uses_model_base_url_when_provider_has_no_provider_entry(tmp_path):
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    (profile / "config.yaml").write_text(
+        "model:\n"
+        "  provider: openai-compatible\n"
+        "  default: local-model\n"
+        "  base_url: http://127.0.0.1:1234/v1\n",
+        encoding="utf-8",
+    )
+
+    assert collectors.model_route(profile) == {
+        "provider": "openai-compatible",
+        "model": "local-model",
+        "base_url": "http://127.0.0.1:1234/v1",
+    }
+
+
+def test_model_route_leaves_named_custom_provider_resolution_to_agent(tmp_path):
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    (profile / "config.yaml").write_text(
+        "model:\n"
+        "  provider: custom\n"
+        "  default: deepseek-v4-flash\n"
+        "  base_url: https://www.packyapi.ai/v1\n"
+        "custom_providers:\n"
+        "  - name: packycode-deepseek\n"
+        "    model: deepseek-v4-flash\n"
+        "    base_url: https://www.packyapi.com/v1\n",
+        encoding="utf-8",
+    )
+
+    assert collectors.model_route(profile) == {
+        "provider": "custom",
+        "model": "deepseek-v4-flash",
+        "base_url": None,
+    }
+
+
 def test_model_route_normalizes_provider_model_picker(tmp_path):
     profile = tmp_path / "profile"
     profile.mkdir()
