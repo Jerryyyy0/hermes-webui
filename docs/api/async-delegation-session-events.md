@@ -73,7 +73,7 @@ child task；Agent 等所有 child task 都结束后只投递一条 completion�
 
 ### 2.1 历史会话查询与每轮任务状态
 
-历史查看不依赖仍然存活的 session SSE。调用 `GET /api/session?session_id={session_id}` 后，在返回的 `messages[]` 中查找带 `_turn_key` 的真实 `role: "user"` 消息；该消息的可选 `async_delegations` 是该轮派发任务的唯一历史状态。
+历史查看不依赖仍然存活的 session SSE。调用 `GET /api/session?session_id={session_id}` 后，在返回的 `messages[]` 中查找带 `_turn_key` 的真实 `role: "user"` 消息；该消息的可选 `async_delegations` 是该轮派发任务的唯一历史状态。`role: "user"` 本身不是展示资格：Agent 为维持模型上下文写入的 `context_anchor / async_delegation_completion` 会在 WebUI 投影中隐藏，且绝不承载 `async_delegations`。
 
 ```json
 {

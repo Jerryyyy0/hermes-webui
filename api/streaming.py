@@ -1354,6 +1354,24 @@ def _is_synthetic_control_message(message) -> bool:
     return is_non_anchor_control_message(message)
 
 
+def _stamp_hidden_user_turn_semantics(message, *, source: str, metadata=None) -> None:
+    """Carry model-only user-turn semantics into a WebUI-generated fallback row."""
+    if not isinstance(message, dict):
+        return
+    normalized = {}
+    if str(source or "").strip() == "async_delegation_wakeup":
+        normalized = {
+            "_hermes_message_class": "context_anchor",
+            "_hermes_scaffold_kind": "async_delegation_completion",
+        }
+    if isinstance(metadata, dict):
+        for key in ("_hermes_message_class", "_hermes_scaffold_kind"):
+            value = metadata.get(key)
+            if isinstance(value, str) and value.strip():
+                normalized[key] = value.strip()
+    message.update(normalized)
+
+
 def _drop_synthetic_control_messages(messages):
     """Remove Agent-internal synthetic scaffolding turns from the WebUI transcript.
 
@@ -5686,6 +5704,7 @@ def _merge_display_messages_after_agent_result(
     source: str = 'webui',
     canonical_turn_key: str = '',
     async_delegation_id: str = '',
+    user_message_metadata=None,
 ):
     """Keep UI transcript durable while allowing model context to compact.
 
@@ -5888,6 +5907,11 @@ def _merge_display_messages_after_agent_result(
         # exchange and then clear the pending prompt. Materialize the current
         # turn at the transcript boundary before the assistant/tool response.
         current_user_msg = {'role': 'user', 'content': msg_text}
+        _stamp_hidden_user_turn_semantics(
+            current_user_msg,
+            source=source,
+            metadata=user_message_metadata,
+        )
         if canonical_turn_key:
             current_user_msg['_turn_key'] = canonical_turn_key
         stamp_message_source(current_user_msg, source)
@@ -9407,6 +9431,7 @@ def _run_agent_streaming(
                         source=getattr(s, 'pending_user_source', None) or 'webui',
                         canonical_turn_key=_manifest_turn_key,
                         async_delegation_id=async_delegation_id,
+                        user_message_metadata=user_message_metadata,
                     )
                     _compact_session_image_parts_for_persistence(s)
                     _advance_truncation_watermark_after_commit(s)  # #3831
@@ -9744,6 +9769,7 @@ def _run_agent_streaming(
                                     source=getattr(s, 'pending_user_source', None) or 'webui',
                                     canonical_turn_key=_manifest_turn_key,
                                     async_delegation_id=async_delegation_id,
+                                    user_message_metadata=user_message_metadata,
                                 )
                                 _compact_session_image_parts_for_persistence(s)
                                 _advance_truncation_watermark_after_commit(s)  # #3831
@@ -10861,6 +10887,7 @@ def _run_agent_streaming(
                                 source=getattr(s, 'pending_user_source', None) or 'webui',
                                 canonical_turn_key=_manifest_turn_key,
                                 async_delegation_id=async_delegation_id,
+                                user_message_metadata=user_message_metadata,
                             )
                             _compact_session_image_parts_for_persistence(s)
                             _advance_truncation_watermark_after_commit(s)

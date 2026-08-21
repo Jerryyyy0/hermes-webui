@@ -7,6 +7,8 @@ import logging
 import time
 from typing import Any
 
+from integration.agent_message_semantics.classifier import is_non_anchor_control_message
+
 logger = logging.getLogger(__name__)
 
 _UNSETTLED_WAKEUP_STATES = frozenset({"idle", "queued", "running"})
@@ -114,6 +116,8 @@ def _project_turns(
             by_turn.setdefault(turn_key, []).append((delegation_id, record))
     for message in messages:
         if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        if is_non_anchor_control_message(message):
             continue
         turn_key = str(message.get("_turn_key") or "").strip()
         records_for_turn = by_turn.get(turn_key)

@@ -469,7 +469,7 @@ function onSessionEvent(event: Envelope) {
 
 收到 `server_turn_started` 时，若对应聊天流已结束或无法附着，不需要重启 wakeup。调用 `GET /api/session?session_id={session_id}` 读取持久化会话即可恢复最终内容。
 
-历史响应的每条真实 user message 都可带 `async_delegations`。它是该轮 delegation 的持久化结论；按 `_turn_key == origin_turn_key` 关联实时事件。对于本契约上线后创建的消息，字段缺失表示未成功派发；旧会话、导入会话或写入版本未知时字段缺失必须视为未知。完整字段见[服务端接口契约](async-delegation-session-events.md#21-历史会话查询与每轮任务状态)。
+历史响应的每条真实 user message 都可带 `async_delegations`。它是该轮 delegation 的持久化结论；按 `_turn_key == origin_turn_key` 关联实时事件。Agent 内部的 `context_anchor / async_delegation_completion` 虽保留 `role: user` 供模型使用，但不会出现在该历史投影，也不会带 `async_delegations`。对于本契约上线后创建的消息，字段缺失表示未成功派发；旧会话、导入会话或写入版本未知时字段缺失必须视为未知。完整字段见[服务端接口契约](async-delegation-session-events.md#21-历史会话查询与每轮任务状态)。
 
 ## 9. 关闭规则
 

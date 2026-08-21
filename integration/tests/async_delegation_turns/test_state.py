@@ -94,6 +94,29 @@ def test_dispatch_projects_lifecycle_state_to_its_origin_user_message():
     assert "_background_task_ids" not in session.messages[1]
 
 
+def test_dispatch_does_not_project_lifecycle_to_hidden_completion_anchor():
+    session = _session()
+    session.messages = [
+        {"role": "user", "content": "dispatch", "_turn_key": "turn:8"},
+        {
+            "role": "user",
+            "content": "internal completion",
+            "_turn_key": "turn:8",
+            "_hermes_message_class": "context_anchor",
+            "_hermes_scaffold_kind": "async_delegation_completion",
+        },
+    ]
+
+    record_async_delegation_dispatch(
+        session,
+        {"status": "dispatched", "mode": "background", "delegation_id": "deleg-1"},
+        turn_key="turn:8",
+    )
+
+    assert "async_delegations" in session.messages[0]
+    assert "async_delegations" not in session.messages[1]
+
+
 def test_batch_dispatch_persists_child_metadata_and_snapshot_counts():
     session = _session()
     session.messages = [{"role": "user", "content": "dispatch", "_turn_key": "turn:8"}]

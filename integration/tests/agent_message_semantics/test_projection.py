@@ -153,6 +153,31 @@ def test_verification_final_replaces_candidate_in_one_answer_projection():
     ]
 
 
+def test_projection_hides_legacy_unmarked_async_completion_clone():
+    from integration.agent_message_semantics.projection import drop_non_display_messages
+
+    completion = "[ASYNC DELEGATION BATCH COMPLETE - deleg-1]"
+    visible = drop_non_display_messages(
+        [
+            {"role": "user", "content": "派发后台任务", "_turn_key": "turn:8"},
+            {"role": "user", "content": completion, "_turn_key": "turn:8"},
+            {
+                "role": "user",
+                "content": completion,
+                "_hermes_message_class": "context_anchor",
+                "_hermes_scaffold_kind": "async_delegation_completion",
+            },
+            {"role": "assistant", "content": "后台任务最终回复"},
+        ],
+        background_task_origins={"deleg-1": {"turn_key": "turn:8"}},
+    )
+
+    assert [message["content"] for message in visible] == [
+        "派发后台任务",
+        "后台任务最终回复",
+    ]
+
+
 def test_verification_candidate_is_the_fallback_when_no_final_exists():
     messages = [
         {"role": "user", "content": "修复登录超时", "_turn_key": "turn:1"},

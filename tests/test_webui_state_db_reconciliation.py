@@ -65,6 +65,27 @@ def test_confirmed_duplicate_does_not_overwrite_conflicting_turn_keys():
     assert kept["_turn_key"] == "turn:6"
 
 
+def test_confirmed_duplicate_propagates_async_completion_semantics():
+    from api.models import _merge_session_display_metadata
+
+    kept = {
+        "role": "user",
+        "content": "internal completion",
+        "_turn_key": "turn:8",
+    }
+    incoming = {
+        "role": "user",
+        "content": "internal completion",
+        "_hermes_message_class": "context_anchor",
+        "_hermes_scaffold_kind": "async_delegation_completion",
+    }
+
+    _merge_session_display_metadata(kept, incoming)
+
+    assert kept["_hermes_message_class"] == "context_anchor"
+    assert kept["_hermes_scaffold_kind"] == "async_delegation_completion"
+
+
 class _GetHandler:
     def __init__(self, path):
         self.path = path

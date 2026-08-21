@@ -7,7 +7,11 @@ import json
 from typing import Any
 
 from integration.agent_message_semantics.audit import log_control_message, log_message_event
-from integration.agent_message_semantics.classifier import is_non_anchor_control_message
+from integration.agent_message_semantics.classifier import (
+    CONTEXT_ANCHOR_CLASS,
+    control_message_semantics,
+    is_non_anchor_control_message,
+)
 
 
 _DISPLAY_METADATA_KEYS = (
@@ -116,6 +120,60 @@ def _strip_deprecated_background_task_ids(messages: list) -> list:
         display_message.pop("_background_task_ids", None)
         projected.append(display_message)
     return projected
+
+
+def _drop_legacy_async_delegation_completion_clones(
+    messages: Any,
+    *,
+    session_id: str | None,
+    background_task_origins: Any,
+) -> list:
+    """Hide a historic sidecar clone only when Agent metadata proves its identity.
+
+    Older WebUI versions could persist a fallback copy of an async-completion
+    anchor without its semantic fields.  Never classify based on its private
+    text: require an exact matching Agent-marked anchor and an origin turn key
+    recorded in the delegation sidecar.
+    """
+    origins = background_task_origins if isinstance(background_task_origins, dict) else {}
+    origin_turn_keys = {
+        str(record.get("turn_key") or "").strip()
+        for record in origins.values()
+        if isinstance(record, dict) and str(record.get("turn_key") or "").strip()
+    }
+    if not origin_turn_keys:
+        return list(messages or [])
+
+    confirmed_anchor_payloads = {
+        _user_semantic_identity(message)
+        for message in list(messages or [])
+        if isinstance(message, dict)
+        and str(message.get("role") or "").lower() == "user"
+        and control_message_semantics(message)
+        == (CONTEXT_ANCHOR_CLASS, "async_delegation_completion")
+    }
+    if not confirmed_anchor_payloads:
+        return list(messages or [])
+
+    retained = []
+    for message in list(messages or []):
+        if (
+            isinstance(message, dict)
+            and str(message.get("role") or "").lower() == "user"
+            and control_message_semantics(message) is None
+            and _turn_key(message) in origin_turn_keys
+            and _user_semantic_identity(message) in confirmed_anchor_payloads
+        ):
+            log_message_event(
+                "legacy_async_completion_clone_drop",
+                message,
+                message_class=CONTEXT_ANCHOR_CLASS,
+                kind="async_delegation_completion",
+                session_id=session_id,
+            )
+            continue
+        retained.append(message)
+    return retained
 
 
 def _is_text_assistant(message: Any) -> bool:
@@ -234,6 +292,11 @@ def drop_non_display_messages(
     background_task_origins: Any = None,
 ) -> list:
     """Return a display projection without Agent-only rows or replay users."""
+    messages = _drop_legacy_async_delegation_completion_clones(
+        messages,
+        session_id=session_id,
+        background_task_origins=background_task_origins,
+    )
     retained = _project_one_answer_messages(
         messages,
         action=action,

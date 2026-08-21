@@ -445,3 +445,30 @@ def test_async_wakeup_display_assistant_keeps_origin_identity():
         for message in visible
         if isinstance(message, dict)
     )
+
+
+def test_async_wakeup_fallback_anchor_is_hidden_when_agent_omits_user_row():
+    """The WebUI fallback must preserve hidden-anchor semantics itself."""
+    from api.streaming import _merge_display_messages_after_agent_result
+
+    prompt = "[ASYNC DELEGATION BATCH COMPLETE - deleg-1]"
+    previous = [
+        {"role": "user", "content": "较早的问题", "_turn_key": "turn:7"},
+        {"role": "assistant", "content": "较早的回答", "_turn_key": "turn:7"},
+    ]
+
+    visible = _merge_display_messages_after_agent_result(
+        previous,
+        previous,
+        previous + [{"role": "assistant", "content": "后台任务最终回复"}],
+        prompt,
+        source="async_delegation_wakeup",
+        canonical_turn_key="turn:8",
+        async_delegation_id="deleg-1",
+    )
+
+    assert [message["content"] for message in visible] == [
+        "较早的问题",
+        "较早的回答",
+        "后台任务最终回复",
+    ]

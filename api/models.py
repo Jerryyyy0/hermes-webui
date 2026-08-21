@@ -8264,10 +8264,26 @@ def _merge_turn_binding_metadata(target: dict | None, source: dict | None) -> No
 
 
 def _merge_session_display_metadata(target: dict | None, source: dict | None) -> None:
-    """Preserve display-only turn metadata when duplicate transcript rows merge."""
+    """Preserve display and Agent-provenance metadata on duplicate rows."""
     if not isinstance(target, dict) or not isinstance(source, dict):
         return
     _merge_turn_binding_metadata(target, source)
+    # Agent semantic fields decide whether a role:user row is model-only
+    # context.  If a state.db row proves a sidecar duplicate is an async
+    # completion anchor, retain that proof before the display projection runs.
+    # Copy the pair atomically: a lone class/kind would be malformed metadata.
+    source_class = source.get("_hermes_message_class")
+    source_kind = source.get("_hermes_scaffold_kind")
+    if (
+        not target.get("_hermes_message_class")
+        and not target.get("_hermes_scaffold_kind")
+        and isinstance(source_class, str)
+        and source_class.strip()
+        and isinstance(source_kind, str)
+        and source_kind.strip()
+    ):
+        target["_hermes_message_class"] = source_class
+        target["_hermes_scaffold_kind"] = source_kind
     for key in _SESSION_MESSAGE_DISPLAY_METADATA_KEYS:
         if _message_display_metadata_value_present(target.get(key)):
             continue
