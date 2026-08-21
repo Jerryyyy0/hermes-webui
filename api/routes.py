@@ -24015,6 +24015,9 @@ def _handle_session_import(handler, body):
     return j(handler, {"ok": True, "session": s.compact() | {"messages": s.messages}})
 
 
+_MASKED_PLACEHOLDER = "••••••"
+
+
 def _mask_secrets(obj):
     """Mask sensitive values in env vars and headers."""
     if not isinstance(obj, dict):
@@ -24023,12 +24026,19 @@ def _mask_secrets(obj):
     masked = {}
     for k, v in obj.items():
         if isinstance(v, str) and any(s in k.lower() for s in sensitive):
-            masked[k] = "••••••"
+            masked[k] = _MASKED_PLACEHOLDER
         elif isinstance(v, dict):
             masked[k] = _mask_secrets(v)
         else:
             masked[k] = v
     return masked
+
+
+def _mask_mcp_headers(headers):
+    """Redact every MCP header value before returning it to the WebUI."""
+    if not isinstance(headers, dict):
+        return {}
+    return {str(name): _MASKED_PLACEHOLDER for name in headers}
 
 
 def _parse_mcp_enabled(value) -> bool:
@@ -24192,9 +24202,8 @@ def _server_summary(name, cfg, runtime_status=None):
     connected = bool(runtime_status.get("connected")) if enabled else False
     if "url" in cfg:
         out["transport"] = _mcp_transport_from_cfg(cfg)
-        # Mask auth headers
         if "headers" in cfg:
-            out["headers"] = _mask_secrets(cfg["headers"])
+            out["headers"] = _mask_mcp_headers(cfg["headers"])
         out["url"] = cfg["url"]
     elif "command" in cfg:
         out["transport"] = "stdio"
@@ -24946,9 +24955,6 @@ def _handle_mcp_server_toggle(handler, name, body):
     _save_yaml_config_file(_get_config_path(), cfg)
     reload_config()
     return j(handler, {"ok": True, "name": name, "enabled": enabled})
-
-
-_MASKED_PLACEHOLDER = "••••••"
 
 
 def _strip_masked_values(submitted, existing):

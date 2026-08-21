@@ -99,7 +99,13 @@ class TestMcpList:
                 'searxng': {'command': 'mcp-searxng', 'args': ['--port', '8888']},
                 'web-reader': {
                     'url': 'http://localhost:3001/mcp',
-                    'headers': {'Authorization': 'Bearer secret123'},
+                    'headers': {
+                        'Authorization': 'Bearer secret123',
+                        'X-IThink-Account': 'admin',
+                        'X-IThink-UUID': 'real-user-uuid',
+                        'X-IThink-IsPersonal': '1',
+                        'Accept': 'application/json',
+                    },
                 },
                 'disabled': {'command': 'disabled-cmd', 'enabled': 0},
                 'broken': 'not-a-dict',
@@ -118,6 +124,11 @@ class TestMcpList:
         assert by_name['searxng']['tool_count'] == 3
         assert by_name['web-reader']['status'] == 'configured'
         assert '••••' in by_name['web-reader']['headers']['Authorization']
+        assert by_name['web-reader']['headers']['X-IThink-Account'] == '••••••'
+        assert by_name['web-reader']['headers']['X-IThink-UUID'] == '••••••'
+        assert by_name['web-reader']['headers']['X-IThink-IsPersonal'] == '••••••'
+        assert by_name['web-reader']['headers']['Accept'] == '••••••'
+        assert 'real-user-uuid' not in json.dumps(payload)
         assert by_name['disabled']['enabled'] is False
         assert by_name['disabled']['active'] is False
         assert by_name['disabled']['status'] == 'disabled'
