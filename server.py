@@ -686,6 +686,14 @@ def main() -> None:
     fix_credential_permissions()
 
     try:
+        from integration.skill_publish.zip_pack import sweep_stale_publish_zips
+        removed = sweep_stale_publish_zips()
+        if removed:
+            log_info(f"[ok] skill-publish: swept {removed} stale zip(s) from temp dir")
+    except Exception as exc:
+        log_warning(f"[!!] skill-publish zip sweep failed: {exc}")
+
+    try:
         from api.models import _active_state_db_path
         from api.session_recovery import recover_all_sessions_on_startup
         result = recover_all_sessions_on_startup(

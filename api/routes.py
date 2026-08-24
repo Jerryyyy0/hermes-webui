@@ -11883,6 +11883,14 @@ def handle_get(handler, parsed) -> bool:
         pass
 
     try:
+        from integration.skill_publish.handlers import try_handle_get as _skill_publish_try_get
+
+        if _skill_publish_try_get(handler, parsed) is True:
+            return True
+    except ImportError:
+        pass
+
+    try:
         from integration.profiles.handlers import try_handle_get as _profiles_try_get
 
         if _profiles_try_get(handler, parsed) is True:
@@ -14023,6 +14031,14 @@ def handle_post(handler, parsed) -> bool:
         pass
 
     try:
+        from integration.skill_publish.handlers import try_handle_post as _skill_publish_try_post
+
+        if _skill_publish_try_post(handler, parsed, body) is True:
+            return True
+    except ImportError:
+        pass
+
+    try:
         from integration.profiles.handlers import try_handle_post as _profiles_try_post
 
         if _profiles_try_post(handler, parsed, body) is True:
@@ -14988,6 +15004,13 @@ def handle_delete(handler, parsed) -> bool:
     if not _check_csrf(handler):
         return j(handler, {"error": _csrf_rejection_error(handler)}, status=403)
     body = read_body(handler)
+    try:
+        from integration.skill_publish.handlers import try_handle_delete as _skill_publish_try_delete
+
+        if _skill_publish_try_delete(handler, parsed) is True:
+            return True
+    except ImportError:
+        pass
     if parsed.path.startswith("/api/mcp/servers/"):
         name = parsed.path[len("/api/mcp/servers/"):]
         return _handle_mcp_server_delete(handler, name)
