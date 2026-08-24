@@ -11979,6 +11979,14 @@ def handle_get(handler, parsed) -> bool:
         pass
 
     try:
+        from integration.env_config.handlers import try_handle_get as _env_config_try_get
+
+        if _env_config_try_get(handler, parsed) is True:
+            return True
+    except ImportError:
+        pass
+
+    try:
         from integration.record_scripts.handlers import try_handle_get as _record_scripts_try_get
 
         if _record_scripts_try_get(handler, parsed) is True:

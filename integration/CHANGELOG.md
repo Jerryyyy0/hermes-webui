@@ -8,6 +8,8 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Added
 
+- **Runtime configuration API** — 新增 `GET /api/integration/config`，只读返回进程当前生效的 `BROWSER_PREVIEW_URL`，不暴露其它环境变量。
+
 - **External Session Manifest artifacts** — 成功工具输出或当前 turn 最后一条 assistant message 中经过验证的外部绝对路径可作为直接引用 Artifact 持久化，并继续通过既有 `GET /api/integration/workspace/file?path=...` 只读预览。源文件不移动、不复制、不哈希；预览仅允许精确已登记且当前通过无跟随 fd、安全路径策略的普通文件，失效时在 Manifest 中标记为 `expired`。
 
 - **Session attachment and memory Artifact preview** — `HERMES_WEBUI_ATTACHMENT_DIR/<session_id>/`（默认 `{STATE_DIR}/attachments/<session_id>/`）及 `HERMES_HOME/memories/` 中的文件现在可在已持久化为精确 Session Manifest Artifact 后复用既有只读预览 URL。上传文件不会自动成为 Artifact，两个目录不会被枚举，未登记文件仍不可读取。

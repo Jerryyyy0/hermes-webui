@@ -33,7 +33,8 @@
     { "name": "IntegrationNotifications", "description": "通知系统（混合模式：kb_apply 实时聚合自下游 get_user_messages；skill_publish 实时聚合自上游 external/notifications，不持久化本地）。read/delete 按 ID 前缀路由：kb: 透传下游，skill_publish: 转发上游。" },
     { "name": "IntegrationMemory",   "description": "记忆统计（需 HERMES_INTEGRATION=1）。聚合展示会话天数、定时任务和记忆文件。" },
     { "name": "IntegrationAssistantBubbles", "description": "Profile 助理气泡（需 HERMES_INTEGRATION=1）。读取 `<profile.path>/assistant_bubbles.json` 独立缓存；定时任务槽位实时统计，不写回。" },
-    { "name": "IntegrationWebuiAppearance", "description": "WebUI 外观配置（需 HERMES_INTEGRATION=1）。只读读取进程级 `{HERMES_HOME}/webui-appearance/` 下的 JSON 与资源文件；不做 schema 校验或写入。" }
+    { "name": "IntegrationWebuiAppearance", "description": "WebUI 外观配置（需 HERMES_INTEGRATION=1）。只读读取进程级 `{HERMES_HOME}/webui-appearance/` 下的 JSON 与资源文件；不做 schema 校验或写入。" },
+    { "name": "IntegrationConfig", "description": "运行时环境配置（需 HERMES_INTEGRATION=1）。仅返回白名单环境变量 BROWSER_PREVIEW_URL。" }
   ],
   "paths": {
 
@@ -2079,6 +2080,34 @@
           },
           "400": { "description": "配置文件不是合法 JSON" },
           "404": { "description": "外观配置文件不存在" }
+        }
+      }
+    },
+    "/api/integration/config": {
+      "get": {
+        "tags": ["IntegrationConfig"],
+        "summary": "获取浏览器预览地址",
+        "description": "需 `HERMES_INTEGRATION=1`。只返回进程当前生效的 `BROWSER_PREVIEW_URL`，不枚举其它环境变量。",
+        "responses": {
+          "200": {
+            "description": "当前生效的浏览器预览地址",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["browser_preview_url"],
+                  "properties": {
+                    "browser_preview_url": {
+                      "type": "string",
+                      "description": "BROWSER_PREVIEW_URL 的当前生效值"
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "500": { "description": "BROWSER_PREVIEW_URL 未配置" }
         }
       }
     },

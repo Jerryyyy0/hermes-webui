@@ -14,6 +14,7 @@ export SKILLHUB_URL=http://127.0.0.1:8000   # optional; SkillHub market only (se
 - **Profile enrich** — `GET /api/profiles` adds nested `info` from `info.json`. UI via `hermes_profiles.js` (logo picker, edit, create).
 - **Profile assistant bubbles** — `GET /api/integration/assistant_bubbles?profile=<name>` returns fixed-order short assistant avatar bubbles from independent `<profile.path>/assistant_bubbles.json`; scheduled-task copy is computed live.
 - **WebUI appearance** — `GET /api/integration/webui_appearance` reads `{HERMES_HOME}/webui-appearance/webui-appearance.json` as-is; `GET /api/integration/webui_appearance/file?path=` streams assets under that directory.
+- **Runtime configuration** — `GET /api/integration/config` returns the allowlisted effective `BROWSER_PREVIEW_URL` value.
 - **Cross-profile cron** — Cron Hub and grouped cron APIs across profiles.
 - **SkillHub** — UI and `/api/skillhub/*` routes are active only when `SKILLHUB_URL` is also set.
 - **Egress policy (iptables)** — gated API to apply iptables open/whitelist policies (see below). **Off by default**; requires `HERMES_EGRESS_POLICY_ENABLED=1`.
@@ -366,6 +367,30 @@ curl -sS 'http://127.0.0.1:8787/api/integration/webui_appearance/file?path=src/l
 
 Implementation: [`integration/webui_appearance/`](webui_appearance/). Route seam: `api/routes.py` only imports and delegates the GET handler.
 
+### Runtime configuration（`HERMES_INTEGRATION=1`）
+
+`GET /api/integration/config` returns only the effective browser preview URL. It reads the process environment after `server.py` applies its configured value or default; it does not enumerate or expose arbitrary environment variables.
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/api/integration/config` | 返回 `BROWSER_PREVIEW_URL` 的当前生效值 |
+
+成功响应：
+
+```json
+{
+  "browser_preview_url": "http://192.168.1.139:38787/browser-preview/"
+}
+```
+
+Example:
+
+```bash
+curl -sS 'http://127.0.0.1:8787/api/integration/config'
+```
+
+如果进程环境中缺少该变量，返回 HTTP `500` 和中文 `error` 字段。实现见 [`integration/env_config/`](env_config/)，路由接缝位于 `api/routes.py`。
+
 ### 知识库 BFF 代理（`KNOWLEDGE_BASE_URL`）
 
 前端将身份字段和业务字段放入请求体，经 WebUI 转发至下游知识库服务
@@ -515,6 +540,7 @@ Response includes global `stats`: `{ hub, installed, not_installed, custom }` ac
 | `knowledge_base/` | `/api/integration/knowledge_base/*` → `{KNOWLEDGE_BASE_URL}/knowledge_base/*`; `turn_references.py` normalizes the two IThink KB MCP search results for Session Manifest. `integration/session_manifest/manifest.py` keeps only the extraction/serialization seam. |
 | `notifications/` | `/api/integration/notifications/*` — 通知存储（`notifications.db`）与知识库消息聚合 |
 | `webui_appearance/` | `GET /api/integration/webui_appearance` + `/file` — 读 `{HERMES_HOME}/webui-appearance/` 配置与资源 |
+| `env_config/` | `GET /api/integration/config` — 返回白名单环境配置 `BROWSER_PREVIEW_URL` |
 | `identity/` | `GET /api/integration/webui_login` → Control Plane `/api/identity/lookup`；进程内身份缓存（`session_store.py`） |
 | `logout/` | `POST /api/integration/webui_logout` → `{ZHILING_LOGOUT_API_URL}/api/logout` |
 | `skills/skillhub.py` | Upstream httpx client |

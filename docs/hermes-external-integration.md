@@ -3,6 +3,13 @@
 本 Fork 的外部集成实现位于 `integration/`。上游文件只保留必要的导入、注册或
 参数传递，以降低上游同步冲突。
 
+## Runtime configuration
+
+`integration/env_config/` 提供只读的 `GET /api/integration/config`。接口只返回白名单
+环境变量 `BROWSER_PREVIEW_URL` 的当前进程值，不枚举其它环境变量；
+`api/routes.py` 仅保留 GET handler 的薄委派。该接口仅在 `HERMES_INTEGRATION=1`
+时启用。
+
 ## External Manifest Artifact References
 
 `integration/session_manifest/external_references/` 承载外部绝对路径 Artifact 的策略、安全打开、登记
