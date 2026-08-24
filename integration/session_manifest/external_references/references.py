@@ -30,6 +30,26 @@ def is_external_artifact_reference(row: dict[str, Any] | None) -> bool:
     return normalize_external_path(str(row.get("path") or "")) is not None
 
 
+def is_registered_external_preview_reference(row: dict[str, Any] | None) -> bool:
+    """Return whether a persisted row may use the absolute-path preview branch.
+
+    ``media`` keeps its separate Artifact provenance and derivation rules, but a
+    persisted absolute media Artifact must still be able to use the existing
+    read-only workspace preview URL.  This grants no path-only access: callers
+    use it only after an exact lookup in ``session_manifest_records``.
+    """
+    if not isinstance(row, dict):
+        return False
+    if str(row.get("record_kind") or "").strip() != "artifact":
+        return False
+    if str(row.get("preview") or "").strip() != "file":
+        return False
+    source_tool = str(row.get("source_tool") or "").strip()
+    if source_tool == _MEDIA_SOURCE:
+        return normalize_external_path(str(row.get("path") or "")) is not None
+    return is_external_artifact_reference(row)
+
+
 def external_artifact_path_is_safe(row: dict[str, Any] | None) -> bool:
     if not is_external_artifact_reference(row):
         return False
@@ -66,6 +86,6 @@ def registered_external_artifact(path: str | Path | None) -> dict[str, Any] | No
         return None
     for raw in rows:
         row = dict(raw)
-        if is_external_artifact_reference(row):
+        if is_registered_external_preview_reference(row):
             return row
     return None

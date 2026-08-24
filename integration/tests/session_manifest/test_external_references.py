@@ -19,12 +19,18 @@ def _patch_external_state(monkeypatch, state_dir: Path) -> None:
     monkeypatch.setattr('integration.session_manifest.external_references.references.STATE_DIR', state_dir)
 
 
-def _persist_external_artifact(state_dir: Path, workspace: Path, external: Path) -> None:
+def _persist_external_artifact(
+    state_dir: Path,
+    workspace: Path,
+    external: Path,
+    *,
+    source_tool: str = 'assistant_prose',
+) -> None:
     session = Session(session_id='externalartifact01', workspace=str(workspace), messages=[])
     persisted = upsert_manifest_records(
         session,
         'turn:0',
-        [{'path': external.as_posix(), 'source_tool': 'assistant_prose', 'preview': 'file'}],
+        [{'path': external.as_posix(), 'source_tool': source_tool, 'preview': 'file'}],
     )
     assert persisted[0]['path'] == external.as_posix()
     assert (state_dir / 'session_manifest.db').is_file()
@@ -83,6 +89,29 @@ def test_registered_session_attachment_can_use_external_artifact_preview(tmp_pat
     unregistered = attachment.parent / 'not-an-artifact.pdf'
     unregistered.write_bytes(b'%PDF-1.4 unregistered')
     assert registered_external_artifact(unregistered) is None
+
+
+def test_registered_media_attachment_can_use_existing_artifact_preview_url(tmp_path, monkeypatch):
+    state_dir = tmp_path / 'state'
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir()
+    attachment = state_dir / 'attachments' / 'attachment-session-02' / 'source.pdf'
+    attachment.parent.mkdir(parents=True)
+    attachment.write_bytes(b'%PDF-1.4 media attachment')
+    _patch_external_state(monkeypatch, state_dir)
+    _persist_external_artifact(state_dir, workspace, attachment, source_tool='media')
+
+    assert registered_external_artifact(attachment) is not None
+
+    handler = MagicMock()
+
+    def serve_and_close(*args, **kwargs):
+        os.close(kwargs['opened_fd'])
+        return True
+
+    with patch('api.routes._serve_file_bytes', side_effect=serve_and_close) as serve:
+        assert serve_registered_external_artifact(handler, attachment.as_posix()) is True
+    assert serve.call_args.args[1] == attachment
 
 
 def test_registered_hermes_memory_can_use_external_artifact_preview(tmp_path, monkeypatch):

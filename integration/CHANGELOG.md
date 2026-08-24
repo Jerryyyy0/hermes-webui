@@ -153,6 +153,8 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Fixed
 
+- **Absolute media Artifact preview** — 已登记的绝对 `source_tool=media` Artifact 现在可通过既有 `GET /api/integration/workspace/file?path=...` 只读预览，不再被外部直接引用的来源判断误拒绝；`MEDIA:` 的 Artifact 生成规则不变。
+
 - **Cron 空 sidecar fallback 顺序** — 当 cron output 先于 Agent transcript 到达时，既有空 sidecar 会同时补回 user anchor 和 assistant fallback，不再让 assistant 消息排在后续 WebUI user 之前。
 
 - **No-agent cron error classification** — 脚本任务失败现在持久化为 `cron_script_error`，展示「脚本执行失败」及「脚本错误详情」，不再因 `Script not found` 等文本被错误标注为 `model_not_found`。重新 materialize 时会替换可由同一脚本输出严格确认的旧 Provider 错误记录。

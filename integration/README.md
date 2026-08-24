@@ -349,7 +349,7 @@ curl -sS -X POST 'http://127.0.0.1:8787/api/integration/workspace/file/delete' \
 
 UI（`HERMES_INTEGRATION=1`）：左侧 Rail / 移动顶栏 **Workspace 文件**（`integrationWorkspace`），`hermes_integration_workspace.js` + `hermes_integration_workspace.css`。左栏为平铺列表（服务端搜索/类型过滤/排序、分页「加载更多」、单行删除与多选批量删除、刷新），中间主区只读预览（文本 / Markdown / 图片 / PDF / HTML / 媒体）。删除后会刷新 session manifest，成果 chip 可标为已过期。与会话绑定的右侧 Workspace 面板（`/api/list` + `session_id`）并存。
 
-Session Manifest 的 `preview=file` 若返回绝对 `path`，前端仍调用此 URL；服务端先按精确路径查询既有 Artifact row，再以无跟随 fd 校验读取。聊天附件目录（`HERMES_WEBUI_ATTACHMENT_DIR/<session_id>/`，默认 `{STATE_DIR}/attachments/<session_id>/`）及 `HERMES_HOME/memories/` 也可使用此只读预览，但前提同样是存在精确的持久化 Artifact row；上传文件不会因此自动成为 Artifact，两个目录都不会被枚举。任意未登记、其余受保护、已删除或 symlink 路径均返回 404。外部文件只能预览/下载，前端不显示编辑或保存操作。
+Session Manifest 的 `preview=file` 若返回绝对 `path`，前端仍调用此 URL；服务端先按精确路径查询既有 Artifact row，再以无跟随 fd 校验读取。外部直接引用和绝对 `media` Artifact 都可使用该只读分支，后者不改变 `MEDIA:` 的独立生成规则。聊天附件目录（`HERMES_WEBUI_ATTACHMENT_DIR/<session_id>/`，默认 `{STATE_DIR}/attachments/<session_id>/`）及 `HERMES_HOME/memories/` 也可使用此只读预览，但前提同样是存在精确的持久化 Artifact row；上传文件不会因此自动成为 Artifact，两个目录都不会被枚举。任意未登记、其余受保护、已删除或 symlink 路径均返回 404。外部文件只能预览/下载，前端不显示编辑或保存操作。
 
 ### WebUI appearance（`HERMES_INTEGRATION=1`）
 
