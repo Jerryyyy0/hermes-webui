@@ -24034,13 +24034,6 @@ def _mask_secrets(obj):
     return masked
 
 
-def _mask_mcp_headers(headers):
-    """Redact every MCP header value before returning it to the WebUI."""
-    if not isinstance(headers, dict):
-        return {}
-    return {str(name): _MASKED_PLACEHOLDER for name in headers}
-
-
 def _parse_mcp_enabled(value) -> bool:
     """Parse Hermes MCP ``enabled`` values without raising on bad config."""
     if value is None:
@@ -24203,7 +24196,7 @@ def _server_summary(name, cfg, runtime_status=None):
     if "url" in cfg:
         out["transport"] = _mcp_transport_from_cfg(cfg)
         if "headers" in cfg:
-            out["headers"] = _mask_mcp_headers(cfg["headers"])
+            out["headers"] = cfg["headers"]
         out["url"] = cfg["url"]
     elif "command" in cfg:
         out["transport"] = "stdio"

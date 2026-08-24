@@ -169,7 +169,7 @@ PUT 保存 → POST /api/mcp/reload → GET /api/mcp/servers（看 status / tool
 | `name` | `string` | 服务器名称 |
 | `transport` | `string` | `stdio` \| `http` \| `sse` \| `invalid` |
 | `url` | `string` | HTTP/SSE 时存在 |
-| `headers` | `object` | HTTP/SSE 请求头；保留 header 名称，所有 value 统一返回 `••••••`（**已脱敏**） |
+| `headers` | `object` | HTTP/SSE 请求头（按配置原样返回） |
 | `command` | `string` | stdio 时存在 |
 | `args` | `string[]` | stdio 参数 |
 | `env` | `object` | stdio 环境变量（**已脱敏**） |

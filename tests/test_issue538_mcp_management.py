@@ -123,12 +123,12 @@ class TestMcpList:
         assert by_name['searxng']['active'] is True
         assert by_name['searxng']['tool_count'] == 3
         assert by_name['web-reader']['status'] == 'configured'
-        assert '••••' in by_name['web-reader']['headers']['Authorization']
-        assert by_name['web-reader']['headers']['X-IThink-Account'] == '••••••'
-        assert by_name['web-reader']['headers']['X-IThink-UUID'] == '••••••'
-        assert by_name['web-reader']['headers']['X-IThink-IsPersonal'] == '••••••'
-        assert by_name['web-reader']['headers']['Accept'] == '••••••'
-        assert 'real-user-uuid' not in json.dumps(payload)
+        assert by_name['web-reader']['headers']['Authorization'] == 'Bearer secret123'
+        assert by_name['web-reader']['headers']['X-IThink-Account'] == 'admin'
+        assert by_name['web-reader']['headers']['X-IThink-UUID'] == 'real-user-uuid'
+        assert by_name['web-reader']['headers']['X-IThink-IsPersonal'] == '1'
+        assert by_name['web-reader']['headers']['Accept'] == 'application/json'
+        assert 'real-user-uuid' in json.dumps(payload)
         assert by_name['disabled']['enabled'] is False
         assert by_name['disabled']['active'] is False
         assert by_name['disabled']['status'] == 'disabled'
@@ -151,7 +151,7 @@ class TestMcpList:
         summary = _server_summary('web-reader', SAMPLE_MCP['web-reader'])
         assert summary['transport'] == 'http'
         assert summary['url'] == 'http://localhost:3001/mcp'
-        assert '••••' in summary['headers']['Authorization']
+        assert summary['headers']['Authorization'] == 'Bearer secret123'
 
     def test_server_summary_sse(self):
         summary = _server_summary('legacy-sse', SAMPLE_MCP['legacy-sse'])
