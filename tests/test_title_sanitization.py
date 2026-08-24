@@ -1,5 +1,4 @@
 import unittest
-from pathlib import Path
 
 from api.streaming import (
     _fallback_title_from_exchange,
@@ -63,6 +62,9 @@ class TestGeneratedTitleSanitization(unittest.TestCase):
             "Conversation topic",
         )
 
-    def test_title_generation_source_has_no_cjk_literals(self):
-        src = Path("api/streaming.py").read_text(encoding="utf-8")
-        self.assertNotRegex(src, r"[\u4e00-\u9fff]", "title generation code should stay English-only")
+    def test_title_prompts_are_chinese(self):
+        from api.streaming import _title_prompts
+
+        _, prompts = _title_prompts("Summarize this title routing bug.", "The title route needs a fix.")
+        self.assertTrue(all("标题必须使用简体中文" in prompt for prompt in prompts))
+        self.assertTrue(all("Generate a short session title" not in prompt for prompt in prompts))

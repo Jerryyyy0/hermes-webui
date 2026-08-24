@@ -95,6 +95,7 @@ from integration.agent_message_semantics.audit import log_control_message
 from integration.agent_message_semantics.classifier import is_non_anchor_control_message
 from integration.agent_message_semantics.projection import drop_non_display_messages
 from integration.session_titles.policy import (
+    build_title_prompts as _build_title_prompts,
     should_validate_source_language_match as _should_validate_title_source_language_match,
     title_language_rule as _title_language_rule,
 )
@@ -3319,31 +3320,7 @@ def _title_language_mismatch(user_text: str, title: str) -> bool:
 
 
 def _title_prompts(user_text: str, assistant_text: str) -> tuple[str, list[str]]:
-    qa = f"User question:\n{user_text[:500]}\n\nAssistant answer:\n{assistant_text[:500]}"
-    language_rule = _title_prompt_language_rule(user_text)
-    prompts = [
-        (
-            "Generate a short session title from this conversation start.\n"
-            "Use BOTH the user's question and the assistant's visible answer.\n"
-            f"{language_rule}"
-            "Return only the title text, 3-8 words, as a topic label.\n"
-            "Do not use markdown, bullets, labels, or prefixes like Session Title:.\n"
-            "Do not output a full sentence.\n"
-            "Do not output acknowledgements or completion phrases like OK, done, or all set.\n"
-            "Do not describe internal reasoning.\n"
-            "Bad: The user is asking..., OK, all set.\n"
-            "Good: Title Generation Test, Clarify Dialog Layout, GitHub Issue Triage"
-        ),
-        (
-            "Rewrite this conversation start as a concise noun-phrase title.\n"
-            "Use the actual topic, not the task outcome.\n"
-            f"{language_rule}"
-            "Return title text only.\n"
-            "Do not use markdown, bullets, labels, or prefixes like Session Title:.\n"
-            "Never output acknowledgements, completion status, or meta commentary."
-        ),
-    ]
-    return qa, prompts
+    return _build_title_prompts(user_text, assistant_text)
 
 
 def _is_minimax_route(provider: str = '', model: str = '', base_url: str = '') -> bool:

@@ -262,13 +262,15 @@ class TestGenerateTitleRawViaAuxTimeout(unittest.TestCase):
         self.assertEqual(result, 'Alte Session Bilder')
         self.assertEqual(status, 'llm_aux')
         messages = captured.get('messages') or []
-        self.assertIn('Write the title in Simplified Chinese', messages[0]['content'])
+        self.assertIn('标题必须使用简体中文', messages[0]['content'])
+        self.assertIn('请根据这段对话开头生成一个简短的会话标题', messages[0]['content'])
+        self.assertNotIn('Generate a short session title', messages[0]['content'])
         self.assertNotIn('Match the language of the user question', messages[0]['content'])
 
     def test_title_prompt_language_rule_is_fixed_to_simplified_chinese(self):
         from api.streaming import _title_prompt_language_rule
 
-        expected = "Write the title in Simplified Chinese.\n"
+        expected = "标题必须使用简体中文。\n"
         examples = [
             'Warum werden hier die Bilder nicht angezeigt?',
             'Pourquoi les images ne sont-elles pas affichées ?',
@@ -347,7 +349,7 @@ class TestGenerateTitleRawViaAuxTimeout(unittest.TestCase):
         code_only = "print('hello')\nfor i in range(3):\n    print(i)"
 
         self.assertEqual(_detect_title_language(code_only), '')
-        self.assertEqual(_title_prompt_language_rule(code_only), 'Write the title in Simplified Chinese.\n')
+        self.assertEqual(_title_prompt_language_rule(code_only), '标题必须使用简体中文。\n')
         self.assertFalse(_title_language_mismatch(code_only, 'Python Hello Loop'))
 
     def test_configured_api_key_is_not_sent_to_caller_supplied_route(self):

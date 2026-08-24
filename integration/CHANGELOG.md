@@ -55,6 +55,8 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Changed
 
+- **Session title prompt localization** — 标题模型收到的两套 system prompt 及其用户消息包装现在全部使用中文；首次生成、非首轮刷新和手动重生成继续共用原有输入截断与重试规则。
+
 - **Knowledge base BFF proxy contract** — 10 个公开 BFF URL 的最后一层路径现与下游知识库接口名一致，例如 `list` 改为 `list_ps_knowledge_bases`。除 `upload_artifacts` 外，JSON 请求体不再经过 WebUI 校验、字段转换或默认值注入，而是原样转发给同名下游接口；响应透传与下游调用保持不变。
 
 - **Knowledge base validation copy** — 知识库 BFF 的参数缺失、数组为空或数量不一致等 WebUI 自身校验错误统一改为中文提示。
