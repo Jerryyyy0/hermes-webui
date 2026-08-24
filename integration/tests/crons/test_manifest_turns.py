@@ -111,7 +111,7 @@ def test_normalize_cron_manifest_messages_preserves_historical_stamped_internal_
 
 def test_manifest_get_reuses_normalized_cron_view(monkeypatch):
     import api.models as models
-    from api.session_manifest import _load_display_messages
+    from integration.session_manifest.manifest import _load_display_messages
 
     merged = _tool_trace()
     merged[0]["_turn_key"] = "turn:1"
@@ -143,7 +143,7 @@ def test_manifest_get_reuses_normalized_cron_view(monkeypatch):
 
 def test_manifest_get_does_not_change_non_cron_messages(monkeypatch):
     import api.models as models
-    from api.session_manifest import _load_display_messages
+    from integration.session_manifest.manifest import _load_display_messages
 
     merged = _tool_trace()
     session = SimpleNamespace(
@@ -165,7 +165,7 @@ def test_manifest_get_does_not_change_non_cron_messages(monkeypatch):
 
 def test_normalized_cron_artifact_stays_on_real_turn(tmp_path):
     from api.models import Session
-    from api.session_manifest import (
+    from integration.session_manifest.manifest import (
         _message_turns,
         extract_turn_artifact_entries_for_manifest,
     )
@@ -197,7 +197,7 @@ def test_normalized_cron_artifact_stays_on_real_turn(tmp_path):
 
 
 def test_cron_turn_stamping_skips_context_anchor():
-    from api.session_manifest import _message_turns
+    from integration.session_manifest.manifest import _message_turns
     from integration.crons.hooks import (
         _stamp_cron_manifest_turn_keys,
         _validate_contiguous_turn_keys,
@@ -225,10 +225,10 @@ def test_cron_turn_stamping_skips_context_anchor():
 
 def test_cron_manifest_store_artifact_aligns_with_real_turn(tmp_path, monkeypatch):
     import api.models as models
-    import api.session_manifest_store as manifest_store
+    import integration.session_manifest.store as manifest_store
     from api.models import Session
-    from api.session_manifest import build_session_manifest
-    from api.session_manifest_store import upsert_manifest_records
+    from integration.session_manifest.manifest import build_session_manifest
+    from integration.session_manifest.store import upsert_manifest_records
     from integration.crons.hooks import _stamp_cron_manifest_turn_keys
 
     monkeypatch.setattr(manifest_store, "STATE_DIR", tmp_path / "state")
@@ -259,7 +259,7 @@ def test_cron_manifest_store_artifact_aligns_with_real_turn(tmp_path, monkeypatc
 
 
 def test_prepare_cron_session_for_reply_stamps_prefix_before_followup(monkeypatch):
-    import api.session_manifest_store as manifest_store
+    import integration.session_manifest.store as manifest_store
     import api.streaming as streaming
 
     persisted: list[str] = []
@@ -297,7 +297,7 @@ def test_prepare_cron_session_for_reply_stamps_prefix_before_followup(monkeypatc
 
 
 def test_prepare_cron_session_for_reply_backfills_legacy_execution_boundary(monkeypatch):
-    import api.session_manifest_store as manifest_store
+    import integration.session_manifest.store as manifest_store
     import api.streaming as streaming
     import integration.crons.hooks as hooks
 
@@ -347,7 +347,7 @@ def test_prepare_cron_session_for_reply_remains_closed_without_authoritative_bou
 
 
 def test_prepare_cron_session_for_reply_preserves_followup_suffix_after_backfill(monkeypatch):
-    import api.session_manifest_store as manifest_store
+    import integration.session_manifest.store as manifest_store
     import api.streaming as streaming
     import integration.crons.hooks as hooks
 
@@ -442,7 +442,7 @@ def test_persist_cron_turn_artifacts_stamps_one_real_turn_before_decision(monkey
 def test_persist_cron_turn_artifacts_keeps_real_turns_contiguous(monkeypatch):
     import api.models as models
     import api.streaming as streaming
-    import api.session_manifest_store as manifest_store
+    import integration.session_manifest.store as manifest_store
 
     monkeypatch.setattr(manifest_store, "load_manifest_decided_turn_keys", lambda _session: set())
     messages = _tool_trace()

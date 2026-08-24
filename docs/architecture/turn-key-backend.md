@@ -18,7 +18,7 @@
 
 ### 2.1 生成下一个 turn_key：`_next_turn_key()`
 
-**文件**: `api/session_manifest.py` 第 905–917 行
+**文件**: `integration/session_manifest/manifest.py` 第 905–917 行
 
 ```python
 def _next_turn_key(messages: list) -> str:
@@ -46,7 +46,7 @@ def _next_turn_key(messages: list) -> str:
 当用户通过聊天提交一条新消息（POST 到 `/api/chat/start` 或类似路由），服务端构建 user message 时立即为其分配 `_turn_key`：
 
 ```python
-from api.session_manifest import _next_turn_key
+from integration.session_manifest.manifest import _next_turn_key
 user_msg["_turn_key"] = _next_turn_key(existing)
 s.messages.append(user_msg)
 ```
@@ -70,7 +70,7 @@ s.messages.append(user_msg)
 
 ### 2.4 存量会话兼容
 
-**文件**: `api/session_manifest.py` 第 921–951 行 `_ensure_turn_keys()`
+**文件**: `integration/session_manifest/manifest.py` 第 921–951 行 `_ensure_turn_keys()`
 
 当 `/api/session/manifest` 构建时调用 `_ensure_turn_keys()`，它只返回 Manifest 自有的消息副本，不修改 session，也不为混合 keyed/unkeyed transcript 猜号。完全没有 `_turn_key` 的旧会话仍由 `_message_turns()` 降级使用消息数组索引；混合会话的缺 key 行记录在 `diagnostics.missing_turn_key_message_indices`。
 
@@ -189,7 +189,7 @@ turn，并输出 per-turn 投影。Artifacts 的长期权威来源是 profile-aw
 
 ### 4.3 `_message_turns()` — 从消息推导 turns
 
-**文件**: `api/session_manifest.py` 第 954–973 行
+**文件**: `integration/session_manifest/manifest.py` 第 954–973 行
 
 核心函数，扫描所有 user 消息推导出 turn 列表：
 
@@ -222,7 +222,7 @@ def _message_turns(messages: list) -> list[dict[str, Any]]:
 
 ### 4.4 turn 与 tool event 的关联：`_turn_key_for_event()`
 
-**文件**: `api/session_manifest.py` 第 976–987 行
+**文件**: `integration/session_manifest/manifest.py` 第 976–987 行
 
 ```python
 def _turn_key_for_event(event: ToolEvent, turns: list[dict[str, Any]]) -> str | None:
@@ -248,7 +248,7 @@ def _turn_key_for_event(event: ToolEvent, turns: list[dict[str, Any]]) -> str | 
 
 ### 4.6 Turn Reconcile（轮次交付物归因）
 
-**`_apply_turn_reconcile_to_manifest_records()`**（`api/session_manifest.py` 第 1269 行起）在整个 manifest 构建时，对每一轮执行 reconcile：
+**`_apply_turn_reconcile_to_manifest_records()`**（`integration/session_manifest/manifest.py` 第 1269 行起）在整个 manifest 构建时，对每一轮执行 reconcile：
 
 1. 对每个 turn 调用 `_turn_message_slice(messages, turn_key)` 切出该轮的消息切片
 2. 收集该切片内的 tool events、MEDIA 标记、交付 prose
@@ -326,7 +326,7 @@ api/streaming.py: _manifest_turn_key = stream_turn_key
            keyed eager/Agent duplicate 折叠为一行并持久化
     │
     ▼
-api/session_manifest.py: build_session_manifest()
+integration/session_manifest/manifest.py: build_session_manifest()
     │  ← _ensure_turn_keys() 复制消息，不猜 active turn 编号
     │  ← _message_turns() 按 user msg 切分 turn，优先使用 _turn_key
     │  ← _turn_key_for_event() 将 tool events 归入对应 turn

@@ -7054,7 +7054,7 @@ def _turn_aligned_window_indices(source: list, limit: int) -> tuple[int, int]:
   even when it exceeds ``limit``; otherwise whole turns are accumulated backward
     until adding another turn would exceed the budget.
     """
-    from api.session_manifest import _message_turns
+    from integration.session_manifest.manifest import _message_turns
 
     limit = max(1, int(limit))
     end_idx = len(source)
@@ -11279,7 +11279,7 @@ def handle_get(handler, parsed) -> bool:
         if not sid:
             return bad(handler, "session_id required", 400)
         try:
-            from api.session_manifest import build_session_manifest, merge_manifest_delta, _wire_todos
+            from integration.session_manifest.manifest import build_session_manifest, merge_manifest_delta, _wire_todos
             session = get_session(sid)
             source_info = {}
             manifest = build_session_manifest(session, source_info=source_info)
@@ -13423,7 +13423,7 @@ def handle_post(handler, parsed) -> bool:
         except Exception:
             logger.debug("Failed to delete run journal for deleted session %s", sid)
         try:
-            from api.session_manifest_store import delete_session_manifest_records
+            from integration.session_manifest.store import delete_session_manifest_records
 
             delete_session_manifest_records(sid)
         except Exception:
@@ -13515,7 +13515,7 @@ def handle_post(handler, parsed) -> bool:
             s.tool_calls = []
             s.turn_artifacts = {}
             try:
-                from api.session_manifest_store import delete_session_manifest_records
+                from integration.session_manifest.store import delete_session_manifest_records
 
                 delete_session_manifest_records(sid)
             except Exception:
@@ -13624,8 +13624,8 @@ def handle_post(handler, parsed) -> bool:
             if isinstance(getattr(s, 'context_messages', None), list):
                 s.context_messages = s.context_messages[:keep]
             try:
-                from api.session_manifest import _message_turns
-                from api.session_manifest_store import delete_session_manifest_turns
+                from integration.session_manifest.manifest import _message_turns
+                from integration.session_manifest.store import delete_session_manifest_turns
 
                 keep_turn_keys = {
                     str(turn.get('turn_key') or '').strip()
@@ -16582,11 +16582,22 @@ def _close_fd_quietly(fd: int | None) -> None:
         pass
 
 
-def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_control: str, *, csp: str | None = None, anchor_root: Path | None = None):
+def _serve_file_bytes(
+    handler,
+    target: Path,
+    mime: str,
+    disposition: str,
+    cache_control: str,
+    *,
+    csp: str | None = None,
+    anchor_root: Path | None = None,
+    opened_fd: int | None = None,
+):
     """Serve a file with correct MIME/disposition and optional byte-range support."""
-    fd = None
+    fd = opened_fd
     try:
-        fd = _open_file_read_fd(target, anchor_root)
+        if fd is None:
+            fd = _open_file_read_fd(target, anchor_root)
         file_size = os.fstat(fd).st_size
     except PermissionError:
         _close_fd_quietly(fd)
@@ -18818,7 +18829,7 @@ def _checkpoint_user_message_for_eager_session_save(
         user_msg["timestamp"] = int(started_at)
     if attachments:
         user_msg["attachments"] = list(attachments)
-    from api.session_manifest import _next_turn_key
+    from integration.session_manifest.manifest import _next_turn_key
     user_msg["_turn_key"] = str(turn_key or "").strip() or _next_turn_key(existing)
     s.messages.append(user_msg)
     # Preserve the truncation boundary after committing a post-truncation turn.
@@ -18835,7 +18846,7 @@ def _turn_key_for_pending_user_message(s, msg: str) -> str:
     2. 否则，基于现存用户消息数计算 _next_turn_key（只统计 role=user 的消息）
     """
     messages = list(getattr(s, "messages", None) or [])
-    from api.session_manifest import _next_turn_key
+    from integration.session_manifest.manifest import _next_turn_key
     if messages:
         latest = messages[-1]
         if isinstance(latest, dict) and latest.get("role") == "user":
@@ -19258,7 +19269,7 @@ def _start_chat_stream_for_session(
                 needs_stale_cleanup = False
                 prepared_turn_key = ""
                 if str(getattr(s, "source_tag", "") or "") == "cron":
-                    from api.session_manifest import _next_turn_key
+                    from integration.session_manifest.manifest import _next_turn_key
                     from integration.crons.hooks import prepare_cron_session_for_reply
 
                     preparation = prepare_cron_session_for_reply(s)
@@ -19285,7 +19296,7 @@ def _start_chat_stream_for_session(
                         }
                     prepared_turn_key = str(turn_key_override).strip()
                 if not prepared_turn_key:
-                    from api.session_manifest import _next_turn_key
+                    from integration.session_manifest.manifest import _next_turn_key
                     prepared_turn_key = _next_turn_key(getattr(s, "messages", None) or [])
                 stream_id = uuid.uuid4().hex
                 diag.stage("save_pending_state") if diag else None
@@ -20587,7 +20598,7 @@ def _handle_chat_sync(handler, body):
         return bad(handler, str(e), status=status)
     with _get_session_agent_lock(s.session_id):
         s.workspace = workspace
-        from api.session_manifest import _next_turn_key
+        from integration.session_manifest.manifest import _next_turn_key
         sync_turn_key = _next_turn_key(getattr(s, "messages", None) or [])
         _sync_requested_provider = (
             body.get("model_provider") if "model_provider" in body else getattr(s, "model_provider", None)

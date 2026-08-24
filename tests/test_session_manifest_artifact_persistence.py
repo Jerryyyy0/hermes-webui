@@ -56,13 +56,13 @@ def _manual_cron_session(workspace, *, session_id: str = "cron_manual_artifact01
 
 
 def test_manual_cron_turn_persists_write_file_artifact(tmp_path, monkeypatch):
-    from api.session_manifest_store import load_manifest_records
+    from integration.session_manifest.store import load_manifest_records
     from api.streaming import _persist_turn_artifact_paths
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     session = _manual_cron_session(workspace)
-    monkeypatch.setattr("api.session_manifest_store.STATE_DIR", tmp_path / "state")
+    monkeypatch.setattr("integration.session_manifest.store.STATE_DIR", tmp_path / "state")
 
     result = _persist_turn_artifact_paths(session, "turn:2")
 
@@ -79,7 +79,7 @@ def test_manual_cron_turn_persists_write_file_artifact(tmp_path, monkeypatch):
 
 
 def test_artifact_extraction_failure_is_observable(tmp_path, monkeypatch, caplog):
-    from api import session_manifest
+    from integration.session_manifest import manifest as session_manifest
     from api.streaming import _persist_turn_artifact_paths
 
     workspace = tmp_path / "workspace"
@@ -99,7 +99,7 @@ def test_artifact_extraction_failure_is_observable(tmp_path, monkeypatch, caplog
 
 
 def test_artifact_store_failure_is_observable_not_empty(tmp_path, monkeypatch, caplog):
-    from api import session_manifest_store
+    from integration.session_manifest import store as session_manifest_store
     from api.streaming import _persist_turn_artifact_paths
 
     workspace = tmp_path / "workspace"

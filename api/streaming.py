@@ -96,6 +96,7 @@ from integration.agent_message_semantics.classifier import is_non_anchor_control
 from integration.agent_message_semantics.projection import drop_non_display_messages
 from integration.session_titles.policy import (
     build_title_prompts as _build_title_prompts,
+    fallback_title_from_exchange as _fallback_title_from_exchange_policy,
     should_validate_source_language_match as _should_validate_title_source_language_match,
     title_language_rule as _title_language_rule,
 )
@@ -1715,7 +1716,7 @@ def _persist_turn_artifact_paths(
             })
 
     try:
-        from api.session_manifest import (
+        from integration.session_manifest.manifest import (
             artifact_workspace_root_for_session,
             _skills_dir_for_session,
             extract_turn_artifact_entries_for_manifest,
@@ -1789,7 +1790,7 @@ def _persist_turn_artifact_paths(
     if not _store_entries:
         _store_entries = [{'path': '', 'source_tool': 'assistant_prose', 'preview': 'file'}]
     try:
-        from api.session_manifest_store import upsert_manifest_records
+        from integration.session_manifest.store import upsert_manifest_records
         persisted = upsert_manifest_records(s, _turn_key, _store_entries)
     except Exception:
         logger.warning(
@@ -3742,86 +3743,15 @@ def _put_title_status(put_event, session_id: str, status: str, reason: str = '',
 
 def _fallback_title_from_exchange(user_text: str, assistant_text: str) -> Optional[str]:
     """Generate a readable local fallback title when LLM title generation fails."""
-    user_text = (user_text or '').strip()
-    assistant_text = _strip_thinking_markup(assistant_text or '').strip()
-    if not user_text:
-        return None
-    user_text = _strip_workspace_prefix(user_text)
-    user_text = re.sub(r'\s+', ' ', user_text).strip()
-    assistant_text = re.sub(r'\s+', ' ', assistant_text).strip()
-    combined = f"{user_text} {assistant_text}".strip().lower()
-    combined_raw = f"{user_text} {assistant_text}".strip()
-    def _contains_latin(text: str) -> bool:
-        return bool(re.search(r'[A-Za-z]', text or ''))
-
-    def _extract_named_topic(text: str) -> str:
-        m = re.search(r'"([^"\n]{2,24})"', text)
-        if m:
-            return (m.group(1) or '').strip()
-        m = re.search(r'“([^”\n]{2,24})”', text)
-        if m:
-            return (m.group(1) or '').strip()
-        return ''
-
-    topic_name = _extract_named_topic(combined_raw)
-    if topic_name:
-        if not _contains_latin(topic_name):
-            if any(k in combined for k in ('time', 'schedule', 'efficiency', 'manage', 'fitness', 'singing', 'calligraphy')):
-                return 'Time management discussion'
-            if any(k in combined for k in ('hermes', 'codex', 'ai')):
-                return 'AI productivity discussion'
-            return 'Conversation topic'
-        if any(k in combined for k in ('time', 'schedule', 'efficiency', 'manage', 'fitness', 'singing', 'calligraphy')):
-            return f'{topic_name} time management'
-        if any(k in combined for k in ('hermes', 'codex', 'ai')):
-            return f'{topic_name} AI productivity'
-        return f'{topic_name} discussion'
-
-    if any(k in combined for k in ('title', 'session title')) and any(k in combined for k in ('summary', 'summar', 'short title')):
-        if any(k in combined for k in ('test', 'ok', 'reply ok')):
-            return 'Session title auto-summary test'
-        return 'Session title auto-summary'
-    if any(k in combined for k in ('clarify', 'clarification')) and any(k in combined for k in ('dialog', 'card')):
-        return 'Clarify dialog card'
-    if any(k in combined for k in ('issue', 'github', 'pr')) and any(k in combined for k in ('triage', 'bug', 'review')):
-        return 'GitHub Issue Triage'
-
-    head = re.split(r'[.!?\n]', user_text)[0].strip()
-    if not head:
-        return None
-
-    stop_en = {
-        'the', 'this', 'that', 'with', 'from', 'into', 'just', 'reply', 'please',
-        'need', 'needs', 'want', 'wants', 'user', 'assistant', 'could', 'would',
-        'should', 'about', 'there', 'here', 'test', 'testing', 'title', 'summary',
-    }
-    # Unicode-aware Latin tokenization: keep the old "no leading underscore"
-    # and non-Latin placeholder behavior while allowing letters such as ä/ö/ü/ß.
-    # The previous ASCII-only pattern turned "führe" into "f" + "hre"; the short
-    # "f" was filtered and the broken "hre" became part of the title.
-    latin_word = r'A-Za-z0-9À-ÖØ-öø-ÿ'
-    tokens = re.findall(rf'[{latin_word}][{latin_word}_./+-]*', head)
-    if not tokens:
-        return 'Conversation topic'
-
-    picked = []
-    for tok in tokens:
-        lower_tok = tok.lower()
-        if lower_tok in stop_en or len(lower_tok) < 3:
-            continue
-        if tok not in picked:
-            picked.append(tok)
-        if len(picked) >= 4:
-            break
-
-    if picked:
-        return ' '.join(picked)[:60]
-    return 'Conversation topic'
+    return _fallback_title_from_exchange_policy(
+        _strip_workspace_prefix(user_text or ''),
+        _strip_thinking_markup(assistant_text or ''),
+    )
 
 
 def _is_generic_fallback_title(title: str) -> bool:
     """Return True for low-information fallback labels that should not be persisted."""
-    return str(title or '').strip().lower() in {'conversation topic'}
+    return str(title or '').strip().lower() in {'conversation topic', '会话主题'}
 
 
 def _run_background_title_update(session_id: str, user_text: str, assistant_text: str, placeholder_title: str, put_event, agent=None):
@@ -7940,10 +7870,10 @@ def _run_agent_streaming(
                     stream_id,
                     session_id,
                 )
-            from api.session_manifest import _skills_dir_for_session as _manifest_skills_dir_for_session
+            from integration.session_manifest.manifest import _skills_dir_for_session as _manifest_skills_dir_for_session
             _manifest_skills_dir = _manifest_skills_dir_for_session(s)
             _manifest_default_profile = str(getattr(s, 'profile', None) or '').strip()
-            from api.session_manifest import artifact_workspace_root_for_session as _artifact_root_for_session
+            from integration.session_manifest.manifest import artifact_workspace_root_for_session as _artifact_root_for_session
             _manifest_workspace_root = _artifact_root_for_session(s)
 
             def _tool_args_snapshot(args):
@@ -7966,7 +7896,7 @@ def _run_agent_streaming(
 
             def _emit_manifest_delta(name, args, result='', *, tid='', status='completed'):
                 try:
-                    from api.session_manifest import (
+                    from integration.session_manifest.manifest import (
                         ToolEvent,
                         _apply_public_todos_to_manifest_delta,
                         extract_manifest_delta_from_tool_event,
@@ -8015,7 +7945,7 @@ def _run_agent_streaming(
 
             def _emit_turn_complete_reconcile_delta():
                 try:
-                    from api.session_manifest import (
+                    from integration.session_manifest.manifest import (
                         extract_manifest_delta_from_turn_reconcile,
                         merge_manifest_delta,
                     )

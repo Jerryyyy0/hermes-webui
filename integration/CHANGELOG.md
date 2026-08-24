@@ -8,6 +8,10 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Added
 
+- **External Session Manifest artifacts** — 成功工具输出或当前 turn 最后一条 assistant message 中经过验证的外部绝对路径可作为直接引用 Artifact 持久化，并继续通过既有 `GET /api/integration/workspace/file?path=...` 只读预览。源文件不移动、不复制、不哈希；预览仅允许精确已登记且当前通过无跟随 fd、安全路径策略的普通文件，失效时在 Manifest 中标记为 `expired`。
+
+- **Session attachment and memory Artifact preview** — `HERMES_WEBUI_ATTACHMENT_DIR/<session_id>/`（默认 `{STATE_DIR}/attachments/<session_id>/`）及 `HERMES_HOME/memories/` 中的文件现在可在已持久化为精确 Session Manifest Artifact 后复用既有只读预览 URL。上传文件不会自动成为 Artifact，两个目录不会被枚举，未登记文件仍不可读取。
+
 - **QA 公开知识库列表代理** — 新增 `POST /api/integration/knowledge_base/list_qa_knowledge_bases`，将 JSON 请求体与下游 `{code, msg, data}` 响应原样转发。
 
 - **Knowledge base MCP session references** — `mcp__ithink_kb_mcp__searchKnowledgeBaseDocuments` 与 `mcp__ithink_kb_mcp__searchKnowledgeBaseDocumentsAcross` 的成功 completed 结果现在进入既有 Session Manifest 的 `references[]`，并复用 `manifest_delta` SSE。相同 `(kbName, fileName)` 合并来源和 `page_content[]`；解析逻辑位于 `integration/knowledge_base/turn_references.py`，不新增数据库表或 sidecar 状态，且不向浏览器透传单库搜索返回的私有源路径。
@@ -117,6 +121,8 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 - **Stream diagnostics logging** — 新增 `HERMES_WEBUI_STREAM_DIAG` 控制的流式执行诊断日志，记录 agent 初始化、上下文准备、运行耗时、最终保存和 worker cleanup summary，便于排查慢流、失败流和资源清理问题。
 
 ### Changed
+
+- **会话标题本地兜底中文化** — 当首次或后续标题生成调用失败时，本地兜底标签、主题后缀和附件场景标题统一使用中文，并避免将 `Attached files` 或绝对路径写入标题。
 
 - **Assistant bubbles skill count uses local_all** — `skill` 气泡的 `skills_count` / 技能列表改为与 SkillHub `scope=local_all` 相同：该 Profile 下已启用的 **installed** hub 技能 ∪ **custom** 技能（同名 custom 优先），排除 `skills.disabled`。不再直接 `rglob` Profile `skills/**/SKILL.md`。SkillHub 目录不可用时回退到本地 `.hub_installed` + custom 扫描（相同合并/禁用规则）。实现见 `integration/skills/listing.py` 的 `list_local_all_enabled_skills` 与 `integration/assistant_bubbles/collectors.py`。
 
@@ -288,7 +294,7 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 - **Knowledge base BFF route prefix** — WebUI proxy paths use `/api/integration/knowledge_base/*` (underscore), aligned with downstream `/knowledge_base/*`. Hyphenated `/api/integration/knowledge-base/*` is no longer served.
 
-- **Integration workspace files profile (restored via DB)** — `GET /api/integration/workspace/files` 恢复 `?profile=` 过滤与 `profile` 标注，改由直查 `session_manifest.db`（`api/session_manifest_store.py` 新增 `get_artifact_profile_index` / `get_artifact_paths_for_profile`）实现，取代旧的 `artifact_profiles.py` 跨会话索引（已删除）。传入 `profile` 时仅返回该 profile 的 manifest 成果文件（走 stat-only 快路径）；不传则返回全部文件并对成果附加 `profile`。session-save hook 不再增量维护 profile 索引——store 在流式 turn 结束时写入，为权威来源。
+- **Integration workspace files profile (restored via DB)** — `GET /api/integration/workspace/files` 恢复 `?profile=` 过滤与 `profile` 标注，改由直查 `session_manifest.db`（`integration/session_manifest/store.py` 新增 `get_artifact_profile_index` / `get_artifact_paths_for_profile`）实现，取代旧的 `artifact_profiles.py` 跨会话索引（已删除）。传入 `profile` 时仅返回该 profile 的 manifest 成果文件（走 stat-only 快路径）；不传则返回全部文件并对成果附加 `profile`。session-save hook 不再增量维护 profile 索引——store 在流式 turn 结束时写入，为权威来源。
 
 - **Integration workspace files performance** — `GET /api/integration/workspace/files` keeps an in-memory workspace file index (invalidated on session save and optional `refresh=1`); pagination/filter/sort reuse the cached index instead of re-walking the tree on every request. Collection uses `os.scandir`; `?profile=` stat-only fast path skips full walk. Artifact profile index skips unrelated sessions by workspace, merges incrementally on session save, and left-rail UI reloads on SSE `manifest_delta` file artifacts. Set `HERMES_DEBUG_TIMING=1` for `X-Hermes-Timing-*` response headers.
 
@@ -300,7 +306,7 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Added
 
-- **Manifest artifact profile** — `GET /api/session/manifest` and SSE `manifest_delta` include optional `profile` on `artifacts[]` rows (from `session.profile`). `GET /api/integration/workspace/files` annotates manifest file artifacts with `profile`; optional `?profile=` returns only that profile's artifacts (default still lists all workspace files). 跨会话索引现由直查 `session_manifest.db`（`api/session_manifest_store.py`）实现。
+- **Manifest artifact profile** — `GET /api/session/manifest` and SSE `manifest_delta` include optional `profile` on `artifacts[]` rows (from `session.profile`). `GET /api/integration/workspace/files` annotates manifest file artifacts with `profile`; optional `?profile=` returns only that profile's artifacts (default still lists all workspace files). 跨会话索引现由直查 `session_manifest.db`（`integration/session_manifest/store.py`）实现。
 
 - **Session workspace inspector** — `GET /api/session/manifest` returns structured todos, artifacts, and referenced files parsed from tool activity; the right panel adds **Tasks**, **Artifacts**, and **Refs** tabs with file preview via the existing workspace preview path. Artifacts outside the session workspace are listed with absolute paths and file metadata, while previews remain scoped to workspace files.
 

@@ -22,7 +22,7 @@ if str(ROOT) not in sys.path:
 
 from api.workspace import is_workspace_cruft_basename  # noqa: E402
 from integration.workspace._root import integration_workspace_root  # noqa: E402
-from api.session_manifest_store import (  # noqa: E402
+from integration.session_manifest.store import (  # noqa: E402
     DB_FILENAME,
     get_artifact_profile_index,
 )

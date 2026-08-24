@@ -40,7 +40,8 @@ def test_workspace_js_fetches_manifest():
     assert '/api/file/allowlisted' not in src
     assert '_isManifestAbsolutePath' in src
     assert '_manifestFilePreviewUrl' in src
-    assert 'api/media?path=' in src
+    assert 'api/media?path=' not in src
+    assert "_previewSource = _isManifestAbsolutePath(path) ? 'manifest-external' : 'workspace';" in src
     assert 'key.startsWith(\'turn:\')' in src
     assert 'function _mergeManifestReferences' in src
     assert "kind==='knowledge_base_document'" in src
@@ -69,7 +70,7 @@ def test_ui_stamps_assistant_turn_with_owning_user_turn_key():
 
 
 def test_session_manifest_module_has_extractors():
-    src = (REPO / 'api' / 'session_manifest.py').read_text(encoding='utf-8')
+    src = (REPO / 'integration' / 'session_manifest' / 'manifest.py').read_text(encoding='utf-8')
     assert 'ARTIFACT_MUTATION_TOOLS' in src
     assert 'ARTIFACT_EXCLUSION_READ_TOOLS' in src
     assert 'REFERENCE_SKILL_TOOLS' in src
@@ -93,7 +94,7 @@ def test_session_manifest_store_lifecycle_hooks_present():
 
 
 def test_session_manifest_store_module_contract():
-    src = (REPO / 'api' / 'session_manifest_store.py').read_text(encoding='utf-8')
+    src = (REPO / 'integration' / 'session_manifest' / 'store.py').read_text(encoding='utf-8')
     assert 'CREATE TABLE IF NOT EXISTS session_manifest_records' in src
     assert 'UNIQUE(lineage_key, profile, turn_key, record_kind, path, workspace_root)' in src
     assert 'def resolve_manifest_lineage_key' in src

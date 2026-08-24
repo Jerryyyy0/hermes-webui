@@ -44,7 +44,7 @@ flowchart TD
 
 ## 数据来源分析
 
-**`_turn_key`**：位于 `messages[]` 中每个 user 消息内，如 `"_turn_key": "turn:1"`。由 `api/session_manifest.py:_next_turn_key()` 生成，在 `POST /api/chat/start` 时写入用户消息。
+**`_turn_key`**：位于 `messages[]` 中每个 user 消息内，如 `"_turn_key": "turn:1"`。由 `integration/session_manifest/manifest.py:_next_turn_key()` 生成，在 `POST /api/chat/start` 时写入用户消息。
 
 **`turn_artifacts`**：session 级 dict，如 `{"turn:1": ["/path/to/file.py"], "turn:2": []}`。来自 `session.turn_artifacts` 属性，通过 `compact()` 返回。
 

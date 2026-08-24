@@ -2,7 +2,7 @@
 
 本文是 Artifacts 证据提取、路径安全、turn 归属、持久化与显式 backfill/read-repair 的唯一实现说明。对外资源语义、HTTP/SSE 字段和 wire 示例以 [Session Manifest HTTP/SSE 契约](../api/session-manifest-api.md) 为准。
 
-实现入口：`api/session_manifest.py`、`api/session_manifest_store.py`、`api/streaming.py`、`api/gateway_chat.py`。
+实现入口：`integration/session_manifest/manifest.py`、`integration/session_manifest/store.py`、`api/streaming.py`、`api/gateway_chat.py`，以及 Fork 的 `integration/session_manifest/external_references/`。
 
 ## 1. 状态层与不变量
 
@@ -82,7 +82,7 @@ turn_key = user._turn_key 或 turn:<user_msg_idx>
 | Skill mutation     | `skill_manage` 或实际写入工具 | mutation action、skill name/path、真实 `SKILL.md`     |
 | Terminal           | `terminal`             | 成功命令中的静态 `-o`/`--output`/`--print-to-pdf` 操作数     |
 | Media              | `media`                | assistant 显式 `MEDIA:<local-path>`                 |
-| Final assistant    | `assistant_prose`      | 当前 turn 最后一条 assistant 中的既存 workspace 文件名/路径      |
+| Final assistant    | `assistant_prose`      | 当前 turn 最后一条 assistant 中经边界校验的既存路径      |
 | Legacy             | 原有 source 或规范化值        | `session.turn_artifacts`，仅 lineage 完全无 decision 时 |
 
 
@@ -139,18 +139,18 @@ User 消息中的 MEDIA:、工具结果 JSON 的相似字段和普通 URL 都不
 - _BROAD_FILENAME_EXT_RE：绝对路径、相对路径、裸文件名；
 - _LAST_ASSISTANT_TILDE_PATH_RE：~/... 路径候选。
 
-显式相对/绝对路径直接走路径安全与预览 gate。裸文件名不从正文中的目录描述补全，而按以下优先级选择首个唯一 exact-basename 匹配：当前 turn 的成功强工具/MEDIA 路径、当前构建中此前 turn 已确认 artifact 路径、workspace 根目录真实文件。任一优先级层出现多个不同路径时视为歧义并跳过，且不降级到下一层。后续纯问答 turn 若最后一条 assistant 明确列出一个能唯一解析的既有文件，仍可产生该 turn 的 `assistant_prose` artifact。
+绝对路径可以在 session workspace 内或外：前者按既有 workspace 相对路径表示，后者原样以绝对路径表示为直接引用。相对路径和裸文件名只以当前 `session.workspace` 为基准解析，解析后必须仍位于该目录；不会借用前序 turn、工具输出或目录描述补全。后续纯问答 turn 若最后一条 assistant 明确列出一个实际存在的 workspace 文件，仍可产生该 turn 的 `assistant_prose` artifact。
 
 不依赖“已保存”“文件路径”等交付关键词。候选必须：
 
-- 解析后位于 session workspace；
+- 相对路径解析后位于 session workspace；绝对路径则通过外部直接引用策略；
 - 当前真实存在且可预览；
 - 不是 `uploads/` 输入文件；
 - 不命中 `.git`、`node_modules`、缓存、构建目录等 cruft；
 - 不超过每轮候选上限；
 - canonical path 去重。
 
-因此最终回复表格中的 ``报告.html`` 可成为成果；不存在的 ``摘要.md`` 不会被推断补全。中间 assistant 即使写出绝对路径或“文件位置”也不产生 prose artifact。
+正则只接受完整 token 边界：`report.pdf附件`、`report.pdf.bak` 和 `abc/report.pdfx` 不会截断为 `report.pdf`。因此最终回复表格中的 ``报告.html`` 可成为成果；不存在的 ``摘要.md`` 不会被推断补全。中间 assistant 即使写出绝对路径或“文件位置”也不产生 prose artifact。
 
 ### 4.5 Read evidence
 
@@ -178,14 +178,13 @@ cp -- SOURCE DEST
 python .../md2word.py INPUT OUTPUT [options]
 ```
 
-`cp` 只接受单 source、单 destination，且只登记 destination；recursive、选项、多 source、变量、glob 和 workspace 外 destination 均拒绝。最后一种位置参数规则只适用于脚本 basename 精确为 `md2word.py` 的 Python 调用；不会推广为未知 CLI 的通用“最后一个参数即输出”规则。
+`cp` 只接受单 source、单 destination，且只登记 destination；recursive、选项、多 source、变量和 glob 均拒绝。静态绝对 destination 可以是 workspace 外的直接引用，但仍须通过第 5 节的外部路径策略和安全打开。最后一种位置参数规则只适用于脚本 basename 精确为 `md2word.py` 的 Python 调用；不会推广为未知 CLI 的通用“最后一个参数即输出”规则。
 
 支持受控 `cd DIR && ...` 的命令本地目录。拒绝：
 
 - 变量、命令替换、通配符；
 - 多行 heredoc 和嵌入源码；
 - 动态/歧义 shell 路径；
-- workspace 外路径；
 - 不存在、目录、cruft 或不可预览文件。
 
 不会扫描 stdout、`ls` 列表、`cat` 输入、Python `open()` 源码或 workspace 快照。
@@ -204,17 +203,16 @@ python .../md2word.py INPUT OUTPUT [options]
 
 `session.workspace` 是未指定目标时的默认写入目录；普通 file artifact 的资格根则由唯一入口 `artifact_workspace_root_for_session(session)` 决定：当 session workspace 位于运行时 `DEFAULT_WORKSPACE` 下时使用该默认根，否则使用 session 自身根。该值必须贯穿 tool-complete SSE、turn reconcile、持久化、GET projection 与 preview，避免“流中可见、刷新后消失”。
 
-用户显式指定的绝对路径不因此被拒绝写入；只有位于 Artifact 根外的文件不成为普通 file artifact。根无法规范化或不可信时 fail closed，不发布普通 file artifact。store 继续以 `workspace_root + path` 保存归属，公开 wire 不新增字段。
+用户显式指定的绝对路径不因此被拒绝写入。位于 Artifact 根内的文件仍是普通 workspace artifact；位于根外、且来源属于允许的成功 mutation/terminal 或最终 assistant prose 时，是外部直接引用。两者都沿用同一 store identity，`workspace_root` 仍是会话 Artifact 根而不是外部文件目录，公开 wire 不新增字段。
 
 所有候选先经 `_resolve_manifest_path(workspace, raw)`：
 
 1. 清理引号和无效形态；
 2. 排除 `ARTIFACT_IGNORE_RE`；
 3. 相对路径使用 `(workspace / path).resolve()`；
-4. 通过 `relative_to(workspace)` 强制 workspace 边界；
-5. 输出 POSIX 相对路径。
+4. workspace 内候选输出 POSIX 相对路径；workspace 外绝对候选保留规范化后的绝对路径。
 
-普通 file artifacts 和 final-assistant artifacts 必须位于 workspace。Workspace 外路径仅对显式 `source_tool=media` 使用独立 media preview gate。
+外部直接引用仅接受允许来源的绝对路径，且登记和预览都经 `integration/session_manifest/external_references/policy.py` 逐组件 `O_NOFOLLOW` 打开：拒绝 symlink、目录、设备文件、`uploads/`、cruft、状态根下的 sessions、cron、logs、checkpoints、backups、`.ssh`、`.gnupg` 和系统受保护根。聊天附件根（`HERMES_WEBUI_ATTACHMENT_DIR/<session_id>/`，默认 `STATE_DIR/attachments/<session_id>/`）与 `HERMES_HOME/memories/` 是例外：其中的文件只有在已被同一 Manifest 机制持久化为精确 Artifact row 后才能走既有只读预览；它不会被目录扫描或仅凭绝对路径自动开放，附件也不会因上传本身自动成为 Artifact。状态根按运行时 `HERMES_HOME`、`HERMES_WEBUI_STATE_DIR` 和默认 Hermes Home 展开；项目自身恰好名为 `sessions` 的目录不会仅因名称被拒绝。绝不根据任意请求中的绝对路径读取文件；必须先有匹配的持久化 Artifact row。
 
 `_artifact_path_is_real()` / wire preview helpers 负责：
 
@@ -223,6 +221,8 @@ python .../md2word.py INPUT OUTPUT [options]
 - 未超预览大小；
 - skill `SKILL.md` 存在；
 - integration/preview backend 可用。
+
+外部引用是活链接：内容修改或同名替换后继续读取当前安全版本；仅文件不存在、不再是普通文件、成为 symlink 或命中拒绝策略时，在 GET 投影为 `status: "expired"`，预览接口不返回字节。系统不复制、移动、哈希或为此新增 SQLite 字段。
 
 搜索命中、目录列表、只读工具、workspace 全量扫描、相似字段和跨字段补全均不产生 artifact。
 
@@ -256,7 +256,7 @@ Legacy `session.turn_artifacts` 不再是新会话写入目标，只在显式 ba
 
 ## 7. 对外投影边界
 
-本模块只决定候选能否投影，不定义对外 JSON。`preview=file` 仅接受可预览的 workspace file 或允许的 media；`preview=skill` 仅接受可预览 canonical skill。历史证据存在但目标已不可预览时可投影为 expired；结算前已失效或没有 provenance 的候选一律不输出。字段、去重优先级和 SSE 帧均以 [Session Manifest HTTP/SSE 契约](../api/session-manifest-api.md) 为准。
+本模块只决定候选能否投影，不定义对外 JSON。`preview=file` 接受可预览的 workspace file、已登记且当前安全的外部直接引用，或允许的 media；`preview=skill` 仅接受可预览 canonical skill。外部绝对路径只会在持久化 row 存在后进入 wire，随后通过既有 `GET /api/integration/workspace/file?path=...` 预览；该 URL 的绝对路径分支只查精确登记记录并用同一 fd 读取。历史证据存在但目标已不可预览时可投影为 expired；结算前已失效或没有 provenance 的候选一律不输出。字段、去重优先级和 SSE 帧均以 [Session Manifest HTTP/SSE 契约](../api/session-manifest-api.md) 为准。
 
 `extract_manifest_delta_from_tool_event()` 只接受成功 `tool_complete`；`extract_manifest_delta_from_turn_reconcile()` 在 assistant durable 后、`done` 前产生当前 turn 的补充候选。两者只更新 Inspector 乐观态，聊天区 chips 始终在 `done` 后以 GET 为准。
 
@@ -276,6 +276,9 @@ Legacy `session.turn_artifacts` 不再是新会话写入目标，只在显式 ba
 | `_extract_turn_artifact_entries`           | 单 turn 共享提取                       |
 | `_resolve_manifest_path`                   | 路径规范化                             |
 | `_artifact_path_is_real`                   | Reconcile/持久化存在性闸门                |
+| `external_references.policy`               | 外部路径策略与无跟随 fd 打开              |
+| `external_references.references`           | 外部行判定与已登记 record 查询            |
+| `external_references.preview`              | 复用既有 workspace preview URL 的授权读取 |
 | `upsert_manifest_records`                  | 普通 store upsert                   |
 | `replace_manifest_turn_records`            | 原子替换单 turn decision               |
 | `repair_empty_manifest_turns`              | 显式维护时的 empty-only read-repair   |
@@ -299,6 +302,7 @@ Legacy `session.turn_artifacts` 不再是新会话写入目标，只在显式 ba
 - 中间 assistant prose 不提取；成功 read evidence 仅抑制同轮 final prose；
 - Terminal `-o` 与 stdout/heredoc 排除；
 - Workspace、`uploads/`、cruft、缺失文件过滤；
+- 外部绝对 Artifact 的登记、既有 preview URL、受保护路径/symlink 拒绝与 expired 投影；
 - Skill canonicalization；
 - Manifest GET 不触发 history backfill 或 empty-decision 修复；显式维护的 empty decision 原子修复、profile/lineage 隔离和幂等；
 - Expired provenance；

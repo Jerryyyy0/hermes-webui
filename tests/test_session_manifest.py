@@ -9,7 +9,7 @@ import pytest
 
 from tests._pytest_port import BASE
 from api.models import Session
-from api.session_manifest import (
+from integration.session_manifest.manifest import (
     MANIFEST_PREVIEW_FILE,
     MANIFEST_PREVIEW_SKILL,
     MEDIA_ARTIFACT_SOURCE,
@@ -58,7 +58,10 @@ def _skill_reference(path: str, tid: str = '', *, expired: bool = False) -> dict
 
 @pytest.fixture(autouse=True)
 def _isolate_manifest_store(tmp_path, monkeypatch):
-    monkeypatch.setattr('api.session_manifest_store.STATE_DIR', tmp_path / 'state')
+    state_dir = tmp_path / 'state'
+    monkeypatch.setattr('integration.session_manifest.store.STATE_DIR', state_dir)
+    monkeypatch.setattr('integration.session_manifest.external_references.policy.STATE_DIR', state_dir)
+    monkeypatch.setattr('integration.session_manifest.external_references.references.STATE_DIR', state_dir)
 
 
 def test_normalize_manifest_path_strips_noise():
@@ -197,10 +200,10 @@ def test_build_session_manifest_keeps_deleted_legacy_artifact_in_turn_projection
             'turn:0': [{'path': 'notes.txt', 'source_tool': 'write_file'}],
         },
     )
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
-    monkeypatch.setattr('api.session_manifest_store.STATE_DIR', tmp_path / 'state')
-    monkeypatch.setattr('api.session_manifest_store.load_manifest_records', lambda *args, **kwargs: [])
-    monkeypatch.setattr('api.session_manifest_store.load_manifest_decided_turn_keys', lambda *args, **kwargs: set())
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.store.STATE_DIR', tmp_path / 'state')
+    monkeypatch.setattr('integration.session_manifest.store.load_manifest_records', lambda *args, **kwargs: [])
+    monkeypatch.setattr('integration.session_manifest.store.load_manifest_decided_turn_keys', lambda *args, **kwargs: set())
     target.unlink()
     manifest = build_session_manifest(session)
     assert manifest['artifacts'] == []
@@ -238,7 +241,7 @@ def test_build_session_manifest_prefixes_managed_workspace_file_paths(tmp_path, 
         ],
         tool_calls=[],
     )
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
     manifest = build_session_manifest(session)
     assert manifest['artifacts'][0]['path'] == f'{sid}/report.md'
     assert manifest['turns'][0]['artifacts'][0]['path'] == f'{sid}/report.md'
@@ -268,7 +271,7 @@ def test_build_session_manifest_keeps_path_when_workspace_is_integration_root(tm
         ],
         tool_calls=[],
     )
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
     manifest = build_session_manifest(session)
     assert manifest['artifacts'][0]['path'] == 'report.md'
 
@@ -334,10 +337,10 @@ def test_build_session_manifest_keeps_deleted_managed_legacy_artifact_in_turn_pr
             'turn:0': [{'path': 'gone.txt', 'source_tool': 'write_file'}],
         },
     )
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
-    monkeypatch.setattr('api.session_manifest_store.STATE_DIR', tmp_path / 'state')
-    monkeypatch.setattr('api.session_manifest_store.load_manifest_records', lambda *args, **kwargs: [])
-    monkeypatch.setattr('api.session_manifest_store.load_manifest_decided_turn_keys', lambda *args, **kwargs: set())
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.store.STATE_DIR', tmp_path / 'state')
+    monkeypatch.setattr('integration.session_manifest.store.load_manifest_records', lambda *args, **kwargs: [])
+    monkeypatch.setattr('integration.session_manifest.store.load_manifest_decided_turn_keys', lambda *args, **kwargs: set())
     target.unlink()
     manifest = build_session_manifest(session)
     assert manifest['artifacts'] == []
@@ -404,7 +407,7 @@ def test_build_session_manifest_drops_unattributed_expired_candidate(tmp_path, m
         tool_calls=[],
     )
 
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
 
     def _fake_extract(events, ws, messages=None, *, skills_dir=None):
         return (
@@ -426,7 +429,7 @@ def test_build_session_manifest_drops_unattributed_expired_candidate(tmp_path, m
             }],
         )
 
-    monkeypatch.setattr('api.session_manifest._extract_manifest_records', _fake_extract)
+    monkeypatch.setattr('integration.session_manifest.manifest._extract_manifest_records', _fake_extract)
     manifest = build_session_manifest(session)
     assert manifest['artifacts'] == []
     assert manifest['turns'][0]['artifacts'] == []
@@ -454,7 +457,7 @@ def test_build_session_manifest_artifacts_include_session_profile(tmp_path, monk
         ],
         tool_calls=[],
     )
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
     manifest = build_session_manifest(session)
     assert manifest['artifacts'][0]['profile'] == 'ops'
     assert manifest['turns'][0]['artifacts'][0]['profile'] == 'ops'
@@ -480,7 +483,7 @@ def test_build_session_manifest_omits_profile_when_session_has_none(tmp_path, mo
         ],
         tool_calls=[],
     )
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
     manifest = build_session_manifest(session)
     assert 'profile' not in manifest['artifacts'][0]
 
@@ -600,7 +603,7 @@ def test_historical_manifest_derives_knowledge_base_references_without_artifact_
         ],
         tool_calls=[],
     )
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
     source_info = {}
 
     manifest = build_session_manifest(session, source_info=source_info)
@@ -681,7 +684,7 @@ def test_build_session_manifest_persists_workspace_files(tmp_path, monkeypatch):
     monkeypatch.setattr('api.models.SESSION_DIR', tmp_path)
     monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
     monkeypatch.setattr(
-        'api.session_manifest._load_display_messages',
+        'integration.session_manifest.manifest._load_display_messages',
         lambda s: list(s.messages),
     )
 
@@ -723,9 +726,9 @@ def test_build_session_manifest_prefers_store_artifacts(tmp_path, monkeypatch):
         ],
         tool_calls=[],
     )
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
     monkeypatch.setattr(
-        'api.session_manifest_store.load_manifest_records',
+        'integration.session_manifest.store.load_manifest_records',
         lambda s, include_lineage=True: [{
             'session_id': s.session_id,
             'lineage_key': s.session_id,
@@ -777,7 +780,7 @@ def test_build_session_manifest_resolves_absolute_write_path(tmp_path, monkeypat
     monkeypatch.setattr('api.models.SESSION_DIR', tmp_path)
     monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
     monkeypatch.setattr(
-        'api.session_manifest._load_display_messages',
+        'integration.session_manifest.manifest._load_display_messages',
         lambda s: list(s.messages),
     )
     manifest = build_session_manifest(session)
@@ -815,7 +818,7 @@ def test_build_session_manifest_excludes_external_write_path(tmp_path, monkeypat
     monkeypatch.setattr('api.models.SESSION_DIR', tmp_path)
     monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
     monkeypatch.setattr(
-        'api.session_manifest._load_display_messages',
+        'integration.session_manifest.manifest._load_display_messages',
         lambda s: list(s.messages),
     )
     manifest = build_session_manifest(session)
@@ -851,7 +854,7 @@ def test_profile_memory_files_are_excluded_from_manifest(tmp_path, monkeypatch):
         ],
         tool_calls=[],
     )
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
 
     manifest = build_session_manifest(session)
     assert manifest['references'] == []
@@ -875,7 +878,7 @@ def test_skill_view_becomes_skill_reference(tmp_path, monkeypatch):
             }),
         ),
     ]
-    monkeypatch.setattr('api.session_manifest._skillhub_preview_available', lambda: True)
+    monkeypatch.setattr('integration.session_manifest.manifest._skillhub_preview_available', lambda: True)
 
     _artifacts, references = _extract_artifacts_and_references(events, workspace, skills_dir=skills_dir)
     wire = _rows_to_wire(references, workspace, skills_dir, collection='references')
@@ -900,7 +903,7 @@ def test_skill_view_reference_missing_marked_expired(tmp_path, monkeypatch):
             }),
         ),
     ]
-    monkeypatch.setattr('api.session_manifest._skillhub_preview_available', lambda: True)
+    monkeypatch.setattr('integration.session_manifest.manifest._skillhub_preview_available', lambda: True)
 
     _artifacts, references = _extract_artifacts_and_references(events, workspace, skills_dir=skills_dir)
     wire = _rows_to_wire(references, workspace, skills_dir, collection='references')
@@ -959,9 +962,9 @@ def test_build_session_manifest_skips_failed_ambiguous_skill_view_reference(tmp_
         ],
         tool_calls=[],
     )
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
-    monkeypatch.setattr('api.session_manifest._skills_dir_for_session', lambda s: skills_dir)
-    monkeypatch.setattr('api.session_manifest._skillhub_preview_available', lambda: True)
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.manifest._skills_dir_for_session', lambda s: skills_dir)
+    monkeypatch.setattr('integration.session_manifest.manifest._skillhub_preview_available', lambda: True)
 
     manifest = build_session_manifest(session)
 
@@ -999,7 +1002,7 @@ def test_skill_manage_create_becomes_skill_artifact(tmp_path, monkeypatch):
             result='{"success": true, "path": "foo"}',
         ),
     ]
-    monkeypatch.setattr('api.session_manifest._skillhub_preview_available', lambda: True)
+    monkeypatch.setattr('integration.session_manifest.manifest._skillhub_preview_available', lambda: True)
 
     artifacts, references = _extract_artifacts_and_references(events, workspace, skills_dir=skills_dir)
     wire = _rows_to_wire(artifacts, workspace, skills_dir, collection='artifacts')
@@ -1026,7 +1029,7 @@ def test_skill_manage_artifact_deleted_marked_expired(tmp_path, monkeypatch):
             result='{"success": true, "path": "gone-skill"}',
         ),
     ]
-    monkeypatch.setattr('api.session_manifest._skillhub_preview_available', lambda: True)
+    monkeypatch.setattr('integration.session_manifest.manifest._skillhub_preview_available', lambda: True)
 
     artifacts, _references = _extract_artifacts_and_references(events, workspace, skills_dir=skills_dir)
     shutil = __import__('shutil')
@@ -1084,11 +1087,11 @@ def test_read_evidence_suppresses_only_final_assistant_prose(tmp_path, monkeypat
         ],
         tool_calls=[],
     )
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
-    monkeypatch.setattr('api.session_manifest_store.load_manifest_records', lambda *a, **k: [])
-    monkeypatch.setattr('api.session_manifest_store.load_manifest_decided_turn_keys', lambda *a, **k: set())
-    monkeypatch.setattr('api.session_manifest_store.repair_empty_manifest_turns', lambda *a, **k: 0)
-    monkeypatch.setattr('api.session_manifest_store.backfill_missing_manifest_records', lambda *a, **k: {'source': 'derived'})
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.store.load_manifest_records', lambda *a, **k: [])
+    monkeypatch.setattr('integration.session_manifest.store.load_manifest_decided_turn_keys', lambda *a, **k: set())
+    monkeypatch.setattr('integration.session_manifest.store.repair_empty_manifest_turns', lambda *a, **k: 0)
+    monkeypatch.setattr('integration.session_manifest.store.backfill_missing_manifest_records', lambda *a, **k: {'source': 'derived'})
 
     manifest = build_session_manifest(session)
 
@@ -1125,11 +1128,11 @@ def test_read_then_edit_same_path_keeps_mutation_artifact(tmp_path, monkeypatch)
         ],
         tool_calls=[],
     )
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
-    monkeypatch.setattr('api.session_manifest_store.load_manifest_records', lambda *a, **k: [])
-    monkeypatch.setattr('api.session_manifest_store.load_manifest_decided_turn_keys', lambda *a, **k: set())
-    monkeypatch.setattr('api.session_manifest_store.repair_empty_manifest_turns', lambda *a, **k: 0)
-    monkeypatch.setattr('api.session_manifest_store.backfill_missing_manifest_records', lambda *a, **k: {'source': 'derived'})
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.store.load_manifest_records', lambda *a, **k: [])
+    monkeypatch.setattr('integration.session_manifest.store.load_manifest_decided_turn_keys', lambda *a, **k: set())
+    monkeypatch.setattr('integration.session_manifest.store.repair_empty_manifest_turns', lambda *a, **k: 0)
+    monkeypatch.setattr('integration.session_manifest.store.backfill_missing_manifest_records', lambda *a, **k: {'source': 'derived'})
 
     manifest = build_session_manifest(session)
 
@@ -1146,7 +1149,7 @@ def test_extract_manifest_delta_skill_reference_expired(tmp_path, monkeypatch):
     workspace.mkdir()
     skills_dir = tmp_path / 'profile-home' / 'skills'
     skills_dir.mkdir(parents=True)
-    monkeypatch.setattr('api.session_manifest._skillhub_preview_available', lambda: True)
+    monkeypatch.setattr('integration.session_manifest.manifest._skillhub_preview_available', lambda: True)
     event = ToolEvent(
         name='skill_view',
         args={'name': 'missing-skill'},
@@ -1180,14 +1183,14 @@ def test_build_session_manifest_prefers_store_skill_artifact(tmp_path, monkeypat
         ],
         tool_calls=[],
     )
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
-    monkeypatch.setattr('api.session_manifest._skillhub_preview_available', lambda: True)
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.manifest._skillhub_preview_available', lambda: True)
     monkeypatch.setattr(
-        'api.session_manifest._skills_dir_for_session',
+        'integration.session_manifest.manifest._skills_dir_for_session',
         lambda s: skills_dir,
     )
     monkeypatch.setattr(
-        'api.session_manifest_store.load_manifest_records',
+        'integration.session_manifest.store.load_manifest_records',
         lambda s, include_lineage=True: [{
             'session_id': s.session_id,
             'lineage_key': s.session_id,
@@ -1233,7 +1236,7 @@ def test_skill_manage_patch_becomes_skill_artifact(tmp_path, monkeypatch):
             status='completed',
         ),
     ]
-    monkeypatch.setattr('api.session_manifest._skillhub_preview_available', lambda: True)
+    monkeypatch.setattr('integration.session_manifest.manifest._skillhub_preview_available', lambda: True)
 
     artifacts, _references = _extract_artifacts_and_references(events, workspace, skills_dir=skills_dir)
     wire = _rows_to_wire(artifacts, workspace, skills_dir)
@@ -1269,7 +1272,7 @@ def test_skill_manage_create_uses_result_path_for_category(tmp_path, monkeypatch
             result=result,
         ),
     ]
-    monkeypatch.setattr('api.session_manifest._skillhub_preview_available', lambda: True)
+    monkeypatch.setattr('integration.session_manifest.manifest._skillhub_preview_available', lambda: True)
 
     artifacts, _references = _extract_artifacts_and_references(events, workspace, skills_dir=skills_dir)
     wire = _rows_to_wire(artifacts, workspace, skills_dir)
@@ -1300,7 +1303,7 @@ def test_skill_manage_create_canonicalizes_absolute_result_path(tmp_path, monkey
             result=result,
         ),
     ]
-    monkeypatch.setattr('api.session_manifest._skillhub_preview_available', lambda: True)
+    monkeypatch.setattr('integration.session_manifest.manifest._skillhub_preview_available', lambda: True)
 
     artifacts, _references = _extract_artifacts_and_references(events, workspace, skills_dir=skills_dir)
     wire = _rows_to_wire(artifacts, workspace, skills_dir)
@@ -1340,11 +1343,11 @@ def test_build_session_manifest_dedupes_legacy_stripped_skill_store_path(tmp_pat
         ],
         tool_calls=[],
     )
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
-    monkeypatch.setattr('api.session_manifest._skills_dir_for_session', lambda s: skills_dir)
-    monkeypatch.setattr('api.session_manifest._skillhub_preview_available', lambda: True)
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.manifest._skills_dir_for_session', lambda s: skills_dir)
+    monkeypatch.setattr('integration.session_manifest.manifest._skillhub_preview_available', lambda: True)
     monkeypatch.setattr(
-        'api.session_manifest_store.load_manifest_records',
+        'integration.session_manifest.store.load_manifest_records',
         lambda s, include_lineage=True: [{
             'session_id': s.session_id,
             'lineage_key': s.session_id,
@@ -1357,7 +1360,7 @@ def test_build_session_manifest_dedupes_legacy_stripped_skill_store_path(tmp_pat
         }],
     )
     monkeypatch.setattr(
-        'api.session_manifest_store.load_manifest_decided_turn_keys',
+        'integration.session_manifest.store.load_manifest_decided_turn_keys',
         lambda s, include_lineage=True: {'turn:2'},
     )
 
@@ -1386,7 +1389,7 @@ def test_skill_manage_delete_is_not_artifact(tmp_path, monkeypatch):
             status='completed',
         ),
     ]
-    monkeypatch.setattr('api.session_manifest._skillhub_preview_available', lambda: True)
+    monkeypatch.setattr('integration.session_manifest.manifest._skillhub_preview_available', lambda: True)
 
     artifacts, references = _extract_artifacts_and_references(events, workspace, skills_dir=skills_dir)
     assert artifacts == []
@@ -1399,7 +1402,7 @@ def test_skill_mutation_without_name_is_omitted(tmp_path, monkeypatch):
     skills_dir = tmp_path / 'profile-home' / 'skills'
     skills_dir.mkdir(parents=True)
     events = [ToolEvent(name='skill_manage', args={'action': 'create', 'content': '# no name'}, assistant_msg_idx=1)]
-    monkeypatch.setattr('api.session_manifest._skillhub_preview_available', lambda: True)
+    monkeypatch.setattr('integration.session_manifest.manifest._skillhub_preview_available', lambda: True)
 
     artifacts, references = _extract_artifacts_and_references(events, workspace, skills_dir=skills_dir)
     assert _rows_to_wire(artifacts, workspace, skills_dir) == []
@@ -1419,7 +1422,7 @@ def test_skill_mutation_in_progress_is_not_wired(tmp_path, monkeypatch):
             status='in_progress',
         ),
     ]
-    monkeypatch.setattr('api.session_manifest._skillhub_preview_available', lambda: True)
+    monkeypatch.setattr('integration.session_manifest.manifest._skillhub_preview_available', lambda: True)
 
     artifacts, _references = _extract_artifacts_and_references(events, workspace, skills_dir=skills_dir)
     assert _rows_to_wire(artifacts, workspace, skills_dir) == []
@@ -1438,7 +1441,7 @@ def test_skill_mutation_omitted_when_integration_disabled(tmp_path, monkeypatch)
             status='completed',
         ),
     ]
-    monkeypatch.setattr('api.session_manifest._skillhub_preview_available', lambda: False)
+    monkeypatch.setattr('integration.session_manifest.manifest._skillhub_preview_available', lambda: False)
 
     artifacts, _references = _extract_artifacts_and_references(events, workspace, skills_dir=skills_dir)
     assert _rows_to_wire(artifacts, workspace, skills_dir) == []
@@ -1459,7 +1462,7 @@ def test_write_file_skill_md_becomes_skill_artifact(tmp_path, monkeypatch):
             status='completed',
         ),
     ]
-    monkeypatch.setattr('api.session_manifest._skillhub_preview_available', lambda: True)
+    monkeypatch.setattr('integration.session_manifest.manifest._skillhub_preview_available', lambda: True)
 
     artifacts, references = _extract_artifacts_and_references(events, workspace, skills_dir=skills_dir)
     wire = _rows_to_wire(artifacts, workspace, skills_dir)
@@ -1487,7 +1490,7 @@ def test_write_file_category_skill_md_becomes_skill_artifact(tmp_path, monkeypat
             status='completed',
         ),
     ]
-    monkeypatch.setattr('api.session_manifest._skillhub_preview_available', lambda: True)
+    monkeypatch.setattr('integration.session_manifest.manifest._skillhub_preview_available', lambda: True)
 
     artifacts, _references = _extract_artifacts_and_references(events, workspace, skills_dir=skills_dir)
     wire = _rows_to_wire(artifacts, workspace, skills_dir)
@@ -1514,7 +1517,7 @@ def test_write_file_non_skill_md_under_skills_is_not_skill_artifact(tmp_path, mo
             status='completed',
         ),
     ]
-    monkeypatch.setattr('api.session_manifest._skillhub_preview_available', lambda: True)
+    monkeypatch.setattr('integration.session_manifest.manifest._skillhub_preview_available', lambda: True)
 
     artifacts, _references = _extract_artifacts_and_references(events, workspace, skills_dir=skills_dir)
     assert _rows_to_wire(artifacts, workspace, skills_dir) == []
@@ -1535,7 +1538,7 @@ def test_write_file_skill_md_in_progress_is_not_wired(tmp_path, monkeypatch):
             status='in_progress',
         ),
     ]
-    monkeypatch.setattr('api.session_manifest._skillhub_preview_available', lambda: True)
+    monkeypatch.setattr('integration.session_manifest.manifest._skillhub_preview_available', lambda: True)
 
     artifacts, _references = _extract_artifacts_and_references(events, workspace, skills_dir=skills_dir)
     assert _rows_to_wire(artifacts, workspace, skills_dir) == []
@@ -1562,7 +1565,7 @@ def test_write_file_and_skill_manage_same_skill_dedupes(tmp_path, monkeypatch):
             status='completed',
         ),
     ]
-    monkeypatch.setattr('api.session_manifest._skillhub_preview_available', lambda: True)
+    monkeypatch.setattr('integration.session_manifest.manifest._skillhub_preview_available', lambda: True)
 
     artifacts, _references = _extract_artifacts_and_references(events, workspace, skills_dir=skills_dir)
     wire = _rows_to_wire(artifacts, workspace, skills_dir)
@@ -1605,9 +1608,9 @@ def test_build_session_manifest_skill_manage_in_turn_artifacts(tmp_path, monkeyp
         ],
         tool_calls=[],
     )
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
-    monkeypatch.setattr('api.session_manifest._skills_dir_for_session', lambda s: skills_dir)
-    monkeypatch.setattr('api.session_manifest._skillhub_preview_available', lambda: True)
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.manifest._skills_dir_for_session', lambda s: skills_dir)
+    monkeypatch.setattr('integration.session_manifest.manifest._skillhub_preview_available', lambda: True)
 
     manifest = build_session_manifest(session)
     assert manifest['artifacts'] == [{
@@ -1672,7 +1675,7 @@ def test_build_session_manifest_groups_artifacts_by_turn(tmp_path, monkeypatch):
         ],
         tool_calls=[],
     )
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
 
     manifest = build_session_manifest(session)
 
@@ -1723,7 +1726,7 @@ def test_build_session_manifest_merges_partial_todos_after_done(tmp_path, monkey
         ],
         tool_calls=[],
     )
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
 
     manifest = build_session_manifest(session)
 
@@ -1878,7 +1881,7 @@ def test_build_session_manifest_omits_previous_turn_todos(tmp_path, monkeypatch)
         ],
         tool_calls=[],
     )
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
 
     manifest = build_session_manifest(session)
 
@@ -2006,6 +2009,30 @@ def test_paths_from_last_assistant_message_scans_final_assistant_text(tmp_path):
     assert _paths_from_last_assistant_message(text, workspace) == ['1.docx', 'report.docx']
 
 
+def test_paths_from_last_assistant_message_accepts_external_absolute_path(tmp_path):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    external = tmp_path / 'exports' / 'report.docx'
+    external.parent.mkdir()
+    external.write_bytes(b'fake-docx')
+
+    assert _paths_from_last_assistant_message(
+        f'已生成：`{external.as_posix()}`', workspace,
+    ) == [external.as_posix()]
+
+
+def test_paths_from_last_assistant_message_rejects_relative_escape_and_partial_match(tmp_path):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    external = tmp_path / 'report.docx'
+    external.write_bytes(b'fake-docx')
+    inside = workspace / 'report.docx'
+    inside.write_bytes(b'fake-docx')
+
+    assert _paths_from_last_assistant_message('../report.docx', workspace) == []
+    assert _paths_from_last_assistant_message('report.docx.bak', workspace) == []
+
+
 def test_paths_from_last_assistant_message_scans_file_label_without_delivery_regex(tmp_path):
     workspace = tmp_path / 'ws'
     workspace.mkdir()
@@ -2072,11 +2099,11 @@ def test_build_session_manifest_does_not_promote_skill_or_terminal_tool_result_t
         ],
         tool_calls=[],
     )
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
-    monkeypatch.setattr('api.session_manifest._skills_dir_for_session', lambda s: skills_dir)
-    monkeypatch.setattr('api.session_manifest._skillhub_preview_available', lambda: True)
-    monkeypatch.setattr('api.session_manifest_store.load_manifest_records', lambda *args, **kwargs: [])
-    monkeypatch.setattr('api.session_manifest_store.load_manifest_decided_turn_keys', lambda *args, **kwargs: set())
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.manifest._skills_dir_for_session', lambda s: skills_dir)
+    monkeypatch.setattr('integration.session_manifest.manifest._skillhub_preview_available', lambda: True)
+    monkeypatch.setattr('integration.session_manifest.store.load_manifest_records', lambda *args, **kwargs: [])
+    monkeypatch.setattr('integration.session_manifest.store.load_manifest_decided_turn_keys', lambda *args, **kwargs: set())
 
     manifest = build_session_manifest(session)
 
@@ -2098,9 +2125,9 @@ def test_build_session_manifest_store_empty_decision_skips_reconcile(tmp_path, m
         ],
         tool_calls=[],
     )
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
-    monkeypatch.setattr('api.session_manifest_store.load_manifest_records', lambda *args, **kwargs: [])
-    monkeypatch.setattr('api.session_manifest_store.load_manifest_decided_turn_keys', lambda *args, **kwargs: {'turn:0'})
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.store.load_manifest_records', lambda *args, **kwargs: [])
+    monkeypatch.setattr('integration.session_manifest.store.load_manifest_decided_turn_keys', lambda *args, **kwargs: {'turn:0'})
 
     manifest = build_session_manifest(session)
 
@@ -2125,9 +2152,9 @@ def test_build_session_manifest_partial_store_decision_skips_whole_session_recon
         ],
         tool_calls=[],
     )
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
     monkeypatch.setattr(
-        'api.session_manifest_store.load_manifest_records',
+        'integration.session_manifest.store.load_manifest_records',
         lambda *args, **kwargs: [{
             'path': 'stored.docx',
             'source_tool': 'assistant_prose',
@@ -2136,7 +2163,7 @@ def test_build_session_manifest_partial_store_decision_skips_whole_session_recon
             'turn_key': 'turn:0',
         }],
     )
-    monkeypatch.setattr('api.session_manifest_store.load_manifest_decided_turn_keys', lambda *args, **kwargs: {'turn:0'})
+    monkeypatch.setattr('integration.session_manifest.store.load_manifest_decided_turn_keys', lambda *args, **kwargs: {'turn:0'})
 
     manifest = build_session_manifest(session)
 
@@ -2163,9 +2190,9 @@ def test_build_session_manifest_keeps_orphan_artifact_out_of_turns(tmp_path, mon
         ],
         tool_calls=[],
     )
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
     monkeypatch.setattr(
-        'api.session_manifest_store.load_manifest_records',
+        'integration.session_manifest.store.load_manifest_records',
         lambda *args, **kwargs: [{
             'path': 'recolor.py',
             'source_tool': 'write_file',
@@ -2175,7 +2202,7 @@ def test_build_session_manifest_keeps_orphan_artifact_out_of_turns(tmp_path, mon
         }],
     )
     monkeypatch.setattr(
-        'api.session_manifest_store.load_manifest_decided_turn_keys',
+        'integration.session_manifest.store.load_manifest_decided_turn_keys',
         lambda *args, **kwargs: {'turn:6'},
     )
 
@@ -2259,7 +2286,7 @@ def test_build_session_manifest_includes_media_artifacts(tmp_path, monkeypatch):
         ],
         tool_calls=[],
     )
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
 
     manifest = build_session_manifest(session)
     by_path = {row['path']: row for row in manifest['artifacts']}
@@ -2333,7 +2360,7 @@ def test_merge_manifest_delta_write_overrides_media_source(tmp_path, monkeypatch
         ],
         tool_calls=[],
     )
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
     persisted = build_session_manifest(session)
     live_delta = extract_manifest_delta_from_tool_event(
         ToolEvent(name='write_file', args={'path': 'notes.txt'}, assistant_msg_idx=1),
@@ -2373,7 +2400,7 @@ def test_build_session_manifest_reconcile_str_replace_path(tmp_path, monkeypatch
     session.save()
     monkeypatch.setattr('api.models.SESSION_DIR', tmp_path)
     monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
     manifest = build_session_manifest(session)
     assert manifest['artifacts'] == []
 
@@ -2404,7 +2431,7 @@ def test_build_session_manifest_reconcile_result_path_requires_existing_file(tmp
     session.save()
     monkeypatch.setattr('api.models.SESSION_DIR', tmp_path)
     monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
     manifest = build_session_manifest(session)
     assert manifest['artifacts'] == []
 
@@ -2432,7 +2459,7 @@ def test_build_session_manifest_reconcile_skips_missing_file(tmp_path, monkeypat
     session.save()
     monkeypatch.setattr('api.models.SESSION_DIR', tmp_path)
     monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
     manifest = build_session_manifest(session)
     assert manifest['artifacts'] == []
 
@@ -2463,7 +2490,7 @@ def test_build_session_manifest_reconcile_skips_args_path_without_file(tmp_path,
     session.save()
     monkeypatch.setattr('api.models.SESSION_DIR', tmp_path)
     monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
     manifest = build_session_manifest(session)
     assert manifest['artifacts'] == []
 
@@ -2495,7 +2522,7 @@ def test_build_session_manifest_reconcile_dedupes_with_write_file(tmp_path, monk
     session.save()
     monkeypatch.setattr('api.models.SESSION_DIR', tmp_path)
     monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
     manifest = build_session_manifest(session)
     assert len(manifest['artifacts']) == 1
     assert manifest['artifacts'][0]['source_tool'] == 'write_file'
@@ -2528,7 +2555,7 @@ def test_build_session_manifest_reconcile_excludes_read_file_path(tmp_path, monk
     session.save()
     monkeypatch.setattr('api.models.SESSION_DIR', tmp_path)
     monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
     manifest = build_session_manifest(session)
     assert manifest['artifacts'] == []
     assert manifest['references'] == []
@@ -2648,11 +2675,11 @@ def test_only_final_assistant_prose_contributes_artifacts(tmp_path, monkeypatch)
         ],
         tool_calls=[],
     )
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
-    monkeypatch.setattr('api.session_manifest_store.load_manifest_records', lambda *a, **k: [])
-    monkeypatch.setattr('api.session_manifest_store.load_manifest_decided_turn_keys', lambda *a, **k: set())
-    monkeypatch.setattr('api.session_manifest_store.repair_empty_manifest_turns', lambda *a, **k: 0)
-    monkeypatch.setattr('api.session_manifest_store.backfill_missing_manifest_records', lambda *a, **k: {'source': 'derived'})
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.store.load_manifest_records', lambda *a, **k: [])
+    monkeypatch.setattr('integration.session_manifest.store.load_manifest_decided_turn_keys', lambda *a, **k: set())
+    monkeypatch.setattr('integration.session_manifest.store.repair_empty_manifest_turns', lambda *a, **k: 0)
+    monkeypatch.setattr('integration.session_manifest.store.backfill_missing_manifest_records', lambda *a, **k: {'source': 'derived'})
 
     manifest = build_session_manifest(session)
 
@@ -2684,7 +2711,7 @@ def test_build_session_manifest_reconcile_assistant_prose_delivery(tmp_path, mon
     session.save()
     monkeypatch.setattr('api.models.SESSION_DIR', tmp_path)
     monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
     manifest = build_session_manifest(session)
     assert manifest['artifacts'] == [{
         'path': 'AI热点top10-2026-06.docx',
@@ -2785,7 +2812,7 @@ def test_build_session_manifest_reconcile_assistant_prose_skips_missing_file(tmp
     session.save()
     monkeypatch.setattr('api.models.SESSION_DIR', tmp_path)
     monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
     manifest = build_session_manifest(session)
     assert manifest['artifacts'] == []
 
@@ -2859,7 +2886,7 @@ def test_build_session_manifest_multi_turn_assistant_prose_delivery(tmp_path, mo
     session.save()
     monkeypatch.setattr('api.models.SESSION_DIR', tmp_path)
     monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
     manifest = build_session_manifest(session)
     artifact_paths = {row['path'] for row in manifest['artifacts']}
     assert '微博热搜榜_20260612.docx' in artifact_paths
@@ -2949,7 +2976,7 @@ def test_build_session_manifest_turn_reconcile_scopes_session_tool_calls(tmp_pat
     session.save()
     monkeypatch.setattr('api.models.SESSION_DIR', tmp_path)
     monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
     manifest = build_session_manifest(session)
 
     assert {row['path'] for row in manifest['artifacts']} == {
@@ -3075,7 +3102,7 @@ def test_build_session_manifest_assistant_delivery_context_backtick_path(tmp_pat
     session.save()
     monkeypatch.setattr('api.models.SESSION_DIR', tmp_path)
     monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
     manifest = build_session_manifest(session)
     assert manifest['artifacts'] == [{
         'path': 'notes/report.docx',
@@ -3118,7 +3145,7 @@ def test_build_session_manifest_terminal_pandoc_output_arg_artifact(tmp_path, mo
     session.save()
     monkeypatch.setattr('api.models.SESSION_DIR', tmp_path)
     monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
     manifest = build_session_manifest(session)
     assert manifest['artifacts'] == [{
         'path': 'notes/report.docx',
@@ -3159,7 +3186,7 @@ def test_build_session_manifest_terminal_ls_path_candidate_not_artifact(tmp_path
     session.save()
     monkeypatch.setattr('api.models.SESSION_DIR', tmp_path)
     monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
     manifest = build_session_manifest(session)
     # ls 输出行本身不产生 artifact，但 assistant 正文提到的路径会匹配
     assert any(
@@ -3194,7 +3221,7 @@ def test_build_session_manifest_terminal_output_requires_success_and_workspace_f
     session.save()
     monkeypatch.setattr('api.models.SESSION_DIR', tmp_path)
     monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
     assert build_session_manifest(session)['artifacts'] == []
 
 
@@ -3219,7 +3246,7 @@ def test_build_session_manifest_terminal_output_rejects_external_and_dynamic_pat
     session.save()
     monkeypatch.setattr('api.models.SESSION_DIR', tmp_path)
     monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
     assert build_session_manifest(session)['artifacts'] == []
 
 
@@ -3257,7 +3284,7 @@ def test_build_session_manifest_execute_code_delivery_output(tmp_path, monkeypat
     session.save()
     monkeypatch.setattr('api.models.SESSION_DIR', tmp_path)
     monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
     manifest = build_session_manifest(session)
     assert manifest['artifacts'] == []
     assert manifest['references'] == []
@@ -3299,7 +3326,7 @@ def test_build_session_manifest_execute_code_delivery_skips_missing_and_external
     session.save()
     monkeypatch.setattr('api.models.SESSION_DIR', tmp_path)
     monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
     manifest = build_session_manifest(session)
     assert manifest['artifacts'] == []
     assert manifest['references'] == []
@@ -3330,7 +3357,7 @@ def test_build_session_manifest_absolute_path_without_delivery_context(tmp_path,
     session.save()
     monkeypatch.setattr('api.models.SESSION_DIR', tmp_path)
     monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
     manifest = build_session_manifest(session)
     assert any(
         row['path'] == 'analysis_report.pdf' and row['source_tool'] == ASSISTANT_PROSE_ARTIFACT_SOURCE
@@ -3362,7 +3389,7 @@ def test_build_session_manifest_final_relative_path_without_delivery_context(tmp
     session.save()
     monkeypatch.setattr('api.models.SESSION_DIR', tmp_path)
     monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
     manifest = build_session_manifest(session)
     assert any(
         row['path'] == 'src/main.py' and row['source_tool'] == ASSISTANT_PROSE_ARTIFACT_SOURCE
@@ -3392,7 +3419,7 @@ def test_build_session_manifest_final_code_span_without_delivery_context(tmp_pat
     session.save()
     monkeypatch.setattr('api.models.SESSION_DIR', tmp_path)
     monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
     manifest = build_session_manifest(session)
     assert any(
         row['path'] == 'result.json' and row['source_tool'] == ASSISTANT_PROSE_ARTIFACT_SOURCE
@@ -3422,7 +3449,7 @@ def test_build_session_manifest_final_basename_without_delivery_context_is_artif
     session.save()
     monkeypatch.setattr('api.models.SESSION_DIR', tmp_path)
     monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
     manifest = build_session_manifest(session)
     assert manifest['artifacts'] == [{
         'path': 'data.csv',
@@ -3451,7 +3478,7 @@ def test_build_session_manifest_path_missing_file_not_artifact(tmp_path, monkeyp
     session.save()
     monkeypatch.setattr('api.models.SESSION_DIR', tmp_path)
     monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
     manifest = build_session_manifest(session)
     assert manifest['artifacts'] == []
 
@@ -3487,7 +3514,7 @@ def test_build_session_manifest_read_file_is_not_public_reference(tmp_path, monk
     session.save()
     monkeypatch.setattr('api.models.SESSION_DIR', tmp_path)
     monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
     manifest = build_session_manifest(session)
     assert manifest['artifacts'] == []
     assert manifest['references'] == []
@@ -3521,7 +3548,7 @@ def test_build_session_manifest_missing_read_file_has_no_expired_reference(tmp_p
     session.save()
     monkeypatch.setattr('api.models.SESSION_DIR', tmp_path)
     monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
     manifest = build_session_manifest(session)
     assert manifest['references'] == []
     assert manifest['turns'][0]['references'] == []
@@ -3555,7 +3582,7 @@ def test_build_session_manifest_list_dir_no_reference(tmp_path, monkeypatch):
     session.save()
     monkeypatch.setattr('api.models.SESSION_DIR', tmp_path)
     monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
     manifest = build_session_manifest(session)
     assert manifest['references'] == []
     assert manifest['turns'][0]['references'] == []
@@ -3683,7 +3710,7 @@ def test_manifest_diagnostics_ignore_synthetic_user_without_turn_key(tmp_path, m
             {'role': 'assistant', 'content': '已验证并修复'},
         ],
     )
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
 
     manifest = build_session_manifest(session)
 
@@ -3749,18 +3776,18 @@ def test_build_session_manifest_does_not_invent_turn_for_unkeyed_mixed_segment(t
         tool_calls=[],
     )
     original = copy.deepcopy(messages)
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
-    monkeypatch.setattr('api.session_manifest_store.repair_empty_manifest_turns', lambda s: {})
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.store.repair_empty_manifest_turns', lambda s: {})
     monkeypatch.setattr(
-        'api.session_manifest_store.load_manifest_records',
+        'integration.session_manifest.store.load_manifest_records',
         lambda s, include_lineage=True: [],
     )
     monkeypatch.setattr(
-        'api.session_manifest_store.load_manifest_decided_turn_keys',
+        'integration.session_manifest.store.load_manifest_decided_turn_keys',
         lambda s, include_lineage=True: set(),
     )
     monkeypatch.setattr(
-        'api.session_manifest_store.backfill_missing_manifest_records',
+        'integration.session_manifest.store.backfill_missing_manifest_records',
         lambda s: {'source': 'derived'},
     )
 
@@ -3801,7 +3828,7 @@ def test_build_session_manifest_compression_turn_keys(tmp_path, monkeypatch):
         ],
         tool_calls=[],
     )
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
     monkeypatch.setattr('api.models.get_state_db_session_messages', lambda *a, **k: [])
 
     manifest = build_session_manifest(session)
@@ -3875,7 +3902,7 @@ def test_build_session_manifest_turn_artifacts_match_wire(tmp_path, monkeypatch)
             'turn:2': ['make_docx.py', 'deliver.docx'],
         },
     )
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
 
     wired = turn_artifacts_for_wire(session)
     manifest = build_session_manifest(session)
@@ -3952,9 +3979,9 @@ def test_build_session_manifest_groups_references_by_turn(tmp_path, monkeypatch)
         ],
         tool_calls=[],
     )
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
-    monkeypatch.setattr('api.session_manifest._skills_dir_for_session', lambda s: skills_dir)
-    monkeypatch.setattr('api.session_manifest._skillhub_preview_available', lambda: True)
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.manifest._skills_dir_for_session', lambda s: skills_dir)
+    monkeypatch.setattr('integration.session_manifest.manifest._skillhub_preview_available', lambda: True)
 
     manifest = build_session_manifest(session)
 
@@ -4004,11 +4031,11 @@ def test_persist_turn_artifact_paths_filters_missing_files(tmp_path, monkeypatch
         tool_calls=[],
     )
 
-    monkeypatch.setattr('api.session_manifest_store.STATE_DIR', tmp_path / 'state')
+    monkeypatch.setattr('integration.session_manifest.store.STATE_DIR', tmp_path / 'state')
 
     _persist_turn_artifact_paths(session, 'turn:2')
 
-    from api.session_manifest_store import load_manifest_records
+    from integration.session_manifest.store import load_manifest_records
 
     records = load_manifest_records(session)
     assert [(row['turn_key'], row['path'], row['source_tool'], row['preview']) for row in records] == [
@@ -4051,11 +4078,11 @@ def test_persist_turn_artifact_paths_scopes_session_tool_calls(tmp_path, monkeyp
         ],
     )
 
-    monkeypatch.setattr('api.session_manifest_store.STATE_DIR', tmp_path / 'state')
+    monkeypatch.setattr('integration.session_manifest.store.STATE_DIR', tmp_path / 'state')
 
     _persist_turn_artifact_paths(session, 'turn:2')
 
-    from api.session_manifest_store import load_manifest_records
+    from integration.session_manifest.store import load_manifest_records
 
     records = load_manifest_records(session)
     assert [(row['turn_key'], row['path'], row['source_tool'], row['preview']) for row in records] == [
@@ -4084,12 +4111,12 @@ def test_persist_turn_artifact_paths_keeps_same_path_across_turns(tmp_path, monk
         tool_calls=[],
     )
 
-    monkeypatch.setattr('api.session_manifest_store.STATE_DIR', tmp_path / 'state')
+    monkeypatch.setattr('integration.session_manifest.store.STATE_DIR', tmp_path / 'state')
 
     _persist_turn_artifact_paths(session, 'turn:1')
     _persist_turn_artifact_paths(session, 'turn:2')
 
-    from api.session_manifest_store import load_manifest_records
+    from integration.session_manifest.store import load_manifest_records
 
     records = load_manifest_records(session)
     assert [(row['turn_key'], row['path'], row['source_tool'], row['preview']) for row in records] == [
@@ -4127,10 +4154,10 @@ def test_session_get_without_db_decision_keeps_artifacts_empty(tmp_path, monkeyp
     monkeypatch.setattr(routes, '_clear_stale_stream_state', lambda _s: None)
     monkeypatch.setattr(routes, 'redact_session_data', lambda payload: payload)
     monkeypatch.setattr(routes, 'j', lambda _handler, payload, status=200, extra_headers=None: payload)
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
-    monkeypatch.setattr('api.session_manifest._skills_dir_for_session', lambda s: tmp_path / 'skills')
-    monkeypatch.setattr('api.session_manifest._skillhub_preview_available', lambda: False)
-    monkeypatch.setattr('api.session_manifest_store.STATE_DIR', tmp_path / 'state')
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.manifest._skills_dir_for_session', lambda s: tmp_path / 'skills')
+    monkeypatch.setattr('integration.session_manifest.manifest._skillhub_preview_available', lambda: False)
+    monkeypatch.setattr('integration.session_manifest.store.STATE_DIR', tmp_path / 'state')
 
     session_resp = routes.handle_get(
         object(),
@@ -4141,7 +4168,7 @@ def test_session_get_without_db_decision_keeps_artifacts_empty(tmp_path, monkeyp
         urlparse('/api/session/manifest?session_id=http_align01'),
     )
 
-    from api.session_manifest_store import load_manifest_decided_turn_keys, load_manifest_records
+    from integration.session_manifest.store import load_manifest_decided_turn_keys, load_manifest_records
 
     assert 'turn_artifacts' not in session_resp['session']
     assert manifest_resp == {
@@ -4168,7 +4195,7 @@ def test_session_get_with_empty_db_decision_uses_db_manifest(tmp_path, monkeypat
     from urllib.parse import urlparse
 
     import api.routes as routes
-    from api.session_manifest_store import upsert_manifest_records
+    from integration.session_manifest.store import upsert_manifest_records
 
     workspace = tmp_path / 'ws'
     workspace.mkdir()
@@ -4183,7 +4210,7 @@ def test_session_get_with_empty_db_decision_uses_db_manifest(tmp_path, monkeypat
     )
     monkeypatch.setattr(routes, 'get_session', lambda sid, metadata_only=False: session)
     monkeypatch.setattr(routes, 'j', lambda _handler, payload, status=200, extra_headers=None: payload)
-    monkeypatch.setattr('api.session_manifest_store.STATE_DIR', tmp_path / 'state')
+    monkeypatch.setattr('integration.session_manifest.store.STATE_DIR', tmp_path / 'state')
     upsert_manifest_records(
         session,
         'turn:1',
@@ -4205,7 +4232,7 @@ def test_session_get_with_empty_db_decision_uses_db_manifest(tmp_path, monkeypat
 
 
 def test_manifest_read_does_not_repair_empty_artifact_decision(tmp_path, monkeypatch):
-    from api.session_manifest_store import (
+    from integration.session_manifest.store import (
         load_manifest_empty_turn_keys,
         load_manifest_records,
         upsert_manifest_records,
@@ -4223,8 +4250,8 @@ def test_manifest_read_does_not_repair_empty_artifact_decision(tmp_path, monkeyp
             {'role': 'assistant', 'content': '文件位置：report.md'},
         ],
     )
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
-    monkeypatch.setattr('api.session_manifest_store.STATE_DIR', tmp_path / 'state')
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.store.STATE_DIR', tmp_path / 'state')
     upsert_manifest_records(
         session,
         'turn:1',
@@ -4285,9 +4312,9 @@ def test_build_session_manifest_multi_turn_mixed_artifacts_and_references(tmp_pa
         },
         tool_calls=[],
     )
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
-    monkeypatch.setattr('api.session_manifest._skills_dir_for_session', lambda s: skills_dir)
-    monkeypatch.setattr('api.session_manifest._skillhub_preview_available', lambda: True)
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.manifest._skills_dir_for_session', lambda s: skills_dir)
+    monkeypatch.setattr('integration.session_manifest.manifest._skillhub_preview_available', lambda: True)
 
     wired = turn_artifacts_for_wire(session)
     manifest = build_session_manifest(session)
@@ -4349,13 +4376,13 @@ def test_persist_turn_artifact_paths_includes_skill_manage(tmp_path, monkeypatch
         ],
         tool_calls=[],
     )
-    monkeypatch.setattr('api.session_manifest._skills_dir_for_session', lambda s: skills_dir)
-    monkeypatch.setattr('api.session_manifest._skillhub_preview_available', lambda: True)
-    monkeypatch.setattr('api.session_manifest_store.STATE_DIR', tmp_path / 'state')
+    monkeypatch.setattr('integration.session_manifest.manifest._skills_dir_for_session', lambda s: skills_dir)
+    monkeypatch.setattr('integration.session_manifest.manifest._skillhub_preview_available', lambda: True)
+    monkeypatch.setattr('integration.session_manifest.store.STATE_DIR', tmp_path / 'state')
 
     _persist_turn_artifact_paths(session, 'turn:1')
 
-    from api.session_manifest_store import load_manifest_records
+    from integration.session_manifest.store import load_manifest_records
 
     records = load_manifest_records(session)
     assert [(row['turn_key'], row['path'], row['source_tool'], row['preview']) for row in records] == [
@@ -4378,12 +4405,12 @@ def test_persist_turn_artifact_paths_empty_turn_not_stored(tmp_path, monkeypatch
         ],
         tool_calls=[],
     )
-    monkeypatch.setattr('api.session_manifest._skills_dir_for_session', lambda s: tmp_path / 'skills')
-    monkeypatch.setattr('api.session_manifest_store.STATE_DIR', tmp_path / 'state')
+    monkeypatch.setattr('integration.session_manifest.manifest._skills_dir_for_session', lambda s: tmp_path / 'skills')
+    monkeypatch.setattr('integration.session_manifest.store.STATE_DIR', tmp_path / 'state')
 
     _persist_turn_artifact_paths(session, 'turn:1')
 
-    from api.session_manifest_store import load_manifest_decided_turn_keys, load_manifest_records
+    from integration.session_manifest.store import load_manifest_decided_turn_keys, load_manifest_records
 
     assert load_manifest_records(session) == []
     assert load_manifest_decided_turn_keys(session) == {'turn:1'}
@@ -4424,9 +4451,9 @@ def test_build_session_manifest_skill_manage_with_empty_persisted_turn_artifacts
         turn_artifacts={'turn:1': []},
         tool_calls=[],
     )
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
-    monkeypatch.setattr('api.session_manifest._skills_dir_for_session', lambda s: skills_dir)
-    monkeypatch.setattr('api.session_manifest._skillhub_preview_available', lambda: True)
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.manifest._skills_dir_for_session', lambda s: skills_dir)
+    monkeypatch.setattr('integration.session_manifest.manifest._skillhub_preview_available', lambda: True)
 
     manifest = build_session_manifest(session)
 
@@ -4498,9 +4525,9 @@ def test_build_session_manifest_skill_view_deduped_when_artifact(tmp_path, monke
         ],
         tool_calls=[],
     )
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
-    monkeypatch.setattr('api.session_manifest._skills_dir_for_session', lambda s: skills_dir)
-    monkeypatch.setattr('api.session_manifest._skillhub_preview_available', lambda: True)
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.manifest._skills_dir_for_session', lambda s: skills_dir)
+    monkeypatch.setattr('integration.session_manifest.manifest._skillhub_preview_available', lambda: True)
 
     manifest = build_session_manifest(session)
 
@@ -4589,7 +4616,7 @@ def test_extract_manifest_records_skips_skill_scan_for_file_artifact_keys(tmp_pa
         return real_find(name, skills_dir_arg)
 
     monkeypatch.setattr(local_skills, '_find_skill', counting_find)
-    monkeypatch.setattr('api.session_manifest._skillhub_preview_available', lambda: True)
+    monkeypatch.setattr('integration.session_manifest.manifest._skillhub_preview_available', lambda: True)
 
     artifacts, references, turns = _extract_manifest_records(
         events, workspace, messages, skills_dir=skills_dir,
@@ -4609,7 +4636,7 @@ def test_extract_manifest_records_skips_skill_scan_for_file_artifact_keys(tmp_pa
 
 
 def test_canonical_skill_path_normalization(tmp_path, monkeypatch):
-    from api.session_manifest import _canonical_skill_manifest_path
+    from integration.session_manifest.manifest import _canonical_skill_manifest_path
 
     skills_dir = tmp_path / 'profile-home' / 'skills'
     _write_local_skill(skills_dir, 'ai-news-top10', rel_path='research/ai-news-top10')
@@ -4629,7 +4656,7 @@ def test_canonical_skill_path_normalization(tmp_path, monkeypatch):
 
 
 def test_canonical_manifest_file_key_normalizes_without_existence(tmp_path):
-    from api.session_manifest import _canonical_manifest_file_key
+    from integration.session_manifest.manifest import _canonical_manifest_file_key
 
     workspace = tmp_path / 'ws'
     workspace.mkdir()
@@ -4674,7 +4701,7 @@ def test_build_session_manifest_drops_reference_when_same_file_is_artifact(tmp_p
         ],
         tool_calls=[],
     )
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
 
     manifest = build_session_manifest(session)
 
@@ -4712,9 +4739,9 @@ def test_build_session_manifest_drops_persisted_artifact_file_from_references(tm
         ],
         tool_calls=[],
     )
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
     monkeypatch.setattr(
-        'api.session_manifest_store.load_manifest_records',
+        'integration.session_manifest.store.load_manifest_records',
         lambda s, include_lineage=True: [{
             'session_id': s.session_id,
             'lineage_key': s.session_id,
@@ -4727,7 +4754,7 @@ def test_build_session_manifest_drops_persisted_artifact_file_from_references(tm
         }],
     )
     monkeypatch.setattr(
-        'api.session_manifest_store.load_manifest_decided_turn_keys',
+        'integration.session_manifest.store.load_manifest_decided_turn_keys',
         lambda *args, **kwargs: {'turn:1'},
     )
 
@@ -4778,9 +4805,9 @@ def test_skill_view_failed_with_warning_does_not_create_reference(tmp_path, monk
         ],
         tool_calls=[],
     )
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
-    monkeypatch.setattr('api.session_manifest._skills_dir_for_session', lambda s: skills_dir)
-    monkeypatch.setattr('api.session_manifest._skillhub_preview_available', lambda: True)
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.manifest._skills_dir_for_session', lambda s: skills_dir)
+    monkeypatch.setattr('integration.session_manifest.manifest._skillhub_preview_available', lambda: True)
 
     manifest = build_session_manifest(session)
 
@@ -4820,9 +4847,9 @@ def test_skill_view_success_keeps_canonical_skill_reference(tmp_path, monkeypatc
         ],
         tool_calls=[],
     )
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
-    monkeypatch.setattr('api.session_manifest._skills_dir_for_session', lambda s: skills_dir)
-    monkeypatch.setattr('api.session_manifest._skillhub_preview_available', lambda: True)
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.manifest._skills_dir_for_session', lambda s: skills_dir)
+    monkeypatch.setattr('integration.session_manifest.manifest._skillhub_preview_available', lambda: True)
 
     manifest = build_session_manifest(session)
 
@@ -4902,9 +4929,9 @@ def test_skill_view_dedupes_bare_and_skill_md_paths_to_one_canonical_reference(t
         ],
         tool_calls=[],
     )
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
-    monkeypatch.setattr('api.session_manifest._skills_dir_for_session', lambda s: skills_dir)
-    monkeypatch.setattr('api.session_manifest._skillhub_preview_available', lambda: True)
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.manifest._skills_dir_for_session', lambda s: skills_dir)
+    monkeypatch.setattr('integration.session_manifest.manifest._skillhub_preview_available', lambda: True)
 
     manifest = build_session_manifest(session)
 

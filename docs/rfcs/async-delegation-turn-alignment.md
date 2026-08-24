@@ -479,7 +479,7 @@ delegation_id=...
 | WebUI metadata | Session 保存 `delegation_id -> origin_turn_key` 索引和取消请求；对应 user message 保存 `async_delegations` 状态。 |
 | `api/background_process.py` | 解析 origin，调用带 `turn_key_override` 的 wakeup；在取消屏障后处理有界竞态与失败关闭。 |
 | `api/streaming.py` | 写入 user-message 任务状态，使用语义显示投影，避免 completion fallback visible user，并沿用 override 结算所有输出。 |
-| `api/session_manifest.py` | 非真实 user 不切 turn；origin turn 收集异步 run 的工具/MEDIA/artifact。 |
+| `integration/session_manifest/manifest.py` | 非真实 user 不切 turn；origin turn 收集异步 run 的工具/MEDIA/artifact。 |
 | 前端/SSE | 扩展现有 `server_turn_started` 和任务状态事件；在时间线尾部实时展示该 run，不渲染 hidden anchor。 |
 
 ## 测试与验收

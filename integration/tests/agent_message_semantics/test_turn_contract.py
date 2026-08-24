@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from api import streaming
-from api.session_manifest import _message_turns
+from integration.session_manifest.manifest import _message_turns
 
 
 INTERNAL_SCAFFOLD_KINDS = (

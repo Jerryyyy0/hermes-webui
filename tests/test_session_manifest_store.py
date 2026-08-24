@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from api import session_manifest_store as store
+from integration.session_manifest import store
 
 
 def _session(session_id, *, profile='ops', parent_session_id=None, pre_compression_snapshot=False):
@@ -106,7 +106,7 @@ def test_legacy_blank_root_resolves_to_default_workspace_for_projection(tmp_path
 
 
 def test_manifest_file_wire_paths_use_the_record_workspace_and_skip_external_roots(tmp_path, monkeypatch):
-    from api.session_manifest import _rows_to_wire
+    from integration.session_manifest.manifest import _rows_to_wire
 
     base = tmp_path / 'workspace-base'
     inside = base / 'project-a'

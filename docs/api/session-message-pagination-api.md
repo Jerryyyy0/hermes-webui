@@ -2,7 +2,7 @@
 
 本文档描述 `GET /api/session` 在加载会话 transcript 时的**尾部窗口分页**契约，重点说明 `msg_limit`、`turn_align` 与 `expand_renderable` 的语义与组合方式。
 
-实现入口：`api/routes.py`（`GET /api/session`、`_message_window_for_display`、`_turn_aligned_window_indices`）；轮次边界与 [`_message_turns()`](api/session_manifest.py) 一致。轮次 key 背景见 [turn-key-backend.md](./turn-key-backend.md)。
+实现入口：`api/routes.py`（`GET /api/session`、`_message_window_for_display`、`_turn_aligned_window_indices`）；轮次边界与 [`_message_turns()`](integration/session_manifest/manifest.py) 一致。轮次 key 背景见 [turn-key-backend.md](./turn-key-backend.md)。
 
 ---
 
@@ -194,5 +194,5 @@ GET /api/session?session_id={sid}&messages=1&resolve_model=0&msg_before={_oldest
 | `GET /api/session` 参数解析 | `api/routes.py` |
 | `_turn_aligned_window_indices` | `api/routes.py` |
 | `_message_window_for_display` | `api/routes.py` |
-| `_message_turns` | `api/session_manifest.py` |
+| `_message_turns` | `integration/session_manifest/manifest.py` |
 | 单测 | `tests/test_session_message_window_turn_align.py`、`tests/test_session_message_window_renderable_tail.py` |

@@ -3,7 +3,7 @@
 from pathlib import Path
 
 from api.models import Session
-from api.session_manifest import ToolEvent, build_session_manifest, extract_manifest_delta_from_tool_event
+from integration.session_manifest.manifest import ToolEvent, build_session_manifest, extract_manifest_delta_from_tool_event
 from api.streaming import _webui_ephemeral_system_prompt
 
 
@@ -53,7 +53,7 @@ def test_global_workspace_write_is_a_turn_artifact_for_managed_session(tmp_path,
         ],
         tool_calls=[],
     )
-    monkeypatch.setattr("api.session_manifest._load_display_messages", lambda s: list(s.messages))
+    monkeypatch.setattr("integration.session_manifest.manifest._load_display_messages", lambda s: list(s.messages))
 
     manifest = build_session_manifest(session)
 
@@ -64,7 +64,7 @@ def test_global_workspace_write_is_a_turn_artifact_for_managed_session(tmp_path,
 
 def test_global_workspace_write_uses_same_root_for_sse_and_store(tmp_path, monkeypatch):
     from api import streaming
-    from api.session_manifest_store import load_manifest_records
+    from integration.session_manifest.store import load_manifest_records
 
     workspace_root = tmp_path / "workspace"
     session_workspace = workspace_root / "sessions" / "managed-persist"
@@ -77,8 +77,8 @@ def test_global_workspace_write_uses_same_root_for_sse_and_store(tmp_path, monke
         if path in (None, "")
         else Path(path).expanduser().resolve(),
     )
-    monkeypatch.setattr("api.session_manifest_store.STATE_DIR", tmp_path / "state")
-    monkeypatch.setattr("api.session_manifest._load_display_messages", lambda s: list(s.messages))
+    monkeypatch.setattr("integration.session_manifest.store.STATE_DIR", tmp_path / "state")
+    monkeypatch.setattr("integration.session_manifest.manifest._load_display_messages", lambda s: list(s.messages))
     session = Session(
         session_id="managed-persist",
         workspace=str(session_workspace),

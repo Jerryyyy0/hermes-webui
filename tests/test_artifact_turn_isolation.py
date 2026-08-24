@@ -23,14 +23,14 @@ def _session(workspace, *, active_stream_id="stream-old"):
 
 def test_stream_owned_tool_evidence_settles_bound_turn_before_transcript_merge(tmp_path, monkeypatch):
     from api import streaming
-    from api.session_manifest_store import load_manifest_records
+    from integration.session_manifest.store import load_manifest_records
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     artifact = workspace / "yijing_pro.html"
     artifact.write_text("<html></html>", encoding="utf-8")
     session = _session(workspace)
-    monkeypatch.setattr("api.session_manifest_store.STATE_DIR", tmp_path / "state")
+    monkeypatch.setattr("integration.session_manifest.store.STATE_DIR", tmp_path / "state")
     streaming.STREAM_LIVE_MANIFEST["stream-old"] = {
         "artifacts": [{
             "turn_key": "turn:7",
@@ -61,8 +61,8 @@ def test_stream_owned_tool_evidence_settles_bound_turn_before_transcript_merge(t
 
 def test_completed_settlement_drops_stream_artifact_removed_before_turn_end(tmp_path, monkeypatch):
     from api import streaming
-    from api.session_manifest import build_session_manifest
-    from api.session_manifest_store import (
+    from integration.session_manifest.manifest import build_session_manifest
+    from integration.session_manifest.store import (
         load_manifest_decided_turn_keys,
         load_manifest_records,
     )
@@ -82,7 +82,7 @@ def test_completed_settlement_drops_stream_artifact_removed_before_turn_end(tmp_
             {"role": "assistant", "content": "完成"},
         ],
     )
-    monkeypatch.setattr("api.session_manifest_store.STATE_DIR", tmp_path / "state")
+    monkeypatch.setattr("integration.session_manifest.store.STATE_DIR", tmp_path / "state")
     streaming.STREAM_LIVE_MANIFEST["stream-complete"] = {
         "artifacts": [{
             "turn_key": "turn:1",
@@ -115,7 +115,7 @@ def test_completed_settlement_drops_stream_artifact_removed_before_turn_end(tmp_
 
 def test_cancelled_settlement_does_not_persist_removed_stream_artifact(tmp_path, monkeypatch):
     from api import streaming
-    from api.session_manifest_store import (
+    from integration.session_manifest.store import (
         load_manifest_decided_turn_keys,
         load_manifest_records,
     )
@@ -123,7 +123,7 @@ def test_cancelled_settlement_does_not_persist_removed_stream_artifact(tmp_path,
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     session = _session(workspace)
-    monkeypatch.setattr("api.session_manifest_store.STATE_DIR", tmp_path / "state")
+    monkeypatch.setattr("integration.session_manifest.store.STATE_DIR", tmp_path / "state")
     streaming.STREAM_LIVE_MANIFEST["stream-old"] = {
         "artifacts": [{
             "turn_key": "turn:7",
@@ -153,7 +153,7 @@ def test_cancelled_settlement_does_not_persist_removed_stream_artifact(tmp_path,
 
 def test_synthetic_verification_nudge_does_not_block_bound_artifact_settlement(tmp_path, monkeypatch):
     from api import streaming
-    from api.session_manifest_store import load_manifest_records
+    from integration.session_manifest.store import load_manifest_records
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -175,7 +175,7 @@ def test_synthetic_verification_nudge_does_not_block_bound_artifact_settlement(t
             {"role": "assistant", "content": "MEDIA: result.png"},
         ],
     )
-    monkeypatch.setattr("api.session_manifest_store.STATE_DIR", tmp_path / "state")
+    monkeypatch.setattr("integration.session_manifest.store.STATE_DIR", tmp_path / "state")
     streaming.STREAM_LIVE_MANIFEST["stream-synthetic"] = {
         "artifacts": [{
             "turn_key": "turn:8",
@@ -207,7 +207,7 @@ def test_synthetic_verification_nudge_does_not_block_bound_artifact_settlement(t
 
 def test_new_semantic_scaffold_does_not_block_bound_artifact_settlement(tmp_path, monkeypatch):
     from api import streaming
-    from api.session_manifest_store import load_manifest_records
+    from integration.session_manifest.store import load_manifest_records
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -230,7 +230,7 @@ def test_new_semantic_scaffold_does_not_block_bound_artifact_settlement(tmp_path
             {"role": "assistant", "content": "MEDIA: result.png"},
         ],
     )
-    monkeypatch.setattr("api.session_manifest_store.STATE_DIR", tmp_path / "state")
+    monkeypatch.setattr("integration.session_manifest.store.STATE_DIR", tmp_path / "state")
     streaming.STREAM_LIVE_MANIFEST["stream-semantic"] = {
         "artifacts": [{
             "turn_key": "turn:8",
@@ -257,7 +257,7 @@ def test_new_semantic_scaffold_does_not_block_bound_artifact_settlement(tmp_path
 
 def test_final_assistant_existing_file_augments_live_stream_evidence(tmp_path, monkeypatch):
     from api import streaming
-    from api.session_manifest_store import load_manifest_records
+    from integration.session_manifest.store import load_manifest_records
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -276,7 +276,7 @@ def test_final_assistant_existing_file_augments_live_stream_evidence(tmp_path, m
             {"role": "assistant", "content": "Created `summary.pdf`"},
         ],
     )
-    monkeypatch.setattr("api.session_manifest_store.STATE_DIR", tmp_path / "state")
+    monkeypatch.setattr("integration.session_manifest.store.STATE_DIR", tmp_path / "state")
     streaming.STREAM_LIVE_MANIFEST["stream-final-prose"] = {
         "artifacts": [{
             "turn_key": "turn:1",
@@ -303,12 +303,12 @@ def test_final_assistant_existing_file_augments_live_stream_evidence(tmp_path, m
 
 def test_stale_worker_cannot_settle_or_create_empty_decision(tmp_path, monkeypatch):
     from api import streaming
-    from api.session_manifest_store import load_manifest_decided_turn_keys
+    from integration.session_manifest.store import load_manifest_decided_turn_keys
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     session = _session(workspace, active_stream_id="stream-new")
-    monkeypatch.setattr("api.session_manifest_store.STATE_DIR", tmp_path / "state")
+    monkeypatch.setattr("integration.session_manifest.store.STATE_DIR", tmp_path / "state")
 
     result = streaming._persist_turn_artifact_paths(
         session,
@@ -328,7 +328,7 @@ def test_stale_worker_cannot_settle_or_create_empty_decision(tmp_path, monkeypat
 
 def test_current_turn_key_conflict_cannot_settle_artifacts(tmp_path, monkeypatch):
     from api import streaming
-    from api.session_manifest_store import load_manifest_decided_turn_keys
+    from integration.session_manifest.store import load_manifest_decided_turn_keys
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -344,7 +344,7 @@ def test_current_turn_key_conflict_cannot_settle_artifacts(tmp_path, monkeypatch
             {"role": "assistant", "content": "完成"},
         ],
     )
-    monkeypatch.setattr("api.session_manifest_store.STATE_DIR", tmp_path / "state")
+    monkeypatch.setattr("integration.session_manifest.store.STATE_DIR", tmp_path / "state")
     journal_events = []
     monkeypatch.setattr(
         streaming,
@@ -389,9 +389,9 @@ def test_current_turn_key_conflict_cannot_settle_artifacts(tmp_path, monkeypatch
 
 
 def test_passive_compression_rotation_keeps_canonical_turn_artifact_alignment(tmp_path, monkeypatch):
-    from api import session_manifest_store as store
+    from integration.session_manifest import store
     from api import streaming
-    from api.session_manifest import build_session_manifest
+    from integration.session_manifest.manifest import build_session_manifest
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -442,7 +442,7 @@ def test_passive_compression_rotation_keeps_canonical_turn_artifact_alignment(tm
     monkeypatch.setattr(store, "SESSION_DIR", session_dir)
     monkeypatch.setattr("api.workspace._BOOT_DEFAULT_WORKSPACE", workspace)
     monkeypatch.setattr(
-        "api.session_manifest._load_display_messages",
+        "integration.session_manifest.manifest._load_display_messages",
         lambda session: list(session.messages),
     )
 
@@ -498,7 +498,7 @@ def test_passive_compression_rotation_keeps_canonical_turn_artifact_alignment(tm
 
 
 def test_legacy_empty_turn_nine_repairs_from_same_turn_write_file(tmp_path):
-    from api import session_manifest_store as store
+    from integration.session_manifest import store
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()

@@ -19,6 +19,7 @@ export SKILLHUB_URL=http://127.0.0.1:8000   # optional; SkillHub market only (se
 - **Egress policy (iptables)** — gated API to apply iptables open/whitelist policies (see below). **Off by default**; requires `HERMES_EGRESS_POLICY_ENABLED=1`.
 - **Knowledge base BFF** — `POST /api/integration/knowledge_base/*` routes are active only when `KNOWLEDGE_BASE_URL` is also set.
 - **Notifications** — `/api/integration/notifications/*` for local notification storage (`notifications.db`) and knowledge base notification aggregation (from downstream `get_user_messages`).
+- **External Manifest artifacts** — 已登记的外部绝对路径成果继续使用既有 workspace 文件预览 URL，只读且不移动源文件；详见下方 Workspace files。
 - **Fixed Chinese session titles** — WebUI automatic and manual title generation always instruct the title model to return Simplified Chinese. This Fork policy does not read `auxiliary.title_generation.language`; model/provider/timeout routing remains unchanged. If the title model fails, WebUI keeps its existing topic-first local fallback behavior.
 - **Chinese approval and clarify display copy** — WebUI approval cards prefer a fork-owned Chinese display description (`display_description_zh`) while keeping the Agent's canonical English `description` and `pattern_key(s)` unchanged for Smart Approval, hooks, and allowlists. When the Agent includes optional structured `tirith_findings` (`rule_id` / `severity` / `title` / `description` / `remediation` / `command_summary`), WebUI localizes known Tirith rules by `rule_id` (including `pipe-to-interpreter` command summaries and separate remediation hints); unknown rules keep severity plus original evidence. Legacy security-scan prose remains supported with English or Chinese envelopes (`Security scan — …` / `安全扫描：…`), `[HIGH]`/`[高]` severity, and inline `Safer:` remediation text. Non-Tirith pattern keys in `pattern_keys` are appended as localized reason text. Browser notifications prefer the same Chinese display copy. Agent and WebUI may land independently; structured findings require a matching Agent build.
 
@@ -326,7 +327,7 @@ auth-proxy 不可达时 WebUI 返回 `502` 且 `error` 为 `zhiling_logout_faile
 | Method | Path | Purpose |
 |--------|------|---------|
 | GET | `/api/integration/workspace/files` | 平铺文件索引；`page`（默认 1）、`page_size`（默认 500，上限 5000）；可选子树 `path`（默认 `.`）；`q`（basename 包含搜索）、`type`（扩展名过滤，如 `.md`）、`sort`（`path`/`size`/`mtime`/`ctime`，默认 `path`）、`order`（`asc`/`desc`，默认 `desc`）；可选 `profile`（传入时仅返回该 profile 的 manifest 成果文件；不传则返回全部文件并对成果附加 `profile`）；可选 `refresh=1`（跳过服务端内存索引，强制重扫磁盘） |
-| GET | `/api/integration/workspace/file` | 原始文件字节流（`path` 必填）；`Content-Type` 按扩展名；不设 `Content-Disposition` |
+| GET | `/api/integration/workspace/file` | 原始文件字节流（`path` 必填）；相对路径按 workspace 解析；绝对路径仅接受 Session Manifest 已登记、当前安全可读的外部 Artifact；`Content-Type` 按扩展名；不设 `Content-Disposition` |
 | POST | `/api/integration/workspace/file/delete` | 删除文件（`paths` 必填，字符串数组，至少 1 项）；仅删文件；响应 `deleted` / `failed`；全部失败 404 |
 
 翻页：递增 `page` 直到响应 `has_more` 为 `false`。条目含 `ext`、`mime`、`mtime_ns`、`ctime_ns`（优先 birthtime，否则为 `st_ctime` 纳秒；`stat` 失败时为 `null`）。manifest 成果文件（会话 write 工具产出）附加可选 `profile`（`session.profile`）；非成果文件无该字段。
@@ -346,6 +347,8 @@ curl -sS -X POST 'http://127.0.0.1:8787/api/integration/workspace/file/delete' \
 ```
 
 UI（`HERMES_INTEGRATION=1`）：左侧 Rail / 移动顶栏 **Workspace 文件**（`integrationWorkspace`），`hermes_integration_workspace.js` + `hermes_integration_workspace.css`。左栏为平铺列表（服务端搜索/类型过滤/排序、分页「加载更多」、单行删除与多选批量删除、刷新），中间主区只读预览（文本 / Markdown / 图片 / PDF / HTML / 媒体）。删除后会刷新 session manifest，成果 chip 可标为已过期。与会话绑定的右侧 Workspace 面板（`/api/list` + `session_id`）并存。
+
+Session Manifest 的 `preview=file` 若返回绝对 `path`，前端仍调用此 URL；服务端先按精确路径查询既有 Artifact row，再以无跟随 fd 校验读取。聊天附件目录（`HERMES_WEBUI_ATTACHMENT_DIR/<session_id>/`，默认 `{STATE_DIR}/attachments/<session_id>/`）及 `HERMES_HOME/memories/` 也可使用此只读预览，但前提同样是存在精确的持久化 Artifact row；上传文件不会因此自动成为 Artifact，两个目录都不会被枚举。任意未登记、其余受保护、已删除或 symlink 路径均返回 404。外部文件只能预览/下载，前端不显示编辑或保存操作。
 
 ### WebUI appearance（`HERMES_INTEGRATION=1`）
 
@@ -509,7 +512,7 @@ Response includes global `stats`: `{ hub, installed, not_installed, custom }` ac
 | Path | Role |
 |------|------|
 | `config.py` | `HERMES_INTEGRATION`, `SKILLHUB_URL`, `KNOWLEDGE_BASE_URL`, `ZHILING_CONTROL_PLANE_URL`, `ZHILING_LOGOUT_API_URL`, `ZHILING_IDENTITY_CACHE_TTL_SECONDS`, `skillhub_enabled()`, `knowledge_base_enabled()`, `identity_lookup_enabled()`, `zhiling_identity_cache_ttl_seconds()`, `zhiling_logout_enabled()` |
-| `knowledge_base/` | `/api/integration/knowledge_base/*` → `{KNOWLEDGE_BASE_URL}/knowledge_base/*`; `turn_references.py` normalizes the two IThink KB MCP search results for Session Manifest. `api/session_manifest.py` keeps only the extraction/serialization seam. |
+| `knowledge_base/` | `/api/integration/knowledge_base/*` → `{KNOWLEDGE_BASE_URL}/knowledge_base/*`; `turn_references.py` normalizes the two IThink KB MCP search results for Session Manifest. `integration/session_manifest/manifest.py` keeps only the extraction/serialization seam. |
 | `notifications/` | `/api/integration/notifications/*` — 通知存储（`notifications.db`）与知识库消息聚合 |
 | `webui_appearance/` | `GET /api/integration/webui_appearance` + `/file` — 读 `{HERMES_HOME}/webui-appearance/` 配置与资源 |
 | `identity/` | `GET /api/integration/webui_login` → Control Plane `/api/identity/lookup`；进程内身份缓存（`session_store.py`） |
@@ -519,7 +522,7 @@ Response includes global `stats`: `{ hub, installed, not_installed, custom }` ac
 | `profiles/` | `GET /api/profiles` enrich; `POST /api/profile/info`; `GET /api/profile/logo-presets` |
 | `scripts/fetch_profile_logos.py` | Generate built-in logo library |
 | `assets/profile-logos/` | Logo preset PNGs + manifest |
-| `agent_message_semantics/` | Hermes Agent 内部脚手架与 model-only context anchor 的兼容分类、一问一答显示投影和无正文 DEBUG 审计；`api/streaming.py` / `api/session_manifest.py` 只保留薄调用 |
+| `agent_message_semantics/` | Hermes Agent 内部脚手架与 model-only context anchor 的兼容分类、一问一答显示投影和无正文 DEBUG 审计；`api/streaming.py` / `integration/session_manifest/manifest.py` 只保留薄调用 |
 | `async_delegation_turns/` | 后台委派的 sidecar 归属、每轮状态投影、取消屏障、持久化活动版本与统一 SSE 生命周期事件信封；`api/streaming.py`、`api/background_process.py`、`api/routes.py` 仅保留发射与 transport 接缝 |
 | `assets/hermes_skillhub.js` | SkillHub sidebar panel |
 | `assets/hermes_profiles.js` | Profiles panel enrich |
@@ -538,7 +541,7 @@ Response includes global `stats`: `{ hub, installed, not_installed, custom }` ac
 - `api/models.py` — Session sidecar persists the nullable `last_error_at` fact used to derive list status, the async-delegation activity version, cron workspace binding state, and state.db reader restores durable context-anchor 语义字段
 - `api/workspace.py` — shared Cron `workspace_unverified` fallback in `resolve_session_workspace()`; it uses the approved WebUI default rather than the unverified root, while `legacy_shared` external bindings retain their approved root
 - `api/profiles.py` — profile deletion best-effort removes that profile's global session read cursors
-- `api/session_manifest.py` — after sidecar/state.db merge, cron-only GET normalization delegates to `integration.crons.hooks.normalize_cron_manifest_messages`; knowledge-base MCP reference normalization delegates to `integration.knowledge_base.turn_references`; semantic internal/context rows are skipped as turn anchors while every allocated `turn:N` remains reserved
+- `integration/session_manifest/manifest.py` — after sidecar/state.db merge, cron-only GET normalization delegates to `integration.crons.hooks.normalize_cron_manifest_messages`; knowledge-base MCP reference normalization delegates to `integration.knowledge_base.turn_references`; semantic internal/context rows are skipped as turn anchors while every allocated `turn:N` remains reserved
 - `static/index.html` — integration scripts + SkillHub panel markup
 - `static/panels.js` — `HermesProfiles` guard (`loadProfilesPanel`, `toggleProfileDropdown`, `renderProfileDetail`, `renderProfileForm`, `saveProfileForm`)
 - `requirements.txt` — `httpx`

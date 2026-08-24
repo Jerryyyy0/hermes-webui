@@ -262,7 +262,7 @@ record root 不存在、session 已删除或 profile identity 不同，completio
 | 仓库 | 实现位置 | 责任 |
 | --- | --- | --- |
 | Hermes WebUI | `integration/async_delegation_turns/` 新增 artifact settlement 状态/处理；`api/streaming.py` 仅保留根注入与 completion hook | 冻结 root、保存 origin、验证 completion、持久化/投影 artifact。 |
-| Hermes WebUI | `api/session_manifest_store.py` 与 manifest 现有持久化入口 | 提供仅限已登记 delegation 的原子 merge 和延迟 empty decision。 |
+| Hermes WebUI | `integration/session_manifest/store.py` 与 manifest 现有持久化入口 | 提供仅限已登记 delegation 的原子 merge 和延迟 empty decision。 |
 | Hermes Agent | `tools/delegate_tool.py` 与 task-context 辅助模块 | 建立/清理 child workspace scope、默认 cwd、收集 child evidence、发出 v1 completion。 |
 | Hermes Agent | `tools/file_tools.py` 及同类 mutation adapter | 在执行前以 scope 为界验证所有 mutation path，并报告 canonical 成功路径。 |
 

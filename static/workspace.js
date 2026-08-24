@@ -1229,15 +1229,6 @@ function _isManifestAbsolutePath(path){
 }
 
 function _manifestFilePreviewUrl(path, opts){
-  opts = opts || {};
-  if(_isManifestAbsolutePath(path)){
-    const sid = (S.session && S.session.session_id) ? String(S.session.session_id) : '';
-    let url = 'api/media?path=' + encodeURIComponent(path);
-    if(sid) url += '&session_id=' + encodeURIComponent(sid);
-    if(opts.inline) url += '&inline=1';
-    if(opts.download) url += '&download=1';
-    return url;
-  }
   return _integrationFileUrl(path);
 }
 
@@ -1268,18 +1259,6 @@ async function _fetchManifestFileText(path){
 }
 
 async function _downloadManifestFile(path){
-  if(_isManifestAbsolutePath(path)){
-    const url = _manifestFilePreviewUrl(path, {download: true});
-    const filename = path.split('/').pop() || path;
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    if(typeof showToast==='function') showToast(t('downloading', filename), 2000);
-    return;
-  }
   return _downloadIntegrationFile(path);
 }
 
@@ -1324,7 +1303,7 @@ async function openIntegrationFilePreview(path){
   $('previewArea').classList.add('visible');
   $('fileTree').style.display = 'none';
   _previewCurrentPath = path;
-  _previewSource = 'workspace';
+  _previewSource = _isManifestAbsolutePath(path) ? 'manifest-external' : 'workspace';
   renderFileBreadcrumb(path);
   const fileUrl = _manifestFilePreviewUrl(path, {
     inline: AUDIO_EXTS.has(ext) || VIDEO_EXTS.has(ext),
@@ -1516,7 +1495,8 @@ function clearBrowserPreviewEmbed(){
 function updateEditBtn(){
   const btn=$('btnEditFile');
   if(!btn)return;
-  const editable = _previewCurrentMode==='code'||_previewCurrentMode==='md';
+  const editable = (_previewCurrentMode==='code'||_previewCurrentMode==='md')
+    && _previewSource !== 'manifest-external';
   btn.style.display = editable?'':'none';
   const editing = $('previewEditArea').style.display!=='none';
   btn.innerHTML = editing ? `&#128190; ${t('save')}` : `&#9998; ${t('edit')}`;
@@ -1526,6 +1506,7 @@ function updateEditBtn(){
 }
 
 async function toggleEditMode(){
+  if(_previewSource === 'manifest-external') return;
   const editing = $('previewEditArea').style.display!=='none';
   if(editing){
     // Save

@@ -78,11 +78,17 @@ MEDIA_ARTIFACT_SOURCE = 'media'
 ASSISTANT_PROSE_ARTIFACT_SOURCE = 'assistant_prose'
 TURN_RECONCILE_SOURCE = 'reconcile'
 _MEDIA_TOKEN_RE = re.compile(r'MEDIA:([^\s\]]+)')
+_ASSISTANT_PATH_TOKEN_CHARS = r'\w\u00b7\u4e00-\u9fff/._\-\(\)（）'
+_ASSISTANT_PATH_CONTINUATION_CHARS = r'\w\u00b7\u4e00-\u9fff/_\-'
 _BROAD_FILENAME_EXT_RE = re.compile(
-    r'([\w\u00b7\u4e00-\u9fff/._\-\(\)（）]{1,240}\.[A-Za-z0-9]{2,8})'
+    rf'(?<![{_ASSISTANT_PATH_CONTINUATION_CHARS}])'
+    rf'([{_ASSISTANT_PATH_TOKEN_CHARS}]{{1,240}}\.[A-Za-z0-9]{{2,8}})'
+    rf'(?![{_ASSISTANT_PATH_CONTINUATION_CHARS}])(?!\.[A-Za-z0-9])'
 )
 _LAST_ASSISTANT_TILDE_PATH_RE = re.compile(
+    rf'(?<![{_ASSISTANT_PATH_CONTINUATION_CHARS}])'
     r'(~/[^\s`\'"<>|，,；;。：)\]]{1,240}\.[A-Za-z0-9]{2,8})'
+    rf'(?![{_ASSISTANT_PATH_CONTINUATION_CHARS}])(?!\.[A-Za-z0-9])'
 )
 _REFERENCE_ONLY_TOOLS = (
     ARTIFACT_EXCLUSION_READ_TOOLS
@@ -180,21 +186,9 @@ def _assistant_path_candidates(text: str) -> list[str]:
     return candidates
 
 
-def _unique_basename_match(raw: str, paths: list[str] | tuple[str, ...] | set[str]) -> str:
-    """Return the one canonical path whose basename exactly matches *raw*."""
-    basename = Path(str(raw or '')).name
-    if not basename:
-        return ''
-    matches = {str(path).strip() for path in paths if Path(str(path or '')).name == basename and str(path or '').strip()}
-    return next(iter(matches)) if len(matches) == 1 else ''
-
-
 def _paths_from_last_assistant_message(
     text: str,
     workspace: Path,
-    *,
-    strong_paths: list[str] | tuple[str, ...] | set[str] = (),
-    prior_artifact_paths: list[str] | tuple[str, ...] | set[str] = (),
 ) -> list[str]:
     """Extract final-message deliveries without guessing a directory from prose."""
     paths: list[str] = []
@@ -204,20 +198,24 @@ def _paths_from_last_assistant_message(
         if not raw or '://' in raw or len(paths) >= _MAX_EXECUTION_ARTIFACTS:
             return
         raw = str(raw).strip()
-        is_bare = '/' not in raw and not raw.startswith('~')
-        normalized = ''
-        if is_bare:
-            # A basename can be resolved only from unambiguous structured evidence.
-            normalized = _unique_basename_match(raw, strong_paths)
-            if not normalized:
-                normalized = _unique_basename_match(raw, prior_artifact_paths)
-            if not normalized:
-                normalized = _resolve_manifest_path(workspace, raw)
-        else:
-            normalized = _resolve_manifest_path(workspace, raw)
+        try:
+            raw_path = Path(raw).expanduser()
+            if not raw_path.is_absolute():
+                # Final assistant prose may name relative files only in the
+                # current session workspace, never through prior-turn aliases.
+                (workspace.expanduser().resolve() / raw_path).resolve().relative_to(
+                    workspace.expanduser().resolve()
+                )
+        except (OSError, ValueError):
+            return
+        normalized = _resolve_manifest_path(workspace, raw)
         if not normalized or normalized in seen or normalized.startswith('uploads/'):
             return
-        if not _artifact_path_is_real(workspace, normalized):
+        if not _artifact_path_is_real(
+            workspace,
+            normalized,
+            source_tool=ASSISTANT_PROSE_ARTIFACT_SOURCE,
+        ):
             return
         seen.add(normalized)
         paths.append(normalized)
@@ -314,8 +312,6 @@ def _collect_final_assistant_artifact_events(
         for path in _paths_from_last_assistant_message(
             text,
             workspace,
-            strong_paths=strong_paths,
-            prior_artifact_paths=prior_artifact_paths,
         )
     ]
 
@@ -588,6 +584,8 @@ def _resolve_manifest_path(workspace: Path, raw: str | None) -> str:
     if not path:
         return ''
     ws = workspace.expanduser().resolve()
+    raw_candidate: Path | None = None
+    candidate: Path | None = None
     try:
         raw_candidate = Path(path).expanduser()
         if not raw_candidate.is_absolute():
@@ -606,7 +604,14 @@ def _resolve_manifest_path(workspace: Path, raw: str | None) -> str:
         rel = candidate.relative_to(ws)
         rel_str = rel.as_posix()
     except (ValueError, OSError):
-        external = candidate.as_posix()
+        # Preserve the lexical external path.  The external-reference policy
+        # will reject symlink components with an O_NOFOLLOW walk; resolving
+        # here would erase that evidence and turn the symlink target into an
+        # apparently direct path.
+        external_path = raw_candidate or candidate
+        if external_path is None:
+            return ''
+        external = external_path.as_posix()
         return '' if ARTIFACT_IGNORE_RE.search(external) else external
     if rel_str in ('', '.'):
         return ''
@@ -649,12 +654,31 @@ def _rebase_file_artifact_records(
         if not raw:
             out.append(copied)
             continue
+        lexical_candidate: Path | None = None
         try:
-            candidate = Path(raw).expanduser()
-            candidate = candidate.resolve() if candidate.is_absolute() else (source / candidate).resolve()
+            raw_candidate = Path(raw).expanduser()
+            lexical_candidate = raw_candidate if raw_candidate.is_absolute() else source / raw_candidate
+            candidate = lexical_candidate.resolve()
             copied["path"] = candidate.relative_to(root).as_posix()
         except (OSError, RuntimeError, ValueError):
-            if str(copied.get("source_tool") or "") != MEDIA_ARTIFACT_SOURCE:
+            source_tool = str(copied.get("source_tool") or "")
+            if source_tool == MEDIA_ARTIFACT_SOURCE:
+                out.append(copied)
+                continue
+            try:
+                from integration.session_manifest.external_references.references import (
+                    external_artifact_path_is_safe,
+                    is_external_artifact_reference,
+                )
+                from integration.session_manifest.external_references.policy import normalize_external_path
+
+                external_path = normalize_external_path(lexical_candidate if lexical_candidate is not None else raw)
+                if external_path is None:
+                    continue
+                copied["path"] = external_path.as_posix()
+                if not is_external_artifact_reference(copied) or not external_artifact_path_is_safe(copied):
+                    continue
+            except (ImportError, OSError, RuntimeError, ValueError):
                 continue
         out.append(copied)
     return out
@@ -751,15 +775,16 @@ def _terminal_output_paths(command: str, workspace: Path) -> list[str]:
         if not raw or raw.startswith('-') or '://' in raw:
             return
         try:
-            candidate = Path(raw).expanduser()
-            candidate = candidate.resolve() if candidate.is_absolute() else (command_cwd / candidate).resolve()
-            rel = candidate.relative_to(workspace).as_posix()
+            raw_candidate = Path(raw).expanduser()
+            lexical_candidate = raw_candidate if raw_candidate.is_absolute() else command_cwd / raw_candidate
+            candidate = lexical_candidate.resolve()
         except (OSError, ValueError):
             return
-        if not rel or ARTIFACT_IGNORE_RE.search(rel) or rel in seen or not candidate.is_file():
+        normalized = _resolve_manifest_path(workspace, lexical_candidate.as_posix())
+        if not normalized or ARTIFACT_IGNORE_RE.search(normalized) or normalized in seen or not candidate.is_file():
             return
-        seen.add(rel)
-        paths.append(rel)
+        seen.add(normalized)
+        paths.append(normalized)
 
     def process_segment(values: list[str]) -> None:
         nonlocal cwd
@@ -1771,9 +1796,16 @@ def _extract_artifacts_and_references(
     return artifacts, references
 
 
-def _artifact_path_is_real(workspace: Path, rel: str) -> bool:
-    """True when rel resolves to an existing previewable workspace file."""
-    return _file_preview_path(workspace, rel, 'file') is not None
+def _artifact_path_is_real(workspace: Path, rel: str, *, source_tool: str = 'write_file') -> bool:
+    """True when a workspace or approved external Artifact file is previewable."""
+    if _file_preview_path(workspace, rel, 'file') is not None:
+        return True
+    try:
+        from integration.session_manifest.external_references.references import external_artifact_path_is_safe
+
+        return external_artifact_path_is_safe({'path': rel, 'source_tool': source_tool})
+    except (ImportError, OSError, RuntimeError, ValueError):
+        return False
 
 
 def filter_existing_turn_artifact_entries(
@@ -1802,7 +1834,7 @@ def filter_existing_turn_artifact_entries(
         elif source_tool == MEDIA_ARTIFACT_SOURCE:
             if not _artifact_path_is_real(workspace, path) and not _session_media_preview_path(workspace, path, MANIFEST_PREVIEW_FILE):
                 continue
-        elif not _artifact_path_is_real(workspace, path):
+        elif not _artifact_path_is_real(workspace, path, source_tool=source_tool):
             continue
         seen.add(path)
         out.append({
@@ -2410,7 +2442,7 @@ def _wire_file_path_for_integration(workspace_root: Path, path: str) -> str:
     Matches left-rail ``/api/integration/workspace/files`` prefixing so
     ``/api/integration/workspace/file`` can open managed-session artifacts.
     """
-    from api.session_manifest_store import project_artifact_path_for_integration_root
+    from integration.session_manifest.store import project_artifact_path_for_integration_root
 
     return project_artifact_path_for_integration_root(path, workspace_root)
 
@@ -2557,7 +2589,39 @@ def _row_to_wire(
     rel = str(row.get('path') or '').strip()
     entry_kind = str(row.get('kind') or row.get('entry_kind') or 'file')
     try:
-        from api.session_manifest_store import (
+        from integration.session_manifest.external_references.references import (
+            external_artifact_path_is_safe,
+            is_external_artifact_reference,
+        )
+
+        is_external_reference = is_external_artifact_reference(row)
+    except (ImportError, OSError, RuntimeError, ValueError):
+        is_external_reference = False
+        external_artifact_path_is_safe = None
+    if is_external_reference:
+        # External paths become wire-visible only after a durable Artifact row
+        # exists. Live tool deltas cannot grant a preview capability.
+        if 'workspace_root' not in row or entry_kind == 'dir':
+            return None
+        safe_now = bool(external_artifact_path_is_safe and external_artifact_path_is_safe(row))
+        if safe_now:
+            return _serialize_manifest_row(
+                rel,
+                MANIFEST_PREVIEW_FILE,
+                source_tool,
+                profile=profile,
+            )
+        if collection == 'artifacts' and str(row.get('turn_key') or '').strip():
+            return _serialize_manifest_row(
+                rel,
+                MANIFEST_PREVIEW_FILE,
+                source_tool,
+                profile=profile,
+                status=MANIFEST_STATUS_EXPIRED,
+            )
+        return None
+    try:
+        from integration.session_manifest.store import (
             effective_manifest_workspace_root,
             relative_prefix_under_root,
         )
@@ -3061,7 +3125,7 @@ def build_session_manifest(session, source_info: dict[str, str] | None = None) -
         source_info['manifest_source'] = 'unknown'
         workspace = Path(str(session.workspace)).expanduser().resolve()
         try:
-            from api.session_manifest_store import (
+            from integration.session_manifest.store import (
                 effective_manifest_workspace_root,
                 load_manifest_decided_turn_keys,
                 load_manifest_decided_turn_keys_by_root,
@@ -3130,7 +3194,7 @@ def build_session_manifest(session, source_info: dict[str, str] | None = None) -
 
     if source_info is None:
         try:
-            from api.session_manifest_store import (
+            from integration.session_manifest.store import (
                 effective_manifest_workspace_root,
                 load_manifest_decided_turn_keys,
                 load_manifest_decided_turn_keys_by_root,
