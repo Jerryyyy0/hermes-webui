@@ -328,7 +328,7 @@ class TestGenerateTitleRawViaAuxTimeout(unittest.TestCase):
         self.assertEqual(status, 'llm_aux')
         self.assertEqual(raw_preview, '')
 
-    def test_german_fallback_uses_generic_topic_extraction_without_literal_override(self):
+    def test_german_image_fallback_uses_chinese_local_label(self):
         from api.streaming import _fallback_title_from_exchange
 
         title = _fallback_title_from_exchange(
@@ -338,9 +338,7 @@ class TestGenerateTitleRawViaAuxTimeout(unittest.TestCase):
 
         self.assertIsNotNone(title)
         self.assertIsInstance(title, str)
-        self.assertNotEqual(title, 'Alte Session Bilder')
-        self.assertNotEqual(title, 'Session Bilder')
-        self.assertIn('Warum', title)
+        self.assertEqual(title, '图片内容分析')
 
     def test_code_only_first_message_does_not_trigger_german_language_guard(self):
         """Code-only starts should fall through to the neutral/default title path."""

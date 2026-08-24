@@ -125,5 +125,5 @@ def test_streaming_helper_has_local_fallback_when_llm_title_is_empty(monkeypatch
     monkeypatch.setattr(streaming, "_generate_llm_session_title_via_aux", lambda *args, **kwargs: (None, "llm_empty", ""))
 
     title, status, _raw = streaming.generate_session_title_for_session(session)
-    assert title == "GitHub Issue Triage"
+    assert title == "GitHub 问题分类"
     assert status == "local_summary:llm_empty"
