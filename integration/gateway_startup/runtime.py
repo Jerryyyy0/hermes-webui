@@ -26,6 +26,22 @@ class AgentCliInvocation:
         return [*self.command_prefix, *args]
 
 
+def bind_runtime_to_profile(runtime: AgentCliInvocation, profile: dict) -> AgentCliInvocation:
+    """Return an invocation whose child environment is pinned to one profile.
+
+    Gateway children must not inherit one mutable ``HERMES_HOME`` mapping while
+    a WebUI startup pass brings up several profiles.  The Agent still receives
+    its explicit ``-p <profile>`` selector for named profiles; pinning the
+    environment makes the filesystem scope equally explicit for every child.
+    """
+    profile_home = str(profile.get("path") or "").strip()
+    if not profile_home:
+        return runtime
+    env = dict(runtime.env)
+    env["HERMES_HOME"] = profile_home
+    return AgentCliInvocation(runtime.command_prefix, runtime.cwd, env, runtime.kind)
+
+
 @dataclass(frozen=True)
 class _RuntimeCandidate:
     kind: str

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -62,6 +63,31 @@ def test_plain_container_uses_webui_gateway_coordinator(monkeypatch):
     assert result["counts"] == {"started": 2}
 
 
+def test_profile_gateways_start_serially_with_default_first(monkeypatch):
+    monkeypatch.setattr(startup, "_running_in_container", lambda: True)
+    first_starting = threading.Event()
+    second_started = threading.Event()
+    seen = []
+
+    def start(profile):
+        seen.append(profile["name"])
+        if profile["name"] == "default":
+            first_starting.set()
+            assert not second_started.wait(timeout=0.1)
+        else:
+            assert first_starting.is_set()
+            second_started.set()
+        return {"profile": profile["name"], "status": "started"}
+
+    result = startup.ensure_all_profile_gateways(
+        list_profiles=lambda: list(reversed(profiles())),
+        start_profile=start,
+    )
+
+    assert seen == ["default", "abc"]
+    assert result["counts"] == {"started": 2}
+
+
 def test_plain_container_replaces_existing_gateway(monkeypatch):
     from integration.gateway_startup import runtime as agent_cli_runtime
 
@@ -79,6 +105,39 @@ def test_plain_container_replaces_existing_gateway(monkeypatch):
 
     assert result == {"profile": "default", "status": "started"}
     assert captured["replace_existing"] is True
+    assert captured["runtime"] is not invocation
+    assert captured["runtime"].env == {"HERMES_HOME": "/tmp/hermes"}
+
+
+def test_profile_runtime_uses_an_isolated_profile_home(monkeypatch):
+    from integration.gateway_startup import runtime as agent_cli_runtime
+
+    invocation = agent_cli_runtime.AgentCliInvocation(
+        ("/hermes",),
+        "/tmp",
+        {"HERMES_HOME": "/tmp/hermes", "X": "1"},
+        "managed_launcher",
+    )
+    captured = {}
+
+    def process_starter(profile, *, runtime, replace_existing=False):
+        captured.update(profile=profile, runtime=runtime, replace_existing=replace_existing)
+        return {"profile": profile["name"], "status": "started"}
+
+    monkeypatch.setattr(startup, "_running_in_container", lambda: True)
+    result = startup._start_profile_gateway(
+        profiles()[1],
+        runtime=invocation,
+        process_starter=process_starter,
+    )
+
+    assert result == {"profile": "abc", "status": "started"}
+    assert captured["runtime"] is not invocation
+    assert captured["runtime"].env == {
+        "HERMES_HOME": "/tmp/hermes/profiles/abc",
+        "X": "1",
+    }
+    assert invocation.env == {"HERMES_HOME": "/tmp/hermes", "X": "1"}
 
 
 def test_native_running_gateway_restarts_through_its_service_manager(monkeypatch):
@@ -108,7 +167,7 @@ def test_native_running_gateway_restarts_through_its_service_manager(monkeypatch
     assert followed == [profiles()[1]]
     assert captured["command"] == ["/hermes", "-p", "abc", "gateway", "restart"]
     assert captured["cwd"] == "/tmp"
-    assert captured["env"] == {"X": "1"}
+    assert captured["env"] == {"X": "1", "HERMES_HOME": "/tmp/hermes/profiles/abc"}
     assert captured["timeout"] == startup._EXTERNAL_SERVICE_RESTART_TIMEOUT_SECONDS
     assert captured["check"] is False
     assert "capture_output" not in captured
@@ -134,11 +193,9 @@ def test_native_unmanaged_gateway_is_replaced_by_webui(monkeypatch):
     )
 
     assert result == {"profile": "default", "status": "started"}
-    assert captured == {
-        "profile": profiles()[0],
-        "runtime": invocation,
-        "replace_existing": True,
-    }
+    assert captured["profile"] == profiles()[0]
+    assert captured["replace_existing"] is True
+    assert captured["runtime"].env == {"HERMES_HOME": "/tmp/hermes"}
 
 
 def test_native_unknown_gateway_state_is_replaced_by_webui(monkeypatch):
@@ -159,11 +216,9 @@ def test_native_unknown_gateway_state_is_replaced_by_webui(monkeypatch):
     )
 
     assert result == {"profile": "default", "status": "started"}
-    assert captured == {
-        "profile": profiles()[0],
-        "runtime": invocation,
-        "replace_existing": True,
-    }
+    assert captured["profile"] == profiles()[0]
+    assert captured["replace_existing"] is True
+    assert captured["runtime"].env == {"HERMES_HOME": "/tmp/hermes"}
 
 
 def test_native_starts_a_gateway_when_the_authoritative_state_is_not_running():
@@ -184,7 +239,8 @@ def test_native_starts_a_gateway_when_the_authoritative_state_is_not_running():
     )
 
     assert result == {"profile": "default", "status": "started"}
-    assert captured == {"profile": profiles()[0], "runtime": invocation}
+    assert captured["profile"] == profiles()[0]
+    assert captured["runtime"].env == {"HERMES_HOME": "/tmp/hermes"}
 
 
 def test_s6_container_keeps_webui_gateway_coordinator_enabled(monkeypatch):
@@ -276,7 +332,8 @@ def test_start_uses_verified_runtime_and_does_not_mutate_home(monkeypatch):
 
     assert result["status"] == "started"
     assert captured["profile"] == profiles()[0]
-    assert captured["runtime"] is invocation
+    assert captured["runtime"] is not invocation
+    assert captured["runtime"].env == {"PYTHONUTF8": "1", "HERMES_HOME": "/tmp/hermes"}
     assert os.environ.get("HERMES_HOME") == original_home
 
 
@@ -300,7 +357,7 @@ def test_s6_keeps_service_manager_lifecycle(monkeypatch):
     assert result == {"profile": "default", "status": "restarted", "owner": "s6"}
     assert captured["command"] == ["/hermes", "gateway", "restart"]
     assert captured["cwd"] == str(Path.home())
-    assert captured["env"] == {"X": "1"}
+    assert captured["env"] == {"X": "1", "HERMES_HOME": "/tmp/hermes"}
 
 
 def test_runtime_unavailable_is_classified(monkeypatch):
@@ -344,6 +401,35 @@ def test_runtime_resolution_retries_transient_failure(monkeypatch):
     assert len(attempts) == 3
 
 
+def test_all_profiles_share_one_retried_runtime_resolution(monkeypatch):
+    from integration.gateway_startup import runtime as agent_cli_runtime
+
+    invocation = agent_cli_runtime.AgentCliInvocation(("/hermes",), str(Path.home()), {}, "launcher")
+    attempts = []
+    started = []
+
+    def resolver():
+        attempts.append(True)
+        if len(attempts) < 3:
+            raise agent_cli_runtime.AgentCliRuntimeUnavailable("temporary probe failure")
+        return invocation
+
+    def start(profile, *, runtime):
+        started.append((profile["name"], runtime))
+        return {"profile": profile["name"], "status": "started"}
+
+    monkeypatch.setattr(agent_cli_runtime, "resolve_agent_cli_runtime", resolver)
+    monkeypatch.setattr(startup, "_start_profile_gateway", start)
+    monkeypatch.setattr(startup.time, "sleep", lambda _seconds: None)
+
+    result = startup.ensure_all_profile_gateways(list_profiles=profiles)
+
+    assert len(attempts) == 3
+    assert sorted(name for name, _runtime in started) == ["abc", "default"]
+    assert all(runtime is invocation for _name, runtime in started)
+    assert result["counts"] == {"started": 2}
+
+
 def test_ui_gateway_running_flag_is_not_an_authoritative_process_probe(monkeypatch):
     profile = profiles()[0]
     profile["gateway_running"] = True
@@ -361,4 +447,5 @@ def test_ui_gateway_running_flag_is_not_an_authoritative_process_probe(monkeypat
     )
 
     assert result == {"profile": "default", "status": "state_unknown"}
-    assert seen == [(profile, invocation)]
+    assert seen[0][0] == profile
+    assert seen[0][1].env == {"HERMES_HOME": "/tmp/hermes"}

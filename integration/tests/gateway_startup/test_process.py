@@ -26,7 +26,8 @@ def test_start_forwards_stdout_and_stderr_with_profile_prefix(monkeypatch, tmp_p
     command = (
         "import sys; "
         "sys.stdout.write('DEBUG startup complete\\n'); sys.stdout.flush(); "
-        "sys.stderr.write('WARNING retrying request\\n'); sys.stderr.flush()"
+        "sys.stderr.write('WARNING retrying request\\n'); sys.stderr.flush(); "
+        "import time; time.sleep(0.2)"
     )
     monkeypatch.setattr(process, "build_gateway_run_command", lambda _runtime, _profile: [sys.executable, "-u", "-c", command])
     lines = []
@@ -36,6 +37,7 @@ def test_start_forwards_stdout_and_stderr_with_profile_prefix(monkeypatch, tmp_p
         {"name": "coder", "path": str(tmp_path)},
         runtime=_runtime(tmp_path),
         state_probe=lambda _profile, _runtime: "not_running",
+        readiness_probe=lambda _entry: True,
     )
 
     assert result["status"] == "started"
@@ -63,7 +65,7 @@ def test_unknown_gateway_state_fails_closed_without_creating_process(tmp_path):
 
 
 def test_unknown_gateway_state_is_replaced_when_requested(monkeypatch, tmp_path):
-    command = "import sys; print('INFO replacement after unknown state')"
+    command = "import sys, time; print('INFO replacement after unknown state'); time.sleep(0.2)"
     replacements = []
 
     def build_command(_runtime, _profile, *, replace_existing=False):
@@ -77,6 +79,7 @@ def test_unknown_gateway_state_is_replaced_when_requested(monkeypatch, tmp_path)
         runtime=_runtime(tmp_path),
         state_probe=lambda _profile, _runtime: "unknown",
         replace_existing=True,
+        readiness_probe=lambda _entry: True,
     )
 
     assert result["status"] == "started"
@@ -138,7 +141,7 @@ def test_external_gateway_follower_forwards_new_lines_without_replaying_history(
 
 
 def test_running_gateway_is_replaced_when_requested(monkeypatch, tmp_path):
-    command = "import sys; print('INFO replacement complete')"
+    command = "import sys, time; print('INFO replacement complete'); time.sleep(0.2)"
     replacements = []
 
     def build_command(_runtime, _profile, *, replace_existing=False):
@@ -152,6 +155,7 @@ def test_running_gateway_is_replaced_when_requested(monkeypatch, tmp_path):
         runtime=_runtime(tmp_path),
         state_probe=lambda _profile, _runtime: "running",
         replace_existing=True,
+        readiness_probe=lambda _entry: True,
     )
 
     assert result["status"] == "started"
@@ -195,7 +199,7 @@ def test_owner_probe_uses_the_profile_home(monkeypatch, tmp_path):
 
 
 def test_process_reader_redacts_before_console_emission(monkeypatch, tmp_path):
-    command = "import sys; print('Authorization: Bearer top-secret-token')"
+    command = "import sys, time; print('Authorization: Bearer top-secret-token'); time.sleep(0.2)"
     monkeypatch.setattr(process, "build_gateway_run_command", lambda _runtime, _profile: [sys.executable, "-u", "-c", command])
     lines = []
     monkeypatch.setattr(process, "log_gateway_line", lambda _level, line: lines.append(line))
@@ -204,6 +208,7 @@ def test_process_reader_redacts_before_console_emission(monkeypatch, tmp_path):
         {"name": "default", "path": str(tmp_path)},
         runtime=_runtime(tmp_path),
         state_probe=lambda _profile, _runtime: "not_running",
+        readiness_probe=lambda _entry: True,
     )
     entry = process._registry[str(tmp_path)]
     assert entry.wait_thread is not None
@@ -211,3 +216,65 @@ def test_process_reader_redacts_before_console_emission(monkeypatch, tmp_path):
 
     assert lines == ["[gateway:default] Authorization: Bearer <redacted>"]
     assert "top-secret-token" not in lines[0]
+
+
+def test_start_waits_for_authoritative_readiness(monkeypatch, tmp_path):
+    command = "import time; time.sleep(5)"
+    monkeypatch.setattr(
+        process,
+        "build_gateway_run_command",
+        lambda _runtime, _profile: [sys.executable, "-u", "-c", command],
+    )
+
+    result = process.start_gateway_process(
+        {"name": "default", "path": str(tmp_path)},
+        runtime=_runtime(tmp_path),
+        state_probe=lambda _profile, _runtime: "not_running",
+        readiness_probe=lambda entry: entry.process.poll() is None,
+        readiness_timeout_seconds=0.5,
+        readiness_poll_seconds=0.01,
+    )
+
+    assert result["status"] == "started"
+    assert result["pid"] == process._registry[str(tmp_path)].process.pid
+
+
+def test_start_fails_when_gateway_exits_before_readiness(monkeypatch, tmp_path):
+    command = "import sys; sys.exit(7)"
+    monkeypatch.setattr(
+        process,
+        "build_gateway_run_command",
+        lambda _runtime, _profile: [sys.executable, "-u", "-c", command],
+    )
+
+    result = process.start_gateway_process(
+        {"name": "default", "path": str(tmp_path)},
+        runtime=_runtime(tmp_path),
+        state_probe=lambda _profile, _runtime: "not_running",
+        readiness_probe=lambda _entry: False,
+        readiness_timeout_seconds=0.5,
+        readiness_poll_seconds=0.01,
+    )
+
+    assert result == {"profile": "default", "status": "failed", "error": "exited_7"}
+
+
+def test_start_terminates_a_gateway_that_never_becomes_ready(monkeypatch, tmp_path):
+    command = "import time; time.sleep(5)"
+    monkeypatch.setattr(
+        process,
+        "build_gateway_run_command",
+        lambda _runtime, _profile: [sys.executable, "-u", "-c", command],
+    )
+
+    result = process.start_gateway_process(
+        {"name": "default", "path": str(tmp_path)},
+        runtime=_runtime(tmp_path),
+        state_probe=lambda _profile, _runtime: "not_running",
+        readiness_probe=lambda _entry: False,
+        readiness_timeout_seconds=0.05,
+        readiness_poll_seconds=0.01,
+    )
+
+    assert result == {"profile": "default", "status": "failed", "error": "readiness_timeout"}
+    assert str(tmp_path) not in process._registry
