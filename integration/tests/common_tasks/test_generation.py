@@ -549,7 +549,7 @@ def test_fallback_seed_tasks_defaults_display_name_to_hermes():
     assert "Hermes" in tasks[0]["description"]
 
 
-# ---------- enqueue_missing_or_stale ----------
+# ---------- enqueue_missing_or_stale (fast path, non-blocking) ----------
 
 
 def test_enqueue_missing_or_stale_blocks_when_retry_after_in_future(tmp_path):
@@ -567,7 +567,26 @@ def test_enqueue_missing_or_stale_blocks_when_retry_after_in_future(tmp_path):
     assert enqueued == []
 
 
-def test_enqueue_missing_or_stale_enqueues_seed_when_no_seed_generated_at(tmp_path):
+def test_enqueue_missing_or_stale_skips_when_mined_and_seed_fresh(tmp_path):
+    """mined + seed 都有且在成功冷却期内 -> 直接跳过,不入队任何任务."""
+    fp = collectors.fingerprint_for_cluster([{"text": f"q{i}"} for i in range(10)])
+    store.write_seed_tasks("alice", [{"title": "种子", "trigger_language": "t"}])
+    store.replace_mined_tasks(
+        "alice",
+        [{"title": "挖掘", "trigger_language": "t", "members_json": "[]"}],
+        fp,
+        success=True,
+    )
+    enqueued = []
+
+    with patch("integration.common_tasks.generation.enqueue", lambda *args: enqueued.append(args)):
+        generation.enqueue_missing_or_stale("alice", tmp_path)
+
+    assert enqueued == []
+
+
+def test_enqueue_missing_or_stale_enqueues_check_when_no_seed(tmp_path):
+    """没有 seed 数据 -> 入队 check 让后台决定."""
     enqueued = []
 
     with patch("integration.common_tasks.generation.enqueue", lambda *args: enqueued.append(args)):
@@ -575,11 +594,67 @@ def test_enqueue_missing_or_stale_enqueues_seed_when_no_seed_generated_at(tmp_pa
 
     assert len(enqueued) == 1
     assert enqueued[0][0] == "alice"
+    assert enqueued[0][2] == "check"
+
+
+def test_enqueue_missing_or_stale_enqueues_check_when_stale_mined(tmp_path):
+    """有 mined 数据但已过冷却期 -> 入队 check 让后台重扫."""
+    fp = collectors.fingerprint_for_cluster([{"text": f"q{i}"} for i in range(10)])
+    store.write_seed_tasks("alice", [{"title": "种子", "trigger_language": "t"}])
+    store.replace_mined_tasks(
+        "alice",
+        [{"title": "挖掘", "trigger_language": "t", "members_json": "[]"}],
+        fp,
+        success=True,
+    )
+    store.update_state("alice", "last_success_at", str(time.time() - 3600))
+    enqueued = []
+
+    with patch("integration.common_tasks.generation.enqueue", lambda *args: enqueued.append(args)):
+        generation.enqueue_missing_or_stale("alice", tmp_path)
+
+    assert len(enqueued) == 1
+    assert enqueued[0][2] == "check"
+
+
+def test_enqueue_missing_or_stale_enqueues_check_when_only_seed(tmp_path):
+    """只有 seed 没有 mined -> 入队 check,后台会扫 session 看是否能 mine."""
+    store.write_seed_tasks("alice", [{"title": "种子", "trigger_language": "t"}])
+    enqueued = []
+
+    with patch("integration.common_tasks.generation.enqueue", lambda *args: enqueued.append(args)):
+        generation.enqueue_missing_or_stale("alice", tmp_path)
+
+    assert len(enqueued) == 1
+    assert enqueued[0][2] == "check"
+
+
+# ---------- _run_check (worker-side decision + session scan) ----------
+
+
+def _make_check_job(tmp_path, *, profile="alice"):
+    return generation.CommonTaskJob(
+        profile=profile,
+        profile_path=str(tmp_path),
+        kind="check",
+        fingerprint="",
+    )
+
+
+def test_run_check_enqueues_seed_when_no_seed_generated_at(tmp_path):
+    job = _make_check_job(tmp_path)
+    enqueued = []
+
+    with patch("integration.common_tasks.generation.enqueue", lambda *args: enqueued.append(args)):
+        generation._run_check(job, tmp_path)
+
+    assert len(enqueued) == 1
+    assert enqueued[0][0] == "alice"
     assert enqueued[0][2] == "seed"
 
 
-def test_enqueue_missing_or_stale_mines_conversation_logs_on_startup_without_seed(tmp_path):
-    """Server startup: if conversation logs exist, mine directly even without seed."""
+def test_run_check_enqueues_mine_when_questions_sufficient(tmp_path):
+    """session 问题足够多且没有 seed -> 直接 mine."""
     questions = [{"text": f"q{i}"} for i in range(10)]
     enqueued = []
 
@@ -587,7 +662,7 @@ def test_enqueue_missing_or_stale_mines_conversation_logs_on_startup_without_see
         "integration.common_tasks.collectors.collect_recent_user_questions",
         return_value=questions,
     ), patch("integration.common_tasks.generation.enqueue", lambda *args: enqueued.append(args)):
-        generation.enqueue_missing_or_stale("alice", tmp_path)
+        generation._run_check(_make_check_job(tmp_path), tmp_path)
 
     assert len(enqueued) == 1
     assert enqueued[0][0] == "alice"
@@ -595,7 +670,37 @@ def test_enqueue_missing_or_stale_mines_conversation_logs_on_startup_without_see
     assert enqueued[0][3] == collectors.fingerprint_for_cluster(questions)
 
 
-def test_enqueue_missing_or_stale_skips_when_too_few_unique_questions(tmp_path):
+def test_run_check_skips_when_retry_after_in_future(tmp_path):
+    store.write_seed_placeholder(
+        "alice",
+        [{"title": "占位", "trigger_language": "t"}],
+        retry_after=time.time() + 60,
+        last_error="boom",
+    )
+    enqueued = []
+
+    with patch("integration.common_tasks.generation.enqueue", lambda *args: enqueued.append(args)):
+        generation._run_check(_make_check_job(tmp_path), tmp_path)
+
+    assert enqueued == []
+
+
+def test_run_check_seed_when_too_few_questions_and_no_seed(tmp_path):
+    """问题不够多且没有 seed -> 入队 seed 兜底."""
+    enqueued = []
+
+    with patch(
+        "integration.common_tasks.collectors.collect_recent_user_questions",
+        return_value=[{"text": "q1"}],
+    ), patch("integration.common_tasks.generation.enqueue", lambda *args: enqueued.append(args)):
+        generation._run_check(_make_check_job(tmp_path), tmp_path)
+
+    assert len(enqueued) == 1
+    assert enqueued[0][2] == "seed"
+
+
+def test_run_check_noop_when_too_few_questions_but_seed_exists(tmp_path):
+    """问题不够多但已有 seed -> 什么都不做."""
     store.write_seed_tasks("alice", [{"title": "种子", "trigger_language": "t"}])
     enqueued = []
 
@@ -603,15 +708,13 @@ def test_enqueue_missing_or_stale_skips_when_too_few_unique_questions(tmp_path):
         "integration.common_tasks.collectors.collect_recent_user_questions",
         return_value=[{"text": "q1"}],
     ), patch("integration.common_tasks.generation.enqueue", lambda *args: enqueued.append(args)):
-        generation.enqueue_missing_or_stale("alice", tmp_path)
+        generation._run_check(_make_check_job(tmp_path), tmp_path)
 
     assert enqueued == []
 
 
-def test_enqueue_missing_or_stale_enqueues_mine_when_questions_sufficient_and_stale(tmp_path):
+def test_run_check_enqueues_mine_when_stale_fingerprint(tmp_path):
     store.write_seed_tasks("alice", [{"title": "种子", "trigger_language": "t"}])
-    # write_seed_tasks stamps last_attempt_at = now; back-date it past FAILURE_RETRY_SECONDS
-    # so _should_mine does not treat this as a recent failed attempt on a new fingerprint.
     store.update_state("alice", "last_attempt_at", str(time.time() - 60))
     questions = [{"text": f"q{i}"} for i in range(10)]
     enqueued = []
@@ -620,14 +723,14 @@ def test_enqueue_missing_or_stale_enqueues_mine_when_questions_sufficient_and_st
         "integration.common_tasks.collectors.collect_recent_user_questions",
         return_value=questions,
     ), patch("integration.common_tasks.generation.enqueue", lambda *args: enqueued.append(args)):
-        generation.enqueue_missing_or_stale("alice", tmp_path)
+        generation._run_check(_make_check_job(tmp_path), tmp_path)
 
     assert len(enqueued) == 1
     assert enqueued[0][2] == "mine"
     assert enqueued[0][3] == collectors.fingerprint_for_cluster(questions)
 
 
-def test_enqueue_missing_or_stale_skips_mine_when_within_success_cooldown(tmp_path):
+def test_run_check_skips_mine_when_within_success_cooldown(tmp_path):
     fp = collectors.fingerprint_for_cluster([{"text": f"q{i}"} for i in range(10)])
     store.write_seed_tasks("alice", [{"title": "种子", "trigger_language": "t"}])
     store.replace_mined_tasks(
@@ -642,14 +745,13 @@ def test_enqueue_missing_or_stale_skips_mine_when_within_success_cooldown(tmp_pa
         "integration.common_tasks.collectors.collect_recent_user_questions",
         return_value=[{"text": f"q{i}"} for i in range(10)],
     ), patch("integration.common_tasks.generation.enqueue", lambda *args: enqueued.append(args)):
-        generation.enqueue_missing_or_stale("alice", tmp_path)
+        generation._run_check(_make_check_job(tmp_path), tmp_path)
 
     assert enqueued == []
 
 
-def test_enqueue_missing_or_stale_enqueues_seed_when_mine_in_failure_cooldown_and_no_cache(tmp_path):
-    """mine 持续失败冷却中(_should_mine 返回 False)且无 mined/seed 数据时,入队 seed 兜底,
-    避免 dedup_count >= 5 时接口长期返回空(items=[], cache_status='empty')."""
+def test_run_check_enqueues_seed_when_mine_cooldown_and_no_cache(tmp_path):
+    """mine 冷却中且无 seed -> 入队 seed 兜底."""
     questions = [{"text": f"q{i}"} for i in range(10)]
     fp = collectors.fingerprint_for_cluster(questions)
     store.replace_mined_tasks(
@@ -666,15 +768,14 @@ def test_enqueue_missing_or_stale_enqueues_seed_when_mine_in_failure_cooldown_an
         "integration.common_tasks.collectors.collect_recent_user_questions",
         return_value=questions,
     ), patch("integration.common_tasks.generation.enqueue", lambda *args: enqueued.append(args)):
-        generation.enqueue_missing_or_stale("alice", tmp_path)
+        generation._run_check(_make_check_job(tmp_path), tmp_path)
 
     assert len(enqueued) == 1
-    assert enqueued[0][0] == "alice"
     assert enqueued[0][2] == "seed"
 
 
-def test_enqueue_missing_or_stale_skips_seed_when_mine_in_failure_cooldown_but_cache_present(tmp_path):
-    """mine 持续失败冷却中但已有 seed 数据时,不再重复入队 seed(已有兜底)."""
+def test_run_check_skips_seed_when_mine_cooldown_but_seed_present(tmp_path):
+    """mine 冷却中但已有 seed -> 不重复入队."""
     questions = [{"text": f"q{i}"} for i in range(10)]
     fp = collectors.fingerprint_for_cluster(questions)
     store.write_seed_tasks("alice", [{"title": "种子", "trigger_language": "t"}])
@@ -692,53 +793,30 @@ def test_enqueue_missing_or_stale_skips_seed_when_mine_in_failure_cooldown_but_c
         "integration.common_tasks.collectors.collect_recent_user_questions",
         return_value=questions,
     ), patch("integration.common_tasks.generation.enqueue", lambda *args: enqueued.append(args)):
-        generation.enqueue_missing_or_stale("alice", tmp_path)
+        generation._run_check(_make_check_job(tmp_path), tmp_path)
 
     assert enqueued == []
 
 
-def test_enqueue_missing_or_stale_repairs_stale_seed_stamp_on_the_fly(tmp_path, capsys):
-    """运行期发现 seed_generated_at 已设但表无 seed 行 -> 清空 stamp 并入队 seed."""
-    # Create stale state: stamp set but seed rows deleted
+def test_run_check_repairs_stale_seed_stamp(tmp_path, capsys):
+    """check 时发现 seed_generated_at 已设但无 seed 行 -> 清空 stamp 并入队 seed."""
     store.write_seed_tasks("alice", [{"title": "真种子", "trigger_language": "t"}])
     store.delete_seed_rows("alice")
-    # Too few questions to trigger mine, so seed path is the only route
     questions = [{"text": "q1"}, {"text": "q2"}]
-
     enqueued = []
+
     with patch(
         "integration.common_tasks.collectors.collect_recent_user_questions",
         return_value=questions,
     ), patch("integration.common_tasks.generation.enqueue", lambda *args: enqueued.append(args)):
-        generation.enqueue_missing_or_stale("alice", tmp_path)
+        generation._run_check(_make_check_job(tmp_path), tmp_path)
 
-    # Stamp cleared
     _, state = store.read_all("alice")
     assert state.get("seed_generated_at", "") == ""
-    # Seed enqueued because stamp is now empty
     assert len(enqueued) == 1
     assert enqueued[0][2] == "seed"
     err = capsys.readouterr().err
     assert "[webui][common_tasks][seed_integrity_repaired]" in err
-
-
-def test_enqueue_missing_or_stale_noop_repair_when_seed_rows_present(tmp_path, capsys):
-    """seed_generated_at 已设且表有 seed 行 -> 不触发修复."""
-    store.write_seed_tasks("alice", [{"title": "真种子", "trigger_language": "t"}])
-    questions = [{"text": f"q{i}"} for i in range(10)]
-
-    enqueued = []
-    with patch(
-        "integration.common_tasks.collectors.collect_recent_user_questions",
-        return_value=questions,
-    ), patch("integration.common_tasks.generation.enqueue", lambda *args: enqueued.append(args)):
-        generation.enqueue_missing_or_stale("alice", tmp_path)
-
-    err = capsys.readouterr().err
-    assert "[webui][common_tasks][seed_integrity_repaired]" not in err
-    # stamp preserved
-    _, state = store.read_all("alice")
-    assert state.get("seed_generated_at")
 
 
 # ---------- _repair_stale_seed_stamp ----------
@@ -874,7 +952,7 @@ def test_run_seed_success_writes_seed_tasks(tmp_path, capsys):
     ) as call_llm:
         generation._run_seed(job, tmp_path)
 
-    assert call_llm.call_args.kwargs["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert "extra_body" not in call_llm.call_args.kwargs
     rows, state = store.read_all("alice")
     assert len(rows) == 3
     assert {r["title"] for r in rows} == {"甲", "乙", "丙"}
@@ -1273,7 +1351,7 @@ def test_run_mine_success_replaces_mined_tasks(tmp_path, capsys):
     ) as call_llm:
         generation._run_mine(job, tmp_path)
 
-    assert call_llm.call_args.kwargs["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert "extra_body" not in call_llm.call_args.kwargs
     assert call_llm.call_args.kwargs["max_tokens"] == 4000
     rows, state = store.read_all("alice")
     mined = [r for r in rows if r["source"] == "mined"]
@@ -1395,20 +1473,41 @@ def test_call_llm_success_returns_content(tmp_path, capsys):
             "user",
             max_tokens=100,
             temperature=0.5,
-            extra_body={"thinking": {"type": "disabled"}},
         )
 
     assert content == "回复内容"
     assert reason == "ok"
     call_kwargs = import_module.return_value.call_llm.call_args.kwargs
-    assert call_kwargs["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert call_kwargs["extra_body"]["thinking"] is False
+    assert call_kwargs["extra_body"]["reasoning_effort"] == "off"
     assert call_kwargs["max_tokens"] == 100
     assert call_kwargs["temperature"] == 0.5
-    assert call_kwargs["timeout"] == 60
+    assert call_kwargs["timeout"] == 120
     assert call_kwargs["task"] == "common_tasks"
     err = capsys.readouterr().err
     assert "[webui][common_tasks][model_call_succeeded]" in err
     assert "output_chars=4" in err
+
+
+def test_disable_thinking_extra_body_qwen_uses_boolean():
+    body = generation._disable_thinking_extra_body("qwen", "qwen3.8-32b-instruct")
+    assert body == {"enable_thinking": False, "thinking": False}
+
+
+def test_disable_thinking_extra_body_kimi_uses_object():
+    body = generation._disable_thinking_extra_body("kimi", "kimi-k2.5")
+    assert body == {"thinking": {"type": "disabled"}}
+
+
+def test_disable_thinking_extra_body_deepseek_uses_thinking_disabled():
+    body = generation._disable_thinking_extra_body("deepseek", "deepseek-r1")
+    assert body == {"thinking": {"type": "disabled"}}
+
+
+def test_disable_thinking_extra_body_default_sends_both():
+    body = generation._disable_thinking_extra_body("test", "test-model")
+    assert body["thinking"] is False
+    assert body["reasoning_effort"] == "off"
 
 
 def test_call_llm_failure_returns_none(tmp_path, capsys):
@@ -1432,7 +1531,7 @@ def test_call_llm_failure_returns_none(tmp_path, capsys):
     assert "provider timeout" in err
 
 
-def test_call_llm_passes_extra_body_none_by_default(tmp_path):
+def test_call_llm_injects_disable_thinking_by_default(tmp_path):
     job = _make_job(tmp_path)
 
     with patch("integration.common_tasks.generation.importlib.import_module") as import_module, patch(
@@ -1441,4 +1540,7 @@ def test_call_llm_passes_extra_body_none_by_default(tmp_path):
         import_module.return_value.call_llm.return_value = _llm_response("ok")
         generation._call_llm(job, "sys", "user", max_tokens=10, temperature=0.1)
 
-    assert import_module.return_value.call_llm.call_args.kwargs["extra_body"] is None
+    body = import_module.return_value.call_llm.call_args.kwargs["extra_body"]
+    assert isinstance(body, dict)
+    assert body["thinking"] is False
+    assert body["reasoning_effort"] == "off"
