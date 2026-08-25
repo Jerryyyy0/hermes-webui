@@ -551,7 +551,7 @@
       "post": {
         "tags": ["Workspace"],
         "summary": "上传会话附件",
-        "description": "将文件保存为指定会话的附件，不写入会话工作区。`session_id` 必须存在，且必须归属请求 Profile。优先使用有效的 `hermes_profile` Cookie；未携带该 Cookie 时，使用 multipart `profile` 字段校验。Profile 不匹配时，服务端为防止跨 Profile 枚举会话而返回 404 `Session not found`。文件大小受服务端 `MAX_UPLOAD_BYTES` 限制（默认 50 MiB，可由 `HERMES_WEBUI_MAX_UPLOAD_MB` 覆盖）。",
+        "description": "将文件保存为指定会话的附件，不写入会话工作区。`session_id` 必须存在，且必须归属请求 Profile。优先使用有效的 `hermes_profile` Cookie；未携带该 Cookie 时，使用 multipart `profile` 字段校验。Profile 不匹配时，服务端为防止跨 Profile 枚举会话而返回 404 `Session not found`。WebUI 不对该 multipart 上传施加文件大小限制。",
         "parameters": [
           {
             "name": "hermes_profile",
@@ -1490,7 +1490,7 @@
       "post": {
         "tags": ["IntegrationKnowledgeBase"],
         "summary": "上传 workspace 成果文件到知识库（编排）",
-        "description": "WebUI 原生编排端点：调用方传 `paths`（workspace 相对路径数组），WebUI 读取成果文件字节后复用下游 `upload_docs` 透传。`fileProperties` 与 `upload_docs` 一致（原样透传，`fileClass` 即直属库类型），`paths` 与 `fileProperties` 一一对应、等长。单文件最大 50 MiB，最多 20 个文件；不限制单次同步的文件总大小。仅执行 `upload_docs`，不串联 `update_docs`。",
+        "description": "WebUI 原生编排端点：调用方传 `paths`（workspace 相对路径数组），WebUI 读取成果文件字节后复用下游 `upload_docs` 透传。`fileProperties` 与 `upload_docs` 一致（原样透传，`fileClass` 即直属库类型），`paths` 与 `fileProperties` 一一对应、等长。WebUI 不限制单个文件大小、文件数量或单次同步的文件总大小；实际限制由下游、代理或存储策略决定。仅执行 `upload_docs`，不串联 `update_docs`。",
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUploadArtifactsRequest" } } } },
         "responses": {
           "200": { "description": "下游 upload_docs 原始 JSON 响应", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughResponse" } } } },
@@ -1741,7 +1741,7 @@
       "post": {
         "tags": ["IntegrationRecordScripts"],
         "summary": "上传录制脚本关联 CSV",
-        "description": "multipart 上传 CSV。表单字段 `relate_name` 必填，文件字段名为 `file`。同一 `relate_name` 只保留一份 CSV，上传会写入或覆盖 `data.csv`。",
+        "description": "multipart 上传 CSV。表单字段 `relate_name` 必填，文件字段名为 `file`。同一 `relate_name` 只保留一份 CSV，上传会写入或覆盖 `data.csv`。WebUI 不对该 multipart 上传施加文件大小限制。",
         "requestBody": {
           "required": true,
           "content": {
@@ -1761,7 +1761,7 @@
           "200": { "description": "上传成功", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecordScriptCsvUploadResponse" } } } },
           "400": { "description": "缺参、格式无效或非 CSV 文件", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecordScriptError" } } } },
           "404": { "description": "脚本不存在", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecordScriptError" } } } },
-          "413": { "description": "上传体过大", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecordScriptError" } } } }
+          "413": { "description": "保留给反向代理或其它上游层的请求体限制", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecordScriptError" } } } }
         }
       }
     },
@@ -3044,7 +3044,7 @@
       "post": {
         "tags": ["SkillHub"],
         "summary": "上传本地 custom 技能",
-        "description": "仅写入 `{HERMES_HOME}/skills`（shared_skills_dir），不调用 SkillHub 上游。需要 `HERMES_INTEGRATION=1`；不要求 `SKILLHUB_URL`。支持 `.md` / `.zip`（multipart）或 JSON。单文件 `.md` 的 leaf 由 SKILL.md frontmatter `name` 决定（不再用 `SKILL.md` 文件名 stem）；`.zip` 可含多个技能目录（每个含 SKILL.md），可含 `.skill-origin.json` sidecar。目标路径优先级：`dir_name` 参数 > sidecar.dir_name > 已有同名 custom 目录 > `category`+leaf。`overwrite=true` 时按 frontmatter `name` 删除全部 custom 副本后写入；市场安装（`.hub_installed`）仍 409。响应含 `skill_count`、`file_count` 与 `skills[]`（每项含 `dir_name`、`name`、`category`）。SKILL.md 须含 frontmatter，必填 `name`、`description`。",
+        "description": "仅写入 `{HERMES_HOME}/skills`（shared_skills_dir），不调用 SkillHub 上游。需要 `HERMES_INTEGRATION=1`；不要求 `SKILLHUB_URL`。支持 `.md` / `.zip`（multipart）或 JSON；multipart 文件上传不设 WebUI 大小限制，JSON 请求仍受通用 20 MiB body 限制。单文件 `.md` 的 leaf 由 SKILL.md frontmatter `name` 决定（不再用 `SKILL.md` 文件名 stem）；`.zip` 可含多个技能目录（每个含 SKILL.md），可含 `.skill-origin.json` sidecar。目标路径优先级：`dir_name` 参数 > sidecar.dir_name > 已有同名 custom 目录 > `category`+leaf。`overwrite=true` 时按 frontmatter `name` 删除全部 custom 副本后写入；市场安装（`.hub_installed`）仍 409。响应含 `skill_count`、`file_count` 与 `skills[]`（每项含 `dir_name`、`name`、`category`）。SKILL.md 须含 frontmatter，必填 `name`、`description`。",
         "requestBody": {
           "required": true,
           "content": {
@@ -4808,7 +4808,7 @@
       "post": {
         "tags": ["Workspace"],
         "summary": "上传文件到工作区",
-        "description": "上传文件到会话工作区目录。",
+        "description": "上传文件到会话工作区目录。WebUI 不对该 multipart 上传施加文件大小限制。",
         "requestBody": {
           "required": true,
           "content": {
@@ -4831,7 +4831,7 @@
       "post": {
         "tags": ["Workspace"],
         "summary": "解压上传文件",
-        "description": "上传并解压 zip 文件到工作区目录。",
+        "description": "上传并解压 zip 文件到工作区目录。WebUI 不限制压缩包上传大小；解压后的总字节数仍受 archive-bomb 防护上限约束。",
         "requestBody": {
           "required": true,
           "content": {

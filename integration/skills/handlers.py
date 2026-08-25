@@ -92,15 +92,13 @@ def handle_skillhub_upload(handler) -> bool:
 
     content_type = str(handler.headers.get("Content-Type", "") or "")
     content_length = int(handler.headers.get("Content-Length", 0) or 0)
-    max_mb = MAX_BODY_BYTES // 1024 // 1024
-    if content_length > MAX_BODY_BYTES:
-        return _respond_bad(handler, f"请求体过大（最大 {max_mb}MB）", 413)
-
     if "multipart/form-data" in content_type:
         from api.upload import parse_multipart
 
         try:
-            fields, files = parse_multipart(handler.rfile, content_type, content_length)
+            fields, files = parse_multipart(
+                handler.rfile, content_type, content_length, max_bytes=None
+            )
         except ValueError as exc:
             return _respond_bad(handler, _upload_multipart_error(exc), 400)
 
@@ -150,6 +148,7 @@ def handle_skillhub_upload(handler) -> bool:
                 explicit_dir_name=explicit_dir_name,
             )
     else:
+        max_mb = MAX_BODY_BYTES // 1024 // 1024
         try:
             body = read_body(handler)
         except ValueError:
@@ -201,17 +200,15 @@ def handle_skillhub_extract(handler) -> bool:
 
     content_type = str(handler.headers.get("Content-Type", "") or "")
     content_length = int(handler.headers.get("Content-Length", 0) or 0)
-    max_mb = MAX_BODY_BYTES // 1024 // 1024
-    if content_length > MAX_BODY_BYTES:
-        return _respond_bad(handler, f"请求体过大（最大 {max_mb}MB）", 413)
-
     if "multipart/form-data" not in content_type:
         return _respond_bad(handler, "需要 multipart/form-data", 400)
 
     from api.upload import parse_multipart
 
     try:
-        fields, files = parse_multipart(handler.rfile, content_type, content_length)
+        fields, files = parse_multipart(
+            handler.rfile, content_type, content_length, max_bytes=None
+        )
     except ValueError as exc:
         return _respond_bad(handler, _upload_multipart_error(exc), 400)
 

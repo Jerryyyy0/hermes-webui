@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from integration.skills import local_skills
-from integration.skills.handlers import handle_skillhub_upload
+from integration.skills.handlers import handle_skillhub_extract, handle_skillhub_upload
 from integration.skills.utils import extract_zip_and_flatten
 
 
@@ -268,3 +268,37 @@ def test_handle_skillhub_upload_json_success():
                 assert handle_skillhub_upload(handler) is True
                 upload.assert_called_once()
                 j_fn.assert_called_once()
+
+
+def test_multipart_skillhub_upload_has_no_local_size_cap():
+    handler = MagicMock()
+    handler.headers = {
+        "Content-Type": "multipart/form-data; boundary=b",
+        "Content-Length": str(20 * 1024 * 1024 + 1),
+    }
+    handler.rfile = MagicMock()
+    parsed = ({"name": "a"}, {"file": ("a.md", b"content")})
+    with patch("integration.skills.handlers.integration_enabled", return_value=True):
+        with patch("api.upload.parse_multipart", return_value=parsed) as parse:
+            with patch("integration.skills.handlers.local_skills.upload_custom_skill", return_value={"ok": True}):
+                with patch("integration.skills.handlers.j"):
+                    assert handle_skillhub_upload(handler) is True
+    parse.assert_called_once()
+    assert parse.call_args.kwargs["max_bytes"] is None
+
+
+def test_skillhub_extract_has_no_local_size_cap():
+    handler = MagicMock()
+    handler.headers = {
+        "Content-Type": "multipart/form-data; boundary=b",
+        "Content-Length": str(20 * 1024 * 1024 + 1),
+    }
+    handler.rfile = MagicMock()
+    parsed = ({}, {"file": ("a.zip", b"zip")})
+    with patch("integration.skills.handlers.integration_enabled", return_value=True):
+        with patch("api.upload.parse_multipart", return_value=parsed) as parse:
+            with patch("integration.skills.handlers.local_skills.extract_zip_skill_content", return_value={"content": "x"}):
+                with patch("integration.skills.handlers.j"):
+                    assert handle_skillhub_extract(handler) is True
+    parse.assert_called_once()
+    assert parse.call_args.kwargs["max_bytes"] is None

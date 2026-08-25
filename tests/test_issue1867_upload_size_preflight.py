@@ -3,7 +3,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 UI_JS = ROOT / "static" / "ui.js"
-I18N_JS = ROOT / "static" / "i18n.js"
 CONFIG_PY = ROOT / "api" / "config.py"
 UPLOAD_PY = ROOT / "api" / "upload.py"
 
@@ -24,49 +23,38 @@ def _function_body(src: str, name: str) -> str:
     raise AssertionError(f"{name} function body not found")
 
 
-def test_upload_limit_constant_matches_server_limit():
-    """The browser preflight should read the runtime upload limit."""
-    ui = UI_JS.read_text(encoding="utf-8")
+def test_archive_and_transcription_limit_constant_remains_configurable():
+    """The retained multipart limit remains available to capped endpoints."""
     config = CONFIG_PY.read_text(encoding="utf-8")
 
-    assert "window.__HERMES_CONFIG__.maxUploadBytes" in ui
     assert 'MAX_UPLOAD_BYTES = _env_mb_bytes("HERMES_WEBUI_MAX_UPLOAD_MB", 50)' in config
 
 
-def test_file_picker_rejects_oversize_files_before_queueing():
-    """Selecting an oversized file should never add it to pending uploads."""
+def test_file_picker_does_not_apply_a_local_upload_size_limit():
+    """Chat/workspace uploads leave file-size enforcement to outer layers."""
     src = UI_JS.read_text(encoding="utf-8")
     body = _function_body(src, "addFiles")
 
-    size_gate = body.index("f&&f.size>MAX_UPLOAD_BYTES")
-    status_notice = body.index("_showUploadTooLarge(f)")
-    push_pending = body.index("S.pendingFiles.push(f)")
-
-    assert size_gate < status_notice < push_pending
-    assert "continue;" in body[size_gate:push_pending]
+    assert "MAX_UPLOAD_BYTES" not in body
+    assert "S.pendingFiles.push(f)" in body
 
 
-def test_pending_uploads_skip_fetch_for_oversize_files():
-    """Restored or queued oversized files should fail locally before fetch()."""
+def test_pending_uploads_do_not_skip_fetch_for_file_size():
+    """Queued files are sent without a browser-side size rejection."""
     src = UI_JS.read_text(encoding="utf-8")
     body = _function_body(src, "uploadPendingFiles")
 
-    size_gate = body.index("f&&f.size>MAX_UPLOAD_BYTES")
     form_data = body.index("const fd=new FormData()")
     upload_fetch = body.index("fetch(url")
 
-    assert size_gate < form_data < upload_fetch
-    assert "throw new Error(_uploadTooLargeMessage(f))" in body[size_gate:form_data]
+    assert form_data < upload_fetch
+    assert "MAX_UPLOAD_BYTES" not in body
 
 
-def test_upload_too_large_has_user_facing_message():
-    """The status toast should explain the upload limit instead of a network reset."""
-    i18n = I18N_JS.read_text(encoding="utf-8")
+def test_upload_size_message_is_not_used_by_unlimited_upload_flow():
+    """The old browser-side size rejection helper is no longer in the flow."""
     ui = UI_JS.read_text(encoding="utf-8")
-
-    assert "upload_too_large" in i18n
-    assert "Maximum upload size is" in i18n
-    assert "_uploadTooLargeMessage(file)" in ui
+    assert "_uploadTooLargeMessage" not in ui
 
 
 def test_archive_extraction_limit_tracks_upload_limit():

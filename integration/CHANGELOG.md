@@ -31,6 +31,15 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Fixed
 
+- **Knowledge base artifact upload limits removed** — `POST /api/integration/knowledge_base/upload_artifacts`
+  不再限制单个文件大小、文件数量或单次同步的文件总大小；仍保留路径安全、文件存在性以及
+  `paths` 与 `fileProperties` 的对应关系校验。
+
+- **Multipart upload size gates** — `/api/skillhub/upload`、`/api/skillhub/extract` 与
+  `/api/integration/record_scripts_csv/upload` 不再由 WebUI 施加文件大小上限；知识库
+  `upload_docs` 继续原样透传且不限制文件大小或数量。核心会话附件和 workspace 上传
+  的本地大小门禁也已移除，外层代理可按部署需要自行设置限制。
+
 - **Profile Gateway parallel startup race** — 普通容器中 WebUI 现在按 default 优先的顺序串行启动各 Profile Gateway，并为每个子进程固定其独立 `HERMES_HOME`。启动结果不再仅以 `Popen` 成功为准：只有子进程自身持有 Agent runtime lock、状态为 `running` 且 heartbeat 新鲜时才记为成功；提前退出或超时会清理子进程并明确记录失败，避免并发 `--replace` 竞争导致一个 Profile 实际退出却被汇总为已启动。
 
 - **Profile Gateway cold-start runtime probe amplification** — all-profile Gateway startup now resolves the Hermes CLI runtime once per coordinator pass and shares that verified invocation with every Profile Gateway. Transient runtime retries no longer run independently for every profile, avoiding concurrent cold-start probe failures that could leave every Gateway unstarted while WebUI itself remained healthy.

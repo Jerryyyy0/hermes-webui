@@ -266,6 +266,7 @@ kb_post list_knowledge_bases_details '{"kbName":"share68","page":1,"size":15}'
 `POST /api/integration/knowledge_base/upload_docs`
 
 请求为 `multipart/form-data`，body 与 `Content-Type` 原样转发；WebUI 不校验表单字段。
+WebUI 不限制单个文件大小或文件数量；实际限制由反向代理、下游知识库服务或其存储策略决定。
 
 | 表单字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
@@ -371,9 +372,9 @@ curl -sS -X POST "$BASE/download_doc" -H 'Content-Type: application/json' \
 
 | 本地错误 | HTTP |
 | --- | --- |
-| 缺少字段、数组长度不一致、路径越界、文件不存在、文件过大、文件数过多 | 400 |
+| 缺少字段、数组长度不一致、路径越界、文件不存在 | 400 |
 
-限制：单文件最大 50 MiB，最多 20 个文件。
+WebUI 不限制单个文件大小、文件数量或单次同步的文件总大小；实际限制由下游、反向代理或存储策略决定。
 
 ```bash
 kb_post upload_artifacts '{"uuid":"uuid-1","kbName":"share68","fileProperties":[{"fileName":"report.md"}],"paths":["reports/report.md"]}'

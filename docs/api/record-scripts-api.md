@@ -94,6 +94,8 @@
 
 请求类型：`multipart/form-data`
 
+WebUI 不设置该 multipart 上传的文件大小上限；反向代理或上游网络层仍可能设置限制。
+
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---:|---|
 | `relate_name` | string | 是 | 关联的资源 id |

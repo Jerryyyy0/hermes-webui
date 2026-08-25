@@ -208,10 +208,6 @@ def try_handle_post(handler, parsed, body) -> bool:
 
 def _handle_upload_artifacts(handler, body: dict[str, Any]) -> bool:
     from api.workspace import resolve_trusted_workspace, safe_resolve_ws
-    from integration.knowledge_base.constants import (
-        MAX_ARTIFACT_FILE_BYTES,
-        MAX_ARTIFACT_COUNT,
-    )
 
     uuid = str(body.get("uuid", "") or "").strip()
     kb_name = str(body.get("kbName", "") or "").strip()
@@ -219,9 +215,6 @@ def _handle_upload_artifacts(handler, body: dict[str, Any]) -> bool:
     paths = body.get("paths") or []
     chunk_size = str(body.get("chunkSize", "") or "").strip() or None
     chunk_overlap = str(body.get("chunkOverlap", "") or "").strip() or None
-
-    if len(paths) > MAX_ARTIFACT_COUNT:
-        return _respond_bad(handler, "文件数量过多", 400)
 
     workspace = resolve_trusted_workspace(None)
     httpx_files: list[tuple[str, tuple[str, bytes, str | None]]] = []
@@ -235,9 +228,6 @@ def _handle_upload_artifacts(handler, body: dict[str, Any]) -> bool:
             return _respond_bad(handler, "路径越界", 400)
         if not resolved.is_file():
             return _respond_bad(handler, "文件不存在", 400)
-        size = resolved.stat().st_size
-        if size > MAX_ARTIFACT_FILE_BYTES:
-            return _respond_bad(handler, "文件过大", 400)
         file_bytes = resolved.read_bytes()
         basename = resolved.name
         httpx_files.append(("files", (basename, file_bytes, "application/octet-stream")))

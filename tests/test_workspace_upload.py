@@ -5,7 +5,7 @@ Covers the POST /api/workspace/upload handler:
   - happy-path upload into workspace
   - filename dedup (-1/-2 suffixes)
   - path-traversal blocking (../ filename → 403)
-  - oversized body rejection (413)
+  - files over the historical body limit are accepted
   - archive extraction containment (no member escapes workspace)
   - zip-bomb cap (extraction rejects when total extracted > limit)
 """
@@ -573,23 +573,21 @@ class TestWorkspaceUploadPathTraversal:
 
 class TestWorkspaceUploadOversized:
 
-    def test_oversized_file_gets_413(self, cleanup_test_sessions):
-        """File over MAX_UPLOAD_BYTES should be rejected with 413."""
+    def test_oversized_file_is_accepted(self, cleanup_test_sessions):
+        """Workspace upload does not impose the historical 50 MiB cap."""
         from api.config import MAX_UPLOAD_BYTES
 
         sid, ws = make_session_tracked(cleanup_test_sessions)
 
         big = b"x" * (MAX_UPLOAD_BYTES + 1024)  # slightly over limit
-        try:
-            result, status = post_multipart(
-                "/api/workspace/upload",
-                {"session_id": sid, "path": ""},
-                {"file": ("big.bin", big)},
-            )
-            assert status == 413, f"Expected 413, got {status}: {result}"
-        except (urllib.error.URLError, ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
-            # Server may close connection after reading Content-Length > limit
-            pass
+        result, status = post_multipart(
+            "/api/workspace/upload",
+            {"session_id": sid, "path": ""},
+            {"file": ("big.bin", big)},
+        )
+        assert status == 200, f"Expected successful upload, got {status}: {result}"
+        assert result["size"] == len(big)
+        assert (ws / "big.bin").stat().st_size == len(big)
 
 
 class TestWorkspaceUploadArchive:
@@ -752,9 +750,9 @@ class TestWorkspaceUploadArchive:
 def test_parse_multipart_rejects_negative_content_length():
     """Negative Content-Length must not reach rfile.read(<0) (unbounded read).
 
-    The per-handler `content_length > MAX_UPLOAD_BYTES` gate is False for a
-    negative value, so the guard has to live in parse_multipart itself (the
-    shared chokepoint for every upload handler).
+    The framing guard must live in parse_multipart itself (the shared
+    chokepoint for every upload handler), including callers that disable the
+    optional file-size cap.
     """
     from api.upload import parse_multipart
     big = b"x" * (2 * 1024 * 1024)
@@ -770,15 +768,65 @@ def test_parse_multipart_rejects_negative_content_length():
     assert rfile.tell() == 0
 
 
-def test_parse_multipart_rejects_oversize_content_length():
+def test_parse_multipart_default_limit_remains_available_for_capped_callers():
     from api.config import MAX_UPLOAD_BYTES
     from api.upload import parse_multipart
     rfile = io.BytesIO(b"ignored")
     try:
         parse_multipart(rfile, "multipart/form-data; boundary=b", MAX_UPLOAD_BYTES + 1)
-        assert False, "oversize Content-Length should have been rejected"
+        assert False, "default-capped caller should reject oversize Content-Length"
     except ValueError as e:
         assert "too large" in str(e).lower()
+
+
+def test_parse_multipart_unlimited_mode_ignores_default_cap(monkeypatch):
+    """Selected upload handlers can disable only the size cap, not framing checks."""
+    import api.upload as upload
+
+    monkeypatch.setattr(upload, "MAX_UPLOAD_BYTES", 1)
+    body = (
+        b"--b\r\n"
+        b'Content-Disposition: form-data; name="file"; filename="large.txt"\r\n\r\n'
+        b"larger than one byte\r\n"
+        b"--b--\r\n"
+    )
+    fields, files = upload.parse_multipart(
+        io.BytesIO(body),
+        "multipart/form-data; boundary=b",
+        len(body),
+        max_bytes=None,
+    )
+    assert fields == {}
+    assert files["file"] == ("large.txt", b"larger than one byte")
+
+
+def test_archive_upload_has_no_local_file_size_cap(monkeypatch, tmp_path):
+    """The attachment archive endpoint disables only its input-size cap."""
+    import api.upload as upload
+    from api.config import MAX_UPLOAD_BYTES
+
+    handler = _FakeUploadHandler(MAX_UPLOAD_BYTES + 1)
+    parse_calls = {}
+
+    def _parse(*args, **kwargs):
+        parse_calls["kwargs"] = kwargs
+        return {"session_id": "sid"}, {"file": ("bundle.zip", b"zip")}
+
+    monkeypatch.setattr(upload, "parse_multipart", _parse)
+    monkeypatch.setattr(upload, "get_session", lambda _sid: object())
+    monkeypatch.setattr(upload, "get_profile_cookie", lambda _handler: None)
+    monkeypatch.setattr(upload, "_reject_invisible_session", lambda *_args: False)
+    monkeypatch.setattr(upload, "_session_attachment_dir", lambda _sid: tmp_path / "sid")
+    monkeypatch.setattr(
+        upload,
+        "extract_archive",
+        lambda _bytes, _filename, _workspace: {"extracted": 0, "files": [], "dest": "bundle"},
+    )
+
+    upload.handle_upload_extract(handler)
+
+    assert handler.status == 200
+    assert parse_calls["kwargs"]["max_bytes"] is None
 
 
 class TestWorkspaceUploadArchiveSuffixes:

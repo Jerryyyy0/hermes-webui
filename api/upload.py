@@ -77,7 +77,7 @@ def _upload_value_error_message(exc: ValueError) -> str:
     return _UPLOAD_VALUE_ERRORS.get(str(exc), '上传请求无效')
 
 
-def parse_multipart(rfile, content_type, content_length) -> tuple:
+def parse_multipart(rfile, content_type, content_length, *, max_bytes=-1) -> tuple:
     import re as _re, email.parser as _ep
     # Imported locally (not just module-level) so the function stays
     # self-contained — some tests exec() this function's source in an isolated
@@ -90,18 +90,21 @@ def parse_multipart(rfile, content_type, content_length) -> tuple:
     if not m:
         raise ValueError('No boundary in Content-Type')
     boundary = m.group(1).strip('"').encode()
-    # Centralized length guard for ALL upload callers: a missing/garbage or
+    # Centralized framing guard for ALL upload callers: a missing/garbage or
     # NEGATIVE Content-Length must never reach rfile.read(<0), which reads the
-    # stream unbounded (read(-1) == read-to-EOF) and bypasses the per-handler
-    # size cap. Reject anything not in [0, MAX_UPLOAD_BYTES].
+    # stream unbounded (read(-1) == read-to-EOF). Callers use ``max_bytes=None``
+    # when the endpoint intentionally has no local file-size limit; the
+    # default keeps the historical MAX_UPLOAD_BYTES cap for other callers.
     try:
         length = int(content_length)
     except (TypeError, ValueError):
         raise ValueError('Invalid Content-Length') from None
     if length < 0:
         raise ValueError('Invalid Content-Length (negative)')
-    if length > _MAX_UPLOAD_BYTES:
-        raise ValueError(f'Upload too large (max {_MAX_UPLOAD_BYTES} bytes)')
+    if max_bytes == -1:
+        max_bytes = _MAX_UPLOAD_BYTES
+    if max_bytes is not None and length > max_bytes:
+        raise ValueError(f'Upload too large (max {max_bytes} bytes)')
     raw = rfile.read(length)
     fields = {}
     files = {}
@@ -246,9 +249,9 @@ def handle_upload(handler):
     try:
         content_type = handler.headers.get('Content-Type', '')
         content_length = int(handler.headers.get('Content-Length', 0) or 0)
-        if content_length > MAX_UPLOAD_BYTES:
-            return j(handler, {'error': _upload_too_large_error()}, status=413)
-        fields, files = parse_multipart(handler.rfile, content_type, content_length)
+        fields, files = parse_multipart(
+            handler.rfile, content_type, content_length, max_bytes=None
+        )
         session_id = fields.get('session_id', '')
         cookie_profile = get_profile_cookie(handler)
         profile_override = None if cookie_profile else _upload_profile_from_fields(fields)
@@ -437,9 +440,9 @@ def handle_upload_extract(handler):
     try:
         content_type = handler.headers.get('Content-Type', '')
         content_length = int(handler.headers.get('Content-Length', 0) or 0)
-        if content_length > MAX_UPLOAD_BYTES:
-            return j(handler, {'error': f'File too large (max {MAX_UPLOAD_BYTES//1024//1024}MB)'}, status=413)
-        fields, files = parse_multipart(handler.rfile, content_type, content_length)
+        fields, files = parse_multipart(
+            handler.rfile, content_type, content_length, max_bytes=None
+        )
         session_id = fields.get('session_id', '')
         cookie_profile = get_profile_cookie(handler)
         profile_override = None if cookie_profile else _upload_profile_from_fields(fields)
@@ -474,9 +477,9 @@ def handle_transcribe(handler):
     try:
         content_type = handler.headers.get('Content-Type', '')
         content_length = int(handler.headers.get('Content-Length', 0) or 0)
-        if content_length > MAX_UPLOAD_BYTES:
-            return j(handler, {'error': f'File too large (max {MAX_UPLOAD_BYTES//1024//1024}MB)'}, status=413)
-        fields, files = parse_multipart(handler.rfile, content_type, content_length)
+        fields, files = parse_multipart(
+            handler.rfile, content_type, content_length, max_bytes=MAX_UPLOAD_BYTES
+        )
         if 'file' not in files:
             return j(handler, {'error': 'No file field in request'}, status=400)
         filename, file_bytes = files['file']
@@ -658,10 +661,9 @@ def handle_workspace_upload(handler):
     try:
         content_type = handler.headers.get('Content-Type', '')
         content_length = int(handler.headers.get('Content-Length', 0) or 0)
-        if content_length > MAX_UPLOAD_BYTES:
-            return j(handler, {'error': f'File too large (max {MAX_UPLOAD_BYTES//1024//1024}MB)'}, status=413)
-
-        fields, files = parse_multipart(handler.rfile, content_type, content_length)
+        fields, files = parse_multipart(
+            handler.rfile, content_type, content_length, max_bytes=None
+        )
         session_id = fields.get('session_id', '')
         subpath = fields.get('path', '')
         cookie_profile = get_profile_cookie(handler)
