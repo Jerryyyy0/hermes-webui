@@ -6,6 +6,7 @@ import queue
 import threading
 from unittest.mock import Mock
 
+import api.streaming as streaming
 from api.streaming import cancel_stream
 from api.config import AGENT_INSTANCES, STREAMS, CANCEL_FLAGS, ACTIVE_RUNS, SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK
 
@@ -291,3 +292,57 @@ class TestCancelInterrupt:
             "detached-path cancel lost its partial text — the under-lock snapshot "
             "must cover the ACTIVE_RUNS-only path too, not just STREAMS-present"
         )
+
+    def test_cancelled_async_wakeup_recovery_is_a_hidden_context_anchor(self):
+        """A cancelled wakeup must not reappear as a real user message."""
+        from unittest.mock import patch
+
+        stream_id = "async-wakeup-cancelled"
+        session_id = "session-async-wakeup-cancelled"
+        prompt = "[ASYNC DELEGATION BATCH COMPLETE — deleg-1]"
+        mock_agent = Mock(session_id=session_id)
+        mock_agent.interrupt = Mock()
+        AGENT_INSTANCES[stream_id] = mock_agent
+        STREAMS[stream_id] = queue.Queue()
+        CANCEL_FLAGS[stream_id] = threading.Event()
+
+        mock_session = Mock()
+        mock_session.session_id = session_id
+        mock_session.active_stream_id = stream_id
+        mock_session.pending_user_message = prompt
+        mock_session.pending_user_source = "async_delegation_wakeup"
+        mock_session.pending_turn_key = "turn:8"
+        mock_session.pending_attachments = []
+        mock_session.pending_started_at = 1.0
+        mock_session.messages = []
+        mock_session.save = Mock()
+
+        with patch("api.streaming.get_session", return_value=mock_session):
+            assert cancel_stream(stream_id) is True
+
+        recovered = next(
+            message
+            for message in mock_session.messages
+            if isinstance(message, dict) and message.get("role") == "user"
+        )
+        assert recovered["_hermes_message_class"] == "context_anchor"
+        assert recovered["_hermes_scaffold_kind"] == "async_delegation_completion"
+
+
+def test_error_recovery_for_async_wakeup_is_a_hidden_context_anchor():
+    """Terminal error recovery must retain async completion provenance."""
+    session = Mock()
+    session.pending_user_message = "[ASYNC DELEGATION BATCH COMPLETE — deleg-1]"
+    session.pending_user_source = "async_delegation_wakeup"
+    session.pending_turn_key = "turn:8"
+    session.pending_attachments = []
+    session.pending_started_at = 1.0
+    session.messages = []
+    session.context_messages = []
+    session.truncation_watermark = None
+
+    assert streaming._materialize_pending_user_turn_before_error(session) is True
+
+    recovered = session.messages[-1]
+    assert recovered["_hermes_message_class"] == "context_anchor"
+    assert recovered["_hermes_scaffold_kind"] == "async_delegation_completion"

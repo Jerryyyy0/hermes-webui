@@ -6340,6 +6340,7 @@ def _materialize_pending_user_turn_before_error(session) -> bool:
         '_recovered': True,
     }
     pending_source = getattr(session, 'pending_user_source', None) or 'webui'
+    _stamp_hidden_user_turn_semantics(recovered, source=pending_source)
     stamp_message_source(recovered, pending_source)
     pending_attachments = list(getattr(session, 'pending_attachments', None) or [])
     if pending_attachments:
@@ -11489,6 +11490,10 @@ def cancel_stream(stream_id: str) -> bool:
                             _pending_turn_key = str(getattr(_cs, 'pending_turn_key', '') or '').strip()
                             if _pending_turn_key:
                                 _user_turn['_turn_key'] = _pending_turn_key
+                            _stamp_hidden_user_turn_semantics(
+                                _user_turn,
+                                source=_pending_source,
+                            )
                             stamp_message_source(_user_turn, _pending_source)
                             if _pending_atts:
                                 _user_turn['attachments'] = _pending_atts
