@@ -42,7 +42,8 @@ CLUSTER_SYSTEM_PROMPT = """你是用户问题聚类器。
 4. 同一问题只能归入一个簇;语义相近的应合并(如「写周报」「生成周报」「本周报」归一类)。
 5. 每个簇至少包含 2 条语义相近的问题,单条问题不要输出;不得编造问题中没有的能力。
 6. members 必须原样复制上下文中的问题文本,不得改写、截断或增删标点。
-7. 不得输出 Markdown、代码块、标题、编号、解释或前后缀。"""
+7. 最多输出 5 个簇,按成员数量从多到少排序;超过 5 个的只保留规模最大的 5 个。
+8. 不得输出 Markdown、代码块、标题、编号、解释或前后缀。"""
 
 SUCCESS_COOLDOWN_SECONDS = 600
 FAILURE_RETRY_SECONDS = 3
@@ -134,10 +135,10 @@ def _ensure_worker() -> None:
 
 
 def enqueue(profile: str, profile_path: Path, kind: str, fingerprint: str = "") -> None:
-    if kind not in ("seed", "mine"):
+    if kind not in ("seed", "mine", "check"):
         return
-    route = collectors.model_route(profile_path)
-    if not route.get("model"):
+    route = {} if kind == "check" else collectors.model_route(profile_path)
+    if kind != "check" and not route.get("model"):
         _emit_warning(
             "enqueue_model_missing",
             {
@@ -165,28 +166,54 @@ def enqueue(profile: str, profile_path: Path, kind: str, fingerprint: str = "") 
 
 
 def enqueue_missing_or_stale(profile: str, profile_path: Path) -> None:
-    """Decide whether to enqueue a seed or mine job for this profile.
+    """Request a background check for this profile.
 
-    Priority: mine real conversations when enough user questions exist
-    (better signal than LLM-generated seed from persona). Falls back to seed
-    generation only when conversation logs are insufficient. This runs on
-    server startup via ``start_pregeneration`` and on each API call, so a
-    profile with existing conversation logs will be mined directly on first
-    boot instead of waiting for seed generation.
+    Returns immediately (non-blocking).  The actual session scan + seed/mine
+    decision happens in the worker thread via a ``check`` job.
 
-    ``retry_after`` in the future blocks both enqueues so a failing LLM is
-    not hammered on every call.
+    Fast-reject conditions are evaluated synchronously to avoid cluttering
+    the queue with no-op checks:
+    - retry_after still active
+    - mined data already fresh (last_success within cooldown) AND seed exists
+
+    Everything else (no seed, stale fingerprint, unknown state) gets a check
+    enqueued so the worker can do the heavy lifting asynchronously.
     """
     tasks, state = store.read_all(profile)
     now = time.time()
     retry_after = _float(state.get("retry_after"))
     if retry_after and retry_after > now:
         return
-    # On-the-fly repair: if seed_generated_at is set but the table has no
-    # seed rows (e.g. rows lost to DB corruption or manual deletion between
-    # restarts), clear the stale stamp so seed can be re-generated. Without
-    # this, the ``elif not seed_generated_at`` gate below would skip seed
-    # forever. Mirrors the startup repair in ``_repair_stale_seed_stamp``.
+
+    has_mined = any(t["source"] == "mined" for t in tasks)
+    has_seed = store.has_seed(tasks)
+    last_success = _float(state.get("last_success_at"))
+
+    if (
+        has_mined
+        and has_seed
+        and last_success
+        and now - last_success < SUCCESS_COOLDOWN_SECONDS
+    ):
+        return
+
+    enqueue(profile, profile_path, "check")
+
+
+def _run_check(task: CommonTaskJob, profile_path: Path) -> None:
+    """Worker-side: scan sessions and decide whether to run seed or mine.
+
+    This used to run synchronously in enqueue_missing_or_stale on the request
+    thread.  It is now fully async — session JSON scanning (the expensive
+    part) happens in the background worker.
+    """
+    profile = task.profile
+    tasks, state = store.read_all(profile)
+    now = time.time()
+    retry_after = _float(state.get("retry_after"))
+    if retry_after and retry_after > now:
+        return
+
     if state.get("seed_generated_at") and not store.has_seed(tasks):
         store.update_state(profile, "seed_generated_at", "")
         state["seed_generated_at"] = ""
@@ -194,6 +221,7 @@ def enqueue_missing_or_stale(profile: str, profile_path: Path) -> None:
             "seed_integrity_repaired",
             {"profile": profile, "reason": "seed_generated_at_without_seed_rows"},
         )
+
     questions = collectors.collect_recent_user_questions(profile)
     dedup_count = len({q["text"] for q in questions})
     if dedup_count >= MIN_QUESTIONS_FOR_MINING:
@@ -330,6 +358,9 @@ def _worker_loop() -> None:
 
 def _run_task(task: CommonTaskJob) -> None:
     profile_path = Path(task.profile_path)
+    if task.kind == "check":
+        _run_check(task, profile_path)
+        return
     if task.kind == "seed":
         _run_seed(task, profile_path)
         return
@@ -368,7 +399,6 @@ def _run_seed(task: CommonTaskJob, profile_path: Path) -> None:
         user_prompt=user_prompt,
         max_tokens=600,
         temperature=0.3,
-        extra_body={"thinking": {"type": "disabled"}},
     )
     if content is None:
         _write_seed_failure(task, profile_path, context, reason=str(error))
@@ -545,7 +575,6 @@ def _run_mine(task: CommonTaskJob, profile_path: Path) -> None:
         user_prompt=user_prompt,
         max_tokens=4000,
         temperature=0.2,
-        extra_body={"thinking": {"type": "disabled"}},
     )
     if content is None:
         store.replace_mined_tasks(
@@ -606,6 +635,58 @@ def _run_mine(task: CommonTaskJob, profile_path: Path) -> None:
     )
 
 
+def _disable_thinking_extra_body(
+    provider: str | None,
+    model: str | None,
+) -> dict[str, Any]:
+    """Return an extra_body dict that disables reasoning/thinking.
+
+    Different providers use different parameter shapes for disabling
+    built-in thinking.  Sending the wrong shape is a no-op at best (the
+    model still thinks and the request times out) and a 400 at worst.
+
+    Returns an empty dict when the provider/model is unknown — the caller
+    should still pass it through merged_extra_body so any user-configured
+    auxiliary.common_tasks.extra_body is preserved.
+    """
+    provider_lower = (provider or "").lower()
+    model_lower = (model or "").lower()
+    bare_model = model_lower.rsplit("/", 1)[-1]
+
+    # Qwen / DashScope — 同时发 enable_thinking (DashScope 官方) 和
+    #  thinking (OpenRouter/第三方网关),保证不同接入方式下都能关闭思考.
+    if (
+        "qwen" in provider_lower
+        or "qwen" in bare_model
+        or "dashscope" in provider_lower
+        or "alibaba" in provider_lower
+    ):
+        return {"enable_thinking": False, "thinking": False}
+
+    # Kimi / Moonshot — object shape {"type": "disabled"}
+    if (
+        "kimi" in provider_lower
+        or "moonshot" in provider_lower
+        or bare_model.startswith("kimi-")
+    ):
+        return {"thinking": {"type": "disabled"}}
+
+    # DeepSeek — thinking 对象格式 {"type": "disabled"}
+    if "deepseek" in provider_lower or "deepseek" in bare_model:
+        return {"thinking": {"type": "disabled"}}
+
+    # xiaomiMimo — object shape {"type": "disabled"}
+    if "mimo" in provider_lower or "deepseek" in bare_model:
+        return {"thinking": {"type": "disabled"}}
+
+    # Default / unknown — send both common shapes as a best-effort fallback.
+    # Most OpenAI-compatible gateways silently ignore unknown extra_body keys.
+    return {
+        "thinking": False,
+        "reasoning_effort": "off",
+    }
+
+
 def _call_llm(
     task: CommonTaskJob,
     system_prompt: str,
@@ -621,6 +702,12 @@ def _call_llm(
         call_llm = getattr(auxiliary_client, "call_llm")
         from api.profiles import profile_env_for_background_worker
 
+        merged_extra: dict[str, Any] = _disable_thinking_extra_body(
+            task.provider, task.model,
+        )
+        if extra_body:
+            merged_extra.update(extra_body)
+
         with profile_env_for_background_worker(task.profile, purpose="common tasks generation"):
             resp = call_llm(
                 task="common_tasks",
@@ -633,8 +720,8 @@ def _call_llm(
                 ],
                 temperature=temperature,
                 max_tokens=max_tokens,
-                timeout=60,
-                extra_body=extra_body,
+                timeout=120,
+                extra_body=merged_extra,
             )
         content = resp.choices[0].message.content
     except Exception as exc:
