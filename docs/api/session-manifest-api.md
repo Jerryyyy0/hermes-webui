@@ -70,7 +70,9 @@ GET /api/session/manifest?session_id=abc123
         "metadata": {
           "kbName": "share49",
           "fileName": "电力市场运行基本规则.docx",
-          "page_content": ["第一章 总则……"]
+          "chunks": [
+            { "page_content": "第一章 总则……", "score": 0.82 }
+          ]
         }
       }
     ],
@@ -258,7 +260,9 @@ Manifest 不返回文件或技能正文。非 expired 且 `preview` 为 `file`/`
   "metadata": {
     "kbName": "share49",
     "fileName": "电力市场运行基本规则.docx",
-    "page_content": ["第一章 总则……"]
+    "chunks": [
+      { "page_content": "第一章 总则……", "score": 0.82 }
+    ]
   }
 }
 ```
@@ -281,7 +285,10 @@ Manifest 不返回文件或技能正文。非 expired 且 `preview` 为 `file`/`
   "metadata": {
     "kbName": "share49",
     "fileName": "电力市场运行基本规则.docx",
-    "page_content": ["第一章 总则……", "第二章 市场成员……"]
+    "chunks": [
+      { "page_content": "第一章 总则……", "score": 0.82 },
+      { "page_content": "第二章 市场成员……", "score": 0.71 }
+    ]
   }
 }
 ```
@@ -293,8 +300,12 @@ Manifest 不返回文件或技能正文。非 expired 且 `preview` 为 `file`/`
 | `metadata.path` | string | `kind=skill` 时的 canonical skill 名 |
 | `metadata.kbName` | string | `kind=knowledge_base_document` 时的知识库名 |
 | `metadata.fileName` | string | 文档文件名；单库工具从其私有 `metadata.source` 仅取 basename，不向浏览器透传原路径 |
-| `metadata.page_content` | string[] | 文档命中片段，保留工具返回顺序并去重 |
+| `metadata.chunks` | object[] | 文档命中片段，保留工具返回顺序并按 `page_content` 去重 |
+| `metadata.chunks[].page_content` | string | 下游返回的原始内容，不改写 |
+| `metadata.chunks[].score` | number or string | 下游返回的原始分数；不存在或无效时为 `""` |
 | `status` | string | 可选；当前仅 `expired`，表示 Skill 有历史来源但当前不可预览 |
+
+`score` 是每个命中片段的原始分数，不是筛选阈值；`scoreThreshold` 仍属于知识库搜索请求参数。Manifest 不对分数做归一化，也不改变下游定义的大小关系；下游没有返回有效 score 时统一写为 `""`。
 
 知识库工具结果仅接受最多 50 条、总编码不超过 1 MiB 的 JSON 列表；畸形、失败、未知工具或超限结果一律跳过。Reference 是 transcript/tool-call 派生索引，不写入 artifact store，因此无需新增数据库表。
 
@@ -322,7 +333,9 @@ Manifest 不返回文件或技能正文。非 expired 且 `preview` 为 `file`/`
       "metadata": {
         "kbName": "share49",
         "fileName": "电力市场运行基本规则.docx",
-        "page_content": ["第一章 总则……"]
+        "chunks": [
+          { "page_content": "第一章 总则……", "score": 0.82 }
+        ]
       }
     }
   ]
@@ -355,7 +368,7 @@ Orphan artifact 仍保留在顶层 `artifacts`，但不进入正常 `turns[]`。
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "session_id": "abc123",
   "stream_id": "stream-xyz",
   "turn_key": "turn:42",
@@ -379,7 +392,7 @@ Orphan artifact 仍保留在顶层 `artifacts`，但不进入正常 `turns[]`。
 
 | 字段 | 说明 |
 | --- | --- |
-| `version` | 协议版本，当前为 `1` |
+| `version` | 协议版本，当前为 `2`；references 使用 `metadata.chunks[]` |
 | `session_id` | 前端丢弃非当前会话事件 |
 | `stream_id` | 配合 `sequence` 做幂等和过期流过滤 |
 | `turn_key` | stream 启动时确定；前端不得从 `stream_id` 推断 |
@@ -397,21 +410,21 @@ Orphan artifact 仍保留在顶层 `artifacts`，但不进入正常 `turns[]`。
 
 ```text
 event: manifest_delta
-data: {"version":1,"session_id":"abc123","stream_id":"stream-xyz","turn_key":"turn:4","sequence":8,"todos":{"items":[{"id":"draft","content":"撰写答复","status":"in_progress"}],"mode":"replace_latest"},"artifacts":[],"references":[]}
+data: {"version":2,"session_id":"abc123","stream_id":"stream-xyz","turn_key":"turn:4","sequence":8,"todos":{"items":[{"id":"draft","content":"撰写答复","status":"in_progress"}],"mode":"replace_latest"},"artifacts":[],"references":[]}
 ```
 
 ### 文件成果 delta
 
 ```text
 event: manifest_delta
-data: {"version":1,"session_id":"abc123","stream_id":"stream-xyz","turn_key":"turn:4","sequence":9,"artifacts":[{"path":"reports/result.md","preview":"file","source_tool":"write_file","profile":"ops"}],"references":[]}
+data: {"version":2,"session_id":"abc123","stream_id":"stream-xyz","turn_key":"turn:4","sequence":9,"artifacts":[{"path":"reports/result.md","preview":"file","source_tool":"write_file","profile":"ops"}],"references":[]}
 ```
 
 ### Skill 引用 delta
 
 ```text
 event: manifest_delta
-data: {"version":1,"session_id":"abc123","stream_id":"stream-xyz","turn_key":"turn:4","sequence":10,"artifacts":[],"references":[{"kind":"skill","source":[{"tool":"skill_view","tid":"call-skill-1"}],"metadata":{"path":"research-skill"}}]}
+data: {"version":2,"session_id":"abc123","stream_id":"stream-xyz","turn_key":"turn:4","sequence":10,"artifacts":[],"references":[{"kind":"skill","source":[{"tool":"skill_view","tid":"call-skill-1"}],"metadata":{"path":"research-skill"}}]}
 ```
 
 ### 知识库 MCP 示例
@@ -422,13 +435,13 @@ data: {"version":1,"session_id":"abc123","stream_id":"stream-xyz","turn_key":"tu
 
 ```text
 event: manifest_delta
-data: {"version":1,"session_id":"5ccfb09bb7a7","stream_id":"stream-xyz","turn_key":"turn:4","sequence":12,"artifacts":[],"references":[{"kind":"knowledge_base_document","source":[{"tool":"mcp__ithink_kb_mcp__searchKnowledgeBaseDocuments","tid":"call_00_nvU4eugjt9ji9RA6gxWu6032"}],"metadata":{"kbName":"share49","fileName":"电力市场运行基本规则.docx","page_content":["第一章 总则……"]}}]}
+data: {"version":2,"session_id":"5ccfb09bb7a7","stream_id":"stream-xyz","turn_key":"turn:4","sequence":12,"artifacts":[],"references":[{"kind":"knowledge_base_document","source":[{"tool":"mcp__ithink_kb_mcp__searchKnowledgeBaseDocuments","tid":"call_00_nvU4eugjt9ji9RA6gxWu6032"}],"metadata":{"kbName":"share49","fileName":"电力市场运行基本规则.docx","chunks":[{"page_content":"第一章 总则……","score":0.82}]}}]}
 
 ```
 
 同一调用返回多个文档时，`references[]` 包含多条行；同一 turn 内两个受支持工具命中同一
 `(kbName, fileName)` 时，客户端按既有合并规则合并为一条，追加不重复的
-`source[]` 与 `metadata.page_content[]`。
+`source[]` 与 `metadata.chunks[]`。
 
 ### Turn reconcile 成果 delta
 
@@ -437,7 +450,7 @@ references 固定为空。
 
 ```text
 event: manifest_delta
-data: {"version":1,"session_id":"abc123","stream_id":"stream-xyz","turn_key":"turn:4","sequence":13,"artifacts":[{"path":"reports/final.docx","preview":"file","source_tool":"assistant_prose"}],"turns":[{"turn_key":"turn:4","artifacts":[{"path":"reports/final.docx","preview":"file","source_tool":"assistant_prose"}],"references":[]}]}
+data: {"version":2,"session_id":"abc123","stream_id":"stream-xyz","turn_key":"turn:4","sequence":13,"artifacts":[{"path":"reports/final.docx","preview":"file","source_tool":"assistant_prose"}],"turns":[{"turn_key":"turn:4","artifacts":[{"path":"reports/final.docx","preview":"file","source_tool":"assistant_prose"}],"references":[]}]}
 ```
 
 ### 发射阶段
@@ -459,7 +472,7 @@ SSE 是乐观派生状态，不写入 transcript，不进入模型上下文，�
 | Session artifacts | 按 profile + canonical path 去重 |
 | Session references | Skill 按 canonical skill path；知识库文档按 `(kbName, fileName)` 去重 |
 | Turn artifacts/references | 按 `turn_key` 合并；artifact 按 path，reference 按其身份键去重 |
-| 知识库文档 | 同文档合并 `source[]` 与 `metadata.page_content[]`，均保持首次出现顺序 |
+| 知识库文档 | 同文档合并 `source[]` 与 `metadata.chunks[]`；chunk 按原始 `page_content` 去重并保持首次出现顺序；同一 chunk 的 score 保留首次有效值 |
 | Skills | 同技能 artifact 优先于 skill reference |
 | Todos | 当前轮按 `id` 合并；出站前过滤无展示内容项 |
 | 缺失字段 | 保持空或跳过，不跨字段推断 |

@@ -45,7 +45,7 @@ def test_workspace_js_fetches_manifest():
     assert 'key.startsWith(\'turn:\')' in src
     assert 'function _mergeManifestReferences' in src
     assert "kind==='knowledge_base_document'" in src
-    assert 'metadata.page_content' in src
+    assert 'metadata.chunks' in src
 
 
 def test_messages_js_listens_for_manifest_delta():
@@ -159,13 +159,14 @@ def test_session_manifest_docs_assign_public_contract_to_api():
     assert 'Manifest 的定位与资源边界' in api
     assert '派生索引' in api
     assert 'artifacts > references' in api
-    assert '"version": 1' in api
+    assert '"version": 2' in api
     assert '"sequence": 7' in api
     assert '"turn_key": "turn:' in api
     assert '顶层不携带工具调用来源' in api
     assert 'mcp__ithink_kb_mcp__searchKnowledgeBaseDocuments' in api
     assert 'mcp__ithink_kb_mcp__searchKnowledgeBaseDocumentsAcross' in api
-    assert '"page_content"' in api
+    assert '"chunks"' in api
+    assert '"score"' in api
     assert '无需新增数据库表' in api
 
     assert 'Decision-first 构建流程' in artifacts

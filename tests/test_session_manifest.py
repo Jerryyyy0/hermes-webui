@@ -535,10 +535,12 @@ def test_manifest_delta_merges_knowledge_base_document_across_both_mcp_tools(tmp
     across_result = json.dumps({'result': json.dumps([{
         'page_content': 'first passage',
         'metadata': {'kbName': 'share49', 'fileName': 'rules.docx'},
+        'score': 0.2,
     }])})
     single_result = json.dumps({'result': json.dumps([{
         'page_content': 'second passage',
         'metadata': {'source': '/private/share49/content/rules.docx'},
+        'score': 0.4,
     }])})
     first = extract_manifest_delta_from_tool_event(
         ToolEvent(
@@ -574,10 +576,51 @@ def test_manifest_delta_merges_knowledge_base_document_across_both_mcp_tools(tmp
         'metadata': {
             'kbName': 'share49',
             'fileName': 'rules.docx',
-            'page_content': ['first passage', 'second passage'],
+            'chunks': [
+                {'page_content': 'first passage', 'score': 0.2},
+                {'page_content': 'second passage', 'score': 0.4},
+            ],
         },
     }]
     assert merged['turns'][0]['references'] == merged['references']
+
+
+def test_manifest_delta_keeps_first_valid_score_for_duplicate_chunk():
+    base = {
+        'todos': {'items': []},
+        'artifacts': [],
+        'references': [{
+            'kind': 'knowledge_base_document',
+            'source': [{'tool': 'kb', 'tid': 'first'}],
+            'metadata': {
+                'kbName': 'share49',
+                'fileName': 'rules.docx',
+                'chunks': [{'page_content': 'same passage', 'score': 0.2}],
+            },
+        }],
+        'turns': [],
+    }
+    delta = {
+        'references': [{
+            'kind': 'knowledge_base_document',
+            'source': [{'tool': 'kb', 'tid': 'second'}],
+            'metadata': {
+                'kbName': 'share49',
+                'fileName': 'rules.docx',
+                'chunks': [{'page_content': 'same passage', 'score': 0.9}],
+            },
+        }],
+    }
+
+    merged = merge_manifest_delta(base, delta)
+
+    assert merged['references'][0]['metadata']['chunks'] == [
+        {'page_content': 'same passage', 'score': 0.2},
+    ]
+    assert merged['references'][0]['source'] == [
+        {'tool': 'kb', 'tid': 'first'},
+        {'tool': 'kb', 'tid': 'second'},
+    ]
 
 
 def test_historical_manifest_derives_knowledge_base_references_without_artifact_decision(tmp_path, monkeypatch):
@@ -610,7 +653,9 @@ def test_historical_manifest_derives_knowledge_base_references_without_artifact_
 
     assert source_info['manifest_source'] == 'none'
     assert manifest['artifacts'] == []
-    assert manifest['references'][0]['metadata']['page_content'] == ['historical passage']
+    assert manifest['references'][0]['metadata']['chunks'] == [
+        {'page_content': 'historical passage', 'score': ''},
+    ]
     assert manifest['turns'][0]['references'] == manifest['references']
 
 

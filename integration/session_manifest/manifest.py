@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import copy
 import logging
+import math
 import re
 import shlex
 from dataclasses import dataclass, field
@@ -2798,6 +2799,25 @@ def _merge_rows_by_path(existing_rows: list | None, incoming_rows: list | None) 
 
 def _merge_reference_wire_rows(existing_rows: list | None, incoming_rows: list | None) -> list[dict]:
     """Merge the public reference wire without treating it as a file row."""
+
+    def normalize_chunk(value: Any) -> dict[str, Any] | None:
+        if not isinstance(value, dict):
+            return None
+        page_content = value.get('page_content')
+        if not isinstance(page_content, str) or not page_content:
+            return None
+        chunk = {'page_content': page_content}
+        score = value.get('score')
+        normalized_score: int | float | str = ''
+        if not isinstance(score, bool) and isinstance(score, (int, float)):
+            try:
+                if math.isfinite(score):
+                    normalized_score = score
+            except (OverflowError, TypeError):
+                pass
+        chunk['score'] = normalized_score
+        return chunk
+
     rows: dict[str, dict] = {}
     for row in list(existing_rows or []) + list(incoming_rows or []):
         if not isinstance(row, dict):
@@ -2819,12 +2839,27 @@ def _merge_reference_wire_rows(existing_rows: list | None, incoming_rows: list |
             current = rows.setdefault(key, {
                 'kind': 'knowledge_base_document',
                 'source': [],
-                'metadata': {'kbName': kb_name, 'fileName': file_name, 'page_content': []},
+                'metadata': {'kbName': kb_name, 'fileName': file_name, 'chunks': []},
             })
-            contents = current['metadata']['page_content']
-            for content in metadata.get('page_content') or []:
-                if isinstance(content, str) and content and content not in contents:
-                    contents.append(content)
+            chunks = current['metadata']['chunks']
+            chunks_by_content = {
+                chunk.get('page_content'): chunk
+                for chunk in chunks
+                if isinstance(chunk, dict) and isinstance(chunk.get('page_content'), str)
+            }
+            for raw_chunk in metadata.get('chunks') or []:
+                chunk = normalize_chunk(raw_chunk)
+                if chunk is None:
+                    continue
+                page_content = chunk['page_content']
+                existing_chunk = chunks_by_content.get(page_content)
+                if existing_chunk is None:
+                    chunks.append(chunk)
+                    chunks_by_content[page_content] = chunk
+                elif existing_chunk.get('score') == '' and chunk['score'] != '':
+                    existing_chunk['score'] = chunk['score']
+            if not chunks:
+                continue
         else:
             continue
         source_keys = {
@@ -2843,8 +2878,13 @@ def _merge_reference_wire_rows(existing_rows: list | None, incoming_rows: list |
                 source_keys.add(source_key)
         if str(row.get('status') or '').strip() == MANIFEST_STATUS_EXPIRED:
             current['status'] = MANIFEST_STATUS_EXPIRED
+    valid_rows = [
+        row for row in rows.values()
+        if row.get('kind') != 'knowledge_base_document'
+        or (row.get('metadata') or {}).get('chunks')
+    ]
     return sorted(
-        rows.values(),
+        valid_rows,
         key=lambda row: (
             str(row.get('kind') or ''),
             str((row.get('metadata') or {}).get('kbName') or (row.get('metadata') or {}).get('path') or ''),
@@ -2970,7 +3010,7 @@ def extract_manifest_delta_from_tool_event(
     artifact_root = artifact_workspace or workspace
     artifacts = _rebase_file_artifact_records(artifacts, workspace, artifact_root)
     payload: dict[str, Any] = {
-        'version': 1,
+        'version': 2,
         'session_id': str(session_id or ''),
         'stream_id': str(stream_id or ''),
         'turn_key': str(turn_key or ''),
@@ -3056,7 +3096,7 @@ def extract_manifest_delta_from_turn_reconcile(
         default_profile=default_profile, collection='artifacts',
     )
     payload: dict[str, Any] = {
-        'version': 1,
+        'version': 2,
         'session_id': str(session_id or ''),
         'stream_id': str(stream_id or ''),
         'turn_key': turn_key,
