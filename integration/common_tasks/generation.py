@@ -870,6 +870,8 @@ def _strip_wrapping_quotes(text: str) -> str:
 
 def _parse_json_array(raw: str) -> Any:
     text = raw.strip()
+    if "</think>" in text:
+        text = text.split("</think>", 1)[-1].strip()
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*", "", text, count=1)
         text = re.sub(r"\s*```$", "", text)
