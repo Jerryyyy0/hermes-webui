@@ -17,12 +17,16 @@ _DEFAULT_MAX_WORKERS = 4
 _EXTERNAL_SERVICE_RESTART_TIMEOUT_SECONDS = 300.0
 _RUNTIME_RESOLUTION_ATTEMPTS = 3
 _RUNTIME_RESOLUTION_RETRY_SECONDS = 1.0
+_RETRY_DELAYS_SECONDS = (5.0, 15.0, 45.0)
+_RETRYABLE_STATUSES = frozenset({"failed", "runtime_unavailable", "state_unknown", "timed_out"})
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 _FALSE_VALUES = {"0", "false", "no", "off"}
 
 _state_lock = threading.Lock()
 _started = False
 _running = False
+_recovery_stop: threading.Event | None = None
+_recovery_thread: threading.Thread | None = None
 
 
 def _running_in_container() -> bool:
@@ -186,6 +190,171 @@ def _deduplicate_profiles(profiles: list[dict]) -> list[dict]:
     return result
 
 
+def _profile_key(profile: dict) -> str:
+    path = str(profile.get("path") or "").strip()
+    name = str(profile.get("name") or "").strip() or "default"
+    return path or name
+
+
+def _profile_name(profile: dict) -> str:
+    return str(profile.get("name") or "").strip() or "default"
+
+
+def _launch_profiles(profiles: list[dict], start_profile: Callable[[dict], dict] | None) -> list[dict]:
+    """Launch selected profiles serially and retain their profile identity on failure."""
+    if not profiles:
+        return []
+    if start_profile is None:
+        from integration.gateway_startup.runtime import resolve_agent_cli_runtime
+
+        runtime, runtime_error = _resolve_runtime_with_retries(resolve_agent_cli_runtime)
+        if runtime is None:
+            return [
+                {
+                    "profile": _profile_name(profile),
+                    "status": "runtime_unavailable",
+                    "error": str(runtime_error),
+                }
+                for profile in profiles
+            ]
+        results = []
+        for profile in profiles:
+            try:
+                results.append(_start_profile_gateway(profile, runtime=runtime))
+            except Exception as exc:
+                results.append({"profile": _profile_name(profile), "status": "failed", "error": type(exc).__name__})
+        return results
+
+    results = []
+    for profile in profiles:
+        try:
+            results.append(start_profile(profile))
+        except Exception as exc:
+            results.append({"profile": _profile_name(profile), "status": "failed", "error": type(exc).__name__})
+    return results
+
+
+def _retry_failed_profiles(
+    pending_keys: set[str],
+    *,
+    list_profiles: Callable[[], list[dict]],
+    start_profile: Callable[[dict], dict] | None,
+) -> set[str]:
+    """Retry only still-visible profiles that failed the initial startup pass."""
+    try:
+        profiles = _deduplicate_profiles(list_profiles())
+    except Exception as exc:
+        logger.warning("Profile gateway recovery enumeration failed: %s", type(exc).__name__)
+        return pending_keys
+
+    default_profile = next((profile for profile in profiles if profile.get("is_default")), None)
+    multiplex = default_profile is not None and _multiplex_enabled(Path(str(default_profile.get("path") or "")))
+    profiles_by_key = {_profile_key(profile): profile for profile in profiles}
+    selected = []
+    for key in pending_keys:
+        profile = profiles_by_key.get(key)
+        if profile is None:
+            logger.info("Profile gateway recovery skipped removed profile: %s", key)
+            continue
+        if multiplex and profile is not default_profile:
+            logger.info("Profile gateway recovery skipped multiplexed profile: %s", _profile_name(profile))
+            continue
+        selected.append(profile)
+
+    if default_profile in selected:
+        selected = [default_profile, *(profile for profile in selected if profile is not default_profile)]
+
+    results = _launch_profiles(selected, start_profile)
+    retry_keys = set()
+    for profile, result in zip(selected, results, strict=True):
+        if str(result.get("status") or "failed") in _RETRYABLE_STATUSES:
+            retry_keys.add(_profile_key(profile))
+    return retry_keys
+
+
+def _run_profile_gateway_recovery(
+    pending_keys: set[str],
+    *,
+    stop_event: threading.Event,
+    list_profiles: Callable[[], list[dict]],
+    start_profile: Callable[[dict], dict] | None,
+) -> None:
+    global _recovery_stop, _recovery_thread
+
+    try:
+        for attempt, delay in enumerate(_RETRY_DELAYS_SECONDS, start=1):
+            if stop_event.wait(delay):
+                return
+            pending_keys = _retry_failed_profiles(
+                pending_keys,
+                list_profiles=list_profiles,
+                start_profile=start_profile,
+            )
+            if not pending_keys:
+                logger.info("Profile gateway recovery completed on attempt %s", attempt)
+                return
+            logger.warning(
+                "Profile gateway recovery attempt %s still needs: %s",
+                attempt,
+                ", ".join(sorted(pending_keys)),
+            )
+        logger.warning("Profile gateway recovery exhausted retries for: %s", ", ".join(sorted(pending_keys)))
+    finally:
+        with _state_lock:
+            if _recovery_stop is stop_event:
+                _recovery_stop = None
+                _recovery_thread = None
+
+
+def _schedule_profile_gateway_recovery(
+    failed_profiles: list[dict],
+    *,
+    list_profiles: Callable[[], list[dict]],
+    start_profile: Callable[[dict], dict] | None,
+) -> bool:
+    """Schedule bounded retries without restarting profiles that already succeeded."""
+    global _recovery_stop, _recovery_thread
+
+    pending_keys = {_profile_key(profile) for profile in failed_profiles}
+    if not pending_keys:
+        return False
+    with _state_lock:
+        if _recovery_thread is not None and _recovery_thread.is_alive():
+            return True
+        stop_event = threading.Event()
+        thread = threading.Thread(
+            target=_run_profile_gateway_recovery,
+            kwargs={
+                "pending_keys": pending_keys,
+                "stop_event": stop_event,
+                "list_profiles": list_profiles,
+                "start_profile": start_profile,
+            },
+            name="profile-gateway-recovery",
+            daemon=True,
+        )
+        _recovery_stop = stop_event
+        _recovery_thread = thread
+        thread.start()
+    logger.warning("Profile gateway recovery scheduled for: %s", ", ".join(sorted(pending_keys)))
+    return True
+
+
+def stop_profile_gateway_recovery() -> None:
+    """Cancel pending retry waits before WebUI-owned Gateway children are stopped."""
+    global _recovery_stop, _recovery_thread
+
+    with _state_lock:
+        stop_event = _recovery_stop
+        thread = _recovery_thread
+        _recovery_stop = None
+        _recovery_thread = None
+    if stop_event is not None:
+        stop_event.set()
+    if thread is not None and thread is not threading.current_thread():
+        thread.join(timeout=1.0)
+
+
 def ensure_all_profile_gateways(
     *,
     list_profiles: Callable[[], list[dict]] | None = None,
@@ -230,33 +399,12 @@ def ensure_all_profile_gateways(
             ]
             profiles = [default_profile]
 
-        results = []
-        if profiles and start_profile is None:
-            from integration.gateway_startup.runtime import resolve_agent_cli_runtime
-
-            runtime, runtime_error = _resolve_runtime_with_retries(resolve_agent_cli_runtime)
-            if runtime is None:
-                results = [
-                    {
-                        "profile": str(profile.get("name") or "").strip() or "default",
-                        "status": "runtime_unavailable",
-                        "error": str(runtime_error),
-                    }
-                    for profile in profiles
-                ]
-            else:
-                for profile in profiles:
-                    try:
-                        results.append(_start_profile_gateway(profile, runtime=runtime))
-                    except Exception as exc:
-                        results.append({"profile": "unknown", "status": "failed", "error": type(exc).__name__})
-        elif profiles:
-            starter = start_profile
-            for profile in profiles:
-                try:
-                    results.append(starter(profile))
-                except Exception as exc:
-                    results.append({"profile": "unknown", "status": "failed", "error": type(exc).__name__})
+        results = _launch_profiles(profiles, start_profile)
+        failed_profiles = [
+            profile
+            for profile, result in zip(profiles, results, strict=True)
+            if str(result.get("status") or "failed") in _RETRYABLE_STATUSES
+        ]
         results.extend(skipped)
         counts: dict[str, int] = {}
         for result in results:
@@ -271,9 +419,20 @@ def ensure_all_profile_gateways(
                     result.get("profile"),
                     f" ({result.get('error')})" if result.get("error") else "",
                 )
+        retry_scheduled = _schedule_profile_gateway_recovery(
+            failed_profiles,
+            list_profiles=list_profiles,
+            start_profile=start_profile,
+        )
         with _state_lock:
             _started = True
-        return {"enabled": True, "multiplex": multiplex, "results": results, "counts": counts}
+        return {
+            "enabled": True,
+            "multiplex": multiplex,
+            "results": results,
+            "counts": counts,
+            "retry_scheduled": retry_scheduled,
+        }
     except Exception as exc:
         logger.warning("Profile gateway startup enumeration failed: %s", type(exc).__name__)
         return {"enabled": True, "error": type(exc).__name__, "results": []}
@@ -284,6 +443,7 @@ def ensure_all_profile_gateways(
 
 def _reset_startup_state_for_tests() -> None:
     global _running, _started
+    stop_profile_gateway_recovery()
     with _state_lock:
         _running = False
         _started = False

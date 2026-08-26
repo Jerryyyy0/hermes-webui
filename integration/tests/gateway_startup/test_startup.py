@@ -294,6 +294,40 @@ def test_failure_does_not_prevent_other_profiles():
     assert "secret detail" not in repr(result)
 
 
+def test_failed_profile_is_retried_without_restarting_successful_profiles(monkeypatch):
+    monkeypatch.setattr(startup, "_RETRY_DELAYS_SECONDS", (0.01,), raising=False)
+    recovered = threading.Event()
+    calls = []
+
+    def start(profile):
+        calls.append(profile["name"])
+        if profile["name"] == "abc" and calls.count("abc") == 1:
+            return {"profile": "abc", "status": "failed"}
+        if profile["name"] == "abc":
+            recovered.set()
+        return {"profile": profile["name"], "status": "started"}
+
+    startup.ensure_all_profile_gateways(list_profiles=profiles, start_profile=start)
+
+    assert recovered.wait(timeout=1)
+    assert calls == ["default", "abc", "abc"]
+
+
+def test_stopping_recovery_cancels_pending_retry(monkeypatch):
+    monkeypatch.setattr(startup, "_RETRY_DELAYS_SECONDS", (0.2,), raising=False)
+    calls = []
+
+    def start(profile):
+        calls.append(profile["name"])
+        return {"profile": profile["name"], "status": "failed"}
+
+    startup.ensure_all_profile_gateways(list_profiles=profiles, start_profile=start)
+    startup.stop_profile_gateway_recovery()
+
+    assert not startup._recovery_thread
+    assert calls == ["default", "abc"]
+
+
 def test_only_runs_once_per_process():
     calls = []
     kwargs = {
