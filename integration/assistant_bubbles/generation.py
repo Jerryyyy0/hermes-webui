@@ -554,25 +554,66 @@ def _skill_mentions_ascii_slug(value: str, context: dict[str, Any] | None) -> bo
     return False
 
 
+_CLOSED_THINK_BLOCK = re.compile(r"<think(?:\s[^>]*)?>.*?</think\s*>", re.IGNORECASE | re.DOTALL)
+_ORPHAN_THINK_CLOSE = re.compile(r"</think\s*>", re.IGNORECASE)
+
+
+def _strip_thinking_content(text: str) -> str:
+    """Remove complete or malformed provider reasoning from visible content."""
+    value = _CLOSED_THINK_BLOCK.sub("", text)
+    # Some providers emit only a closing marker.  It still marks the end of
+    # private reasoning, so retain only the final answer after the last marker.
+    if _ORPHAN_THINK_CLOSE.search(value):
+        value = _ORPHAN_THINK_CLOSE.split(value)[-1]
+    return value.strip()
+
+
 def _parse_emotion_json(raw: str) -> Any:
-    text = raw.strip()
+    text = _strip_thinking_content(raw)
+    # Reasoning-capable providers may place their private reasoning and final
+    # answer in one content field.  Ignore only an explicit, closed think
+    # block; candidate arrays inside it must never be mistaken for the answer.
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*", "", text, count=1)
         text = re.sub(r"\s*```$", "", text)
         text = text.strip()
     try:
         return json.loads(text)
-    except json.JSONDecodeError:
-        match = re.search(r"\[.*\]", text, re.DOTALL)
-        if match:
-            return json.loads(match.group(0))
-        raise
+    except json.JSONDecodeError as whole_document_error:
+        # Keep the existing tolerance for a short natural-language prefix, but
+        # decode candidate arrays structurally rather than with a greedy regex.
+        # This selects the final top-level JSON array and cannot span reasoning
+        # prose between two otherwise-valid arrays.
+        decoder = json.JSONDecoder()
+        candidates: list[Any] = []
+        index = 0
+        while index < len(text):
+            start = text.find("[", index)
+            if start < 0:
+                break
+            previous = text[start - 1] if start else ""
+            if previous and not (previous.isspace() or previous in "：:=-"):
+                index = start + 1
+                continue
+            try:
+                parsed, consumed = decoder.raw_decode(text[start:])
+            except json.JSONDecodeError:
+                index = start + 1
+                continue
+            if isinstance(parsed, list):
+                candidates.append(parsed)
+            # Advancing past the decoded value prevents nested arrays from
+            # competing with their enclosing top-level candidate.
+            index = start + max(consumed, 1)
+        if candidates:
+            return candidates[-1]
+        raise whole_document_error
 
 
 def validate_one_text(category: str, text: Any, context: dict[str, Any] | None = None) -> tuple[str | None, str]:
     if not isinstance(text, str):
         return None, "not_string"
-    value = copy.normalize_emoji_punct(_strip_wrapping_quotes(text))
+    value = copy.normalize_emoji_punct(_strip_thinking_content(_strip_wrapping_quotes(text)))
     if not value:
         return None, "empty"
     if "```" in value or re.search(r"(^|\n)\s*(?:[-*+]\s+|\d+[.)]\s+|#{1,6}\s+)", value):

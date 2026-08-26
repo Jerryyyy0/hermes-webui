@@ -201,6 +201,75 @@ def test_validate_emotion_accepts_prefix_before_json_array():
     assert reason == "ok"
 
 
+def test_validate_emotion_uses_final_array_after_thinking_block():
+    content = '''<think>
+候选：["候选一，继续推。", "候选二，继续推。", "候选三，继续推。", "候选四，继续推。"]
+</think>
+[
+  "投研小脑：已上弦，等你出题🧠！",
+  "数据再绕，我也能陪你捋顺📊~",
+  "算力冒泡，灵感也在冒泡🫧！",
+  "投研路上：少一点慌，多一点稳📈！"
+]'''
+
+    result, reason = generation.validate_model_output("emotion", content)
+
+    assert result == [
+        "投研小脑：已上弦，等你出题🧠！",
+        "数据再绕，我也能陪你捋顺📊~",
+        "算力冒泡，灵感也在冒泡🫧！",
+        "投研路上：少一点慌，多一点稳📈！",
+    ]
+    assert reason == "ok"
+
+
+def test_validate_text_categories_strip_closed_thinking_blocks():
+    content = '''<think>
+先检查是否符合短句限制。
+</think>
+我在这里，陪你稳稳推进工作😊！'''
+
+    for category in ("assistant_intro", "memory", "skill"):
+        result, reason = generation.validate_model_output(category, content)
+        assert result == "我在这里，陪你稳稳推进工作😊！"
+        assert reason == "ok"
+
+
+def test_validate_text_categories_keep_only_content_after_orphan_think_close_marker():
+    content = "这是内部推理，不应显示。</think>\n我在这里，陪你稳稳推进工作😊！"
+
+    for category in ("assistant_intro", "memory", "skill"):
+        result, reason = generation.validate_model_output(category, content)
+        assert result == "我在这里，陪你稳稳推进工作😊！"
+        assert reason == "ok"
+
+
+def test_validate_emotion_removes_orphan_think_close_marker():
+    content = '这是内部推理，不应显示。</think>["我在这里，随时回应😊！", "一起推进，节奏在线💪！", "保持专注，思路清晰✨！", "有事直说，马上接招🚀！"]'
+
+    result, reason = generation.validate_model_output("emotion", content)
+
+    assert result == [
+        "我在这里，随时回应😊！",
+        "一起推进，节奏在线💪！",
+        "保持专注，思路清晰✨！",
+        "有事直说，马上接招🚀！",
+    ]
+    assert reason == "ok"
+
+
+def test_validate_emotion_rejects_invalid_final_array_after_thinking_block():
+    content = r'''<think>
+候选：["候选一，继续推。", "候选二，继续推。", "候选三，继续推。", "候选四，继续推。"]
+</think>
+["投研小脑：已上弦，等你出题🧠！","数据再绕，我也能陪你捋顺📊\~","算力冒泡，灵感也在冒泡🫧！","投研路上：少一点慌，多一点稳📈！"]'''
+
+    result, reason = generation.validate_model_output("emotion", content)
+
+    assert result is None
+    assert reason == "invalid_json"
+
+
 def test_validate_emotion_rejects_plain_text():
     content = "今日也要加油打工哦💪！"
     result, reason = generation.validate_model_output("emotion", content)
