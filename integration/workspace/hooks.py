@@ -45,7 +45,7 @@ def _on_session_saved(session) -> None:
 
 def _run_profile_backfill() -> None:
     try:
-        from api.session_manifest_store import (
+        from integration.session_manifest.store import (
             backfill_empty_profile_artifacts,
             backfill_workspace_artifacts_from_sessions,
         )

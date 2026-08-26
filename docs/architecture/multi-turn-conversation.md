@@ -20,7 +20,7 @@
 | `api/streaming.py` | Agent 流式执行：`_run_agent_streaming()`、`_handle_chat_steer()` |
 | `static/messages.js` | 前端发送消息、SSE 连接与事件处理 |
 | `static/ui.js` | 前端 UI 辅助函数 |
-| `api/session_manifest.py` | 会话 Manifest（成果/待办/参考）管理 |
+| `integration/session_manifest/manifest.py` | 会话 Manifest（成果/待办/参考）管理 |
 | `api/compression_anchor.py` | 自动压缩锚点管理 |
 
 ---

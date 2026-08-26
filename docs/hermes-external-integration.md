@@ -3,6 +3,26 @@
 本 Fork 的外部集成实现位于 `integration/`。上游文件只保留必要的导入、注册或
 参数传递，以降低上游同步冲突。
 
+## Runtime configuration
+
+`integration/env_config/` 提供只读的 `GET /api/integration/config`。接口只返回白名单
+环境变量 `BROWSER_PREVIEW_URL` 的当前进程值，不枚举其它环境变量；
+`api/routes.py` 仅保留 GET handler 的薄委派。该接口仅在 `HERMES_INTEGRATION=1`
+时启用。
+
+## External Manifest Artifact References
+
+`integration/session_manifest/external_references/` 承载外部绝对路径 Artifact 的策略、安全打开、登记
+record 查询与预览授权：`policy.py` 负责逐组件无跟随 fd 打开与受保护路径拒绝（已登记的会话附件与
+`HERMES_HOME/memories/` 文件是只读预览例外，上传本身不产生授权），`references.py`
+负责根据既有 row 推导引用资格，`preview.py` 复用原有 workspace 文件字节流服务。它不复制、移动或
+哈希源文件，也不新增 SQLite 字段。
+
+允许的接缝是 `integration/session_manifest/manifest.py`（候选归一化与 wire 投影）、`api/routes.py`（接受已打开 fd 的
+通用字节流函数）、`integration/workspace/handlers.py`（既有 URL 的绝对路径薄分支）和
+`static/workspace.js`（外部路径只读 UI）。`api/streaming.py`、`api/gateway_chat.py` 与 store 不承载
+外部路径策略或额外 SQL。公开 URL、参数和 Manifest/SSE schema 不变。
+
 ## Cron Workspace
 
 `integration/crons/` 负责 Cron workspace policy、当前执行物化、生命周期与 Cron
@@ -38,7 +58,7 @@ HTTP handler、状态变更和事件构造必须留在 `integration/async_delega
 解析、大小限制、路径脱敏和 wire projection 都必须留在该目录；不新增数据库表或
 sidecar 状态。
 
-允许的上游接缝只有 `api/session_manifest.py`：它把已配对的 completed ToolEvent 交给
+允许的上游接缝只有 `integration/session_manifest/manifest.py`：它把已配对的 completed ToolEvent 交给
 解析器，并把结果放入既有 `manifest_delta` SSE 与 `GET /api/session/manifest` 的同一
 references wire。不得在 `api/streaming.py` 或前端重复解析 MCP 结果。
 

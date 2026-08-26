@@ -11,7 +11,9 @@ def test_title_prompts_always_require_simplified_chinese():
         "I will inspect the presentation.",
     )
 
-    assert all("Write the title in Simplified Chinese." in prompt for prompt in prompts)
+    assert all("标题必须使用简体中文。" in prompt for prompt in prompts)
+    assert all("请" in prompt for prompt in prompts)
+    assert all("Generate a short session title" not in prompt for prompt in prompts)
     assert all("Match the language of the user question" not in prompt for prompt in prompts)
 
 

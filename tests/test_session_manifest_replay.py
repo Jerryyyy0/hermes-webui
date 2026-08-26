@@ -3,7 +3,7 @@
 import json
 
 from api.models import Session
-from api.session_manifest import build_session_manifest
+from integration.session_manifest.manifest import build_session_manifest
 
 
 def _write_call(tid: str, path: str) -> dict:
@@ -34,9 +34,9 @@ def test_replayed_write_call_belongs_only_to_latest_turn(tmp_path, monkeypatch):
         ],
         tool_calls=[],
     )
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
-    monkeypatch.setattr('api.session_manifest_store.load_manifest_records', lambda *a, **k: [])
-    monkeypatch.setattr('api.session_manifest_store.load_manifest_decided_turn_keys', lambda *a, **k: set())
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.store.load_manifest_records', lambda *a, **k: [])
+    monkeypatch.setattr('integration.session_manifest.store.load_manifest_decided_turn_keys', lambda *a, **k: set())
 
     manifest = build_session_manifest(session)
 
@@ -62,9 +62,9 @@ def test_distinct_write_calls_to_same_path_remain_in_each_turn(tmp_path, monkeyp
         ],
         tool_calls=[],
     )
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda s: list(s.messages))
-    monkeypatch.setattr('api.session_manifest_store.load_manifest_records', lambda *a, **k: [])
-    monkeypatch.setattr('api.session_manifest_store.load_manifest_decided_turn_keys', lambda *a, **k: set())
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
+    monkeypatch.setattr('integration.session_manifest.store.load_manifest_records', lambda *a, **k: [])
+    monkeypatch.setattr('integration.session_manifest.store.load_manifest_decided_turn_keys', lambda *a, **k: set())
 
     manifest = build_session_manifest(session)
 

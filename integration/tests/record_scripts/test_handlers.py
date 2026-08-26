@@ -138,6 +138,21 @@ def test_csv_upload_download_delete(enabled, root):
     assert not (root / "flow_csv" / "data.csv").exists()
 
 
+def test_csv_upload_has_no_local_size_cap(enabled):
+    store.create_script("flow_csv", "{}")
+    h = _handler()
+    h.headers = _Headers({
+        "Content-Type": "multipart/form-data; boundary=b",
+        "Content-Length": str(50 * 1024 * 1024 + 1),
+    })
+    h.rfile = BytesIO(b"")
+    parsed = ({"relate_name": "flow_csv"}, {"file": ("data.csv", b"a,b\n")})
+    with patch("integration.record_scripts.handlers.parse_multipart", return_value=parsed) as parse:
+        assert try_handle_post_early(h, urlparse("/api/integration/record_scripts_csv/upload")) is True
+    parse.assert_called_once()
+    assert parse.call_args.kwargs["max_bytes"] is None
+
+
 def test_csv_upload_requires_existing_script_and_csv_extension(enabled):
     content_type, body = _multipart({"relate_name": "missing"}, "data.csv", b"a\n")
     h = _handler()

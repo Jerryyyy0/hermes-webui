@@ -1,7 +1,7 @@
 import json
 
 from api.models import Session
-from api.session_manifest import (
+from integration.session_manifest.manifest import (
     MANIFEST_PREVIEW_FILE,
     ToolEvent,
     _collect_turn_artifact_entries_from_events,
@@ -12,14 +12,14 @@ from api.session_manifest import (
 
 
 def _manifest_without_store(monkeypatch, session):
-    monkeypatch.setattr('api.session_manifest._load_display_messages', lambda _s: list(session.messages))
-    monkeypatch.setattr('api.session_manifest_store.load_manifest_records', lambda *args, **kwargs: [])
-    monkeypatch.setattr('api.session_manifest_store.load_manifest_decided_turn_keys', lambda *args, **kwargs: set())
-    monkeypatch.setattr('api.session_manifest_store.repair_empty_manifest_turns', lambda *args, **kwargs: 0)
-    monkeypatch.setattr('api.session_manifest_store.backfill_missing_manifest_records', lambda *args, **kwargs: {'source': 'derived'})
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda _s: list(session.messages))
+    monkeypatch.setattr('integration.session_manifest.store.load_manifest_records', lambda *args, **kwargs: [])
+    monkeypatch.setattr('integration.session_manifest.store.load_manifest_decided_turn_keys', lambda *args, **kwargs: set())
+    monkeypatch.setattr('integration.session_manifest.store.repair_empty_manifest_turns', lambda *args, **kwargs: 0)
+    monkeypatch.setattr('integration.session_manifest.store.backfill_missing_manifest_records', lambda *args, **kwargs: {'source': 'derived'})
 
 
-def test_strong_subdirectory_path_wins_over_root_basename(monkeypatch, tmp_path):
+def test_final_relative_basename_resolves_from_session_workspace(monkeypatch, tmp_path):
     workspace = tmp_path / 'ws'
     workspace.mkdir()
     (workspace / 'report.md').write_text('old', encoding='utf-8')
@@ -44,14 +44,21 @@ def test_strong_subdirectory_path_wins_over_root_basename(monkeypatch, tmp_path)
 
     manifest = build_session_manifest(session)
 
-    assert manifest['turns'][0]['artifacts'] == [{
-        'path': 'deliveries/report.md',
-        'preview': MANIFEST_PREVIEW_FILE,
-        'source_tool': 'write_file',
-    }]
+    assert manifest['turns'][0]['artifacts'] == [
+        {
+            'path': 'deliveries/report.md',
+            'preview': MANIFEST_PREVIEW_FILE,
+            'source_tool': 'write_file',
+        },
+        {
+            'path': 'report.md',
+            'preview': MANIFEST_PREVIEW_FILE,
+            'source_tool': 'assistant_prose',
+        },
+    ]
 
 
-def test_followup_prose_resolves_unique_prior_artifact(monkeypatch, tmp_path):
+def test_followup_relative_basename_resolves_from_session_workspace(monkeypatch, tmp_path):
     workspace = tmp_path / 'ws'
     workspace.mkdir()
     (workspace / 'report.md').write_text('old', encoding='utf-8')
@@ -81,7 +88,7 @@ def test_followup_prose_resolves_unique_prior_artifact(monkeypatch, tmp_path):
 
     assert by_turn['turn:1'][0]['path'] == 'deliveries/report.md'
     assert by_turn['turn:4'] == [{
-        'path': 'deliveries/report.md',
+        'path': 'report.md',
         'preview': MANIFEST_PREVIEW_FILE,
         'source_tool': 'assistant_prose',
     }]

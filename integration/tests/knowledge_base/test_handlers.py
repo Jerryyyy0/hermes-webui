@@ -586,19 +586,65 @@ def test_upload_artifacts_file_not_found():
     assert _json_payload(handler)["error"] == "文件不存在"
 
 
-def test_upload_artifacts_too_many():
+def test_upload_artifacts_accepts_more_than_previous_file_count_limit(tmp_path):
     handler = MagicMock()
     parsed = urlparse("/api/integration/knowledge_base/upload_artifacts")
-    paths = [f"file_{i}.md" for i in range(21)]
+    paths = []
+    for i in range(21):
+        path = tmp_path / f"file_{i}.md"
+        path.write_text(f"file {i}", encoding="utf-8")
+        paths.append(path.name)
     file_props = [
         {"fileName": f"file_{i}.md", "fileClass": "直属", "fileUploader": "u1", "publicationDate": "1"}
         for i in range(21)
     ]
     body = {"uuid": "u1", "kbName": "share54", "fileProperties": file_props, "paths": paths}
+    upstream_resp = {"code": "200", "msg": "success", "data": None}
     with patch("integration.knowledge_base.handlers.knowledge_base_enabled", return_value=True):
-        assert try_handle_post(handler, parsed, body) is True
-    handler.send_response.assert_called_with(400)
-    assert _json_payload(handler)["error"] == "文件数量过多"
+        with patch("api.workspace.resolve_trusted_workspace", return_value=tmp_path):
+            with patch("api.workspace.safe_resolve_ws", side_effect=lambda ws, p: (ws / p).resolve()):
+                with patch(
+                    "integration.knowledge_base.handlers.client.post_multipart",
+                    return_value=(200, upstream_resp),
+                ) as mock_upload:
+                    assert try_handle_post(handler, parsed, body) is True
+    handler.send_response.assert_called_with(200)
+    assert len(mock_upload.call_args.kwargs["files"]) == 21
+
+
+def test_upload_artifacts_accepts_file_over_previous_size_limit(tmp_path):
+    handler = MagicMock()
+    parsed = urlparse("/api/integration/knowledge_base/upload_artifacts")
+    body = {
+        "uuid": "u1",
+        "kbName": "share54",
+        "fileProperties": [{"fileName": "large.bin"}],
+        "paths": ["large.bin"],
+    }
+
+    class _OversizedPath:
+        name = "large.bin"
+
+        def is_file(self):
+            return True
+
+        def stat(self):
+            return type("_Stat", (), {"st_size": 50 * 1024 * 1024 + 1})()
+
+        def read_bytes(self):
+            return b"large file"
+
+    upstream_resp = {"code": "200", "msg": "success", "data": None}
+    with patch("integration.knowledge_base.handlers.knowledge_base_enabled", return_value=True):
+        with patch("api.workspace.resolve_trusted_workspace", return_value=tmp_path):
+            with patch("api.workspace.safe_resolve_ws", return_value=_OversizedPath()):
+                with patch(
+                    "integration.knowledge_base.handlers.client.post_multipart",
+                    return_value=(200, upstream_resp),
+                ) as mock_upload:
+                    assert try_handle_post(handler, parsed, body) is True
+    handler.send_response.assert_called_with(200)
+    assert mock_upload.call_args.kwargs["files"][0][1][1] == b"large file"
 
 
 def test_upload_artifacts_success(tmp_path):

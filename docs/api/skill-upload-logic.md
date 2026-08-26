@@ -59,6 +59,9 @@ skills/
 
 上传 `.md` 或 `.zip` 文件到本地技能目录。
 
+multipart 文件上传不设置 WebUI 侧的文件大小上限；若使用 JSON 形式提交
+`content`，仍受通用 20 MiB 请求体限制。反向代理或上游网络层仍可能设置更小的限制。
+
 **Content-Type**: `multipart/form-data`
 
 **表单参数**:
@@ -106,13 +109,15 @@ skills/
 |--------|------|
 | 400 | 缺少文件、文件格式无效、SKILL.md 格式错误 |
 | 409 | 技能已存在（且未传 `overwrite`） |
-| 413 | 请求体过大 |
+| 413 | JSON 请求体超过通用限制，或被反向代理/上游网络层拒绝 |
 
 ---
 
 ### 2. POST `/api/skillhub/extract` — 提取 ZIP 内容
 
 从 ZIP 文件中提取 SKILL.md 内容，不持久化存储。
+
+multipart 上传不设置 WebUI 侧的文件大小上限；反向代理或上游网络层仍可能设置限制。
 
 **Content-Type**: `multipart/form-data`
 

@@ -274,8 +274,8 @@ def prepare_cron_session_for_reply(session) -> CronReplyPreparation:
             )
             return CronReplyPreparation(False, error_stage="save")
 
-    from api.session_manifest import _message_turns
-    from api.session_manifest_store import load_manifest_decided_turn_keys
+    from integration.session_manifest.manifest import _message_turns
+    from integration.session_manifest.store import load_manifest_decided_turn_keys
     from api.streaming import _persist_turn_artifact_paths
 
     decided_turn_keys = load_manifest_decided_turn_keys(session)
@@ -291,7 +291,7 @@ def prepare_cron_session_for_reply(session) -> CronReplyPreparation:
             or decision.get("turn_key") != turn_key
         ):
             return CronReplyPreparation(False, error_stage="artifact_decision")
-    from api.session_manifest import _next_turn_key
+    from integration.session_manifest.manifest import _next_turn_key
 
     return CronReplyPreparation(True, next_turn_key=_next_turn_key(session.messages))
 

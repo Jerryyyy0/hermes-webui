@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from urllib.parse import parse_qs
 
-from api.config import MAX_UPLOAD_BYTES
 from api.helpers import _sanitize_error, bad, j
 from api.upload import parse_multipart
 
@@ -84,10 +83,9 @@ def _handle_csv_upload(handler) -> bool:
     content_type = handler.headers.get("Content-Type", "")
     content_length = handler.headers.get("Content-Length", 0) or 0
     try:
-        if int(content_length) > MAX_UPLOAD_BYTES:
-            j(handler, {"error": f"文件大小需控制在{MAX_UPLOAD_BYTES // 1024 // 1024}M以内"}, status=413)
-            return True
-        fields, files = parse_multipart(handler.rfile, content_type, content_length)
+        fields, files = parse_multipart(
+            handler.rfile, content_type, content_length, max_bytes=None
+        )
     except ValueError as exc:
         status = 413 if "too large" in str(exc).lower() else 400
         bad(handler, _sanitize_error(exc), status=status)

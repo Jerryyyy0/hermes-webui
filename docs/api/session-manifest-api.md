@@ -2,7 +2,7 @@
 
 本文是 Session Manifest 的唯一对外契约：定义 HTTP/SSE 字段、资源语义、合并和生命周期。Artifacts 的内部提取、持久化和路径安全见 [Session Manifest Artifacts 实现](../architecture/session-manifest-artifacts.md)；`turn_key` 的生成、压缩与消息层对齐见 [Turn Key 后端说明](../architecture/turn-key-backend.md)。
 
-实现入口：`api/routes.py`（HTTP）、`api/session_manifest.py`（构建与 delta）、`api/streaming.py` / `api/gateway_chat.py`（SSE）、`static/workspace.js`（前端缓存）。
+实现入口：`api/routes.py`（HTTP）、`integration/session_manifest/manifest.py`（构建与 delta）、`api/streaming.py` / `api/gateway_chat.py`（SSE）、`static/workspace.js`（前端缓存）。
 
 ## 0. Manifest 的定位与资源边界
 
@@ -17,7 +17,7 @@ Session Manifest 是从会话活动派生出的轻量索引，服务于 Workspac
 
 同一资源在一个 Manifest 中只保留一个主归类，优先级为 `artifacts > references`。缺失字段保持为空或跳过，不从相似字段推断、复制或补全。
 
-Artifacts 只接受成功 completed 工具的结构化证据、显式 `MEDIA:`、成功 skill mutation，或当前 turn 最后一条 assistant 中经严格验证的 workspace 文件。工具 start、文件读取、terminal stdout、目录列表、中间 assistant prose 和全 workspace 扫描不构成 artifact 证据；具体白名单与路径 gate 以 [Artifacts 实现文档](../architecture/session-manifest-artifacts.md) 为准。
+Artifacts 只接受成功 completed 工具的结构化证据、显式 `MEDIA:`、成功 skill mutation，或当前 turn 最后一条 assistant 中经严格验证的路径。工具和最终 assistant 的绝对路径可成为外部直接引用；相对路径仍必须位于当前 session workspace。工具 start、文件读取、terminal stdout、目录列表、中间 assistant prose 和全 workspace 扫描不构成 artifact 证据；具体白名单与路径 gate 以 [Artifacts 实现文档](../architecture/session-manifest-artifacts.md) 为准。
 
 References 只接受成功 completed 的 `skill_view` 或本页列出的两个知识库 MCP 工具。知识库 reference 不写入 `session_manifest.db`，也不新增数据库表或 sidecar；artifact store 只负责 artifacts 的成果/空决策。
 
@@ -70,7 +70,9 @@ GET /api/session/manifest?session_id=abc123
         "metadata": {
           "kbName": "share49",
           "fileName": "电力市场运行基本规则.docx",
-          "page_content": ["第一章 总则……"]
+          "chunks": [
+            { "page_content": "第一章 总则……", "score": 0.82 }
+          ]
         }
       }
     ],
@@ -144,7 +146,7 @@ Todos 是当前轮最新快照，不是历史流水。GET 中不包含 SSE 专�
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `path` | string | 见下方 path 语义；或允许的 media 绝对路径；或 canonical skill 名 |
+| `path` | string | 见下方 path 语义；可为已登记外部直接引用或允许的 media 绝对路径；或 canonical skill 名 |
 | `preview` | string | `file` 或 `skill` |
 | `source_tool` | string | 明确 provenance，不为空 |
 
@@ -190,11 +192,11 @@ Todos 是当前轮最新快照，不是历史流水。GET 中不包含 SSE 专�
 
 `status: "expired"` 仅表示历史成果证据仍在、当前不可预览；客户端必须保留展示但禁用打开。
 
-**`preview=file` 的 `path` 语义（wire）：** 持久化 artifact 以自身的 `workspace_root` 解析；历史 `workspace_root=""` 在运行时解释为启动时的 `HERMES_WEBUI_DEFAULT_WORKSPACE`，数据库原值不回填。当该根位于 integration 根之下时，GET/SSE 返回**相对 integration 根**的路径，以便直接调用 `GET /api/integration/workspace/file?path=...`：历史默认根为 `report.md`，新 managed 会话为 `sessions/<session_id>/report.md`，base 子目录 external workspace 为 `project-a/report.md`。根位于 integration 根之外的持久化 artifact 不返回 `preview=file`，不能退回裸相对路径或绝对路径。仅尚未持久化的 transcript/SSE 临时行沿用当前 session workspace 的既有投影。`preview=skill` 与 workspace 外绝对 `MEDIA:` path 不改写。
+**`preview=file` 的 `path` 语义（wire）：** 持久化 workspace artifact 以自身的 `workspace_root` 解析；历史 `workspace_root=""` 在运行时解释为启动时的 `HERMES_WEBUI_DEFAULT_WORKSPACE`，数据库原值不回填。当该根位于 integration 根之下时，GET/SSE 返回**相对 integration 根**的路径，以便直接调用 `GET /api/integration/workspace/file?path=...`：历史默认根为 `report.md`，新 managed 会话为 `sessions/<session_id>/report.md`，base 子目录 external workspace 为 `project-a/report.md`。已登记的外部直接引用保留规范化后的绝对 `path`，也通过同一 URL 预览；服务端只接受精确匹配持久化 Artifact row 且当前安全可读的路径。根位于 integration 根之外的普通 workspace artifact 不返回 `preview=file`，不能退回裸相对路径或绝对路径。仅尚未持久化的 transcript/SSE 临时行沿用当前 session workspace 的既有投影。`preview=skill` 与 workspace 外绝对 `MEDIA:` path 不改写。
 
 Manifest 不返回文件或技能正文。非 expired 且 `preview` 为 `file`/`skill` 的条目可由 `HermesSessionInspector.openManifestPreview(item)` 打开；expired 条目不可预览。
 
-文件预览使用 integration workspace file API（path 为上表 wire 语义），skill 预览使用 SkillHub content API，workspace 外 `MEDIA:` 使用 session media API。具体接口与部署约束见 [integration/README.md](../integration/README.md)。
+文件预览使用 integration workspace file API（path 为上表 wire 语义；外部直接引用为只读），skill 预览使用 SkillHub content API，workspace 外 `MEDIA:` 使用 session media API。具体接口与部署约束见 [integration/README.md](../integration/README.md)。
 
 ### `references[]` / `turns[].references[]`：引用行
 
@@ -258,7 +260,9 @@ Manifest 不返回文件或技能正文。非 expired 且 `preview` 为 `file`/`
   "metadata": {
     "kbName": "share49",
     "fileName": "电力市场运行基本规则.docx",
-    "page_content": ["第一章 总则……"]
+    "chunks": [
+      { "page_content": "第一章 总则……", "score": 0.82 }
+    ]
   }
 }
 ```
@@ -281,7 +285,10 @@ Manifest 不返回文件或技能正文。非 expired 且 `preview` 为 `file`/`
   "metadata": {
     "kbName": "share49",
     "fileName": "电力市场运行基本规则.docx",
-    "page_content": ["第一章 总则……", "第二章 市场成员……"]
+    "chunks": [
+      { "page_content": "第一章 总则……", "score": 0.82 },
+      { "page_content": "第二章 市场成员……", "score": 0.71 }
+    ]
   }
 }
 ```
@@ -293,8 +300,12 @@ Manifest 不返回文件或技能正文。非 expired 且 `preview` 为 `file`/`
 | `metadata.path` | string | `kind=skill` 时的 canonical skill 名 |
 | `metadata.kbName` | string | `kind=knowledge_base_document` 时的知识库名 |
 | `metadata.fileName` | string | 文档文件名；单库工具从其私有 `metadata.source` 仅取 basename，不向浏览器透传原路径 |
-| `metadata.page_content` | string[] | 文档命中片段，保留工具返回顺序并去重 |
+| `metadata.chunks` | object[] | 文档命中片段，保留工具返回顺序并按 `page_content` 去重 |
+| `metadata.chunks[].page_content` | string | 下游返回的原始内容，不改写 |
+| `metadata.chunks[].score` | number or string | 下游返回的原始分数；不存在或无效时为 `""` |
 | `status` | string | 可选；当前仅 `expired`，表示 Skill 有历史来源但当前不可预览 |
+
+`score` 是每个命中片段的原始分数，不是筛选阈值；`scoreThreshold` 仍属于知识库搜索请求参数。Manifest 不对分数做归一化，也不改变下游定义的大小关系；下游没有返回有效 score 时统一写为 `""`。
 
 知识库工具结果仅接受最多 50 条、总编码不超过 1 MiB 的 JSON 列表；畸形、失败、未知工具或超限结果一律跳过。Reference 是 transcript/tool-call 派生索引，不写入 artifact store，因此无需新增数据库表。
 
@@ -322,7 +333,9 @@ Manifest 不返回文件或技能正文。非 expired 且 `preview` 为 `file`/`
       "metadata": {
         "kbName": "share49",
         "fileName": "电力市场运行基本规则.docx",
-        "page_content": ["第一章 总则……"]
+        "chunks": [
+          { "page_content": "第一章 总则……", "score": 0.82 }
+        ]
       }
     }
   ]
@@ -355,7 +368,7 @@ Orphan artifact 仍保留在顶层 `artifacts`，但不进入正常 `turns[]`。
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "session_id": "abc123",
   "stream_id": "stream-xyz",
   "turn_key": "turn:42",
@@ -379,7 +392,7 @@ Orphan artifact 仍保留在顶层 `artifacts`，但不进入正常 `turns[]`。
 
 | 字段 | 说明 |
 | --- | --- |
-| `version` | 协议版本，当前为 `1` |
+| `version` | 协议版本，当前为 `2`；references 使用 `metadata.chunks[]` |
 | `session_id` | 前端丢弃非当前会话事件 |
 | `stream_id` | 配合 `sequence` 做幂等和过期流过滤 |
 | `turn_key` | stream 启动时确定；前端不得从 `stream_id` 推断 |
@@ -397,21 +410,21 @@ Orphan artifact 仍保留在顶层 `artifacts`，但不进入正常 `turns[]`。
 
 ```text
 event: manifest_delta
-data: {"version":1,"session_id":"abc123","stream_id":"stream-xyz","turn_key":"turn:4","sequence":8,"todos":{"items":[{"id":"draft","content":"撰写答复","status":"in_progress"}],"mode":"replace_latest"},"artifacts":[],"references":[]}
+data: {"version":2,"session_id":"abc123","stream_id":"stream-xyz","turn_key":"turn:4","sequence":8,"todos":{"items":[{"id":"draft","content":"撰写答复","status":"in_progress"}],"mode":"replace_latest"},"artifacts":[],"references":[]}
 ```
 
 ### 文件成果 delta
 
 ```text
 event: manifest_delta
-data: {"version":1,"session_id":"abc123","stream_id":"stream-xyz","turn_key":"turn:4","sequence":9,"artifacts":[{"path":"reports/result.md","preview":"file","source_tool":"write_file","profile":"ops"}],"references":[]}
+data: {"version":2,"session_id":"abc123","stream_id":"stream-xyz","turn_key":"turn:4","sequence":9,"artifacts":[{"path":"reports/result.md","preview":"file","source_tool":"write_file","profile":"ops"}],"references":[]}
 ```
 
 ### Skill 引用 delta
 
 ```text
 event: manifest_delta
-data: {"version":1,"session_id":"abc123","stream_id":"stream-xyz","turn_key":"turn:4","sequence":10,"artifacts":[],"references":[{"kind":"skill","source":[{"tool":"skill_view","tid":"call-skill-1"}],"metadata":{"path":"research-skill"}}]}
+data: {"version":2,"session_id":"abc123","stream_id":"stream-xyz","turn_key":"turn:4","sequence":10,"artifacts":[],"references":[{"kind":"skill","source":[{"tool":"skill_view","tid":"call-skill-1"}],"metadata":{"path":"research-skill"}}]}
 ```
 
 ### 知识库 MCP 示例
@@ -422,13 +435,13 @@ data: {"version":1,"session_id":"abc123","stream_id":"stream-xyz","turn_key":"tu
 
 ```text
 event: manifest_delta
-data: {"version":1,"session_id":"5ccfb09bb7a7","stream_id":"stream-xyz","turn_key":"turn:4","sequence":12,"artifacts":[],"references":[{"kind":"knowledge_base_document","source":[{"tool":"mcp__ithink_kb_mcp__searchKnowledgeBaseDocuments","tid":"call_00_nvU4eugjt9ji9RA6gxWu6032"}],"metadata":{"kbName":"share49","fileName":"电力市场运行基本规则.docx","page_content":["第一章 总则……"]}}]}
+data: {"version":2,"session_id":"5ccfb09bb7a7","stream_id":"stream-xyz","turn_key":"turn:4","sequence":12,"artifacts":[],"references":[{"kind":"knowledge_base_document","source":[{"tool":"mcp__ithink_kb_mcp__searchKnowledgeBaseDocuments","tid":"call_00_nvU4eugjt9ji9RA6gxWu6032"}],"metadata":{"kbName":"share49","fileName":"电力市场运行基本规则.docx","chunks":[{"page_content":"第一章 总则……","score":0.82}]}}]}
 
 ```
 
 同一调用返回多个文档时，`references[]` 包含多条行；同一 turn 内两个受支持工具命中同一
 `(kbName, fileName)` 时，客户端按既有合并规则合并为一条，追加不重复的
-`source[]` 与 `metadata.page_content[]`。
+`source[]` 与 `metadata.chunks[]`。
 
 ### Turn reconcile 成果 delta
 
@@ -437,7 +450,7 @@ references 固定为空。
 
 ```text
 event: manifest_delta
-data: {"version":1,"session_id":"abc123","stream_id":"stream-xyz","turn_key":"turn:4","sequence":13,"artifacts":[{"path":"reports/final.docx","preview":"file","source_tool":"assistant_prose"}],"turns":[{"turn_key":"turn:4","artifacts":[{"path":"reports/final.docx","preview":"file","source_tool":"assistant_prose"}],"references":[]}]}
+data: {"version":2,"session_id":"abc123","stream_id":"stream-xyz","turn_key":"turn:4","sequence":13,"artifacts":[{"path":"reports/final.docx","preview":"file","source_tool":"assistant_prose"}],"turns":[{"turn_key":"turn:4","artifacts":[{"path":"reports/final.docx","preview":"file","source_tool":"assistant_prose"}],"references":[]}]}
 ```
 
 ### 发射阶段
@@ -446,9 +459,9 @@ data: {"version":1,"session_id":"abc123","stream_id":"stream-xyz","turn_key":"tu
 | --- | --- | --- | --- |
 | `tool_start` | 不发射 | 不发射工具 artifact | 不发射 |
 | `tool_complete` | 成功 `todo` 顶层 `todos[]` | 仅成功工具的参数、结果、diff 或 terminal 输出操作数 | 成功 `skill_view`，或两个受支持知识库 MCP 工具的有效结果 |
-| `turn_complete` | 不发射 | 工具强证据、`MEDIA:` 与最后一条 assistant 的严格 workspace 文件提取 | 不发射 |
+| `turn_complete` | 不发射 | 工具强证据、`MEDIA:` 与最后一条 assistant 的严格路径提取 | 不发射 |
 
-`tool_start` 只可携带待配对的工具参数，永不产生 artifact/reference。`tool_complete` 仅在与同一 `stream_id + tid` 的 start 配对且成功时解析工具参数；complete 缺参数且没有对应 start、或配对身份不一致时不产生工具 artifact。`turn_complete` 中的最终 assistant 裸文件名按当前 turn 强证据、此前 turn 已确认 artifacts、workspace 根目录的唯一 exact-basename 顺序解析；因此后续纯问答 turn 明确列出可唯一解析的既有文件时，可产生该 turn 的 `assistant_prose` artifact。
+`tool_start` 只可携带待配对的工具参数，永不产生 artifact/reference。`tool_complete` 仅在与同一 `stream_id + tid` 的 start 配对且成功时解析工具参数；complete 缺参数且没有对应 start、或配对身份不一致时不产生工具 artifact。`turn_complete` 中的最终 assistant 路径只扫描最后一条真实 assistant message：绝对路径可为外部直接引用；相对路径与裸文件名只在当前 session workspace 解析。外部直接引用需先持久化，随后由 GET Manifest 作为可预览成果返回。
 
 SSE 是乐观派生状态，不写入 transcript，不进入模型上下文，只更新 Inspector；不直接生成聊天区 per-turn chips。
 
@@ -459,7 +472,7 @@ SSE 是乐观派生状态，不写入 transcript，不进入模型上下文，�
 | Session artifacts | 按 profile + canonical path 去重 |
 | Session references | Skill 按 canonical skill path；知识库文档按 `(kbName, fileName)` 去重 |
 | Turn artifacts/references | 按 `turn_key` 合并；artifact 按 path，reference 按其身份键去重 |
-| 知识库文档 | 同文档合并 `source[]` 与 `metadata.page_content[]`，均保持首次出现顺序 |
+| 知识库文档 | 同文档合并 `source[]` 与 `metadata.chunks[]`；chunk 按原始 `page_content` 去重并保持首次出现顺序；同一 chunk 的 score 保留首次有效值 |
 | Skills | 同技能 artifact 优先于 skill reference |
 | Todos | 当前轮按 `id` 合并；出站前过滤无展示内容项 |
 | 缺失字段 | 保持空或跳过，不跨字段推断 |

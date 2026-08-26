@@ -119,26 +119,36 @@ if __name__ == "__main__":
     os.environ["KNOWLEDGE_BASE_URL"] = os.getenv(
         "KNOWLEDGE_BASE_URL", "http://192.168.1.137:17862/"
     )
-    os.environ["BROWSER_PREVIEW_MODE"] = os.getenv(
-        "BROWSER_PREVIEW_MODE", "legacy"
-    )
+    os.environ["BROWSER_SESSION_MODE"] = os.getenv("BROWSER_SESSION_MODE", "kasmvnc")
     os.environ["BROWSER_PREVIEW_URL"] = os.getenv(
         "BROWSER_PREVIEW_URL",
-        "http://192.168.1.139:38787/browser-preview/",
+        "https://192.168.1.137:23003/browser/preview/",
     )
-    os.environ["BROWSER_SNAPSHOT_PREVIEW_URL"] = os.getenv(
-        "BROWSER_SNAPSHOT_PREVIEW_URL",
-        "http://192.168.1.139:38787/browser-snapshot/",
+    os.environ["BROWSER_RUNTIME_URL"] = os.getenv(
+        "BROWSER_RUNTIME_URL",
+        "http://zhiling-user-user-wzq-browser:9390",
     )
-    os.environ["CAMOFOX_URL"] = os.getenv(
-        "CAMOFOX_URL", "http://zhiling-camofox:9377"
+    # The runtime token is injected by the deployment; never commit a fallback secret.
+    os.environ["BROWSER_RUNTIME_TOKEN_SECRET"] = os.getenv(
+        "BROWSER_RUNTIME_TOKEN_SECRET", ""
     )
-    os.environ["CAMOFOX_USER_ID"] = os.getenv("CAMOFOX_USER_ID", "testwzq")
-    os.environ["CAMOFOX_SESSION_KEY"] = os.getenv(
-        "CAMOFOX_SESSION_KEY", "runtime-testwzq"
+    os.environ["BROWSER_CDP_URL"] = os.getenv(
+        "BROWSER_CDP_URL",
+        "http://zhiling-user-user-wzq-browser:9390/cdp",
     )
-    os.environ["CAMOFOX_ADOPT_EXISTING_TAB"] = os.getenv(
-        "CAMOFOX_ADOPT_EXISTING_TAB", "1"
+    os.environ["PLAYWRIGHT_CDP_URL"] = os.getenv(
+        "PLAYWRIGHT_CDP_URL",
+        "http://zhiling-user-user-wzq-browser:9390/cdp",
+    )
+    os.environ["HERMES_PLAYWRIGHT_FORCE_REMOTE"] = os.getenv(
+        "HERMES_PLAYWRIGHT_FORCE_REMOTE", "1"
+    )
+    os.environ["NODE_OPTIONS"] = os.getenv(
+        "NODE_OPTIONS",
+        "--require=/home/hermeswebui/.hermes/extra-packages/zhiling-playwright-remote.js",
+    )
+    os.environ["BROWSER_SESSION_PUBLIC_BASE_PATH"] = os.getenv(
+        "BROWSER_SESSION_PUBLIC_BASE_PATH", "/browser"
     )
     os.environ["HERMES_EGRESS_POLICY_ENABLED"] = os.getenv(
         "HERMES_EGRESS_POLICY_ENABLED", "1"

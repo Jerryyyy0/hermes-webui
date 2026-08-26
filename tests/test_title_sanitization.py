@@ -1,5 +1,4 @@
 import unittest
-from pathlib import Path
 
 from api.streaming import (
     _fallback_title_from_exchange,
@@ -39,30 +38,51 @@ class TestGeneratedTitleSanitization(unittest.TestCase):
             ("What time is it in San Francisco?", "It is 6:16 PM in San Francisco."),
         )
 
-    def test_fallback_title_uses_english_discussion_suffix(self):
+    def test_fallback_title_uses_chinese_discussion_suffix(self):
         self.assertEqual(
             _fallback_title_from_exchange('Please review "random cancel"', ""),
-            "random cancel discussion",
+            "random cancel 讨论",
         )
 
-    def test_fallback_title_summary_label_is_english(self):
+    def test_fallback_title_summary_label_is_chinese(self):
         self.assertEqual(
             _fallback_title_from_exchange("Generate a short title summary test", ""),
-            "Session title auto-summary test",
+            "会话标题自动摘要测试",
         )
 
-    def test_fallback_title_non_latin_input_uses_english_placeholder(self):
+    def test_fallback_title_non_latin_input_uses_chinese_topic(self):
         self.assertEqual(
             _fallback_title_from_exchange("讨论一下这个问题", ""),
-            "Conversation topic",
+            "会话主题",
         )
 
-    def test_fallback_title_non_latin_quoted_topic_uses_english_placeholder(self):
+    def test_fallback_title_non_latin_quoted_topic_uses_chinese_suffix(self):
         self.assertEqual(
             _fallback_title_from_exchange('Please review "讨论主题"', ""),
-            "Conversation topic",
+            "讨论主题 讨论",
         )
 
-    def test_title_generation_source_has_no_cjk_literals(self):
-        src = Path("api/streaming.py").read_text(encoding="utf-8")
-        self.assertNotRegex(src, r"[\u4e00-\u9fff]", "title generation code should stay English-only")
+    def test_fallback_title_handles_pdf_conversion_without_attachment_path(self):
+        self.assertEqual(
+            _fallback_title_from_exchange(
+                "帮我转为pdf\n\n[Attached files: /Users/wzq/Documents/report.docx]",
+                "",
+            ),
+            "文档转 PDF",
+        )
+
+    def test_fallback_title_handles_image_analysis_without_attachment_path(self):
+        self.assertEqual(
+            _fallback_title_from_exchange(
+                "我已上传 1 个文件\n\n[Attached files: /Users/wzq/image.png]",
+                "",
+            ),
+            "图片内容分析",
+        )
+
+    def test_title_prompts_are_chinese(self):
+        from api.streaming import _title_prompts
+
+        _, prompts = _title_prompts("Summarize this title routing bug.", "The title route needs a fix.")
+        self.assertTrue(all("标题必须使用简体中文" in prompt for prompt in prompts))
+        self.assertTrue(all("Generate a short session title" not in prompt for prompt in prompts))

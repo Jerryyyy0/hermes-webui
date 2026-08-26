@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import concurrent.futures
 import importlib
-import logging
 import os
 import subprocess
 import threading
@@ -64,9 +62,27 @@ def _multiplex_enabled(default_home: Path) -> bool:
     return bool(value)
 
 
+def _resolve_runtime_with_retries(runtime_resolver: Callable) -> tuple[object | None, Exception | None]:
+    """Resolve one verified Agent runtime without amplifying startup probes."""
+    from integration.gateway_startup.runtime import AgentCliRuntimeUnavailable
+
+    runtime = None
+    runtime_error = None
+    for attempt in range(_RUNTIME_RESOLUTION_ATTEMPTS):
+        try:
+            runtime = runtime_resolver()
+            break
+        except AgentCliRuntimeUnavailable as exc:
+            runtime_error = exc
+            if attempt + 1 < _RUNTIME_RESOLUTION_ATTEMPTS:
+                time.sleep(_RUNTIME_RESOLUTION_RETRY_SECONDS)
+    return runtime, runtime_error
+
+
 def _start_profile_gateway(
     profile: dict,
     *,
+    runtime: object | None = None,
     runtime_resolver: Callable | None = None,
     process_starter: Callable | None = None,
     service_runner: Callable = subprocess.run,
@@ -84,7 +100,7 @@ def _start_profile_gateway(
     name = str(profile.get("name") or "").strip() or "default"
     try:
         from integration.gateway_startup.runtime import (
-            AgentCliRuntimeUnavailable,
+            bind_runtime_to_profile,
             build_gateway_command,
             resolve_agent_cli_runtime,
         )
@@ -95,18 +111,12 @@ def _start_profile_gateway(
             start_gateway_process,
         )
         resolver = runtime_resolver or resolve_agent_cli_runtime
-        runtime = None
         runtime_error = None
-        for attempt in range(_RUNTIME_RESOLUTION_ATTEMPTS):
-            try:
-                runtime = resolver()
-                break
-            except AgentCliRuntimeUnavailable as exc:
-                runtime_error = exc
-                if attempt + 1 < _RUNTIME_RESOLUTION_ATTEMPTS:
-                    time.sleep(_RUNTIME_RESOLUTION_RETRY_SECONDS)
+        if runtime is None:
+            runtime, runtime_error = _resolve_runtime_with_retries(resolver)
         if runtime is None:
             return {"profile": name, "status": "runtime_unavailable", "error": str(runtime_error)}
+        runtime = bind_runtime_to_profile(runtime, profile)
         in_container = _running_in_container()
         if in_container and _s6_service_manager_available():
             completed = service_runner(
@@ -182,7 +192,12 @@ def ensure_all_profile_gateways(
     start_profile: Callable[[dict], dict] | None = None,
     max_workers: int = _DEFAULT_MAX_WORKERS,
 ) -> dict:
-    """Ensure profile gateways are running once per WebUI process."""
+    """Ensure profile gateways are ready once per WebUI process.
+
+    Profile launches intentionally serialize.  The Agent uses process-scoped
+    PID and runtime-lock files during startup; parallel ``--replace`` launches
+    can temporarily observe another profile's handoff state as their own.
+    """
     global _running, _started
 
     if not gateway_autostart_enabled():
@@ -200,6 +215,8 @@ def ensure_all_profile_gateways(
             list_profiles = list_profiles_api
         profiles = _deduplicate_profiles(list_profiles())
         default_profile = next((p for p in profiles if p.get("is_default")), None)
+        if default_profile is not None:
+            profiles = [default_profile, *(p for p in profiles if p is not default_profile)]
         multiplex = False
         if default_profile is not None:
             multiplex = _multiplex_enabled(Path(str(default_profile.get("path") or "")))
@@ -213,20 +230,33 @@ def ensure_all_profile_gateways(
             ]
             profiles = [default_profile]
 
-        starter = start_profile or _start_profile_gateway
         results = []
-        if profiles:
-            workers = max(1, min(int(max_workers), len(profiles)))
-            with concurrent.futures.ThreadPoolExecutor(
-                max_workers=workers,
-                thread_name_prefix="profile-gateway-start",
-            ) as pool:
-                futures = [pool.submit(starter, profile) for profile in profiles]
-                for future in futures:
+        if profiles and start_profile is None:
+            from integration.gateway_startup.runtime import resolve_agent_cli_runtime
+
+            runtime, runtime_error = _resolve_runtime_with_retries(resolve_agent_cli_runtime)
+            if runtime is None:
+                results = [
+                    {
+                        "profile": str(profile.get("name") or "").strip() or "default",
+                        "status": "runtime_unavailable",
+                        "error": str(runtime_error),
+                    }
+                    for profile in profiles
+                ]
+            else:
+                for profile in profiles:
                     try:
-                        results.append(future.result())
+                        results.append(_start_profile_gateway(profile, runtime=runtime))
                     except Exception as exc:
                         results.append({"profile": "unknown", "status": "failed", "error": type(exc).__name__})
+        elif profiles:
+            starter = start_profile
+            for profile in profiles:
+                try:
+                    results.append(starter(profile))
+                except Exception as exc:
+                    results.append({"profile": "unknown", "status": "failed", "error": type(exc).__name__})
         results.extend(skipped)
         counts: dict[str, int] = {}
         for result in results:

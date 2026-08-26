@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from pathlib import PurePath
 from typing import Any
@@ -22,6 +23,22 @@ _WRAPPED_RESULT_START = re.compile(r'\{\s*"result"\s*:')
 
 def _text(value: Any) -> str:
     return value.strip() if isinstance(value, str) else ""
+
+
+def _score(value: Any) -> int | float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        return value if math.isfinite(value) else None
+    except (OverflowError, TypeError):
+        return None
+
+
+def _chunk(page_content: str, score: Any) -> dict[str, Any]:
+    chunk: dict[str, Any] = {"page_content": page_content}
+    normalized_score = _score(score)
+    chunk["score"] = normalized_score if normalized_score is not None else ""
+    return chunk
 
 
 def _canonical_tool_name(name: Any) -> str:
@@ -127,7 +144,7 @@ def extract_references(
             "resource_type": "knowledge_base_document",
             "kb_name": kb_name,
             "file_name": file_name,
-            "page_content": [content],
+            "chunks": [_chunk(content, row.get("score"))],
             "sources": [{"tool": tool, "tid": _text(tid)}],
         })
     return merge_reference_rows([], candidates)
@@ -151,7 +168,7 @@ def merge_reference_rows(
                 "resource_type": "knowledge_base_document",
                 "kb_name": _text(row.get("kb_name")),
                 "file_name": _text(row.get("file_name")),
-                "page_content": [],
+                "chunks": [],
                 "sources": [],
             }
             rows[key] = current
@@ -170,11 +187,24 @@ def merge_reference_rows(
             if source_key not in source_keys:
                 current["sources"].append(normalized)
                 source_keys.add(source_key)
-        contents = {content for content in current["page_content"] if isinstance(content, str)}
-        for content in row.get("page_content") or []:
-            if isinstance(content, str) and content and content not in contents:
-                current["page_content"].append(content)
-                contents.add(content)
+        chunks_by_content = {
+            chunk.get("page_content"): chunk
+            for chunk in current["chunks"]
+            if isinstance(chunk, dict) and isinstance(chunk.get("page_content"), str)
+        }
+        for chunk in row.get("chunks") or []:
+            if not isinstance(chunk, dict):
+                continue
+            page_content = chunk.get("page_content")
+            if not isinstance(page_content, str) or not page_content:
+                continue
+            normalized = _chunk(page_content, chunk.get("score"))
+            existing_chunk = chunks_by_content.get(page_content)
+            if existing_chunk is None:
+                current["chunks"].append(normalized)
+                chunks_by_content[page_content] = normalized
+            elif "score" not in existing_chunk and "score" in normalized:
+                existing_chunk["score"] = normalized["score"]
     return sorted(rows.values(), key=lambda row: (row["kb_name"], row["file_name"]))
 
 
@@ -184,7 +214,7 @@ def to_wire(row: dict[str, Any]) -> dict[str, Any] | None:
     if len(merged) != 1:
         return None
     record = merged[0]
-    if not record["sources"] or not record["page_content"]:
+    if not record["sources"] or not record["chunks"]:
         return None
     return {
         "kind": "knowledge_base_document",
@@ -192,6 +222,6 @@ def to_wire(row: dict[str, Any]) -> dict[str, Any] | None:
         "metadata": {
             "kbName": record["kb_name"],
             "fileName": record["file_name"],
-            "page_content": record["page_content"],
+            "chunks": record["chunks"],
         },
     }

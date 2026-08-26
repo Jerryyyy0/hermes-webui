@@ -2,7 +2,7 @@
 
 This store is intentionally artifact-only for the first slice. Todos and
 references continue to be derived from transcript/tool events in
-``api.session_manifest``.
+``integration.session_manifest.manifest``.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from api.config import SESSION_DIR, STATE_DIR
-from api.session_manifest_repair import (
+from integration.session_manifest.repair import (
     rebind_manifest_turn_records as rebind_manifest_turn_records,
 )
 
@@ -510,7 +510,7 @@ def repair_empty_manifest_turns(
     empty_turn_keys = load_manifest_empty_turn_keys(session, include_lineage=True, db_path=db_path)
     if not empty_turn_keys:
         return 0
-    from api.session_manifest import extract_turn_artifact_entries_for_manifest
+    from integration.session_manifest.manifest import extract_turn_artifact_entries_for_manifest
 
     repaired = 0
     for turn_key in sorted(empty_turn_keys):
@@ -887,7 +887,7 @@ def backfill_session_artifacts(
     if not messages:
         return {"written": 0, "skipped": 1, "turns": 0}
 
-    from api.session_manifest import (
+    from integration.session_manifest.manifest import (
         _message_turns,
         extract_turn_artifact_entries_for_manifest,
     )

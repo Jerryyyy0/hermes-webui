@@ -2,7 +2,7 @@
 
 Shares ``STATE_DIR / session_manifest.db`` with ``session_manifest_records``
 and ``common_tasks`` - same connection conventions as
-``api.session_manifest_store`` / ``integration.common_tasks.store``: short
+``integration.session_manifest.store`` / ``integration.common_tasks.store``: short
 transactions, ``busy_timeout=5000``, WAL, idempotent ``_ensure_schema`` per
 connection. All functions accept ``db_path=None`` for test injection.
 """

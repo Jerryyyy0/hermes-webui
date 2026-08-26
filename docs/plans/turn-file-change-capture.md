@@ -734,4 +734,4 @@ SSE 是乐观态并写入 run journal；`done` 后 GET 覆盖前端状态。`cap
 - 腾讯 CodeBuddy WorkBuddy，变更面板与按任务查看：<https://www.codebuddy.cn/docs/workbuddy/From-Beginner-to-Expert-Guide/Function-Description/Right-Sidebar>
 - 腾讯 CodeBuddy WorkBuddy，workspace、独立任务与并行任务：<https://www.codebuddy.cn/docs/workbuddy/From-Beginner-to-Expert-Guide/Function-Description/Task-Bar>
 - Hermes Agent：`agent/display.py`、`agent/tool_executor.py`、`agent/tool_dispatch_helpers.py`、`agent/tool_result_classification.py`、`agent/codex_runtime.py`、`agent/transports/codex_app_server_session.py`、`tools/checkpoint_manager.py`
-- Hermes WebUI：`api/streaming.py`、`api/gateway_chat.py`、`api/session_manifest.py`、`api/workspace.py`
+- Hermes WebUI：`api/streaming.py`、`api/gateway_chat.py`、`integration/session_manifest/manifest.py`、`api/workspace.py`

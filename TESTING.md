@@ -790,14 +790,14 @@ EXPECT:
   - Clicking Send button does nothing
 FAIL: Multiple messages sent while one is in flight.
 
-### T12.2: Upload Failure Shows Status
+### T12.2: Uploads Do Not Apply a Browser File-Size Limit
 SETUP: Active session.
 STEPS:
-  1. Try to attach a file larger than the configured upload limit (50 MiB by default; overridden by `HERMES_WEBUI_MAX_UPLOAD_MB` if set)
+  1. Try to attach a file larger than the historical 50 MiB application limit
 EXPECT:
-  - Status bar shows an error message about file size or the upload is rejected
-  - The chat is not broken (can still send messages)
-FAIL: Uncaught error, page crashes, or no feedback given.
+  - The file is queued and sent to the upload endpoint without a browser-side size error
+  - If an outer reverse proxy rejects the request, the error is surfaced without breaking chat
+FAIL: The WebUI rejects the file solely because of its size, crashes, or becomes unable to send messages.
 
 ### T12.3: File Preview for Binary Non-Image
 SETUP: Workspace has a .zip or .bin file.

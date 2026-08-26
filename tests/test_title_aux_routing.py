@@ -262,13 +262,15 @@ class TestGenerateTitleRawViaAuxTimeout(unittest.TestCase):
         self.assertEqual(result, 'Alte Session Bilder')
         self.assertEqual(status, 'llm_aux')
         messages = captured.get('messages') or []
-        self.assertIn('Write the title in Simplified Chinese', messages[0]['content'])
+        self.assertIn('标题必须使用简体中文', messages[0]['content'])
+        self.assertIn('请根据这段对话开头生成一个简短的会话标题', messages[0]['content'])
+        self.assertNotIn('Generate a short session title', messages[0]['content'])
         self.assertNotIn('Match the language of the user question', messages[0]['content'])
 
     def test_title_prompt_language_rule_is_fixed_to_simplified_chinese(self):
         from api.streaming import _title_prompt_language_rule
 
-        expected = "Write the title in Simplified Chinese.\n"
+        expected = "标题必须使用简体中文。\n"
         examples = [
             'Warum werden hier die Bilder nicht angezeigt?',
             'Pourquoi les images ne sont-elles pas affichées ?',
@@ -326,7 +328,7 @@ class TestGenerateTitleRawViaAuxTimeout(unittest.TestCase):
         self.assertEqual(status, 'llm_aux')
         self.assertEqual(raw_preview, '')
 
-    def test_german_fallback_uses_generic_topic_extraction_without_literal_override(self):
+    def test_german_image_fallback_uses_chinese_local_label(self):
         from api.streaming import _fallback_title_from_exchange
 
         title = _fallback_title_from_exchange(
@@ -336,9 +338,7 @@ class TestGenerateTitleRawViaAuxTimeout(unittest.TestCase):
 
         self.assertIsNotNone(title)
         self.assertIsInstance(title, str)
-        self.assertNotEqual(title, 'Alte Session Bilder')
-        self.assertNotEqual(title, 'Session Bilder')
-        self.assertIn('Warum', title)
+        self.assertEqual(title, '图片内容分析')
 
     def test_code_only_first_message_does_not_trigger_german_language_guard(self):
         """Code-only starts should fall through to the neutral/default title path."""
@@ -347,7 +347,7 @@ class TestGenerateTitleRawViaAuxTimeout(unittest.TestCase):
         code_only = "print('hello')\nfor i in range(3):\n    print(i)"
 
         self.assertEqual(_detect_title_language(code_only), '')
-        self.assertEqual(_title_prompt_language_rule(code_only), 'Write the title in Simplified Chinese.\n')
+        self.assertEqual(_title_prompt_language_rule(code_only), '标题必须使用简体中文。\n')
         self.assertFalse(_title_language_mismatch(code_only, 'Python Hello Loop'))
 
     def test_configured_api_key_is_not_sent_to_caller_supplied_route(self):

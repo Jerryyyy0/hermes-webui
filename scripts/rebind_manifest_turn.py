@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from api.session_manifest_repair import rebind_manifest_turn_records  # noqa: E402
+from integration.session_manifest.repair import rebind_manifest_turn_records  # noqa: E402
 
 
 def rebind_manifest_turn(

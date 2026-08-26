@@ -5,7 +5,7 @@ import sqlite3
 import pytest
 
 from api.models import get_state_db_session_messages
-from api.session_manifest import _message_turns
+from integration.session_manifest.manifest import _message_turns
 from api.streaming import _drop_synthetic_control_messages
 
 

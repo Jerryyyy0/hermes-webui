@@ -8,9 +8,15 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Added
 
+- **Runtime configuration API** — 新增 `GET /api/integration/config`，只读返回进程当前生效的 `BROWSER_PREVIEW_URL`，不暴露其它环境变量。
+
+- **External Session Manifest artifacts** — 成功工具输出或当前 turn 最后一条 assistant message 中经过验证的外部绝对路径可作为直接引用 Artifact 持久化，并继续通过既有 `GET /api/integration/workspace/file?path=...` 只读预览。源文件不移动、不复制、不哈希；预览仅允许精确已登记且当前通过无跟随 fd、安全路径策略的普通文件，失效时在 Manifest 中标记为 `expired`。
+
+- **Session attachment and memory Artifact preview** — `HERMES_WEBUI_ATTACHMENT_DIR/<session_id>/`（默认 `{STATE_DIR}/attachments/<session_id>/`）及 `HERMES_HOME/memories/` 中的文件现在可在已持久化为精确 Session Manifest Artifact 后复用既有只读预览 URL。上传文件不会自动成为 Artifact，两个目录不会被枚举，未登记文件仍不可读取。
+
 - **QA 公开知识库列表代理** — 新增 `POST /api/integration/knowledge_base/list_qa_knowledge_bases`，将 JSON 请求体与下游 `{code, msg, data}` 响应原样转发。
 
-- **Knowledge base MCP session references** — `mcp__ithink_kb_mcp__searchKnowledgeBaseDocuments` 与 `mcp__ithink_kb_mcp__searchKnowledgeBaseDocumentsAcross` 的成功 completed 结果现在进入既有 Session Manifest 的 `references[]`，并复用 `manifest_delta` SSE。相同 `(kbName, fileName)` 合并来源和 `page_content[]`；解析逻辑位于 `integration/knowledge_base/turn_references.py`，不新增数据库表或 sidecar 状态，且不向浏览器透传单库搜索返回的私有源路径。
+- **Knowledge base MCP session references** — `mcp__ithink_kb_mcp__searchKnowledgeBaseDocuments` 与 `mcp__ithink_kb_mcp__searchKnowledgeBaseDocumentsAcross` 的成功 completed 结果现在进入既有 Session Manifest 的 `references[]`，并复用 `manifest_delta` SSE。相同 `(kbName, fileName)` 合并来源和 `metadata.chunks[]`，每个 chunk 保留原始 `page_content` 与有效 `score`；不存在或无效的 score 使用空字符串。解析逻辑位于 `integration/knowledge_base/turn_references.py`，不新增数据库表或 sidecar 状态，且不向浏览器透传单库搜索返回的私有源路径。
 
 - **异步委派会话取消与恢复** — session SSE 每次建连均先发送 `background_tasks_snapshot`（包括空快照）；真实 user message 持久化其 `async_delegations` 生命周期。Agent 的异步完成 `context_anchor` 保持模型上下文语义，但不会漏显为用户消息或承载轮次状态；旧 sidecar 仅在 Agent 的权威标记可证明同一锚点时隐藏其遗留副本。新增 `POST` / `GET /api/sessions/background_tasks/cancel`：取消范围先写入 Session sidecar，再并行请求 Agent 中断，客户端轮询至 `state=settled` 确认该固定范围已收口。归属映射耗尽重试后发送 `background_task_unresolved`，取消范围内的完成结果不会启动新的 wakeup stream。
 
@@ -24,6 +30,19 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 - **Unified Profile Gateway ownership** — `server.py` 启动时会重启每个可见 Profile Gateway：原生主机中确认由 launchd/systemd 管理的 Gateway 仍通过 Agent service manager 重启，并持续跟随各 Profile 新写入的 `gateway.log` 与 `gateway.error.log` 到 WebUI 控制台；未受管、所有权不明或状态探测不明的原生 Gateway，以及普通容器中的遗留 Gateway，统一使用 Agent 的 `--replace` 协议接管，确保新 WebUI 继续转发日志。所有 WebUI-owned Gateway 都以前台 `gateway run -v --external-supervisor` 子进程运行，将合并 stdout/stderr 以 `[gateway:<profile>]` 前缀写入 WebUI 控制台及同一持久化日志。转发行不受 `HERMES_WEBUI_LOG_LEVEL` 过滤，敏感字段在输出前脱敏；WebUI 退出时只终止自身创建的 Gateway。s6 通过 service manager 执行 `gateway restart`，不由 WebUI 替换。
 
 ### Fixed
+
+- **Knowledge base artifact upload limits removed** — `POST /api/integration/knowledge_base/upload_artifacts`
+  不再限制单个文件大小、文件数量或单次同步的文件总大小；仍保留路径安全、文件存在性以及
+  `paths` 与 `fileProperties` 的对应关系校验。
+
+- **Multipart upload size gates** — `/api/skillhub/upload`、`/api/skillhub/extract` 与
+  `/api/integration/record_scripts_csv/upload` 不再由 WebUI 施加文件大小上限；知识库
+  `upload_docs` 继续原样透传且不限制文件大小或数量。核心会话附件和 workspace 上传
+  的本地大小门禁也已移除，外层代理可按部署需要自行设置限制。
+
+- **Profile Gateway parallel startup race** — 普通容器中 WebUI 现在按 default 优先的顺序串行启动各 Profile Gateway，并为每个子进程固定其独立 `HERMES_HOME`。启动结果不再仅以 `Popen` 成功为准：只有子进程自身持有 Agent runtime lock、状态为 `running` 且 heartbeat 新鲜时才记为成功；提前退出或超时会清理子进程并明确记录失败，避免并发 `--replace` 竞争导致一个 Profile 实际退出却被汇总为已启动。
+
+- **Profile Gateway cold-start runtime probe amplification** — all-profile Gateway startup now resolves the Hermes CLI runtime once per coordinator pass and shares that verified invocation with every Profile Gateway. Transient runtime retries no longer run independently for every profile, avoiding concurrent cold-start probe failures that could leave every Gateway unstarted while WebUI itself remained healthy.
 
 - **Profile auxiliary model routing** — 助理气泡与常用任务现在继承 Profile `model.base_url`；旧配置未填写 `model.provider` 时会明确路由到 `custom`，不再因辅助路由丢失自定义网关而自动请求第一方 DeepSeek。已配置命名 `custom_providers` 的 Profile 仍交由 Agent 解析其专属 endpoint 与 `api_mode`。
 
@@ -50,6 +69,8 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 - **Managed session manifest file preview paths** — When a session workspace is a child of `HERMES_WEBUI_DEFAULT_WORKSPACE`, `GET /api/session/manifest` and SSE `manifest_delta` now project `preview=file` paths relative to that integration root (e.g. `<session_id>/report.md`), matching left-rail `/api/integration/workspace/files`. Inspector preview via `/api/integration/workspace/file` no longer 404s on bare session-relative names. Shared-root and out-of-base workspaces keep prior relative paths; skill and absolute MEDIA paths are unchanged. DB rows remain session-relative.
 
 ### Changed
+
+- **Session title prompt localization** — 标题模型收到的两套 system prompt 及其用户消息包装现在全部使用中文；首次生成、非首轮刷新和手动重生成继续共用原有输入截断与重试规则。
 
 - **Knowledge base BFF proxy contract** — 10 个公开 BFF URL 的最后一层路径现与下游知识库接口名一致，例如 `list` 改为 `list_ps_knowledge_bases`。除 `upload_artifacts` 外，JSON 请求体不再经过 WebUI 校验、字段转换或默认值注入，而是原样转发给同名下游接口；响应透传与下游调用保持不变。
 
@@ -112,6 +133,8 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Changed
 
+- **会话标题本地兜底中文化** — 当首次或后续标题生成调用失败时，本地兜底标签、主题后缀和附件场景标题统一使用中文，并避免将 `Attached files` 或绝对路径写入标题。
+
 - **Assistant bubbles skill count uses local_all** — `skill` 气泡的 `skills_count` / 技能列表改为与 SkillHub `scope=local_all` 相同：该 Profile 下已启用的 **installed** hub 技能 ∪ **custom** 技能（同名 custom 优先），排除 `skills.disabled`。不再直接 `rglob` Profile `skills/**/SKILL.md`。SkillHub 目录不可用时回退到本地 `.hub_installed` + custom 扫描（相同合并/禁用规则）。实现见 `integration/skills/listing.py` 的 `list_local_all_enabled_skills` 与 `integration/assistant_bubbles/collectors.py`。
 
 - **SkillHub `local_all` name dedupe** — `scope=local_all` 合并结果按 frontmatter `name` 去重（先出现者保留；custom 在前），避免同名多目录把 `total` 抬高，导致与气泡 `skills_count`（按 name 计数）不一致。
@@ -138,6 +161,8 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 - **Chat apperror `content_filtered` type** — Provider 内容审核拦截（如 `data_inspection_failed`、`content_filter`、`content_policy_violation`、`moderation`）不再落到通用 `error` 兜底文案，新增 `content_filtered` 分类，中文文案「内容被审核拦截 / 输入内容被模型服务的内容审核策略拦截」，`details_label` 为「审核详情」。分类与文案集中在 `integration/chat_provider_errors/`（`classify.py`、`messages.py`），`api/streaming.py` 接缝不动。分类顺序：`content_filtered` / `compression_exhausted` 等 provider 专有 code 优先于 `404`/`401`/`429` 弱状态码匹配，避免 chatcmpl ID 子串误判（见下条 Fixed）。
 
 ### Fixed
+
+- **Absolute media Artifact preview** — 已登记的绝对 `source_tool=media` Artifact 现在可通过既有 `GET /api/integration/workspace/file?path=...` 只读预览，不再被外部直接引用的来源判断误拒绝；`MEDIA:` 的 Artifact 生成规则不变。
 
 - **Cron 空 sidecar fallback 顺序** — 当 cron output 先于 Agent transcript 到达时，既有空 sidecar 会同时补回 user anchor 和 assistant fallback，不再让 assistant 消息排在后续 WebUI user 之前。
 
@@ -282,7 +307,7 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 - **Knowledge base BFF route prefix** — WebUI proxy paths use `/api/integration/knowledge_base/*` (underscore), aligned with downstream `/knowledge_base/*`. Hyphenated `/api/integration/knowledge-base/*` is no longer served.
 
-- **Integration workspace files profile (restored via DB)** — `GET /api/integration/workspace/files` 恢复 `?profile=` 过滤与 `profile` 标注，改由直查 `session_manifest.db`（`api/session_manifest_store.py` 新增 `get_artifact_profile_index` / `get_artifact_paths_for_profile`）实现，取代旧的 `artifact_profiles.py` 跨会话索引（已删除）。传入 `profile` 时仅返回该 profile 的 manifest 成果文件（走 stat-only 快路径）；不传则返回全部文件并对成果附加 `profile`。session-save hook 不再增量维护 profile 索引——store 在流式 turn 结束时写入，为权威来源。
+- **Integration workspace files profile (restored via DB)** — `GET /api/integration/workspace/files` 恢复 `?profile=` 过滤与 `profile` 标注，改由直查 `session_manifest.db`（`integration/session_manifest/store.py` 新增 `get_artifact_profile_index` / `get_artifact_paths_for_profile`）实现，取代旧的 `artifact_profiles.py` 跨会话索引（已删除）。传入 `profile` 时仅返回该 profile 的 manifest 成果文件（走 stat-only 快路径）；不传则返回全部文件并对成果附加 `profile`。session-save hook 不再增量维护 profile 索引——store 在流式 turn 结束时写入，为权威来源。
 
 - **Integration workspace files performance** — `GET /api/integration/workspace/files` keeps an in-memory workspace file index (invalidated on session save and optional `refresh=1`); pagination/filter/sort reuse the cached index instead of re-walking the tree on every request. Collection uses `os.scandir`; `?profile=` stat-only fast path skips full walk. Artifact profile index skips unrelated sessions by workspace, merges incrementally on session save, and left-rail UI reloads on SSE `manifest_delta` file artifacts. Set `HERMES_DEBUG_TIMING=1` for `X-Hermes-Timing-*` response headers.
 
@@ -294,7 +319,7 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Added
 
-- **Manifest artifact profile** — `GET /api/session/manifest` and SSE `manifest_delta` include optional `profile` on `artifacts[]` rows (from `session.profile`). `GET /api/integration/workspace/files` annotates manifest file artifacts with `profile`; optional `?profile=` returns only that profile's artifacts (default still lists all workspace files). 跨会话索引现由直查 `session_manifest.db`（`api/session_manifest_store.py`）实现。
+- **Manifest artifact profile** — `GET /api/session/manifest` and SSE `manifest_delta` include optional `profile` on `artifacts[]` rows (from `session.profile`). `GET /api/integration/workspace/files` annotates manifest file artifacts with `profile`; optional `?profile=` returns only that profile's artifacts (default still lists all workspace files). 跨会话索引现由直查 `session_manifest.db`（`integration/session_manifest/store.py`）实现。
 
 - **Session workspace inspector** — `GET /api/session/manifest` returns structured todos, artifacts, and referenced files parsed from tool activity; the right panel adds **Tasks**, **Artifacts**, and **Refs** tabs with file preview via the existing workspace preview path. Artifacts outside the session workspace are listed with absolute paths and file metadata, while previews remain scoped to workspace files.
 

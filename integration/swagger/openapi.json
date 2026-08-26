@@ -33,7 +33,8 @@
     { "name": "IntegrationNotifications", "description": "通知系统（混合模式：kb_apply 实时聚合自下游 get_user_messages；skill_publish 实时聚合自上游 external/notifications，不持久化本地）。read/delete 按 ID 前缀路由：kb: 透传下游，skill_publish: 转发上游。" },
     { "name": "IntegrationMemory",   "description": "记忆统计（需 HERMES_INTEGRATION=1）。聚合展示会话天数、定时任务和记忆文件。" },
     { "name": "IntegrationAssistantBubbles", "description": "Profile 助理气泡（需 HERMES_INTEGRATION=1）。读取 `<profile.path>/assistant_bubbles.json` 独立缓存；定时任务槽位实时统计，不写回。" },
-    { "name": "IntegrationWebuiAppearance", "description": "WebUI 外观配置（需 HERMES_INTEGRATION=1）。只读读取进程级 `{HERMES_HOME}/webui-appearance/` 下的 JSON 与资源文件；不做 schema 校验或写入。" }
+    { "name": "IntegrationWebuiAppearance", "description": "WebUI 外观配置（需 HERMES_INTEGRATION=1）。只读读取进程级 `{HERMES_HOME}/webui-appearance/` 下的 JSON 与资源文件；不做 schema 校验或写入。" },
+    { "name": "IntegrationConfig", "description": "运行时环境配置（需 HERMES_INTEGRATION=1）。仅返回白名单环境变量 BROWSER_PREVIEW_URL。" }
   ],
   "paths": {
 
@@ -550,7 +551,7 @@
       "post": {
         "tags": ["Workspace"],
         "summary": "上传会话附件",
-        "description": "将文件保存为指定会话的附件，不写入会话工作区。`session_id` 必须存在，且必须归属请求 Profile。优先使用有效的 `hermes_profile` Cookie；未携带该 Cookie 时，使用 multipart `profile` 字段校验。Profile 不匹配时，服务端为防止跨 Profile 枚举会话而返回 404 `Session not found`。文件大小受服务端 `MAX_UPLOAD_BYTES` 限制（默认 50 MiB，可由 `HERMES_WEBUI_MAX_UPLOAD_MB` 覆盖）。",
+        "description": "将文件保存为指定会话的附件，不写入会话工作区。`session_id` 必须存在，且必须归属请求 Profile。优先使用有效的 `hermes_profile` Cookie；未携带该 Cookie 时，使用 multipart `profile` 字段校验。Profile 不匹配时，服务端为防止跨 Profile 枚举会话而返回 404 `Session not found`。WebUI 不对该 multipart 上传施加文件大小限制。",
         "parameters": [
           {
             "name": "hermes_profile",
@@ -1312,8 +1313,8 @@
         "description": "代理 `POST {KNOWLEDGE_BASE_URL}/knowledge_base/list_ps_knowledge_bases`。请求体原样转发，字段契约由下游定义。",
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughRequest" } } } },
         "responses": {
-          "200": { "description": "知识库数组（下游 data）", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/KnowledgeBaseEntry" } } } } },
-          "400": { "description": "缺参或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
+          "200": { "description": "下游原始 JSON 响应", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughResponse" } } } },
+          "400": { "description": "下游 HTTP 400 业务响应（原样回传）", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughResponse" } } } },
           "500": { "description": "下游未返回有效响应", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
         }
       }
@@ -1351,8 +1352,8 @@
         "summary": "已加入的团队知识库",
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughRequest" } } } },
         "responses": {
-          "200": { "description": "知识库数组", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/KnowledgeBaseEntry" } } } } },
-          "400": { "description": "缺参或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
+          "200": { "description": "下游原始 JSON 响应", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughResponse" } } } },
+          "400": { "description": "下游 HTTP 400 业务响应（原样回传）", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughResponse" } } } },
           "500": { "description": "下游未返回有效响应", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
         }
       }
@@ -1363,8 +1364,8 @@
         "summary": "创建知识库",
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughRequest" } } } },
         "responses": {
-          "200": { "description": "下游原始 JSON 响应（含 code/msg/data 包装）" },
-          "400": { "description": "缺参或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
+          "200": { "description": "下游原始 JSON 响应", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughResponse" } } } },
+          "400": { "description": "下游 HTTP 400 业务响应（原样回传）", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughResponse" } } } },
           "500": { "description": "下游未返回有效响应", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
         }
       }
@@ -1377,7 +1378,7 @@
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughRequest" } } } },
         "responses": {
           "200": { "description": "下游知识库详情响应", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseInfoResponse" } } } },
-          "400": { "description": "缺参或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
+          "400": { "description": "下游 HTTP 400 业务响应（原样回传）", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughResponse" } } } },
           "500": { "description": "下游未返回有效响应", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
         }
       }
@@ -1388,8 +1389,8 @@
         "summary": "编辑知识库信息",
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughRequest" } } } },
         "responses": {
-          "200": { "description": "编辑成功" },
-          "400": { "description": "缺参或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
+          "200": { "description": "下游原始 JSON 响应", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughResponse" } } } },
+          "400": { "description": "下游 HTTP 400 业务响应（原样回传）", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughResponse" } } } },
           "500": { "description": "下游未返回有效响应", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
         }
       }
@@ -1400,8 +1401,8 @@
         "summary": "删除知识库",
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughRequest" } } } },
         "responses": {
-          "200": { "description": "删除成功" },
-          "400": { "description": "缺参或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
+          "200": { "description": "下游原始 JSON 响应", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughResponse" } } } },
+          "400": { "description": "下游 HTTP 400 业务响应（原样回传）", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughResponse" } } } },
           "500": { "description": "下游未返回有效响应", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
         }
       }
@@ -1412,8 +1413,8 @@
         "summary": "可加入的团队知识库（分页）",
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughRequest" } } } },
         "responses": {
-          "200": { "description": "分页结果", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseAvailableResponse" } } } },
-          "400": { "description": "缺参或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
+          "200": { "description": "下游原始 JSON 响应", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughResponse" } } } },
+          "400": { "description": "下游 HTTP 400 业务响应（原样回传）", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughResponse" } } } },
           "500": { "description": "下游未返回有效响应", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
         }
       }
@@ -1424,8 +1425,8 @@
         "summary": "申请加入团队知识库",
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughRequest" } } } },
         "responses": {
-          "200": { "description": "申请成功" },
-          "400": { "description": "缺参或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
+          "200": { "description": "下游原始 JSON 响应", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughResponse" } } } },
+          "400": { "description": "下游 HTTP 400 业务响应（原样回传）", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughResponse" } } } },
           "500": { "description": "下游未返回有效响应", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
         }
       }
@@ -1436,8 +1437,8 @@
         "summary": "知识库成员列表（分页）",
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughRequest" } } } },
         "responses": {
-          "200": { "description": "成员分页", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseMembersResponse" } } } },
-          "400": { "description": "缺参或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
+          "200": { "description": "下游原始 JSON 响应", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughResponse" } } } },
+          "400": { "description": "下游 HTTP 400 业务响应（原样回传）", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughResponse" } } } },
           "500": { "description": "下游未返回有效响应", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
         }
       }
@@ -1448,8 +1449,8 @@
         "summary": "知识库文档列表（分页）",
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughRequest" } } } },
         "responses": {
-          "200": { "description": "文档分页", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseDocumentsResponse" } } } },
-          "400": { "description": "缺参或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
+          "200": { "description": "下游原始 JSON 响应", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughResponse" } } } },
+          "400": { "description": "下游 HTTP 400 业务响应（原样回传）", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughResponse" } } } },
           "500": { "description": "下游未返回有效响应", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
         }
       }
@@ -1465,7 +1466,7 @@
             "multipart/form-data": {
               "schema": {
                 "type": "object",
-                "required": ["uuid", "kbName", "files", "fileProperties"],
+                "description": "下游 multipart 字段透传；WebUI 不在本地校验必填字段。",
                 "properties": {
                   "uuid": { "type": "string" },
                   "kbName": { "type": "string" },
@@ -1479,8 +1480,8 @@
           }
         },
         "responses": {
-          "200": { "description": "下游原始 JSON 响应" },
-          "400": { "description": "Content-Length 无效、请求体不完整或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
+          "200": { "description": "下游原始 JSON 响应", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughResponse" } } } },
+          "400": { "description": "WebUI 请求体错误或下游 HTTP 400 业务响应", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseLocalOrPassthroughError" } } } },
           "500": { "description": "下游未返回有效响应", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
         }
       }
@@ -1489,11 +1490,11 @@
       "post": {
         "tags": ["IntegrationKnowledgeBase"],
         "summary": "上传 workspace 成果文件到知识库（编排）",
-        "description": "WebUI 原生编排端点：调用方传 `paths`（workspace 相对路径数组），WebUI 读取成果文件字节后复用下游 `upload_docs` 透传。`fileProperties` 与 `upload_docs` 一致（原样透传，`fileClass` 即直属库类型），`paths` 与 `fileProperties` 一一对应、等长。单文件最大 50 MiB，最多 20 个文件；不限制单次同步的文件总大小。仅执行 `upload_docs`，不串联 `update_docs`。",
+        "description": "WebUI 原生编排端点：调用方传 `paths`（workspace 相对路径数组），WebUI 读取成果文件字节后复用下游 `upload_docs` 透传。`fileProperties` 与 `upload_docs` 一致（原样透传，`fileClass` 即直属库类型），`paths` 与 `fileProperties` 一一对应、等长。WebUI 不限制单个文件大小、文件数量或单次同步的文件总大小；实际限制由下游、代理或存储策略决定。仅执行 `upload_docs`，不串联 `update_docs`。",
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUploadArtifactsRequest" } } } },
         "responses": {
-          "200": { "description": "下游 upload_docs 原始 JSON 响应" },
-          "400": { "description": "缺参、路径校验失败或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
+          "200": { "description": "下游 upload_docs 原始 JSON 响应", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughResponse" } } } },
+          "400": { "description": "WebUI 本地校验错误或下游 HTTP 400 业务响应", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseLocalOrPassthroughError" } } } },
           "500": { "description": "下游未返回有效响应", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
         }
       }
@@ -1504,8 +1505,8 @@
         "summary": "更新文档属性并触发解析",
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughRequest" } } } },
         "responses": {
-          "200": { "description": "更新成功" },
-          "400": { "description": "缺参或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
+          "200": { "description": "下游原始 JSON 响应", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughResponse" } } } },
+          "400": { "description": "下游 HTTP 400 业务响应（原样回传）", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughResponse" } } } },
           "500": { "description": "下游未返回有效响应", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
         }
       }
@@ -1516,8 +1517,8 @@
         "summary": "删除文档",
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughRequest" } } } },
         "responses": {
-          "200": { "description": "删除成功" },
-          "400": { "description": "缺参或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
+          "200": { "description": "下游原始 JSON 响应", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughResponse" } } } },
+          "400": { "description": "下游 HTTP 400 业务响应（原样回传）", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughResponse" } } } },
           "500": { "description": "下游未返回有效响应", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
         }
       }
@@ -1544,21 +1545,21 @@
       "post": {
         "tags": ["IntegrationKnowledgeBase"],
         "summary": "检索知识库切片",
-        "description": "代理 `POST {KNOWLEDGE_BASE_URL}/knowledge_base/search_docs`。请求体原样转发，字段契约与默认值由下游定义。成功返回匹配切片 JSON 数组。",
+        "description": "代理 `POST {KNOWLEDGE_BASE_URL}/knowledge_base/search_docs`。请求体与 JSON 响应原样转发，字段契约与默认值由下游定义。下游成功响应可能是匹配切片数组或 `{code, msg, data}` 包装。",
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughRequest" } } } },
         "responses": {
           "200": {
-            "description": "匹配切片数组",
+            "description": "下游原始 JSON 响应",
             "content": {
               "application/json": {
-                "schema": {
-                  "type": "array",
-                  "items": { "$ref": "#/components/schemas/KnowledgeBaseSearchDocChunk" }
-                }
+                "schema": { "oneOf": [
+                  { "$ref": "#/components/schemas/KnowledgeBasePassthroughResponse" },
+                  { "type": "array", "items": { "$ref": "#/components/schemas/KnowledgeBaseSearchDocChunk" } }
+                ] }
               }
             }
           },
-          "400": { "description": "缺参或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
+          "400": { "description": "下游 HTTP 400 业务响应（原样回传）", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughResponse" } } } },
           "500": { "description": "下游未返回有效响应", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
         }
       }
@@ -1567,18 +1568,21 @@
       "post": {
         "tags": ["IntegrationKnowledgeBase"],
         "summary": "跨库检索知识库切片（xcore）",
-        "description": "代理 `POST {KNOWLEDGE_BASE_URL}/knowledge_base/search_docs_xcore`。请求体原样转发，字段契约与默认值由下游定义。成功返回 `{kbNames, docNames, context}`。",
+        "description": "代理 `POST {KNOWLEDGE_BASE_URL}/knowledge_base/search_docs_xcore`。请求体与 JSON 响应原样转发，字段契约与默认值由下游定义。下游成功响应可能直接返回 `{kbNames, docNames, context}`，也可能使用 `{code, msg, data}` 包装。",
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughRequest" } } } },
         "responses": {
           "200": {
-            "description": "检索命中结果",
+            "description": "下游原始 JSON 响应",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/KnowledgeBaseSearchDocsXcoreResponse" }
+                "schema": { "oneOf": [
+                  { "$ref": "#/components/schemas/KnowledgeBasePassthroughResponse" },
+                  { "$ref": "#/components/schemas/KnowledgeBaseSearchDocsXcoreResponse" }
+                ] }
               }
             }
           },
-          "400": { "description": "缺参或下游业务错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseError" } } } },
+          "400": { "description": "下游 HTTP 400 业务响应（原样回传）", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBasePassthroughResponse" } } } },
           "500": { "description": "下游未返回有效响应", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseUpstreamFailed" } } } }
         }
       }
@@ -1737,7 +1741,7 @@
       "post": {
         "tags": ["IntegrationRecordScripts"],
         "summary": "上传录制脚本关联 CSV",
-        "description": "multipart 上传 CSV。表单字段 `relate_name` 必填，文件字段名为 `file`。同一 `relate_name` 只保留一份 CSV，上传会写入或覆盖 `data.csv`。",
+        "description": "multipart 上传 CSV。表单字段 `relate_name` 必填，文件字段名为 `file`。同一 `relate_name` 只保留一份 CSV，上传会写入或覆盖 `data.csv`。WebUI 不对该 multipart 上传施加文件大小限制。",
         "requestBody": {
           "required": true,
           "content": {
@@ -1757,7 +1761,7 @@
           "200": { "description": "上传成功", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecordScriptCsvUploadResponse" } } } },
           "400": { "description": "缺参、格式无效或非 CSV 文件", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecordScriptError" } } } },
           "404": { "description": "脚本不存在", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecordScriptError" } } } },
-          "413": { "description": "上传体过大", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecordScriptError" } } } }
+          "413": { "description": "保留给反向代理或其它上游层的请求体限制", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecordScriptError" } } } }
         }
       }
     },
@@ -2076,6 +2080,34 @@
           },
           "400": { "description": "配置文件不是合法 JSON" },
           "404": { "description": "外观配置文件不存在" }
+        }
+      }
+    },
+    "/api/integration/config": {
+      "get": {
+        "tags": ["IntegrationConfig"],
+        "summary": "获取浏览器预览地址",
+        "description": "需 `HERMES_INTEGRATION=1`。只返回进程当前生效的 `BROWSER_PREVIEW_URL`，不枚举其它环境变量。",
+        "responses": {
+          "200": {
+            "description": "当前生效的浏览器预览地址",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["browser_preview_url"],
+                  "properties": {
+                    "browser_preview_url": {
+                      "type": "string",
+                      "description": "BROWSER_PREVIEW_URL 的当前生效值"
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "500": { "description": "BROWSER_PREVIEW_URL 未配置" }
         }
       }
     },
@@ -3012,7 +3044,7 @@
       "post": {
         "tags": ["SkillHub"],
         "summary": "上传本地 custom 技能",
-        "description": "仅写入 `{HERMES_HOME}/skills`（shared_skills_dir），不调用 SkillHub 上游。需要 `HERMES_INTEGRATION=1`；不要求 `SKILLHUB_URL`。支持 `.md` / `.zip`（multipart）或 JSON。单文件 `.md` 的 leaf 由 SKILL.md frontmatter `name` 决定（不再用 `SKILL.md` 文件名 stem）；`.zip` 可含多个技能目录（每个含 SKILL.md），可含 `.skill-origin.json` sidecar。目标路径优先级：`dir_name` 参数 > sidecar.dir_name > 已有同名 custom 目录 > `category`+leaf。`overwrite=true` 时按 frontmatter `name` 删除全部 custom 副本后写入；市场安装（`.hub_installed`）仍 409。响应含 `skill_count`、`file_count` 与 `skills[]`（每项含 `dir_name`、`name`、`category`）。SKILL.md 须含 frontmatter，必填 `name`、`description`。",
+        "description": "仅写入 `{HERMES_HOME}/skills`（shared_skills_dir），不调用 SkillHub 上游。需要 `HERMES_INTEGRATION=1`；不要求 `SKILLHUB_URL`。支持 `.md` / `.zip`（multipart）或 JSON；multipart 文件上传不设 WebUI 大小限制，JSON 请求仍受通用 20 MiB body 限制。单文件 `.md` 的 leaf 由 SKILL.md frontmatter `name` 决定（不再用 `SKILL.md` 文件名 stem）；`.zip` 可含多个技能目录（每个含 SKILL.md），可含 `.skill-origin.json` sidecar。目标路径优先级：`dir_name` 参数 > sidecar.dir_name > 已有同名 custom 目录 > `category`+leaf。`overwrite=true` 时按 frontmatter `name` 删除全部 custom 副本后写入；市场安装（`.hub_installed`）仍 409。响应含 `skill_count`、`file_count` 与 `skills[]`（每项含 `dir_name`、`name`、`category`）。SKILL.md 须含 frontmatter，必填 `name`、`description`。",
         "requestBody": {
           "required": true,
           "content": {
@@ -4776,7 +4808,7 @@
       "post": {
         "tags": ["Workspace"],
         "summary": "上传文件到工作区",
-        "description": "上传文件到会话工作区目录。",
+        "description": "上传文件到会话工作区目录。WebUI 不对该 multipart 上传施加文件大小限制。",
         "requestBody": {
           "required": true,
           "content": {
@@ -4799,7 +4831,7 @@
       "post": {
         "tags": ["Workspace"],
         "summary": "解压上传文件",
-        "description": "上传并解压 zip 文件到工作区目录。",
+        "description": "上传并解压 zip 文件到工作区目录。WebUI 不限制压缩包上传大小；解压后的总字节数仍受 archive-bomb 防护上限约束。",
         "requestBody": {
           "required": true,
           "content": {
@@ -6484,7 +6516,7 @@
           "error": { "type": "string" }
         }
       },
-      "KnowledgeBaseError": {
+      "KnowledgeBaseLocalError": {
         "type": "object",
         "required": ["error"],
         "properties": {
@@ -6551,6 +6583,13 @@
         "type": "object",
         "additionalProperties": true,
         "description": "透传接口响应体：下游返回的原始 JSON 原样回传。"
+      },
+      "KnowledgeBaseLocalOrPassthroughError": {
+        "description": "上传接口的 HTTP 400：可能是 WebUI 本地校验错误，也可能是下游业务响应原样回传。",
+        "oneOf": [
+          { "$ref": "#/components/schemas/KnowledgeBaseLocalError" },
+          { "$ref": "#/components/schemas/KnowledgeBasePassthroughResponse" }
+        ]
       },
       "KnowledgeBaseAccountUuidRequest": {
         "type": "object",

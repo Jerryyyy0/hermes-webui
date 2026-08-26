@@ -383,7 +383,7 @@ assistant 正文中提及附件:
 
 ### 修复 A1：回滚 `_merge_reconcile_artifacts_for_turn()` external fallback
 
-**文件**：`api/session_manifest.py`，改动 3 修改处 1
+**文件**：`integration/session_manifest/manifest.py`，改动 3 修改处 1
 
 ```python
 # 现状（改动3 引入，line 1449-1453）
@@ -400,7 +400,7 @@ assistant 正文中提及附件:
 
 ### 修复点 2：回滚 `_row_to_wire()` external fallback
 
-**文件**：`api/session_manifest.py`，改动 3 修改处 2
+**文件**：`integration/session_manifest/manifest.py`，改动 3 修改处 2
 
 ```python
 # 现状（改动3 引入）
@@ -432,7 +432,7 @@ assistant 正文中提及附件:
 
 ### 修复 B1：移除路 5 — reconcile 通用路径
 
-**文件**：`api/session_manifest.py` — `_reconcile_candidate_paths()` line 1389 之后
+**文件**：`integration/session_manifest/manifest.py` — `_reconcile_candidate_paths()` line 1389 之后
 
 ```python
 # 现状（line 1389-1404）
@@ -457,7 +457,7 @@ assistant 正文中提及附件:
 
 ### 修复 B2：移除路 6 — 发现类工具 diff 证据
 
-**文件**：`api/session_manifest.py` — `_reconcile_candidate_paths()` line 1386-1387
+**文件**：`integration/session_manifest/manifest.py` — `_reconcile_candidate_paths()` line 1386-1387
 
 ```python
 # 现状
@@ -471,7 +471,7 @@ assistant 正文中提及附件:
 
 ### 修复 C：简化 `_paths_from_assistant_prose()`（移除冗余 `_paths_from_delivery_prose()` 调用）
 
-**文件**：`api/session_manifest.py` — `_paths_from_assistant_prose()` line 278-288
+**文件**：`integration/session_manifest/manifest.py` — `_paths_from_assistant_prose()` line 278-288
 
 ```python
 # 现状（改动 2 引入，双层结构）

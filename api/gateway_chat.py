@@ -944,7 +944,7 @@ def _run_gateway_chat_streaming(
 
     def _gateway_manifest_skills_dir():
         try:
-            from api.session_manifest import _skills_dir_for_session
+            from integration.session_manifest.manifest import _skills_dir_for_session
 
             return _skills_dir_for_session(get_session(session_id))
         except Exception:
@@ -952,7 +952,7 @@ def _run_gateway_chat_streaming(
 
     def emit_gateway_manifest_delta(event_payload: dict, event_name: str) -> None:
         try:
-            from api.session_manifest import (
+            from integration.session_manifest.manifest import (
                 ToolEvent,
                 _apply_public_todos_to_manifest_delta,
                 extract_manifest_delta_from_tool_event,
@@ -1493,7 +1493,7 @@ def _run_gateway_chat_streaming(
                 goal_exc,
             )
         try:
-            from api.session_manifest import (
+            from integration.session_manifest.manifest import (
                 extract_manifest_delta_from_turn_reconcile,
                 merge_manifest_delta,
             )

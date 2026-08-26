@@ -1,6 +1,7 @@
 """Swagger handler: dynamic servers and offline asset references."""
 
 import json
+from pathlib import Path
 from unittest.mock import MagicMock, mock_open, patch
 
 from integration.swagger import swagger_handler as sh
@@ -72,3 +73,31 @@ def test_handle_openapi_json_valid_json(mock_j, _mock_open):
     sh.handle_openapi_json(_handler(Host="localhost"))
     spec = mock_j.call_args[0][1]
     json.dumps(spec)
+
+
+def test_knowledge_base_passthrough_response_schemas_match_proxy_contract():
+    spec_path = Path(sh.__file__).with_name("openapi.json")
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    prefix = "/api/integration/knowledge_base/"
+    passthrough_ref = "#/components/schemas/KnowledgeBasePassthroughResponse"
+
+    for route_name in {
+        "list_ps_knowledge_bases",
+        "user_joined_shkbs",
+        "create_ps_kb",
+        "edit_kb_information",
+        "delete_ps_kb",
+        "available_shkbs",
+        "apply_join_shkb",
+        "get_user_inshkb",
+        "list_knowledge_bases_details",
+        "update_docs",
+        "delete_docs",
+    }:
+        responses = spec["paths"][f"{prefix}{route_name}"]["post"]["responses"]
+        assert responses["200"]["content"]["application/json"]["schema"]["$ref"] == passthrough_ref
+        assert responses["400"]["content"]["application/json"]["schema"]["$ref"] == passthrough_ref
+
+    for route_name in {"upload_docs", "upload_artifacts"}:
+        schema = spec["paths"][f"{prefix}{route_name}"]["post"]["responses"]["400"]["content"]["application/json"]["schema"]
+        assert schema["$ref"] == "#/components/schemas/KnowledgeBaseLocalOrPassthroughError"

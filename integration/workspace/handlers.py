@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import os
 import time
+from pathlib import Path
 from urllib.parse import parse_qs
 
 from api.helpers import _sanitize_error, bad, j
-from api.session_manifest_store import (
+from integration.session_manifest.store import (
     get_artifact_paths_for_profile,
     get_artifact_profile_index,
 )
@@ -182,6 +183,13 @@ def _handle_file_stream(handler, parsed) -> bool:
     rel = qs.get("path", [""])[0]
     if not rel:
         bad(handler, "path is required", status=400)
+        return True
+
+    if Path(rel).expanduser().is_absolute():
+        from integration.session_manifest.external_references.preview import serve_registered_external_artifact
+
+        if not serve_registered_external_artifact(handler, rel):
+            j(handler, {"error": "文件不存在或无权预览"}, status=404)
         return True
 
     try:

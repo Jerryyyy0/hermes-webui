@@ -10,6 +10,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Literal
@@ -42,6 +43,9 @@ _LEVELS = {
 }
 _PLANNED_RESTART_EXIT_CODE = 75
 _EXTERNAL_LOG_POLL_SECONDS = 0.25
+_GATEWAY_READINESS_TIMEOUT_SECONDS = 20.0
+_GATEWAY_READINESS_POLL_SECONDS = 0.25
+_GATEWAY_HEARTBEAT_MAX_AGE_SECONDS = 30.0
 
 
 @dataclass
@@ -86,6 +90,20 @@ _STATE_PROBE_SCRIPT = (
     "pid = get_running_pid(Path(sys.argv[1]) / 'gateway.pid', cleanup_stale=False); "
     "print('running' if pid else 'not_running')"
 )
+_READINESS_PROBE_SCRIPT = (
+    "import json, sys, time; from pathlib import Path; "
+    "from gateway.status import get_running_pid; "
+    "home = Path(sys.argv[1]); "
+    "pid = get_running_pid(home / 'gateway.pid', cleanup_stale=False); "
+    "state_path = home / 'gateway_state.json'; "
+    "heartbeat_path = home / 'state' / 'gateway.heartbeat'; "
+    "payload = json.loads(state_path.read_text(encoding='utf-8')) if state_path.is_file() else {}; "
+    "state_pid = payload.get('pid'); "
+    "ready = (pid is not None and state_pid is not None and int(state_pid) == pid "
+    "and payload.get('gateway_state') == 'running' and heartbeat_path.is_file() "
+    "and time.time() - heartbeat_path.stat().st_mtime <= float(sys.argv[2])); "
+    "print(pid if ready else '')"
+)
 _OWNER_PROBE_SCRIPT = (
     "import os, sys; "
     "os.environ['HERMES_HOME'] = sys.argv[1]; "
@@ -119,6 +137,37 @@ def probe_profile_gateway_state(profile: dict, runtime: AgentCliInvocation) -> G
         return status if status in {"running", "not_running"} else "unknown"
     except Exception:
         return "unknown"
+
+
+def probe_profile_gateway_readiness(entry: GatewayProcess) -> bool:
+    """Confirm that the spawned child owns a fresh, running Gateway state."""
+    path = str(entry.profile.get("path") or "").strip()
+    if not path:
+        return False
+    command = build_agent_python_command(
+        entry.runtime,
+        "-c",
+        _READINESS_PROBE_SCRIPT,
+        path,
+        str(_GATEWAY_HEARTBEAT_MAX_AGE_SECONDS),
+    )
+    if command is None:
+        return False
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=entry.runtime.cwd,
+            env=entry.runtime.env,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if completed.returncode != 0:
+            return False
+        return int(completed.stdout.strip()) == entry.process.pid
+    except (TypeError, ValueError, OSError, subprocess.SubprocessError):
+        return False
 
 
 def probe_profile_gateway_owner(profile: dict, runtime: AgentCliInvocation) -> GatewayOwnerState:
@@ -347,15 +396,59 @@ def _popen_kwargs() -> dict:
     return kwargs
 
 
+def _wait_for_gateway_readiness(
+    entry: GatewayProcess,
+    readiness_probe: Callable[[GatewayProcess], bool],
+    *,
+    timeout_seconds: float,
+    poll_seconds: float,
+) -> str | None:
+    deadline = time.monotonic() + max(0.0, timeout_seconds)
+    while True:
+        returncode = entry.process.poll()
+        if returncode is not None:
+            return f"exited_{returncode}"
+        try:
+            if readiness_probe(entry) and entry.process.poll() is None:
+                return None
+        except Exception:
+            logger.debug("Gateway readiness probe failed for %s", _profile_name(entry.profile), exc_info=True)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return "readiness_timeout"
+        time.sleep(min(max(0.01, poll_seconds), remaining))
+
+
+def _stop_unready_gateway(entry: GatewayProcess) -> None:
+    entry.stopping.set()
+    _terminate(entry)
+    try:
+        entry.process.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        try:
+            entry.process.kill()
+        except OSError:
+            pass
+    if entry.wait_thread is not None:
+        entry.wait_thread.join(timeout=2)
+    key = _profile_key(entry.profile)
+    with _registry_lock:
+        if _registry.get(key) is entry:
+            _registry.pop(key, None)
+
+
 def start_gateway_process(
     profile: dict,
     *,
     runtime: AgentCliInvocation,
     popen_factory: Callable = subprocess.Popen,
     state_probe: Callable[[dict, AgentCliInvocation], GatewayState] = probe_profile_gateway_state,
+    readiness_probe: Callable[[GatewayProcess], bool] = probe_profile_gateway_readiness,
     replace_existing: bool = False,
+    readiness_timeout_seconds: float = _GATEWAY_READINESS_TIMEOUT_SECONDS,
+    readiness_poll_seconds: float = _GATEWAY_READINESS_POLL_SECONDS,
 ) -> dict:
-    """Start one foreground Gateway and connect its output to WebUI logging."""
+    """Start one foreground Gateway and return only after it is ready."""
     key = _profile_key(profile)
     name = _profile_name(profile)
     if not key:
@@ -392,9 +485,18 @@ def start_gateway_process(
             placeholder.stopping.set()
             process.terminate()
             return {"profile": name, "status": "not_started"}
-        _registry[key] = placeholder
+    _registry[key] = placeholder
     placeholder.reader.start()
     placeholder.wait_thread.start()
+    readiness_error = _wait_for_gateway_readiness(
+        placeholder,
+        readiness_probe,
+        timeout_seconds=readiness_timeout_seconds,
+        poll_seconds=readiness_poll_seconds,
+    )
+    if readiness_error is not None:
+        _stop_unready_gateway(placeholder)
+        return {"profile": name, "status": "failed", "error": readiness_error}
     return {"profile": name, "status": "started", "pid": process.pid}
 
 

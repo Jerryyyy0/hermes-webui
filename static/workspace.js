@@ -451,10 +451,19 @@ function _normalizeManifestReference(row){
   if(kind==='knowledge_base_document'){
     const kbName = String(metadata.kbName||'').trim();
     const fileName = String(metadata.fileName||'').trim();
-    const page_content = [...new Set((Array.isArray(metadata.page_content)?metadata.page_content:[])
-      .filter(value=>typeof value==='string'&&value))];
-    if(!kbName||!fileName||!cleanSources.length||!page_content.length) return null;
-    return {kind:'knowledge_base_document', source:cleanSources, metadata:{kbName, fileName, page_content}};
+    const chunks = [];
+    const chunksByContent = new Set();
+    (Array.isArray(metadata.chunks)?metadata.chunks:[]).forEach(rawChunk=>{
+      if(!rawChunk||typeof rawChunk!=='object') return;
+      const pageContent = rawChunk.page_content;
+      if(typeof pageContent!=='string'||!pageContent||chunksByContent.has(pageContent)) return;
+      const chunk = {page_content:pageContent, score:''};
+      if(typeof rawChunk.score==='number'&&Number.isFinite(rawChunk.score)) chunk.score=rawChunk.score;
+      chunks.push(chunk);
+      chunksByContent.add(pageContent);
+    });
+    if(!kbName||!fileName||!cleanSources.length||!chunks.length) return null;
+    return {kind:'knowledge_base_document', source:cleanSources, metadata:{kbName, fileName, chunks}};
   }
   return null;
 }
@@ -486,11 +495,14 @@ function _mergeManifestReferences(existing, incoming){
       }
     });
     if(current.kind==='knowledge_base_document'){
-      const contents = new Set(current.metadata.page_content);
-      normalized.metadata.page_content.forEach(content=>{
-        if(!contents.has(content)){
-          current.metadata.page_content.push(content);
-          contents.add(content);
+      const chunksByContent = new Map(current.metadata.chunks.map(chunk=>[chunk.page_content, chunk]));
+      normalized.metadata.chunks.forEach(chunk=>{
+        const existingChunk = chunksByContent.get(chunk.page_content);
+        if(!existingChunk){
+          current.metadata.chunks.push(chunk);
+          chunksByContent.set(chunk.page_content, chunk);
+        }else if(existingChunk.score===''&&chunk.score!==''){
+          existingChunk.score = chunk.score;
         }
       });
     }
@@ -739,8 +751,8 @@ function renderSessionReferences(){
   root.innerHTML = items.map((item, idx)=>{
     const metadata = item.metadata || {};
     if(item.kind==='knowledge_base_document'){
-      const passages = Array.isArray(metadata.page_content) ? metadata.page_content : [];
-      return `<div class="workspace-inspector-item"><div class="workspace-inspector-path">${esc(metadata.fileName||'')}</div><div class="workspace-inspector-meta">${esc(metadata.kbName||'')}</div><details><summary>${esc(String(passages.length))}</summary>${passages.map(content=>`<div class="workspace-inspector-meta">${esc(content)}</div>`).join('')}</details></div>`;
+      const chunks = Array.isArray(metadata.chunks) ? metadata.chunks : [];
+      return `<div class="workspace-inspector-item"><div class="workspace-inspector-path">${esc(metadata.fileName||'')}</div><div class="workspace-inspector-meta">${esc(metadata.kbName||'')}</div><details><summary>${esc(String(chunks.length))}</summary>${chunks.map(chunk=>{const score=typeof chunk.score==='number'&&Number.isFinite(chunk.score)?` · score ${chunk.score}`:''; return `<div class="workspace-inspector-meta">${esc(chunk.page_content||'')}${esc(score)}</div>`;}).join('')}</details></div>`;
     }
     const path = metadata.path || '';
     const expired = isManifestExpired(item);
@@ -1229,15 +1241,6 @@ function _isManifestAbsolutePath(path){
 }
 
 function _manifestFilePreviewUrl(path, opts){
-  opts = opts || {};
-  if(_isManifestAbsolutePath(path)){
-    const sid = (S.session && S.session.session_id) ? String(S.session.session_id) : '';
-    let url = 'api/media?path=' + encodeURIComponent(path);
-    if(sid) url += '&session_id=' + encodeURIComponent(sid);
-    if(opts.inline) url += '&inline=1';
-    if(opts.download) url += '&download=1';
-    return url;
-  }
   return _integrationFileUrl(path);
 }
 
@@ -1268,18 +1271,6 @@ async function _fetchManifestFileText(path){
 }
 
 async function _downloadManifestFile(path){
-  if(_isManifestAbsolutePath(path)){
-    const url = _manifestFilePreviewUrl(path, {download: true});
-    const filename = path.split('/').pop() || path;
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    if(typeof showToast==='function') showToast(t('downloading', filename), 2000);
-    return;
-  }
   return _downloadIntegrationFile(path);
 }
 
@@ -1324,7 +1315,7 @@ async function openIntegrationFilePreview(path){
   $('previewArea').classList.add('visible');
   $('fileTree').style.display = 'none';
   _previewCurrentPath = path;
-  _previewSource = 'workspace';
+  _previewSource = _isManifestAbsolutePath(path) ? 'manifest-external' : 'workspace';
   renderFileBreadcrumb(path);
   const fileUrl = _manifestFilePreviewUrl(path, {
     inline: AUDIO_EXTS.has(ext) || VIDEO_EXTS.has(ext),
@@ -1516,7 +1507,8 @@ function clearBrowserPreviewEmbed(){
 function updateEditBtn(){
   const btn=$('btnEditFile');
   if(!btn)return;
-  const editable = _previewCurrentMode==='code'||_previewCurrentMode==='md';
+  const editable = (_previewCurrentMode==='code'||_previewCurrentMode==='md')
+    && _previewSource !== 'manifest-external';
   btn.style.display = editable?'':'none';
   const editing = $('previewEditArea').style.display!=='none';
   btn.innerHTML = editing ? `&#128190; ${t('save')}` : `&#9998; ${t('edit')}`;
@@ -1526,6 +1518,7 @@ function updateEditBtn(){
 }
 
 async function toggleEditMode(){
+  if(_previewSource === 'manifest-external') return;
   const editing = $('previewEditArea').style.display!=='none';
   if(editing){
     // Save
