@@ -533,14 +533,17 @@ def test_manifest_delta_merges_knowledge_base_document_across_both_mcp_tools(tmp
     workspace = tmp_path / 'ws'
     workspace.mkdir()
     across_result = json.dumps({'result': json.dumps([{
-        'page_content': 'first passage',
         'metadata': {'kbName': 'share49', 'fileName': 'rules.docx'},
-        'score': 0.2,
+        'type': 'Document',
+        'chunks': [
+            {'page_content': 'first passage', 'score': 0.2},
+            {'page_content': 'second passage', 'score': 0.3},
+        ],
     }])})
     single_result = json.dumps({'result': json.dumps([{
-        'page_content': 'second passage',
-        'metadata': {'source': '/private/share49/content/rules.docx'},
-        'score': 0.4,
+        'metadata': {'kbName': 'share49', 'fileName': 'rules.docx'},
+        'type': 'Document',
+        'chunks': [{'page_content': 'third passage', 'score': 0.4}],
     }])})
     first = extract_manifest_delta_from_tool_event(
         ToolEvent(
@@ -554,7 +557,6 @@ def test_manifest_delta_merges_knowledge_base_document_across_both_mcp_tools(tmp
     second = extract_manifest_delta_from_tool_event(
         ToolEvent(
             name='mcp__ithink_kb_mcp__searchKnowledgeBaseDocuments',
-            args={'kbName': 'share49'},
             result=single_result,
             tid='single-call',
         ),
@@ -578,7 +580,8 @@ def test_manifest_delta_merges_knowledge_base_document_across_both_mcp_tools(tmp
             'fileName': 'rules.docx',
             'chunks': [
                 {'page_content': 'first passage', 'score': 0.2},
-                {'page_content': 'second passage', 'score': 0.4},
+                {'page_content': 'second passage', 'score': 0.3},
+                {'page_content': 'third passage', 'score': 0.4},
             ],
         },
     }]
@@ -627,8 +630,9 @@ def test_historical_manifest_derives_knowledge_base_references_without_artifact_
     workspace = tmp_path / 'ws'
     workspace.mkdir()
     result = json.dumps({'result': json.dumps([{
-        'page_content': 'historical passage',
         'metadata': {'kbName': 'share49', 'fileName': 'rules.docx'},
+        'type': 'Document',
+        'chunks': [{'page_content': 'historical passage'}],
     }])})
     session = Session(
         session_id='kb-historical-reference',

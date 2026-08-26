@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import math
 import re
-from pathlib import PurePath
 from typing import Any
 
 SINGLE_SEARCH_TOOL = "mcp__ithink_kb_mcp__searchKnowledgeBaseDocuments"
@@ -93,14 +92,6 @@ def _result_rows(result: Any) -> list[dict[str, Any]]:
     return [row for row in outer if isinstance(row, dict)]
 
 
-def _source_file_name(raw_source: Any) -> str:
-    source = _text(raw_source).replace("\\", "/")
-    if not source or "\x00" in source:
-        return ""
-    name = PurePath(source).name.strip()
-    return "" if name in ("", ".", "..") else name
-
-
 def reference_key(row: dict[str, Any]) -> str:
     return "\0".join((
         _text(row.get("kb_name")),
@@ -116,35 +107,42 @@ def extract_references(
     status: Any = "completed",
     tid: Any = "",
 ) -> list[dict[str, Any]]:
-    """Return untrusted MCP results as minimal internal reference candidates.
+    """Return grouped MCP document results as internal reference candidates.
 
-    The caller owns tool-event success validation. This parser still requires a
-    completed event and only recognizes the two exact MCP tool names.
+    Both supported tools return the same document-grouped structure. A top-level
+    row identifies one document through ``metadata.kbName`` and
+    ``metadata.fileName``; its original, independently-scored passages are in
+    ``chunks``. Do not infer identity from request arguments or legacy result
+    fields: references are a strict transcript-derived index.
     """
     tool = _canonical_tool_name(name)
     if not tool or _text(status).lower() != "completed":
         return []
-    args = args if isinstance(args, dict) else {}
     candidates: list[dict[str, Any]] = []
     for row in _result_rows(result):
         metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
-        content = row.get("page_content")
-        if not isinstance(content, str) or not content:
+        if row.get("type") != "Document":
             continue
-        if tool == SINGLE_SEARCH_TOOL:
-            kb_name = _text(args.get("kbName"))
-            file_name = _source_file_name(metadata.get("source"))
-        else:
-            kb_name = _text(metadata.get("kbName"))
-            file_name = _text(metadata.get("fileName"))
+        kb_name = _text(metadata.get("kbName"))
+        file_name = _text(metadata.get("fileName"))
         if not kb_name or not file_name:
+            continue
+        chunks = []
+        for raw_chunk in row.get("chunks") if isinstance(row.get("chunks"), list) else []:
+            if not isinstance(raw_chunk, dict):
+                continue
+            content = raw_chunk.get("page_content")
+            if not isinstance(content, str) or not content:
+                continue
+            chunks.append(_chunk(content, raw_chunk.get("score")))
+        if not chunks:
             continue
         candidates.append({
             "kind": "knowledge_base_document",
             "resource_type": "knowledge_base_document",
             "kb_name": kb_name,
             "file_name": file_name,
-            "chunks": [_chunk(content, row.get("score"))],
+            "chunks": chunks,
             "sources": [{"tool": tool, "tid": _text(tid)}],
         })
     return merge_reference_rows([], candidates)
@@ -203,7 +201,7 @@ def merge_reference_rows(
             if existing_chunk is None:
                 current["chunks"].append(normalized)
                 chunks_by_content[page_content] = normalized
-            elif "score" not in existing_chunk and "score" in normalized:
+            elif existing_chunk.get("score") == "" and normalized.get("score") != "":
                 existing_chunk["score"] = normalized["score"]
     return sorted(rows.values(), key=lambda row: (row["kb_name"], row["file_name"]))
 

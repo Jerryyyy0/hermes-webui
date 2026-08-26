@@ -13,6 +13,14 @@ def _preview(rows):
     return json.dumps({"result": json.dumps(rows, ensure_ascii=False)}, ensure_ascii=False)
 
 
+def _document(kb_name, file_name, chunks):
+    return {
+        "metadata": {"kbName": kb_name, "fileName": file_name},
+        "type": "Document",
+        "chunks": chunks,
+    }
+
+
 def _untrusted_result(payload):
     return (
         '<untrusted_tool_result source="mcp__ithink_kb_mcp__searchKnowledgeBaseDocuments">\n'
@@ -22,16 +30,14 @@ def _untrusted_result(payload):
     )
 
 
-def test_single_search_uses_args_kb_name_and_source_basename():
+def test_single_search_reads_document_identity_and_chunks_from_result():
     rows = extract_references(
         name=SINGLE_SEARCH_TOOL,
-        args={"kbName": "share49"},
-        result=_preview([{
-            "page_content": "single passage",
-            "metadata": {"source": "/private/knowledge_base/share49/content/rules.docx"},
-            "type": "Document",
-            "score": 0.5,
-        }]),
+        args={},
+        result=_preview([_document("share49", "rules.docx", [
+            {"page_content": "single passage", "score": 0.5},
+            {"page_content": "second passage", "score": 0.4},
+        ])]),
         tid="single-call",
     )
 
@@ -41,7 +47,10 @@ def test_single_search_uses_args_kb_name_and_source_basename():
         "metadata": {
             "kbName": "share49",
             "fileName": "rules.docx",
-            "chunks": [{"page_content": "single passage", "score": 0.5}],
+            "chunks": [
+                {"page_content": "single passage", "score": 0.5},
+                {"page_content": "second passage", "score": 0.4},
+            ],
         },
     }
 
@@ -49,12 +58,10 @@ def test_single_search_uses_args_kb_name_and_source_basename():
 def test_single_search_unwraps_one_structured_result_from_agent_safety_wrapper():
     rows = extract_references(
         name=SINGLE_SEARCH_TOOL,
-        args={"kbName": "share49"},
-        result=_untrusted_result(_preview([{
-            "page_content": "wrapped passage",
-            "metadata": {"source": "/private/knowledge_base/share49/content/rules.docx"},
-            "score": 0.25,
-        }])),
+        args={},
+        result=_untrusted_result(_preview([_document("share49", "rules.docx", [
+            {"page_content": "wrapped passage", "score": 0.25},
+        ])])),
         tid="wrapped-call",
     )
 
@@ -73,21 +80,17 @@ def test_across_and_single_results_merge_same_document_and_keep_both_sources():
     across = extract_references(
         name=ACROSS_SEARCH_TOOL,
         args={},
-        result=_preview([{
-            "page_content": "first passage",
-            "metadata": {"kbName": "share49", "fileName": "rules.docx"},
-            "score": 0.2,
-        }]),
+        result=_preview([_document("share49", "rules.docx", [
+            {"page_content": "first passage", "score": 0.2},
+        ])]),
         tid="across-call",
     )
     single = extract_references(
         name=SINGLE_SEARCH_TOOL,
-        args={"kbName": "share49"},
-        result=_preview([{
-            "page_content": "second passage",
-            "metadata": {"source": "/private/rules.docx"},
-            "score": 0.4,
-        }]),
+        args={},
+        result=_preview([_document("share49", "rules.docx", [
+            {"page_content": "second passage", "score": 0.4},
+        ])]),
         tid="single-call",
     )
 
@@ -114,21 +117,17 @@ def test_same_chunk_keeps_first_valid_score_and_rejects_invalid_score():
     first = extract_references(
         name=ACROSS_SEARCH_TOOL,
         args={},
-        result=_preview([{
-            "page_content": "same passage",
-            "metadata": {"kbName": "share49", "fileName": "rules.docx"},
-            "score": 0.2,
-        }]),
+        result=_preview([_document("share49", "rules.docx", [
+            {"page_content": "same passage", "score": 0.2},
+        ])]),
         tid="first-call",
     )
     second = extract_references(
         name=ACROSS_SEARCH_TOOL,
         args={},
-        result=_preview([{
-            "page_content": "same passage",
-            "metadata": {"kbName": "share49", "fileName": "rules.docx"},
-            "score": "not-a-number",
-        }]),
+        result=_preview([_document("share49", "rules.docx", [
+            {"page_content": "same passage", "score": "not-a-number"},
+        ])]),
         tid="second-call",
     )
 
@@ -143,15 +142,39 @@ def test_missing_score_is_emitted_as_empty_string():
     rows = extract_references(
         name=ACROSS_SEARCH_TOOL,
         args={},
-        result=_preview([{
-            "page_content": "without score",
-            "metadata": {"kbName": "share49", "fileName": "rules.docx"},
-        }]),
+        result=_preview([_document("share49", "rules.docx", [
+            {"page_content": "without score"},
+        ])]),
         tid="missing-score-call",
     )
 
     assert to_wire(rows[0])["metadata"]["chunks"] == [
         {"page_content": "without score", "score": ""},
+    ]
+
+
+def test_duplicate_chunk_upgrades_missing_score_to_first_valid_score():
+    first = extract_references(
+        name=ACROSS_SEARCH_TOOL,
+        args={},
+        result=_preview([_document("share49", "rules.docx", [
+            {"page_content": "same passage", "score": "not-a-number"},
+        ])]),
+        tid="first-call",
+    )
+    second = extract_references(
+        name=SINGLE_SEARCH_TOOL,
+        args={},
+        result=_preview([_document("share49", "rules.docx", [
+            {"page_content": "same passage", "score": 0.8},
+        ])]),
+        tid="second-call",
+    )
+
+    merged = merge_reference_rows(first, second)
+
+    assert to_wire(merged[0])["metadata"]["chunks"] == [
+        {"page_content": "same passage", "score": 0.8},
     ]
 
 
@@ -162,15 +185,31 @@ def test_unknown_failed_or_malformed_results_fail_closed():
     ) == []
     assert extract_references(
         name=SINGLE_SEARCH_TOOL,
-        args={"kbName": "share49"}, result="[]", status="failed", tid="x",
+        args={}, result="[]", status="failed", tid="x",
     ) == []
     assert extract_references(
         name=SINGLE_SEARCH_TOOL,
-        args={"kbName": "share49"}, result="not json", tid="x",
+        args={}, result="not json", tid="x",
+    ) == []
+    assert extract_references(
+        name=SINGLE_SEARCH_TOOL,
+        args={},
+        result=_untrusted_result(_preview([]) + _preview([])),
+        tid="x",
     ) == []
     assert extract_references(
         name=SINGLE_SEARCH_TOOL,
         args={"kbName": "share49"},
-        result=_untrusted_result(_preview([]) + _preview([])),
+        result=_preview([{
+            "page_content": "legacy flat result",
+            "metadata": {"source": "/private/rules.docx"},
+            "score": 0.5,
+        }]),
+        tid="x",
+    ) == []
+    assert extract_references(
+        name=SINGLE_SEARCH_TOOL,
+        args={},
+        result=_preview([_document("share49", "rules.docx", [])]),
         tid="x",
     ) == []
