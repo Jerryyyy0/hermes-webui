@@ -93,7 +93,7 @@ exec /usr/local/bin/python3 server.py
 
 Do not separately launch any Profile Gateway in the container entrypoint.
 
-Implementation: [`integration/gateway_startup/`](gateway_startup/), including the runtime boundary in [`integration/gateway_startup/runtime.py`](gateway_startup/runtime.py). `api/agent_cli_runtime.py` only preserves compatibility for existing core callers. The WebUI code root is derived from module locations, so local checkouts and containers can run `server.py` directly without a `~/.hermes/hermes-webui` symlink. Agent discovery prefers `HERMES_WEBUI_AGENT_DIR`, then `${HERMES_HOME}/hermes-agent`, then the existing `api.config` discovery fallbacks. The only startup seam is the asynchronous hook in `server.py`.
+Implementation: [`integration/gateway_startup/`](gateway_startup/), including the runtime boundary in [`integration/gateway_startup/runtime.py`](gateway_startup/runtime.py). `api/agent_cli_runtime.py` only preserves compatibility for existing core callers. The WebUI code root is derived from module locations, so local checkouts and containers can run `server.py` directly without a `~/.hermes/hermes-webui` symlink. Agent discovery prefers `HERMES_WEBUI_AGENT_DIR`, then `${HERMES_HOME}/hermes-agent`, then the existing `api.config` discovery fallbacks. The only startup seam is the asynchronous hook in `server.py`. A failed profile is retried independently with bounded backoff (5, 15, then 45 seconds); successful profiles are not restarted, and pending retries are cancelled before WebUI shuts down its Gateway children.
 
 ### Profile enrich (`info.json`)
 

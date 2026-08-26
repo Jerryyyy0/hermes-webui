@@ -9,4 +9,5 @@ def test_server_starts_profile_gateway_coordinator_as_daemon_thread():
     assert "daemon=True" in source
     assert "ensure_all_profile_gateways()" in source
     assert "from integration.gateway_startup import stop_gateway_processes" in source
+    assert "stop_profile_gateway_recovery" in source
     assert "stop_gateway_processes()" in source

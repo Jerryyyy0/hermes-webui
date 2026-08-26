@@ -957,7 +957,8 @@ def main() -> None:
         httpd.server_close()
         _log_shutdown_audit()
         try:
-            from integration.gateway_startup import stop_gateway_processes
+            from integration.gateway_startup import stop_gateway_processes, stop_profile_gateway_recovery
+            stop_profile_gateway_recovery()
             stop_gateway_processes()
         except Exception:
             logger.debug("Failed to stop WebUI-owned Gateway processes during shutdown", exc_info=True)
