@@ -138,7 +138,6 @@ def test_upload_zip_overwrite_custom(tmp_path, monkeypatch):
     z = _zip_bytes(
         {
             "alpha/SKILL.md": "---\nname: alpha\ndescription: new\n---\n# New",
-            "beta/SKILL.md": "---\nname: beta\ndescription: b\n---\n",
         }
     )
     result = local_skills.upload_custom_skill(
@@ -148,9 +147,8 @@ def test_upload_zip_overwrite_custom(tmp_path, monkeypatch):
         overwrite=True,
     )
     assert result.get("ok") is True
-    assert result["skill_count"] == 2
+    assert result["skill_count"] == 1
     assert "# New" in (existing / "SKILL.md").read_text(encoding="utf-8")
-    assert (skills_dir / "tools" / "beta" / "SKILL.md").is_file()
 
 
 def test_upload_rejects_invalid_frontmatter(tmp_path, monkeypatch):
@@ -175,7 +173,7 @@ def test_upload_rejects_missing_description(tmp_path, monkeypatch):
     assert not (skills_dir / "nodesc").exists()
 
 
-def test_upload_zip_multi_skills(tmp_path, monkeypatch):
+def test_upload_zip_multi_skills_rejected(tmp_path, monkeypatch):
     skills_dir = tmp_path / "skills"
     monkeypatch.setattr("integration.skills.local_skills.shared_skills_dir", lambda: skills_dir)
     z = _zip_bytes(
@@ -189,11 +187,10 @@ def test_upload_zip_multi_skills(tmp_path, monkeypatch):
         zip_bytes=z,
         filename="bundle.zip",
     )
-    assert result["ok"] is True
-    assert result["skill_count"] == 2
-    assert result["file_count"] == 2
-    dirs = {s["dir_name"] for s in result["skills"]}
-    assert dirs == {"tools/alpha", "tools/beta"}
+    assert result["status"] == 400
+    assert "只能包含一个技能" in result["error"]
+    assert not (skills_dir / "tools" / "alpha").exists()
+    assert not (skills_dir / "tools" / "beta").exists()
 
 
 def test_upload_zip_batch_rollback_on_conflict(tmp_path, monkeypatch):
@@ -209,7 +206,8 @@ def test_upload_zip_batch_rollback_on_conflict(tmp_path, monkeypatch):
         }
     )
     result = local_skills.upload_custom_skill(category="tools", zip_bytes=z, filename="bundle.zip")
-    assert result["status"] == 409
+    assert result["status"] == 400
+    assert "只能包含一个技能" in result["error"]
     assert not (skills_dir / "tools" / "beta").exists()
 
 

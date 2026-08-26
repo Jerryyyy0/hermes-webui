@@ -1329,6 +1329,8 @@ def _upload_zip_skills(
         roots = discover_skill_roots(temp_dir)
         if not roots:
             return {"error": "压缩包内需包含 SKILL.md", "status": 400}
+        if len(roots) > 1:
+            return {"error": "压缩包内只能包含一个技能，请上传单个技能包", "status": 400}
 
         # Rename skill root directories to use request_name as outermost dir name,
         # avoiding conflicts from unpredictable zip directory names.
