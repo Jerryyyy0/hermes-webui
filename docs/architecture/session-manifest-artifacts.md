@@ -236,7 +236,7 @@ User 消息中的 MEDIA:、工具结果 JSON 的相似字段和普通 URL 都不
 - 当前真实存在且可预览；
 - 不是 `uploads/` 输入文件；
 - 不命中 `.git`、`node_modules`、缓存、构建目录等 cruft；
-- 不超过每轮候选上限；
+- 不超过每轮 32 个候选上限；
 - 裸文件名的递归查找不超过 4,096 个 workspace 条目，超过即整次 fallback 失败关闭；
 - canonical path 去重。
 

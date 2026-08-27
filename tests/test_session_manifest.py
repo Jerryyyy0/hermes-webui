@@ -2071,6 +2071,18 @@ def test_paths_from_last_assistant_message_finds_unique_nested_bare_delivery_onc
     assert paths == ['table_outputs/employee_data_2024.csv']
 
 
+def test_paths_from_last_assistant_message_limits_final_deliveries_to_32(tmp_path):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    filenames = [f'output_{index:02}.pdf' for index in range(33)]
+    for filename in filenames:
+        (workspace / filename).write_bytes(b'pdf')
+
+    paths = _paths_from_last_assistant_message(' '.join(filenames), workspace)
+
+    assert paths == filenames[:32]
+
+
 def test_paths_from_last_assistant_message_rejects_ambiguous_nested_bare_delivery(tmp_path):
     workspace = tmp_path / 'ws'
     (workspace / 'first').mkdir(parents=True)
