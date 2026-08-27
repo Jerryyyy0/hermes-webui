@@ -2058,6 +2058,60 @@ def test_paths_from_last_assistant_message_scans_final_assistant_text(tmp_path):
     assert _paths_from_last_assistant_message(text, workspace) == ['1.docx', 'report.docx']
 
 
+def test_paths_from_last_assistant_message_finds_unique_nested_bare_delivery_once(tmp_path):
+    workspace = tmp_path / 'ws'
+    output_dir = workspace / 'table_outputs'
+    output_dir.mkdir(parents=True)
+    (output_dir / 'employee_data_2024.csv').write_text('name\nAda\n', encoding='utf-8')
+
+    paths = _paths_from_last_assistant_message(
+        '已生成 employee_data_2024.csv；下载 employee_data_2024.csv。', workspace,
+    )
+
+    assert paths == ['table_outputs/employee_data_2024.csv']
+
+
+def test_paths_from_last_assistant_message_limits_final_deliveries_to_32(tmp_path):
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    filenames = [f'output_{index:02}.pdf' for index in range(33)]
+    for filename in filenames:
+        (workspace / filename).write_bytes(b'pdf')
+
+    paths = _paths_from_last_assistant_message(' '.join(filenames), workspace)
+
+    assert paths == filenames[:32]
+
+
+def test_paths_from_last_assistant_message_rejects_ambiguous_nested_bare_delivery(tmp_path):
+    workspace = tmp_path / 'ws'
+    (workspace / 'first').mkdir(parents=True)
+    (workspace / 'second').mkdir()
+    (workspace / 'first' / 'report.pdf').write_bytes(b'first')
+    (workspace / 'second' / 'report.pdf').write_bytes(b'second')
+
+    assert _paths_from_last_assistant_message('已生成 report.pdf', workspace) == []
+
+
+def test_paths_from_last_assistant_message_does_not_substitute_nested_file_for_root_name(tmp_path):
+    workspace = tmp_path / 'ws'
+    (workspace / 'report.pdf').mkdir(parents=True)
+    output_dir = workspace / 'table_outputs'
+    output_dir.mkdir()
+    (output_dir / 'report.pdf').write_bytes(b'pdf')
+
+    assert _paths_from_last_assistant_message('已生成 report.pdf', workspace) == []
+
+
+def test_paths_from_last_assistant_message_does_not_search_uploaded_bare_delivery(tmp_path):
+    workspace = tmp_path / 'ws'
+    upload_dir = workspace / 'uploads' / 'input-1'
+    upload_dir.mkdir(parents=True)
+    (upload_dir / 'source.docx').write_bytes(b'input')
+
+    assert _paths_from_last_assistant_message('参考 source.docx', workspace) == []
+
+
 def test_paths_from_last_assistant_message_accepts_external_absolute_path(tmp_path):
     workspace = tmp_path / 'ws'
     workspace.mkdir()
@@ -4091,6 +4145,65 @@ def test_persist_turn_artifact_paths_filters_missing_files(tmp_path, monkeypatch
         ('turn:2', 'deliver.docx', 'write_file', MANIFEST_PREVIEW_FILE),
     ]
     assert session.turn_artifacts == {}
+
+
+def test_persist_turn_artifact_paths_registers_unique_nested_final_deliveries_once(tmp_path, monkeypatch):
+    from api.streaming import _persist_turn_artifact_paths
+    from integration.session_manifest.store import load_manifest_records
+
+    workspace = tmp_path / 'ws'
+    output_dir = workspace / 'table_outputs'
+    output_dir.mkdir(parents=True)
+    (output_dir / 'employee_data_2024.csv').write_text('name\nAda\n', encoding='utf-8')
+    (output_dir / 'team_roster_legacy.xls').write_bytes(b'xls')
+    session = Session(
+        session_id='persist_nested_delivery01',
+        workspace=str(workspace),
+        messages=[
+            {'role': 'user', 'content': '生成多格式表格', '_turn_key': 'turn:1'},
+            {
+                'role': 'assistant',
+                'tool_calls': [{
+                    'id': 'terminal-1',
+                    'function': {
+                        'name': 'terminal',
+                        'arguments': json.dumps({'command': 'python3 create_table_formats.py'}),
+                    },
+                }],
+            },
+            {
+                'role': 'tool',
+                'tool_call_id': 'terminal-1',
+                'name': 'terminal',
+                'content': json.dumps({'exit_code': 0}),
+            },
+            {
+                'role': 'assistant',
+                'content': (
+                    '已生成 employee_data_2024.csv、employee_data_2024.csv '
+                    '和 team_roster_legacy.xls。'
+                ),
+            },
+        ],
+        tool_calls=[],
+    )
+    monkeypatch.setattr('integration.session_manifest.store.STATE_DIR', tmp_path / 'state')
+
+    result = _persist_turn_artifact_paths(session, 'turn:1')
+
+    assert result == {
+        'status': 'persisted',
+        'decision': 'artifacts',
+        'turn_key': 'turn:1',
+        'artifact_count': 2,
+    }
+    assert [
+        (row['turn_key'], row['path'], row['source_tool'], row['preview'])
+        for row in load_manifest_records(session)
+    ] == [
+        ('turn:1', 'table_outputs/employee_data_2024.csv', ASSISTANT_PROSE_ARTIFACT_SOURCE, MANIFEST_PREVIEW_FILE),
+        ('turn:1', 'table_outputs/team_roster_legacy.xls', ASSISTANT_PROSE_ARTIFACT_SOURCE, MANIFEST_PREVIEW_FILE),
+    ]
 
 
 def test_persist_turn_artifact_paths_scopes_session_tool_calls(tmp_path, monkeypatch):

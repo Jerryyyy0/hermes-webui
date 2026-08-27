@@ -31,6 +31,8 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Fixed
 
+- **Nested final-message Artifact delivery** — 当当前 turn 最后一条 assistant message 明确列出裸文件名而文件位于 workspace 子目录时，Session Manifest 现在会进行一次受限的唯一匹配并登记实际相对路径。根目录优先；同名多路径、`uploads/`、cruft、symlink、不可预览文件、目录遍历异常或超过 4,096 个条目时均失败关闭。重复提及继续只生成一个 Artifact。
+
 - **Knowledge base artifact upload limits removed** — `POST /api/integration/knowledge_base/upload_artifacts`
   不再限制单个文件大小、文件数量或单次同步的文件总大小；仍保留路径安全、文件存在性以及
   `paths` 与 `fileProperties` 的对应关系校验。
@@ -69,6 +71,8 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 - **Managed session manifest file preview paths** — When a session workspace is a child of `HERMES_WEBUI_DEFAULT_WORKSPACE`, `GET /api/session/manifest` and SSE `manifest_delta` now project `preview=file` paths relative to that integration root (e.g. `<session_id>/report.md`), matching left-rail `/api/integration/workspace/files`. Inspector preview via `/api/integration/workspace/file` no longer 404s on bare session-relative names. Shared-root and out-of-base workspaces keep prior relative paths; skill and absolute MEDIA paths are unchanged. DB rows remain session-relative.
 
 ### Changed
+
+- **Session Manifest Artifact candidate limit** — 最后一条 assistant message 与受控 terminal 输出的单轮 Artifact 候选上限由 16 提升至 32；路径安全、唯一匹配与去重规则不变。
 
 - **Session title prompt localization** — 标题模型收到的两套 system prompt 及其用户消息包装现在全部使用中文；首次生成、非首轮刷新和手动重生成继续共用原有输入截断与重试规则。
 

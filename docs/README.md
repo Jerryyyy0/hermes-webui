@@ -30,6 +30,7 @@
 - [`architecture/HermesAgent消息补充说明文档.md`](architecture/HermesAgent消息补充说明文档.md) - Agent 运行时消息的语义与 WebUI 展示边界。
 - [`architecture/HermesAgent上下文压缩逻辑说明.md`](architecture/HermesAgent上下文压缩逻辑说明.md) - Agent 侧上下文压缩的触发、摘要、会话持久化与故障分支。
 - [`architecture/state_db表结构说明.md`](architecture/state_db表结构说明.md) - Hermes Agent `state.db` 的 schema 和字段说明。
+- [`architecture/zhiling-webui-request-chain.md`](architecture/zhiling-webui-request-chain.md) - Zhiling 平台的共享 WebUI 请求链路、容器技术栈、职责与时延归因。
 - [`api/async-delegation-session-events.md`](api/async-delegation-session-events.md) - 异步子任务的会话事件、wakeup 聊天流与多会话订阅交互提案。
 - [`api/async-delegation-external-client-guide.md`](api/async-delegation-external-client-guide.md) - 外部前端接入异步子任务双 SSE、重连与关闭逻辑。
 - [`api/session-manifest-api.md`](api/session-manifest-api.md) - Session Manifest 的 GET/SSE 唯一字段契约与全部资源类型示例。
