@@ -18,7 +18,7 @@ lineage_key + profile + workspace_root + turn_key + record_kind + path
 
 1. 工具事件和最终 assistant 提取必须限定在当前 turn slice。
 2. 中间 assistant prose 不提取路径。
-3. 不扫描 terminal stdout、目录列表、heredoc/Python 源码或整个 workspace。
+3. 不从 terminal stdout、目录列表、heredoc/Python 源码或任意 workspace 文件清单推断 Artifact；仅最终 assistant 明确点名的裸文件名可使用本节定义的受控唯一匹配补全。
 4. 非空 DB decision 是该 turn 的权威记录；正常完成结算时，同轮最终 assistant 明确列出且存在的文件会追加到该 decision，重复路径保留工具来源。
 5. Empty decision 只能由显式维护操作使用同轮完整 transcript 的强证据原子修复。
 6. `GET /api/session/manifest` 是只读操作，不更新 artifact store、session recency 或 session-list 事件。
@@ -228,7 +228,7 @@ User 消息中的 MEDIA:、工具结果 JSON 的相似字段和普通 URL 都不
 - _BROAD_FILENAME_EXT_RE：绝对路径、相对路径、裸文件名；
 - _LAST_ASSISTANT_TILDE_PATH_RE：~/... 路径候选。
 
-绝对路径可以在 session workspace 内或外：前者按既有 workspace 相对路径表示，后者原样以绝对路径表示为直接引用。相对路径和裸文件名只以当前 `session.workspace` 为基准解析，解析后必须仍位于该目录；不会借用前序 turn、工具输出或目录描述补全。后续纯问答 turn 若最后一条 assistant 明确列出一个实际存在的 workspace 文件，仍可产生该 turn 的 `assistant_prose` artifact。
+绝对路径可以在 session workspace 内或外：前者按既有 workspace 相对路径表示，后者原样以绝对路径表示为直接引用。含目录的相对路径只以当前 `session.workspace` 为基准解析，解析后必须仍位于该目录。裸文件名先按 workspace 根解析；仅根目录没有该文件时，才在当前 workspace 内进行一次受控递归唯一匹配：候选必须由最终 assistant 明确点名、是普通非 symlink 文件、不在 `uploads/` 或 cruft 目录、并且在受限条目数内恰好命中一个路径。零个或多个命中均跳过，不借用前序 turn、工具输出或目录描述补全。后续纯问答 turn 若最后一条 assistant 明确列出一个实际存在的 workspace 文件，仍可产生该 turn 的 `assistant_prose` artifact。
 
 不依赖“已保存”“文件路径”等交付关键词。候选必须：
 
@@ -237,6 +237,7 @@ User 消息中的 MEDIA:、工具结果 JSON 的相似字段和普通 URL 都不
 - 不是 `uploads/` 输入文件；
 - 不命中 `.git`、`node_modules`、缓存、构建目录等 cruft；
 - 不超过每轮候选上限；
+- 裸文件名的递归查找不超过 4,096 个 workspace 条目，超过即整次 fallback 失败关闭；
 - canonical path 去重。
 
 正则必须同时通过四层边界：

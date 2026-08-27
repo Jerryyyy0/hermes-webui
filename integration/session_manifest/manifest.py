@@ -6,6 +6,7 @@ import json
 import copy
 import logging
 import math
+import os
 import re
 import shlex
 from dataclasses import dataclass, field
@@ -40,6 +41,7 @@ EXECUTION_ARTIFACT_TOOLS = frozenset({'terminal'})
 _MAX_TERMINAL_COMMAND_LENGTH = 16 * 1024
 _MAX_TERMINAL_SEGMENTS = 32
 _MAX_EXECUTION_ARTIFACTS = 16
+_MAX_ASSISTANT_WORKSPACE_LOOKUP_ENTRIES = 4096
 
 ARTIFACT_EXCLUSION_READ_TOOLS = frozenset({
     'read_file',
@@ -187,17 +189,97 @@ def _assistant_path_candidates(text: str) -> list[str]:
     return candidates
 
 
+def _is_bare_assistant_filename(raw: str) -> bool:
+    """Return whether an assistant delivery candidate is a basename only."""
+    cleaned = _clean_manifest_path_raw(raw)
+    if not cleaned or '/' in cleaned or cleaned.startswith('~'):
+        return False
+    return Path(cleaned).name == cleaned
+
+
+def _workspace_root_has_bare_candidate(workspace: Path, name: str) -> bool:
+    """Avoid substituting a nested file when the explicit root name exists."""
+    try:
+        return (workspace.expanduser().resolve() / name).exists()
+    except (OSError, ValueError):
+        return False
+
+
+def _unique_workspace_bare_file_paths(workspace: Path, names: set[str]) -> dict[str, str]:
+    """Resolve explicitly delivered basenames to one safe workspace file each.
+
+    This is deliberately a bounded lookup, not an inventory: callers supply
+    only basename candidates from the final assistant response, and ambiguity
+    or traversal failure fails closed.  The normal preview gate still validates
+    each selected path before it can become an artifact.
+    """
+    if not names:
+        return {}
+    try:
+        root = workspace.expanduser().resolve()
+        if not root.is_dir():
+            return {}
+    except (OSError, ValueError):
+        return {}
+
+    matches: dict[str, list[str]] = {name: [] for name in names}
+    pending = set(names)
+    entries_seen = 0
+    stack = [root]
+    while stack and pending:
+        directory = stack.pop()
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    entries_seen += 1
+                    if entries_seen > _MAX_ASSISTANT_WORKSPACE_LOOKUP_ENTRIES:
+                        return {}
+                    try:
+                        relative = Path(entry.path).relative_to(root).as_posix()
+                    except ValueError:
+                        continue
+                    if entry.is_symlink():
+                        continue
+                    if entry.is_dir(follow_symlinks=False):
+                        if (
+                            relative == 'uploads'
+                            or relative.startswith('uploads/')
+                            or ARTIFACT_IGNORE_RE.search(f'{relative}/')
+                        ):
+                            continue
+                        stack.append(Path(entry.path))
+                        continue
+                    if not entry.is_file(follow_symlinks=False) or entry.name not in pending:
+                        continue
+                    if ARTIFACT_IGNORE_RE.search(relative):
+                        continue
+                    if _file_preview_path(root, relative, MANIFEST_PREVIEW_FILE) is None:
+                        continue
+                    found = matches[entry.name]
+                    found.append(relative)
+                    if len(found) > 1:
+                        pending.discard(entry.name)
+        except OSError:
+            return {}
+
+    return {
+        name: paths[0]
+        for name, paths in matches.items()
+        if len(paths) == 1
+    }
+
+
 def _paths_from_last_assistant_message(
     text: str,
     workspace: Path,
 ) -> list[str]:
-    """Extract final-message deliveries without guessing a directory from prose."""
+    """Extract final-message deliveries with a bounded bare-name fallback."""
     paths: list[str] = []
     seen: set[str] = set()
 
-    def add(raw: str) -> None:
+    def add(raw: str) -> bool:
         if not raw or '://' in raw or len(paths) >= _MAX_EXECUTION_ARTIFACTS:
-            return
+            return False
         raw = str(raw).strip()
         try:
             raw_path = Path(raw).expanduser()
@@ -208,21 +290,36 @@ def _paths_from_last_assistant_message(
                     workspace.expanduser().resolve()
                 )
         except (OSError, ValueError):
-            return
+            return False
         normalized = _resolve_manifest_path(workspace, raw)
         if not normalized or normalized in seen or normalized.startswith('uploads/'):
-            return
+            return normalized in seen
         if not _artifact_path_is_real(
             workspace,
             normalized,
             source_tool=ASSISTANT_PROSE_ARTIFACT_SOURCE,
         ):
-            return
+            return False
         seen.add(normalized)
         paths.append(normalized)
+        return True
 
-    for raw in _assistant_path_candidates(text):
-        add(raw)
+    candidates = _assistant_path_candidates(text)
+    unresolved_basenames: set[str] = set()
+    for raw in candidates:
+        name = _clean_manifest_path_raw(raw)
+        if (
+            not add(raw)
+            and _is_bare_assistant_filename(raw)
+            and not _workspace_root_has_bare_candidate(workspace, name)
+        ):
+            unresolved_basenames.add(name)
+    fallback_paths = _unique_workspace_bare_file_paths(workspace, unresolved_basenames)
+    for raw in candidates:
+        name = _clean_manifest_path_raw(raw)
+        resolved = fallback_paths.get(name, '') if name in unresolved_basenames else ''
+        if resolved:
+            add(resolved)
     return paths
 
 
