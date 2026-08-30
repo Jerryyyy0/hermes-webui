@@ -11160,11 +11160,6 @@ def handle_get(handler, parsed) -> bool:
                         )
                         if materialized == sid:
                             s = get_session(sid, metadata_only=(not load_messages))
-                            if load_messages and is_cron_session(sid, getattr(s, "source_tag", None)):
-                                from integration.crons.session_bridge import reconcile_cron_session_transcript
-
-                                if reconcile_cron_session_transcript(s):
-                                    s.save(touch_updated_at=False)
                             raw = s.compact()
                             raw["messages"] = (
                                 drop_non_display_messages(

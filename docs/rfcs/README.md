@@ -82,7 +82,14 @@ First-time contributor RFCs should be discussed in an issue before opening a PR.
   cross-repository contract for giving every Cron execution session an
   independent, immutable workspace from Agent execution through WebUI recovery
   and cleanup.
+- [`cron-session-manifest-artifact-settlement.md`](cron-session-manifest-artifact-settlement.md)
+  — Proposed cross-repository repair plan for binding each stored Cron prompt
+  to its trigger's execution identity, settling every materialization path, and
+  repairing explicit historical Artifact gaps.
 - [`cron-model-provider-binding.md`](cron-model-provider-binding.md) — Proposed
   cross-repository contract that makes every fixed Cron inference selection a
   complete Provider/model binding, blocks unsafe legacy partial bindings before
   network execution, and defines a safe migration/audit path.
+- [`cron-followup-model-error-persistence.md`](cron-followup-model-error-persistence.md)
+  — Proposed repair plan for shared `unknown` model normalization and preserving
+  every Cron follow-up terminal error across cache, reconciliation, and later turns.

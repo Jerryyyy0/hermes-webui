@@ -2025,6 +2025,95 @@ def _can_repair_unverified_cron_workspace(session: Any) -> bool:
     return user_messages <= 1
 
 
+def _settle_materialized_cron_session(session: Any) -> dict[str, object]:
+    """Persist missing Manifest decisions after a Cron sidecar is durable.
+
+    Materialization must remain usable when the execution boundary or manifest
+    store is temporarily unavailable, so settlement reports an explicit state
+    instead of changing the materialization result or raising into callers.
+    """
+    from integration.crons.hooks import settle_materialized_cron_session
+
+    session_id = str(getattr(session, "session_id", "") or "?")
+    profile = str(getattr(session, "profile", "") or "")
+    try:
+        settlement = settle_materialized_cron_session(session)
+    except Exception as exc:
+        logger.warning(
+            "cron manifest settlement failed for session_id=%s error_type=%s",
+            session_id,
+            type(exc).__name__,
+        )
+        return {
+            "status": "failed",
+            "session_id": session_id,
+            "profile": profile,
+            "stage": "unexpected",
+            "error_type": type(exc).__name__,
+        }
+    if settlement.status != "persisted":
+        logger.warning(
+            "cron manifest settlement %s for session_id=%s stage=%s",
+            settlement.status,
+            session_id,
+            settlement.error_stage or "unknown",
+        )
+        return {
+            "status": settlement.status,
+            "session_id": session_id,
+            "profile": profile,
+            "stage": settlement.error_stage or "unknown",
+            "settled_turn_keys": settlement.settled_turn_keys,
+        }
+    return {
+        "status": "persisted",
+        "session_id": session_id,
+        "profile": profile,
+        "stage": "complete",
+        "next_turn_key": settlement.next_turn_key,
+        "settled_turn_keys": settlement.settled_turn_keys,
+    }
+
+
+def _materialize_and_settle_cron_session_found(
+    job: dict,
+    found: tuple[str, str, float | None, str],
+    **kwargs,
+) -> str:
+    """Materialize and settle one execution while holding its session lock."""
+    from api.config import _get_session_agent_lock
+    from api.models import Session
+
+    sid = str(found[0] or "").strip()
+    target_profile = str(kwargs.get("target_profile") or "").strip()
+    with _get_session_agent_lock(sid):
+        materialized_sid = _materialize_cron_session_found(job, found, **kwargs)
+        session = Session.load(materialized_sid)
+        if session is None:
+            logger.warning(
+                "cron manifest settlement failed for session_id=%s stage=sidecar_missing",
+                sid,
+            )
+            return materialized_sid
+        session_profile = _normalize_profile_name(getattr(session, "profile", None) or "")
+        if target_profile and session_profile != _normalize_profile_name(target_profile):
+            logger.warning(
+                "cron manifest settlement skipped for session_id=%s stage=profile_mismatch",
+                sid,
+            )
+            return materialized_sid
+        settlement = _settle_materialized_cron_session(session)
+        logger.info(
+            "cron manifest settlement result session_id=%s profile=%s status=%s stage=%s settled_turns=%d",
+            sid,
+            settlement.get("profile", ""),
+            settlement.get("status", "unknown"),
+            settlement.get("stage", "unknown"),
+            len(settlement.get("settled_turn_keys") or ()),
+        )
+        return materialized_sid
+
+
 def _materialize_cron_session_found(
     job: dict,
     found: tuple[str, str, float | None, str],
@@ -2365,7 +2454,7 @@ def materialize_cron_session(
             state_db_cwd=None,
             profile_home=Path(execution_home),
         )
-        return _materialize_cron_session_found(
+        return _materialize_and_settle_cron_session_found(
             job,
             (
                 str(session_id or fallback_record["id"]),
@@ -2431,7 +2520,7 @@ def materialize_cron_session(
             profile_home=Path(execution_home),
         )
 
-    return _materialize_cron_session_found(
+    return _materialize_and_settle_cron_session_found(
         job,
         found,
         target_profile=target_profile,
@@ -2494,7 +2583,7 @@ def materialize_cron_session_run(
             state_db_cwd=state_db_cwd,
             profile_home=profile_home,
         )
-    return _materialize_cron_session_found(
+    return _materialize_and_settle_cron_session_found(
         job,
         found,
         target_profile=_target_profile_for_job(job, owner),
@@ -2574,7 +2663,7 @@ def materialize_cron_sessions_for_runs(
                 state_db_cwd=state_db_cwd,
                 profile_home=Path(execution_home),
             )
-        sid = _materialize_cron_session_found(
+        sid = _materialize_and_settle_cron_session_found(
             job,
             found,
             target_profile=target_profile,

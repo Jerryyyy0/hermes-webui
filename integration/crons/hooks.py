@@ -186,6 +186,16 @@ class CronReplyPreparation:
     error_stage: str = ""
 
 
+@dataclass(frozen=True)
+class CronManifestSettlement:
+    """Structured outcome of settling a materialized Cron execution prefix."""
+
+    status: str
+    next_turn_key: str = ""
+    error_stage: str = ""
+    settled_turn_keys: tuple[str, ...] = ()
+
+
 def _validate_contiguous_turn_keys(messages: list) -> tuple[bool, str]:
     expected = 1
     for message in messages or []:
@@ -198,15 +208,15 @@ def _validate_contiguous_turn_keys(messages: list) -> tuple[bool, str]:
     return True, f"turn:{expected}"
 
 
-def prepare_cron_session_for_reply(session) -> CronReplyPreparation:
-    """Make a cron execution prefix durable before ordinary WebUI reply starts.
+def settle_materialized_cron_session(session) -> CronManifestSettlement:
+    """Settle a durable Cron execution prefix into the Manifest store.
 
     The caller owns the per-session lock. This function mutates only the supplied
     Session object and never reloads it, so the following chat-start save cannot
     overwrite a separately loaded repair object.
     """
     if str(getattr(session, "source_tag", "") or "") != "cron":
-        return CronReplyPreparation(True)
+        return CronManifestSettlement("persisted")
 
     from integration.crons.session_bridge import (
         cron_execution_prefix_and_suffix,
@@ -215,7 +225,7 @@ def prepare_cron_session_for_reply(session) -> CronReplyPreparation:
 
     execution_ended_at = resolve_cron_execution_ended_at(session)
     if execution_ended_at is None:
-        return CronReplyPreparation(False, error_stage="execution_prefix")
+        return CronManifestSettlement("unsettled", error_stage="execution_prefix")
     if getattr(session, "cron_execution_ended_at", None) in (None, ""):
         session.cron_execution_ended_at = execution_ended_at
         try:
@@ -229,17 +239,17 @@ def prepare_cron_session_for_reply(session) -> CronReplyPreparation:
                 getattr(session, "session_id", "?"),
                 exc_info=True,
             )
-            return CronReplyPreparation(False, error_stage="save")
+            return CronManifestSettlement("failed", error_stage="save")
 
     split = cron_execution_prefix_and_suffix(session)
     if split is None:
-        return CronReplyPreparation(False, error_stage="execution_prefix")
+        return CronManifestSettlement("failed", error_stage="execution_prefix")
     reconciled = False
     if getattr(session, "session_id", None):
         reconciled = reconcile_cron_session_transcript(session)
     split = cron_execution_prefix_and_suffix(session)
     if split is None:
-        return CronReplyPreparation(False, error_stage="execution_prefix")
+        return CronManifestSettlement("failed", error_stage="execution_prefix")
     prefix, suffix = split
     prefix_snapshot = [
         (id(message), str(message.get("_turn_key") or ""))
@@ -250,7 +260,7 @@ def prepare_cron_session_for_reply(session) -> CronReplyPreparation:
     stamped = _stamp_cron_manifest_turn_keys(normalized)
     valid, _prefix_next_turn_key = _validate_contiguous_turn_keys(stamped)
     if not valid:
-        return CronReplyPreparation(False, error_stage="turn_keys")
+        return CronManifestSettlement("failed", error_stage="turn_keys")
 
     stamped_snapshot = [
         (id(message), str(message.get("_turn_key") or ""))
@@ -272,28 +282,54 @@ def prepare_cron_session_for_reply(session) -> CronReplyPreparation:
                 getattr(session, "session_id", "?"),
                 exc_info=True,
             )
-            return CronReplyPreparation(False, error_stage="save")
+            return CronManifestSettlement("failed", error_stage="save")
 
     from integration.session_manifest.manifest import _message_turns
     from integration.session_manifest.store import load_manifest_decided_turn_keys
     from api.streaming import _persist_turn_artifact_paths
 
     decided_turn_keys = load_manifest_decided_turn_keys(session)
+    settled_turn_keys: list[str] = []
     for turn in _message_turns(stamped):
         turn_key = str(turn.get("turn_key") or "").strip()
-        if not turn_key or turn_key in decided_turn_keys:
+        if not turn_key:
+            continue
+        if turn_key in decided_turn_keys:
+            settled_turn_keys.append(turn_key)
             continue
         decision = _persist_turn_artifact_paths(session, turn_key)
         if decision is None and getattr(session, "_cron_compatibility_stub", False):
+            settled_turn_keys.append(turn_key)
             continue
         if not isinstance(decision, dict) or (
             decision.get("status") != "persisted"
             or decision.get("turn_key") != turn_key
         ):
-            return CronReplyPreparation(False, error_stage="artifact_decision")
+            return CronManifestSettlement(
+                "failed",
+                error_stage="artifact_decision",
+                settled_turn_keys=tuple(settled_turn_keys),
+            )
+        settled_turn_keys.append(turn_key)
     from integration.session_manifest.manifest import _next_turn_key
 
-    return CronReplyPreparation(True, next_turn_key=_next_turn_key(session.messages))
+    return CronManifestSettlement(
+        "persisted",
+        next_turn_key=_next_turn_key(session.messages),
+        settled_turn_keys=tuple(settled_turn_keys),
+    )
+
+
+def prepare_cron_session_for_reply(session) -> CronReplyPreparation:
+    """Make a Cron execution prefix durable before an ordinary WebUI reply."""
+    if str(getattr(session, "source_tag", "") or "") != "cron":
+        return CronReplyPreparation(True)
+    settlement = settle_materialized_cron_session(session)
+    return CronReplyPreparation(
+        settlement.status == "persisted",
+        next_turn_key=settlement.next_turn_key,
+        error_stage=settlement.error_stage,
+    )
 
 
 def materialize_after_cron_run(
@@ -343,12 +379,6 @@ def materialize_after_cron_run(
         execution_end_reason=execution_end_reason,
         execution_error_detail=execution_error_detail,
     )
-    if sid:
-        from api.models import Session
-
-        session = Session.load(sid)
-        if session is not None:
-            prepare_cron_session_for_reply(session)
     return sid
 
 
