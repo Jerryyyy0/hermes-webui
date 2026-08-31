@@ -205,6 +205,10 @@ def test_source_python_version_failure_is_rejected(monkeypatch, tmp_path):
         runtime.resolve_agent_cli_runtime(agent_dir=None, probe_runner=probe)
 
 
+def test_runtime_probe_timeout_is_one_minute():
+    assert runtime._RUNTIME_PROBE_TIMEOUT_SECONDS == 60.0
+
+
 def test_source_python_builds_named_profile_gateway_command(monkeypatch, tmp_path):
     python = tmp_path / "python"
     python.write_text("", encoding="utf-8")

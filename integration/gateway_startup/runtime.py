@@ -15,6 +15,9 @@ class AgentCliRuntimeUnavailable(RuntimeError):
     """Raised when no verified Hermes CLI runtime can be found."""
 
 
+_RUNTIME_PROBE_TIMEOUT_SECONDS = 60.0
+
+
 @dataclass(frozen=True)
 class AgentCliInvocation:
     command_prefix: tuple[str, ...]
@@ -177,7 +180,7 @@ def _probe_candidate(
                 env=_base_env(),
                 capture_output=True,
                 text=True,
-                timeout=10,
+                timeout=_RUNTIME_PROBE_TIMEOUT_SECONDS,
                 check=False,
             )
             if completed.returncode != 0:

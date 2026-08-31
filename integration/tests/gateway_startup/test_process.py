@@ -278,3 +278,7 @@ def test_start_terminates_a_gateway_that_never_becomes_ready(monkeypatch, tmp_pa
 
     assert result == {"profile": "default", "status": "failed", "error": "readiness_timeout"}
     assert str(tmp_path) not in process._registry
+
+
+def test_default_readiness_timeout_is_five_minutes():
+    assert process._GATEWAY_READINESS_TIMEOUT_SECONDS == 300.0

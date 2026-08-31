@@ -43,6 +43,10 @@ If automatic startup was intentionally disabled, remove the override or set:
 HERMES_WEBUI_START_PROFILE_GATEWAYS=1
 ```
 
+The Agent runtime probe allows 60 seconds per clean `import`/`--version` check. Each Profile
+Gateway child has a 300-second cold-start readiness window while it creates MCP clients, plugins,
+state, and its heartbeat.
+
 Then restart WebUI. Set it to `0` when an external supervisor owns Gateway startup. If the default config enables `gateway.multiplex_profiles`, only the default Gateway should run; it serves the named Profiles too.
 
 ---
