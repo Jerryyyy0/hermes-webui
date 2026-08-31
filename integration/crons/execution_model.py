@@ -42,6 +42,19 @@ def _environment_model(profile_home: Path) -> str:
     return ""
 
 
+def read_profile_default_binding(profile_home: Path) -> tuple[str, str]:
+    """Read a Profile's configured model/provider without catalog discovery.
+
+    This is intentionally fail-closed: no catalog or global default is used.
+    Callers may persist an empty model when the Profile has no usable binding,
+    but must not invent one from an unrelated provider.
+    """
+    model, provider = _configured_inference(Path(profile_home))
+    if not model:
+        model = _environment_model(Path(profile_home))
+    return model, provider
+
+
 def _first_catalog_inference(catalog: dict) -> tuple[str, str]:
     groups = catalog.get("groups") if isinstance(catalog, dict) else None
     if not isinstance(groups, list):

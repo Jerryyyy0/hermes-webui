@@ -9733,8 +9733,12 @@ def _run_agent_streaming(
                         s.last_error_at = time.time()
                         try:
                             s.save()
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            logger.warning(
+                                "provider error sidecar save failed session_id=%s stream_id=%s turn_key=%s stage=provider_error_sidecar_save error_type=%s",
+                                getattr(s, 'session_id', None), stream_id,
+                                _manifest_turn_key, type(exc).__name__,
+                            )
                         if not ephemeral:
                             _persist_turn_artifact_paths(
                                 s,
@@ -10893,8 +10897,12 @@ def _run_agent_streaming(
                 s.last_error_at = time.time()
                 try:
                     s.save()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning(
+                        "provider error sidecar save failed session_id=%s stream_id=%s turn_key=%s stage=provider_error_sidecar_save error_type=%s",
+                        getattr(s, 'session_id', None), stream_id,
+                        _manifest_turn_key, type(exc).__name__,
+                    )
                 if not ephemeral:
                     _persist_turn_artifact_paths(
                         s,

@@ -6417,6 +6417,7 @@ def import_cli_session(
     workspace_mode=None,
     workspace_state=None,
     require_workspace_binding: bool = False,
+    model_provider=None,
 ):
     """Create a new WebUI session populated with CLI/agent messages.
 
@@ -6433,6 +6434,7 @@ def import_cli_session(
         workspace_mode=workspace_mode,
         workspace_state=workspace_state,
         model=model,
+        model_provider=model_provider,
         messages=messages,
         profile=profile,
         created_at=created_at,

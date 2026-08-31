@@ -5774,6 +5774,15 @@ def _resolve_compatible_session_model_state(
     """
     model = str(model_id or "").strip()
     requested_provider = _clean_session_model_provider(model_provider)
+    bare_placeholder, qualified_placeholder_provider = _split_provider_qualified_model(model)
+    if model.lower() in {"unknown", "none", "null"} or (
+        model.startswith("@") and bare_placeholder.strip().lower() in {"unknown", "none", "null"}
+    ):
+        if explicit_model_pick:
+            return "", requested_provider or qualified_placeholder_provider, True
+        model = ""
+        if requested_provider is None:
+            requested_provider = _clean_session_model_provider(qualified_placeholder_provider)
     if model and requested_provider and model.startswith(f"@{requested_provider}:"):
         try:
             from api.config import cfg as _active_cfg
@@ -6090,6 +6099,55 @@ def _resolve_compatible_session_model_state(
     if model_provider and model_provider not in {"", "custom", "openrouter"} and model_provider != _active_for_compare and default_model:
         return default_model, requested_provider, True
     return model, requested_provider, False
+
+
+def _validate_start_model(model, model_provider=None, *, explicit_model_pick=False):
+    """Reject unresolved model placeholders before creating a runtime stream."""
+    value = str(model or "").strip()
+    bare, _provider = _split_provider_qualified_model(value)
+    if not value or value.lower() in {"unknown", "none", "null"} or (
+        value.startswith("@") and bare.strip().lower() in {"unknown", "none", "null"}
+    ):
+        if explicit_model_pick:
+            return {
+                "error": "所选模型无效，请选择 Profile 中可用的模型",
+                "type": "session_model_unresolved",
+                "_status": 409,
+            }
+        return {
+            "error": "当前会话没有可用模型，请配置当前 Profile 的默认模型或重新选择模型",
+            "type": "session_model_unresolved",
+            "_status": 409,
+        }
+    return None
+
+
+def _reload_session_for_locked_start(session):
+    """Use the latest full Cron sidecar before mutating pending state."""
+    sid = str(getattr(session, "session_id", "") or "").strip()
+    if not sid or str(getattr(session, "source_tag", "") or "").strip() != "cron":
+        return session
+    latest = Session.load(sid)
+    if latest is None or getattr(latest, "_loaded_metadata_only", False):
+        return session
+    # The caller may have staged non-transcript state (for example an explicit
+    # model-pick signature) before taking the lock. Preserve that state while
+    # taking the disk transcript as authoritative.
+    for field in (
+        "pending_user_message",
+        "pending_attachments",
+        "pending_started_at",
+        "pending_user_source",
+        "pending_turn_key",
+        "model_explicit_pick_signature",
+    ):
+        current_value = getattr(session, field, None)
+        if current_value is not None and getattr(latest, field, None) in (None, "", []):
+            setattr(latest, field, copy.deepcopy(current_value))
+    with LOCK:
+        SESSIONS[sid] = latest
+        SESSIONS.move_to_end(sid)
+    return latest
 
 
 def _resolve_compatible_session_model(model_id: str | None) -> tuple[str, bool]:
@@ -19197,6 +19255,9 @@ def _start_chat_stream_for_session(
             "error": "当前聊天后端不支持后台委派原轮次唤醒",
             "_status": 501,
         }
+    model_error = _validate_start_model(model, model_provider)
+    if model_error is not None:
+        return model_error
     stale_response = _agent_runtime_barrier_response(
         external_runtime_owned=backend_is_gateway,
     )
@@ -19228,6 +19289,7 @@ def _start_chat_stream_for_session(
     diag.stage("session_lock_wait") if diag else None
     while True:
         with session_lock:
+            s = _reload_session_for_locked_start(s)
             locked_stream_id = getattr(s, "active_stream_id", None)
             if locked_stream_id:
                 if _active_stream_blocks_chat_start(s, locked_stream_id):
@@ -19540,6 +19602,10 @@ def _start_run(
         runtime_adapter_enabled,
         runtime_adapter_runner_enabled,
     )
+
+    model_error = _validate_start_model(model, model_provider)
+    if model_error is not None:
+        return model_error
 
     if runtime_adapter_enabled() or runtime_adapter_runner_enabled():
         if turn_key_override and runtime_adapter_runner_enabled():

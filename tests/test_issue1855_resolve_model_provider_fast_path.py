@@ -243,6 +243,26 @@ class TestSlowPathStillFires:
         )
         assert result[0] == "gpt-5.5"
 
+    def test_unknown_model_never_uses_provider_fast_path(self):
+        """Historical Cron placeholders must resolve through Profile defaults."""
+        from api.routes import _resolve_compatible_session_model_state
+
+        with patch("api.routes.get_available_models") as mock_catalog:
+            mock_catalog.return_value = {
+                "default_model": "gpt-5.5",
+                "active_provider": "openai-codex",
+                "groups": [],
+            }
+            result = _resolve_compatible_session_model_state(
+                "unknown",
+                "openai-codex",
+                profile_provider="openai-codex",
+                profile_default_model="gpt-5.5",
+            )
+
+        assert mock_catalog.call_count == 1
+        assert result == ("gpt-5.5", "openai-codex", True)
+
 
 class TestFastPathSourceShape:
     """Static checks that the fast path is wired correctly in the source.

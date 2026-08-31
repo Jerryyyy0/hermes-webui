@@ -785,6 +785,31 @@ def test_materialize_no_agent_output_creates_stable_session(cron_env):
     ]
 
 
+def test_materialize_no_agent_binds_profile_model_provider(cron_env, monkeypatch):
+    from integration.crons import session_bridge
+
+    monkeypatch.setattr(
+        session_bridge,
+        "read_profile_default_binding",
+        lambda _home: ("deepseek-v4", "deepseek"),
+        raising=False,
+    )
+    sid = session_bridge.materialize_cron_session(
+        {"id": "script1", "name": "Watchdog", "no_agent": True},
+        owner_profile="default",
+        execution_home=cron_env["home"],
+        fallback_output="## Response\n\nscript completed",
+        fallback_filename="2026-07-31_12-00-05.md",
+    )
+
+    from api.models import Session
+
+    session = Session.load(sid)
+    assert session.model == "deepseek-v4"
+    assert session.model_provider == "deepseek"
+    assert session.model != "unknown"
+
+
 def test_materialize_no_agent_failure_persists_cron_error(cron_env):
     from integration.crons.session_bridge import (
         list_cron_job_runs_from_state_db,

@@ -20,6 +20,7 @@ from integration.crons.listing import (
     resolve_owner_profile_for_job,
 )
 from integration.project_logging import get_logger
+from integration.crons.execution_model import read_profile_default_binding
 
 logger = get_logger(__name__)
 
@@ -2130,6 +2131,20 @@ def _materialize_cron_session_found(
 ) -> str:
     sid, cli_title, started_at, model = found
     model = str(model or "").strip()
+    model_provider = None
+    if (job or {}).get("no_agent"):
+        try:
+            profile_home = _profile_home_for_name(target_profile)
+            bound_model, model_provider = read_profile_default_binding(profile_home)
+            if not model or model.lower() == "unknown":
+                model = bound_model
+        except Exception:
+            logger.warning(
+                "cron profile model binding read failed for session_id=%s profile=%s",
+                sid,
+                target_profile,
+                exc_info=True,
+            )
     error_timestamp = run_mtime or started_at
     cron_error_message = _build_cron_error_message(
         job,
@@ -2168,6 +2183,9 @@ def _materialize_cron_session_found(
             needs_model_update = bool(
                 model and (not getattr(existing, "model", None) or getattr(existing, "model", None) == "unknown")
             )
+            needs_provider_update = bool(
+                model_provider and not getattr(existing, "model_provider", None)
+            )
             metadata_count = getattr(existing, "_metadata_message_count", None)
             needs_error_update = bool(cron_error_message) and not _has_matching_cron_error(
                 getattr(existing, "messages", None),
@@ -2177,7 +2195,7 @@ def _materialize_cron_session_found(
             # database still lacked the final reply. Always enter the full-load
             # path so append-only reconciliation can repair that same-ID gap.
             needs_transcript_reconcile = True
-            if not needs_update and not needs_model_update and not needs_error_update and not needs_transcript_reconcile and (not fallback_output or (metadata_count or 0) > 0):
+            if not needs_update and not needs_model_update and not needs_provider_update and not needs_error_update and not needs_transcript_reconcile and (not fallback_output or (metadata_count or 0) > 0):
                 return sid
 
             # load_metadata_only() returns messages=[] by design and Session.save()
@@ -2255,8 +2273,18 @@ def _materialize_cron_session_found(
             if needs_model_update:
                 full.model = model
                 changed = True
+            if needs_provider_update:
+                full.model_provider = model_provider
+                changed = True
             if changed:
                 full.save()
+                try:
+                    from api.models import LOCK, SESSIONS
+                    with LOCK:
+                        SESSIONS[sid] = full
+                        SESSIONS.move_to_end(sid)
+                except Exception:
+                    logger.debug("failed to refresh cached cron session %s", sid, exc_info=True)
                 publish_session_list_changed("cron_session_imported")
             return sid
         return sid
@@ -2307,7 +2335,8 @@ def _materialize_cron_session_found(
         sid,
         title,
         msgs,
-        model=model or "unknown",
+        model=model,
+        model_provider=model_provider,
         profile=target_profile,
         created_at=started_at,
         updated_at=started_at,
@@ -2327,6 +2356,13 @@ def _materialize_cron_session_found(
     if cron_error_message:
         s.last_error_at = _cron_error_timestamp(error_timestamp)
     s.save()
+    try:
+        from api.models import LOCK, SESSIONS
+        with LOCK:
+            SESSIONS[sid] = s
+            SESSIONS.move_to_end(sid)
+    except Exception:
+        logger.debug("failed to cache imported cron session %s", sid, exc_info=True)
     publish_session_list_changed("cron_session_imported")
     return sid
 

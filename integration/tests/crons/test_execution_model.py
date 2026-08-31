@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 from integration.crons.execution_model import (
     _first_catalog_inference,
+    read_profile_default_binding,
     prepare_cron_hub_execution_job,
 )
 
@@ -149,3 +150,13 @@ def test_empty_discovery_keeps_original_snapshots(tmp_path):
             ):
                 execution = prepare_cron_hub_execution_job(original, "ops", tmp_path)
     assert execution == original
+
+
+def test_read_profile_default_binding_reads_model_and_provider(tmp_path):
+    (tmp_path / "config.yaml").write_text(
+        "model:\n  default: deepseek-v4\n  provider: deepseek\n",
+        encoding="utf-8",
+    )
+    with patch("integration.crons.execution_model.get_config_for_profile_home") as load:
+        load.return_value = {"model": {"default": "deepseek-v4", "provider": "deepseek"}}
+        assert read_profile_default_binding(tmp_path) == ("deepseek-v4", "deepseek")
