@@ -1,5 +1,7 @@
 import json
+import io
 import time
+import uuid
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 from urllib.parse import urlparse
@@ -7,7 +9,7 @@ from urllib.parse import urlparse
 import pytest
 
 from api.workspace import safe_resolve_ws, walk_workspace_files_page
-from integration.workspace.handlers import try_handle_get, try_handle_post
+from integration.workspace.handlers import try_handle_get, try_handle_post, try_handle_post_early
 
 
 def _patch_ws(ws_root):
@@ -22,6 +24,40 @@ def _patch_resolve(ws_root):
         "integration.workspace.handlers.resolve_integration_rel",
         side_effect=lambda rel: safe_resolve_ws(ws_root, rel),
     )
+
+
+def _patch_save_ws(ws_root):
+    return patch(
+        "integration.workspace.save.integration_workspace_root",
+        return_value=ws_root,
+    ), patch(
+        "integration.workspace.save.resolve_integration_rel",
+        side_effect=lambda rel: safe_resolve_ws(ws_root, rel),
+    )
+
+
+def _multipart(fields: dict[str, str], filename: str, data: bytes) -> tuple[str, bytes]:
+    boundary = uuid.uuid4().hex
+    body = b""
+    for name, value in fields.items():
+        body += f"--{boundary}\r\n".encode()
+        body += f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode()
+        body += value.encode()
+        body += b"\r\n"
+    body += f"--{boundary}\r\n".encode()
+    body += f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'.encode()
+    body += b"Content-Type: application/octet-stream\r\n\r\n"
+    body += data + b"\r\n"
+    body += f"--{boundary}--\r\n".encode()
+    return f"multipart/form-data; boundary={boundary}", body
+
+
+def _multipart_handler(fields: dict[str, str], data: bytes, filename: str = "updated.md"):
+    content_type, body = _multipart(fields, filename, data)
+    handler = MagicMock()
+    handler.headers = {"Content-Type": content_type, "Content-Length": str(len(body))}
+    handler.rfile = io.BytesIO(body)
+    return handler
 
 
 @contextmanager
@@ -419,6 +455,139 @@ def test_post_disabled_returns_false():
     parsed = urlparse("/api/integration/workspace/file/delete")
     with patch("integration.workspace.handlers.integration_enabled", return_value=False):
         assert try_handle_post(handler, parsed, {"paths": ["a.txt"]}) is False
+
+
+def test_overwrite_post_disabled_returns_false():
+    handler = MagicMock()
+    parsed = urlparse("/api/integration/workspace/file/overwrite")
+    with patch("integration.workspace.handlers.integration_enabled", return_value=False):
+        assert try_handle_post_early(handler, parsed) is False
+
+
+def test_overwrite_file_success(ws_root):
+    target = ws_root / "sessions" / "bbbad785a663"
+    target.mkdir(parents=True)
+    file_path = target / "今日AI热点简报_2026-08-31_1404.md"
+    file_path.write_text("旧内容", encoding="utf-8")
+    handler = _multipart_handler(
+        {"path": "sessions/bbbad785a663/今日AI热点简报_2026-08-31_1404.md"},
+        "新内容\n多行".encode("utf-8"),
+    )
+    parsed = urlparse("/api/integration/workspace/file/overwrite")
+    with patch("integration.workspace.handlers.integration_enabled", return_value=True):
+        with _patch_save_ws(ws_root)[0], _patch_save_ws(ws_root)[1]:
+            assert try_handle_post_early(handler, parsed) is True
+    assert handler.send_response.call_args.args[0] == 200
+    payload = _json_payload(handler)
+    assert payload["ok"] is True
+    assert payload["size"] == len("新内容\n多行".encode("utf-8"))
+    assert isinstance(payload["mtime_ns"], int)
+    assert file_path.read_text(encoding="utf-8") == "新内容\n多行"
+
+
+def test_overwrite_file_empty_body_is_allowed(ws_root):
+    handler = _multipart_handler({"path": "a.txt"}, b"")
+    parsed = urlparse("/api/integration/workspace/file/overwrite")
+    with patch("integration.workspace.handlers.integration_enabled", return_value=True):
+        with _patch_save_ws(ws_root)[0], _patch_save_ws(ws_root)[1]:
+            assert try_handle_post_early(handler, parsed) is True
+    assert _json_payload(handler)["ok"] is True
+    assert (ws_root / "a.txt").read_bytes() == b""
+
+
+@pytest.mark.parametrize(
+    ("fields", "data", "status"),
+    [
+        ({}, b"x", 400),
+        ({"path": "missing.txt"}, b"x", 404),
+        ({"path": "sub"}, b"x", 400),
+        ({"path": "../outside.txt"}, b"x", 400),
+        ({"path": "/tmp/outside.txt"}, b"x", 400),
+    ],
+)
+def test_overwrite_file_validation(ws_root, fields, data, status):
+    handler = _multipart_handler(fields, data)
+    parsed = urlparse("/api/integration/workspace/file/overwrite")
+    with patch("integration.workspace.handlers.integration_enabled", return_value=True):
+        with _patch_save_ws(ws_root)[0], _patch_save_ws(ws_root)[1]:
+            assert try_handle_post_early(handler, parsed) is True
+    assert handler.send_response.call_args.args[0] == status
+
+
+def test_overwrite_file_requires_file_part(ws_root):
+    boundary = "missing-file"
+    body = (
+        f"--{boundary}\r\n"
+        'Content-Disposition: form-data; name="path"\r\n\r\n'
+        "a.txt\r\n"
+        f"--{boundary}--\r\n"
+    ).encode()
+    handler = MagicMock()
+    handler.headers = {
+        "Content-Type": f"multipart/form-data; boundary={boundary}",
+        "Content-Length": str(len(body)),
+    }
+    handler.rfile = io.BytesIO(body)
+    parsed = urlparse("/api/integration/workspace/file/overwrite")
+    with patch("integration.workspace.handlers.integration_enabled", return_value=True):
+        assert try_handle_post_early(handler, parsed) is True
+    assert handler.send_response.call_args.args[0] == 400
+
+
+def test_overwrite_file_invalidates_index(ws_root):
+    handler = _multipart_handler({"path": "a.txt"}, b"updated")
+    parsed = urlparse("/api/integration/workspace/file/overwrite")
+    with patch("integration.workspace.handlers.integration_enabled", return_value=True):
+        with _patch_save_ws(ws_root)[0], _patch_save_ws(ws_root)[1]:
+            with patch("integration.workspace.save.invalidate_workspace_file_index") as invalidate:
+                assert try_handle_post_early(handler, parsed) is True
+                invalidate.assert_called_once_with(ws_root)
+
+
+def test_overwrite_file_too_large(ws_root):
+    handler = _multipart_handler({"path": "a.txt"}, b"too-large")
+    parsed = urlparse("/api/integration/workspace/file/overwrite")
+    with patch("integration.workspace.handlers.integration_enabled", return_value=True):
+        with patch("integration.workspace.handlers.MAX_UPLOAD_BYTES", 1):
+            assert try_handle_post_early(handler, parsed) is True
+    assert handler.send_response.call_args.args[0] == 413
+
+
+def test_overwrite_file_rejects_cruft(ws_root):
+    (ws_root / ".DS_Store").write_bytes(b"old")
+    handler = _multipart_handler({"path": ".DS_Store"}, b"new")
+    parsed = urlparse("/api/integration/workspace/file/overwrite")
+    with patch("integration.workspace.handlers.integration_enabled", return_value=True):
+        with _patch_save_ws(ws_root)[0], _patch_save_ws(ws_root)[1]:
+            assert try_handle_post_early(handler, parsed) is True
+    assert handler.send_response.call_args.args[0] == 404
+
+
+def test_overwrite_file_rejects_symlink_escape(ws_root):
+    outside = ws_root.parent / "outside-target.txt"
+    outside.write_text("outside", encoding="utf-8")
+    link = ws_root / "link.txt"
+    try:
+        link.symlink_to(outside)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+    handler = _multipart_handler({"path": "link.txt"}, b"new")
+    parsed = urlparse("/api/integration/workspace/file/overwrite")
+    with patch("integration.workspace.handlers.integration_enabled", return_value=True):
+        with _patch_save_ws(ws_root)[0], _patch_save_ws(ws_root)[1]:
+            assert try_handle_post_early(handler, parsed) is True
+    assert handler.send_response.call_args.args[0] == 400
+    assert outside.read_text(encoding="utf-8") == "outside"
+
+
+def test_overwrite_file_write_failure_is_chinese(ws_root):
+    handler = _multipart_handler({"path": "a.txt"}, b"new")
+    parsed = urlparse("/api/integration/workspace/file/overwrite")
+    with patch("integration.workspace.handlers.integration_enabled", return_value=True):
+        with patch("integration.workspace.handlers.overwrite_workspace_file", side_effect=OSError("disk full")):
+            assert try_handle_post_early(handler, parsed) is True
+    assert handler.send_response.call_args.args[0] == 500
+    assert _json_payload(handler)["error"] == "文件写入失败"
 
 
 def test_delete_missing_paths_400():

@@ -8,6 +8,8 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Added
 
+- **Integration workspace file overwrite** — 新增 `POST /api/integration/workspace/file/overwrite`，通过 multipart 的 `path` + `file` 覆盖已有 workspace 相对文件；外部绝对 Artifact 保持只读，成功响应仅返回 `ok`、`size` 与 `mtime_ns`。
+
 - **Runtime configuration API** — 新增 `GET /api/integration/config`，只读返回进程当前生效的 `BROWSER_PREVIEW_URL`，不暴露其它环境变量。
 
 - **External Session Manifest artifacts** — 成功工具输出或当前 turn 最后一条 assistant message 中经过验证的外部绝对路径可作为直接引用 Artifact 持久化，并继续通过既有 `GET /api/integration/workspace/file?path=...` 只读预览。源文件不移动、不复制、不哈希；预览仅允许精确已登记且当前通过无跟随 fd、安全路径策略的普通文件，失效时在 Manifest 中标记为 `expired`。

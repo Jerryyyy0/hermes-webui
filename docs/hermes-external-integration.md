@@ -10,6 +10,13 @@
 `api/routes.py` 仅保留 GET handler 的薄委派。该接口仅在 `HERMES_INTEGRATION=1`
 时启用。
 
+## Workspace file overwrite
+
+`integration/workspace/` 还提供 `POST /api/integration/workspace/file/overwrite`。
+该 multipart 接口在 `api/routes.py` 的 POST body 解析前通过 early hook 薄委派，
+仅覆盖 integration workspace 内已有的相对普通文件；绝对路径和外部 Manifest
+Artifact 继续保持只读。保存实现、路径安全和文件索引失效均由 integration 层负责。
+
 ## External Manifest Artifact References
 
 `integration/session_manifest/external_references/` 承载外部绝对路径 Artifact 的策略、安全打开、登记

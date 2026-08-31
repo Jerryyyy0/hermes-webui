@@ -12546,6 +12546,14 @@ def handle_post(handler, parsed) -> bool:
     except ImportError:
         pass
 
+    try:
+        from integration.workspace.handlers import try_handle_post_early as _workspace_try_post_early
+
+        if _workspace_try_post_early(handler, parsed) is True:
+            return True
+    except ImportError:
+        pass
+
     if parsed.path == "/api/tts":
         return _handle_tts(handler, parsed)
 

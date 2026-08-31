@@ -8,6 +8,8 @@ from pathlib import Path
 from urllib.parse import parse_qs
 
 from api.helpers import _sanitize_error, bad, j
+from api.config import MAX_UPLOAD_BYTES
+from api.upload import parse_multipart
 from integration.session_manifest.store import (
     get_artifact_paths_for_profile,
     get_artifact_profile_index,
@@ -24,6 +26,7 @@ from api.workspace import (
 from integration.config import integration_enabled
 from integration.workspace._root import integration_workspace_root, resolve_integration_rel
 from integration.workspace.file_index_cache import get_workspace_file_entries, invalidate_workspace_file_index
+from integration.workspace.save import overwrite_workspace_file
 
 _DEFAULT_PAGE = 1
 _DEFAULT_PAGE_SIZE = 500
@@ -247,6 +250,49 @@ def _handle_file_delete(handler, body) -> bool:
     return True
 
 
+def _handle_file_overwrite(handler) -> bool:
+    content_type = handler.headers.get("Content-Type", "")
+    content_length = handler.headers.get("Content-Length", 0)
+    try:
+        fields, files = parse_multipart(
+            handler.rfile,
+            content_type,
+            content_length,
+            max_bytes=MAX_UPLOAD_BYTES,
+        )
+    except ValueError as exc:
+        message = "文件过大" if "too large" in str(exc).lower() else "请求格式无效"
+        bad(handler, message, status=413 if message == "文件过大" else 400)
+        return True
+
+    path = fields.get("path")
+    if not isinstance(path, str) or not path.strip():
+        bad(handler, "path 为必填字段", status=400)
+        return True
+    if "file" not in files:
+        bad(handler, "file 为必填文件字段", status=400)
+        return True
+
+    _filename, data = files["file"]
+    try:
+        result = overwrite_workspace_file(path, data)
+    except FileNotFoundError:
+        bad(handler, "文件不存在", status=404)
+        return True
+    except IsADirectoryError:
+        bad(handler, "不能保存目录", status=400)
+        return True
+    except ValueError as exc:
+        bad(handler, str(exc), status=400)
+        return True
+    except (PermissionError, OSError):
+        bad(handler, "文件写入失败", status=500, exc_info=True)
+        return True
+
+    j(handler, {"ok": True, **result})
+    return True
+
+
 def try_handle_get(handler, parsed) -> bool:
     if not integration_enabled():
         return False
@@ -266,4 +312,12 @@ def try_handle_post(handler, parsed, body) -> bool:
     if parsed.path == "/api/integration/workspace/file/delete":
         return _handle_file_delete(handler, body)
 
+    return False
+
+
+def try_handle_post_early(handler, parsed) -> bool:
+    if not integration_enabled():
+        return False
+    if parsed.path == "/api/integration/workspace/file/overwrite":
+        return _handle_file_overwrite(handler)
     return False

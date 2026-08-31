@@ -329,6 +329,7 @@ auth-proxy 不可达时 WebUI 返回 `502` 且 `error` 为 `zhiling_logout_faile
 |--------|------|---------|
 | GET | `/api/integration/workspace/files` | 平铺文件索引；`page`（默认 1）、`page_size`（默认 500，上限 5000）；可选子树 `path`（默认 `.`）；`q`（basename 包含搜索）、`type`（扩展名过滤，如 `.md`）、`sort`（`path`/`size`/`mtime`/`ctime`，默认 `path`）、`order`（`asc`/`desc`，默认 `desc`）；可选 `profile`（传入时仅返回该 profile 的 manifest 成果文件；不传则返回全部文件并对成果附加 `profile`）；可选 `refresh=1`（跳过服务端内存索引，强制重扫磁盘） |
 | GET | `/api/integration/workspace/file` | 原始文件字节流（`path` 必填）；相对路径按 workspace 解析；绝对路径仅接受 Session Manifest 已登记、当前安全可读的外部 Artifact；`Content-Type` 按扩展名；不设 `Content-Disposition` |
+| POST | `/api/integration/workspace/file/overwrite` | 以 multipart 覆盖已有 workspace 文件（`path` 与 `file` 均必填）；仅允许 workspace 内相对路径，不创建新文件；成功返回 `ok`、写入字节数 `size` 和 `mtime_ns` |
 | POST | `/api/integration/workspace/file/delete` | 删除文件（`paths` 必填，字符串数组，至少 1 项）；仅删文件；响应 `deleted` / `failed`；全部失败 404 |
 
 翻页：递增 `page` 直到响应 `has_more` 为 `false`。条目含 `ext`、`mime`、`mtime_ns`、`ctime_ns`（优先 birthtime，否则为 `st_ctime` 纳秒；`stat` 失败时为 `null`）。manifest 成果文件（会话 write 工具产出）附加可选 `profile`（`session.profile`）；非成果文件无该字段。
@@ -342,6 +343,9 @@ curl -sS 'http://127.0.0.1:8787/api/integration/workspace/files?profile=ops'
 curl -sS 'http://127.0.0.1:8787/api/integration/workspace/files?q=report&type=.md&sort=mtime&order=desc'
 curl -sS 'http://127.0.0.1:8787/api/integration/workspace/file?path=README.md'
 curl -sS 'http://127.0.0.1:8787/api/integration/workspace/file?path=assets/logo.png' -o logo.png
+curl -sS -X POST 'http://127.0.0.1:8787/api/integration/workspace/file/overwrite' \
+  -F 'path=sessions/bbbad785a663/今日AI热点简报_2026-08-31_1404.md' \
+  -F 'file=@updated.md;type=text/markdown'
 curl -sS -X POST 'http://127.0.0.1:8787/api/integration/workspace/file/delete' \
   -H 'Content-Type: application/json' \
   -d '{"paths":["tmp/report.md","old.txt"]}'

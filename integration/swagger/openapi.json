@@ -1152,6 +1152,35 @@
         }
       }
     },
+    "/api/integration/workspace/file/overwrite": {
+      "post": {
+        "tags": ["IntegrationWorkspace"],
+        "summary": "覆盖已有 workspace 文件",
+        "description": "使用 multipart/form-data 覆盖 HERMES_WEBUI_DEFAULT_WORKSPACE 内已有的普通文件。path 为 workspace 相对路径，file 为文件内容；不创建新文件，绝对路径和外部 Manifest Artifact 不允许保存。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": { "$ref": "#/components/schemas/IntegrationWorkspaceFileOverwriteRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "文件已覆盖",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/IntegrationWorkspaceFileOverwriteResponse" }
+              }
+            }
+          },
+          "400": { "description": "请求格式、字段或路径无效" },
+          "404": { "description": "文件不存在或无权保存" },
+          "413": { "description": "文件过大" },
+          "500": { "description": "文件写入失败" }
+        }
+      }
+    },
     "/api/integration/workspace/file/delete": {
       "post": {
         "tags": ["IntegrationWorkspace"],
@@ -6914,6 +6943,30 @@
             "items": { "type": "string" },
             "description": "workspace 相对路径列表"
           }
+        }
+      },
+      "IntegrationWorkspaceFileOverwriteRequest": {
+        "type": "object",
+        "required": ["path", "file"],
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "workspace 相对路径"
+          },
+          "file": {
+            "type": "string",
+            "format": "binary",
+            "description": "待写入的文件内容"
+          }
+        }
+      },
+      "IntegrationWorkspaceFileOverwriteResponse": {
+        "type": "object",
+        "required": ["ok", "size", "mtime_ns"],
+        "properties": {
+          "ok": { "type": "boolean" },
+          "size": { "type": "integer", "minimum": 0 },
+          "mtime_ns": { "type": "integer", "format": "int64" }
         }
       },
       "IntegrationWorkspaceFileDeleteFailure": {
