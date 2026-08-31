@@ -1734,7 +1734,10 @@ def _append_missing_cron_response(
     return True
 
 
-def cron_execution_prefix_and_suffix(session) -> tuple[list, list] | None:
+def cron_execution_prefix_and_suffix(
+    session,
+    messages: list | None = None,
+) -> tuple[list, list] | None:
     """Split a growing cron sidecar without reordering later WebUI turns."""
     try:
         ended_at = float(getattr(session, "cron_execution_ended_at", None))
@@ -1743,7 +1746,12 @@ def cron_execution_prefix_and_suffix(session) -> tuple[list, list] | None:
     if not math.isfinite(ended_at):
         return None
 
-    messages = list(getattr(session, "messages", None) or [])
+    source_messages = (
+        getattr(session, "messages", None) or []
+        if messages is None
+        else messages
+    )
+    messages = list(source_messages)
     split_at = len(messages)
     for index, message in enumerate(messages):
         if not isinstance(message, dict):
@@ -1941,7 +1949,10 @@ def reconcile_cron_session_transcript(
     )
 
     merged_prefix = _stamp_cron_manifest_turn_keys(
-        normalize_cron_manifest_messages(merged_prefix)
+        normalize_cron_manifest_messages(
+            merged_prefix,
+            collapse_execution_replayed_users=split is not None,
+        )
     )
     changed = merged_prefix != sidecar_prefix
     if changed:
@@ -2310,7 +2321,12 @@ def _materialize_cron_session_found(
         normalize_cron_manifest_messages,
     )
 
-    msgs = _stamp_cron_manifest_turn_keys(normalize_cron_manifest_messages(msgs))
+    msgs = _stamp_cron_manifest_turn_keys(
+        normalize_cron_manifest_messages(
+            msgs,
+            collapse_execution_replayed_users=execution_ended_at is not None,
+        )
+    )
 
     title = (job or {}).get("name") or cli_title or f"Cron {str((job or {}).get('id') or '').strip()}"
     if workspace_binding is not None:

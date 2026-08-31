@@ -244,6 +244,50 @@ def test_materialize_persists_execution_boundary_from_state_db(cron_env, monkeyp
     assert Session.load(sid).cron_execution_ended_at == 1700000250.0
 
 
+def test_materialize_collapses_compaction_replayed_execution_prompt(cron_env, monkeypatch):
+    pytest.importorskip("cron.jobs")
+    sid = "cron_job1_1700000000"
+    prompt = "generate the scheduled briefing"
+    with closing(sqlite3.connect(str(cron_env["db"]))) as conn:
+        conn.execute("ALTER TABLE sessions ADD COLUMN ended_at REAL")
+        conn.execute(
+            "UPDATE sessions SET ended_at = ? WHERE id = ?",
+            (1700000250.0, sid),
+        )
+        conn.commit()
+    messages = [
+        {"role": "user", "content": prompt, "timestamp": 1700000001.0},
+        {
+            "role": "assistant",
+            "content": "compressed context",
+            "timestamp": 1700000100.0,
+            "_hermes_message_class": "context_anchor",
+            "_hermes_scaffold_kind": "compaction_summary",
+        },
+        {"role": "assistant", "content": "briefing ready", "timestamp": 1700000200.0},
+        {"role": "user", "content": prompt, "timestamp": 1700000201.0},
+    ]
+    monkeypatch.setattr("api.models.get_state_db_session_messages", lambda *_args, **_kwargs: messages)
+    with patch(
+        "api.profiles.list_profiles_api",
+        return_value=[{"name": "default", "path": str(cron_env["home"])}],
+    ):
+        from integration.crons.session_bridge import materialize_cron_session
+
+        assert materialize_cron_session(
+            {"id": "job1", "name": "Nightly", "profile": ""},
+            owner_profile="default",
+            execution_home=cron_env["home"],
+        ) == sid
+
+    from api.models import Session
+
+    materialized = Session.load(sid)
+    users = [message for message in materialized.messages if message.get("role") == "user"]
+    assert [message["content"] for message in users] == [prompt]
+    assert [message.get("_turn_key") for message in users] == ["turn:1"]
+
+
 def test_current_v1_materialize_uses_selected_state_db_cwd_without_transient_handoff(cron_env, monkeypatch):
     workspace = cron_env["workspace"] / "sessions" / "cron" / "default" / "cron_job1_1700000000"
     workspace.mkdir(parents=True)

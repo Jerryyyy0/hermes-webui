@@ -22,7 +22,87 @@
 
 该样本中 WebUI sidecar 的归一化回放仍得到两条相同真实用户消息，并为其连续分配 `turn:1`、`turn:2`。因此现象可在不访问网络、不运行真实任务的情况下稳定复现。
 
-### 1.2 当前责任边界
+### 1.2 当前定时任务会话的消息切分逻辑
+
+当前实现不是把 Cron 消息当作普通聊天数组直接展示，而是经过两次不同目的的切分：Agent 的**压缩/活跃消息切分**，以及 WebUI 的**一次 execution 与后续人工 follow-up 切分**。两者的边界不同，必须区分。
+
+#### A. Agent：canonical transcript 与 compaction active view
+
+Cron scheduler 只向 Agent 提交一次 assembled prompt，并以本轮 `cron_*` session ID 写入 `state.db.messages`。随后 Agent 运行工具链；当上下文过长时，压缩器会：
+
+1. 将可压缩的较早消息折叠为一条 durable `context_anchor/compaction_summary`；
+2. 保留最近真实 user，以确保下一次模型调用仍知道正在执行的任务；
+3. 保留与当前执行连续的 assistant/tool 尾部；
+4. 将被压缩的旧消息从 active view 排除，但不把它们作为 WebUI 的业务 turn 删除。
+
+因此，**“压缩后恢复的 user”在 Agent 侧不是一次新的 Cron 提交**，而是同一个初始 prompt 为模型上下文连续性留下的 active 副本。一次长任务可能压缩多次，也就可能生成多个同正文恢复副本。
+
+```text
+一次 scheduler 提交
+  P (初始 Cron prompt)
+  -> assistant/tool 链
+  -> [compaction_summary] + P (恢复副本) + assistant/tool 尾部
+  -> [compaction_summary] + P (再次恢复副本) + assistant/tool 尾部 + 最终答复
+```
+
+这里的 `P` 语义上仍是同一请求；Agent 需要它继续推理，但它不应在 WebUI 中变成多个用户发起的业务轮次。
+
+#### B. WebUI：execution prefix 与 follow-up suffix
+
+Cron execution 结束后，WebUI sidecar 可以被普通聊天继续使用。WebUI 以 durable 的 `cron_execution_ended_at` 作为唯一切分边界：
+
+```text
+messages[0 : split_at]  = execution prefix
+messages[split_at : ]   = WebUI follow-up suffix
+```
+
+`cron_execution_prefix_and_suffix(session)` 从消息数组开头扫描；第一条 `timestamp > cron_execution_ended_at` 的消息开始即为 suffix。它还会验证 suffix 中所有消息都确实晚于该边界；任何缺失、非数值或乱序边界都返回 `None`，使 reply prepare fail closed，而不是猜测切分。
+
+这条边界有两个重要后果：
+
+- execution prefix 是 Agent 所有权范围：其中只应投影一次初始 Cron 请求，以及它的工具活动和最终交付；
+- suffix 是 WebUI 所有权范围：其中的 user 消息是新的人工 follow-up，即使正文与 `P` 完全相同，也必须保留为新 turn。
+
+本次样本的重复恢复行时间戳仍不晚于 `cron_execution_ended_at`，所以它属于 prefix；它不是 suffix 中的人工重试。
+
+#### C. WebUI：物化、reconcile 与展示路径
+
+当前代码的实际数据流如下：
+
+```text
+Agent state.db active messages
+  -> materialize_cron_session()（首次创建 sidecar）
+  -> reconcile_cron_session_transcript()（已有 sidecar 时）
+       1. 切出 prefix / suffix
+       2. 只读取 execution profile 的 state.db 消息
+       3. 仅保留 timestamp <= cron_execution_ended_at 的 DB 行
+       4. 与 sidecar prefix 做 append-only merge
+       5. 保留原 suffix 不动
+       6. normalize_cron_manifest_messages(prefix)
+       7. _stamp_cron_manifest_turn_keys(prefix)
+  -> sidecar.messages = normalized_prefix + untouched_suffix
+```
+
+`settle_materialized_cron_session()` 在用户开始 follow-up 前再次执行同一 prefix/suffix 切分：先 reconcile prefix，再归一化、写入 sidecar、结算 prefix 中的 Manifest turn，最后把未改动 suffix 拼回。这样 Artifact 只应属于原 Cron execution，而 follow-up 使用下一个 turn key。
+
+`GET /api/session` 的 Cron 路径会触发 reconcile；`GET /api/session/manifest` 则为只读展示路径，它会合并 sidecar 与 `state.db`，在已有稳定 key 的条件下调用 Cron normalize。Manifest GET 本身不允许写 sidecar 或 Agent 数据。
+
+#### D. 本次重复如何穿透切分
+
+当前 normalize 先移除已知 max-iteration 内部请求，并可调整“anchor 后只剩一条恢复 user”的顺序；随后为每条 `_is_real_user_message()` 分配连续 `_turn_key`。它没有 execution-prefix 内的“compaction 恢复副本”语义，因此结果为：
+
+```text
+prefix（实际样本的可见投影）
+  P                         -> turn:1
+  context_anchor            -> 不占用 turn
+  assistant/tool 尾部        -> 归属 turn:1
+  P（compaction 恢复副本）   -> turn:2  ← 错误的业务切分
+  最终 assistant             -> 归属 turn:2 / 产生错误的后续结算风险
+```
+
+问题不在 prefix/suffix 边界本身，而在 prefix 内缺少对“跨 compaction anchor 的同一初始 prompt 恢复副本”的投影折叠。第 3 节的修复只补这个缺口，绝不跨越 `cron_execution_ended_at` 修改 suffix。
+
+### 1.3 当前责任边界
 
 ```text
 Cron scheduler
@@ -37,7 +117,7 @@ Agent 压缩器的 `_ensure_last_user_message_in_tail()` 有意保护最近真�
 
 问题位于 WebUI：`normalize_cron_manifest_messages()` 当前能识别 context anchor、最大工具轮次总结请求，以及“压缩后只剩一个真实 user”时的顺序修复；但它明确保留多个真实 user。于是同一 Cron execution 内、跨 `compaction_summary` 恢复的相同 prompt 被误认为两个独立业务 turn。
 
-### 1.3 已有修复为何未覆盖
+### 1.4 已有修复为何未覆盖
 
 已有 Cron 归一化修复解决的是：context anchor 后只有一条恢复 user 时，恢复 user 被落在 assistant/tool 尾部之后的顺序问题。它的保护条件要求 transcript 只有一个真实 user，以避免把多轮对话或真正 follow-up 当作重复。
 

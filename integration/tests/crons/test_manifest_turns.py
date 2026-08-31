@@ -81,6 +81,96 @@ def test_normalize_cron_manifest_messages_moves_restored_user_before_agent_tail(
     ]
 
 
+def test_normalize_cron_manifest_messages_collapses_compaction_replayed_execution_prompt():
+    """One Cron execution prompt remains one visible/settled turn after compaction."""
+    from integration.crons.hooks import _stamp_cron_manifest_turn_keys
+    from integration.session_manifest.manifest import _message_turns
+
+    prompt = "generate the scheduled briefing"
+    messages = [
+        {"role": "user", "content": prompt, "timestamp": 10.0},
+        {
+            "role": "assistant",
+            "content": "compressed context",
+            "timestamp": 20.0,
+            "_hermes_message_class": "context_anchor",
+            "_hermes_scaffold_kind": "compaction_summary",
+        },
+        {
+            "role": "assistant",
+            "content": "",
+            "timestamp": 21.0,
+            "tool_calls": [{"id": "call-1", "function": {"name": "write_file"}}],
+        },
+        {"role": "tool", "tool_call_id": "call-1", "content": "ok", "timestamp": 22.0},
+        {"role": "assistant", "content": "briefing ready", "timestamp": 23.0},
+        # This is not a second user request: Agent compaction restored the
+        # initial Cron prompt to preserve the active task for its next call.
+        {"role": "user", "content": prompt, "timestamp": 20.000001},
+    ]
+
+    normalized = _stamp_cron_manifest_turn_keys(
+        normalize_cron_manifest_messages(
+            messages,
+            collapse_execution_replayed_users=True,
+        )
+    )
+
+    users = [message for message in normalized if message.get("role") == "user"]
+    assert [message["content"] for message in users] == [prompt]
+    assert [message.get("_turn_key") for message in users] == ["turn:1"]
+    assert [turn["turn_key"] for turn in _message_turns(normalized)] == ["turn:1"]
+    assert [message["content"] for message in normalized if message.get("role") == "assistant"][-1] == "briefing ready"
+
+
+def test_normalize_cron_manifest_messages_collapses_prompt_replayed_across_multiple_compactions():
+    """Each recovery of the same single Cron prompt remains one execution turn."""
+    prompt = "generate the scheduled briefing"
+    messages = [
+        {
+            "role": "user",
+            "content": "first compacted context",
+            "_hermes_message_class": "context_anchor",
+            "_hermes_scaffold_kind": "compaction_summary",
+        },
+        {"role": "user", "content": prompt},
+        {"role": "assistant", "content": "first partial result"},
+        {
+            "role": "user",
+            "content": "second compacted context",
+            "_hermes_message_class": "context_anchor",
+            "_hermes_scaffold_kind": "compaction_summary",
+        },
+        {"role": "user", "content": prompt},
+        {"role": "assistant", "content": "final result"},
+    ]
+
+    normalized = normalize_cron_manifest_messages(
+        messages,
+        collapse_execution_replayed_users=True,
+    )
+
+    assert [message["content"] for message in normalized if message.get("role") == "user"] == [
+        "first compacted context",
+        prompt,
+        "second compacted context",
+    ]
+
+
+def test_normalize_cron_manifest_messages_keeps_matching_users_without_compaction_anchor():
+    """Equal text alone is not proof that one user turn is a replay."""
+    messages = [
+        {"role": "user", "content": "repeat this request"},
+        {"role": "assistant", "content": "first answer"},
+        {"role": "user", "content": "repeat this request"},
+    ]
+
+    assert normalize_cron_manifest_messages(
+        messages,
+        collapse_execution_replayed_users=True,
+    ) == messages
+
+
 def test_normalize_cron_manifest_messages_preserves_multiple_real_turns():
     messages = [
         {
@@ -139,6 +229,44 @@ def test_manifest_get_reuses_normalized_cron_view(monkeypatch):
     ]
     assert messages[0]["_turn_key"] == "turn:1"
     assert messages[-1]["content"] == "Created `report.html`."
+
+
+def test_manifest_get_collapses_replayed_execution_prompt_but_keeps_same_text_followup(monkeypatch):
+    import api.models as models
+    from integration.session_manifest.manifest import _load_display_messages
+
+    prompt = "generate the scheduled briefing"
+    session = SimpleNamespace(
+        session_id="cron_job_20260713_120001",
+        source_tag="cron",
+        profile="abc",
+        cron_execution_ended_at=100.0,
+        truncation_watermark=None,
+        messages=[
+            {"role": "user", "content": prompt, "timestamp": 10.0, "_turn_key": "turn:1"},
+            {
+                "role": "assistant",
+                "content": "compressed context",
+                "timestamp": 20.0,
+                "_hermes_message_class": "context_anchor",
+                "_hermes_scaffold_kind": "compaction_summary",
+            },
+            {"role": "assistant", "content": "briefing ready", "timestamp": 90.0},
+            {"role": "user", "content": prompt, "timestamp": 95.0},
+            {"role": "user", "content": prompt, "timestamp": 110.0, "_turn_key": "turn:2"},
+            {"role": "assistant", "content": "follow-up answer", "timestamp": 120.0},
+        ],
+    )
+    monkeypatch.setattr(models, "get_state_db_session_messages", lambda *args, **kwargs: [])
+
+    messages = _load_display_messages(session)
+
+    users = [message for message in messages if message.get("role") == "user"]
+    assert [message.get("_turn_key") for message in users] == ["turn:1", "turn:2"]
+    assert [message["content"] for message in messages[-2:]] == [
+        prompt,
+        "follow-up answer",
+    ]
 
 
 def test_manifest_get_does_not_change_non_cron_messages(monkeypatch):
@@ -294,6 +422,62 @@ def test_prepare_cron_session_for_reply_stamps_prefix_before_followup(monkeypatc
         for message in session.messages
         if message.get("role") == "user"
     ] == ["turn:1", "turn:2"]
+
+
+def test_prepare_cron_session_for_reply_collapses_replayed_prefix_but_preserves_same_text_followup(monkeypatch):
+    """Only the Agent-owned prefix may fold a compaction-restored prompt."""
+    import api.models as models
+    import api.streaming as streaming
+    import integration.session_manifest.store as manifest_store
+
+    prompt = "generate the scheduled briefing"
+    persisted: list[str] = []
+    session = SimpleNamespace(
+        session_id="cron_job_20260713_120099",
+        source_tag="cron",
+        profile="default",
+        cron_execution_ended_at=100.0,
+        messages=[
+            {"role": "user", "content": prompt, "timestamp": 10.0},
+            {
+                "role": "assistant",
+                "content": "compressed context",
+                "timestamp": 20.0,
+                "_hermes_message_class": "context_anchor",
+                "_hermes_scaffold_kind": "compaction_summary",
+            },
+            {"role": "assistant", "content": "working", "timestamp": 30.0},
+            {"role": "tool", "content": "ok", "timestamp": 40.0},
+            {"role": "user", "content": prompt, "timestamp": 50.0},
+            {"role": "assistant", "content": "briefing ready", "timestamp": 90.0},
+            # This same text is a genuine human follow-up after execution end.
+            {"role": "user", "content": prompt, "timestamp": 110.0, "_turn_key": "turn:2"},
+            {"role": "assistant", "content": "follow-up answer", "timestamp": 120.0},
+        ],
+        save=lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(models, "get_state_db_session_messages", lambda *args, **kwargs: [])
+    monkeypatch.setattr(manifest_store, "load_manifest_decided_turn_keys", lambda _session: set())
+    monkeypatch.setattr(
+        streaming,
+        "_persist_turn_artifact_paths",
+        lambda _session, turn_key: persisted.append(turn_key) or {
+            "status": "persisted", "turn_key": turn_key,
+        },
+    )
+
+    prepared = prepare_cron_session_for_reply(session)
+
+    assert prepared.ready is True
+    assert prepared.next_turn_key == "turn:3"
+    assert persisted == ["turn:1"]
+    users = [message for message in session.messages if message.get("role") == "user"]
+    assert [message["content"] for message in users] == [prompt, prompt]
+    assert [message.get("_turn_key") for message in users] == ["turn:1", "turn:2"]
+    assert [message["content"] for message in session.messages[-2:]] == [
+        prompt,
+        "follow-up answer",
+    ]
 
 
 def test_prepare_cron_session_for_reply_backfills_legacy_execution_boundary(monkeypatch):

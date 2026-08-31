@@ -101,10 +101,43 @@ def _move_restored_cron_user_before_agent_tail(messages: list) -> list:
     return [source[0], source[user_index], *source[1:user_index], *source[user_index + 1:]]
 
 
+def _collapse_compaction_replayed_execution_users(messages: list) -> list:
+    """Hide only a compaction-restored copy of an earlier Cron execution prompt.
+
+    Callers must pass one verified execution prefix, never a whole growing
+    Cron conversation. A later WebUI follow-up can intentionally repeat the
+    original prompt and belongs to a separate turn.
+    """
+    source = list(messages or [])
+    retained_real_user_prompts: set[str] = set()
+    saw_compaction_anchor = False
+    collapsed: list = []
+    for message in source:
+        if (
+            isinstance(message, dict)
+            and is_context_anchor(message)
+            and message.get("_hermes_scaffold_kind") == "compaction_summary"
+        ):
+            saw_compaction_anchor = True
+            collapsed.append(message)
+            continue
+        if not _is_real_user_message(message):
+            collapsed.append(message)
+            continue
+        text = _normalized_message_text(message)
+        if saw_compaction_anchor and text and text in retained_real_user_prompts:
+            continue
+        collapsed.append(message)
+        if text:
+            retained_real_user_prompts.add(text)
+    return collapsed
+
+
 def normalize_cron_manifest_messages(
     messages: list,
     *,
     require_stable_real_turn: bool = False,
+    collapse_execution_replayed_users: bool = False,
 ) -> list:
     """Return the cron transcript view used by manifest persistence and GET.
 
@@ -112,7 +145,8 @@ def normalize_cron_manifest_messages(
     It drives a final summary but is not a new cron invocation, so it must not
     split the manifest turn. Historical transcripts are left untouched on GET:
     the read path opts in only when a real user row already has a stable key and
-    recognized internal rows have never been assigned one.
+    recognized internal rows have never been assigned one. The replay-collapse
+    option is reserved for a verified, already-ended Cron execution prefix.
     """
     source = list(messages or [])
     internal_indexes = {
@@ -142,6 +176,8 @@ def normalize_cron_manifest_messages(
             for index, message in enumerate(source)
             if index not in internal_indexes
         ]
+    if collapse_execution_replayed_users:
+        source = _collapse_compaction_replayed_execution_users(source)
     return _move_restored_cron_user_before_agent_tail(source)
 
 
@@ -256,7 +292,10 @@ def settle_materialized_cron_session(session) -> CronManifestSettlement:
         for message in prefix
         if isinstance(message, dict)
     ]
-    normalized = normalize_cron_manifest_messages(prefix)
+    normalized = normalize_cron_manifest_messages(
+        prefix,
+        collapse_execution_replayed_users=True,
+    )
     stamped = _stamp_cron_manifest_turn_keys(normalized)
     valid, _prefix_next_turn_key = _validate_contiguous_turn_keys(stamped)
     if not valid:

@@ -3237,12 +3237,25 @@ def _load_display_messages(session) -> list:
     )
     if str(getattr(session, 'source_tag', '') or '').strip().lower() == 'cron':
         try:
+            from integration.crons.session_bridge import cron_execution_prefix_and_suffix
             from integration.crons.hooks import normalize_cron_manifest_messages
 
-            messages = normalize_cron_manifest_messages(
-                messages,
-                require_stable_real_turn=True,
-            )
+            split = cron_execution_prefix_and_suffix(session, messages)
+            if split is None:
+                messages = normalize_cron_manifest_messages(
+                    messages,
+                    require_stable_real_turn=True,
+                )
+            else:
+                prefix, suffix = split
+                messages = [
+                    *normalize_cron_manifest_messages(
+                        prefix,
+                        require_stable_real_turn=True,
+                        collapse_execution_replayed_users=True,
+                    ),
+                    *suffix,
+                ]
         except Exception:
             logger.debug("failed to normalize cron manifest messages", exc_info=True)
     return messages
