@@ -18309,6 +18309,7 @@ def _handle_cron_history(handler, parsed):
                     owner_profile=profile,
                     run=run,
                     fallback_output=run.pop("_fallback_output", None),
+                    history_read=True,
                 )
         except Exception:
             logger.debug("Failed to materialize cron history %s", job_id, exc_info=True)

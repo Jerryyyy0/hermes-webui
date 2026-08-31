@@ -2087,6 +2087,66 @@ def _settle_materialized_cron_session(session: Any) -> dict[str, object]:
     }
 
 
+def _cron_history_sidecar_is_complete(
+    sidecar: Any,
+    *,
+    job: dict,
+    target_profile: str,
+    execution_profile: str,
+    run: dict[str, Any],
+) -> bool:
+    """Return whether history can safely reuse an existing sidecar.
+
+    History is a read path.  This deliberately proves only persisted metadata
+    that is cheap and stable; uncertainty falls back to the existing full
+    materialization path, which can reconcile Agent messages and Manifest
+    decisions.
+    """
+    if sidecar is None:
+        return False
+    if str(getattr(sidecar, "source_tag", "") or "").strip() != "cron":
+        return False
+    if _normalize_profile_name(getattr(sidecar, "profile", None) or "") != target_profile:
+        return False
+    if _normalize_profile_name(getattr(sidecar, "cron_execution_profile", None) or "") != execution_profile:
+        return False
+    if getattr(sidecar, "is_cli_session", True) is not False:
+        return False
+    if not getattr(sidecar, "project_id", None):
+        return False
+    model = str(getattr(sidecar, "model", "") or "").strip().lower()
+    if not model or model in {"unknown", "none", "null", "n/a"}:
+        return False
+    if getattr(sidecar, "active_stream_id", None) or getattr(sidecar, "pending_user_message", None):
+        return False
+
+    message_count = getattr(sidecar, "_metadata_message_count", None)
+    if not isinstance(message_count, int) or message_count <= 0:
+        return False
+
+    try:
+        boundary = float(getattr(sidecar, "cron_execution_ended_at", None))
+        run_ended_at = float((run or {}).get("ended_at"))
+    except (TypeError, ValueError):
+        return False
+    if not math.isfinite(boundary) or not math.isfinite(run_ended_at):
+        return False
+    if abs(boundary - run_ended_at) > 1.0:
+        return False
+
+    workspace_state = str(getattr(sidecar, "workspace_state", "") or "").strip()
+    if isinstance((job or {}).get("workspace_policy"), dict):
+        if workspace_state != "ready":
+            return False
+    elif workspace_state not in {"ready", "legacy_shared"}:
+        return False
+
+    end_reason = str((run or {}).get("end_reason") or "").strip().lower()
+    if ("error" in end_reason or "fail" in end_reason) and not getattr(sidecar, "last_error_at", None):
+        return False
+    return True
+
+
 def _materialize_and_settle_cron_session_found(
     job: dict,
     found: tuple[str, str, float | None, str],
@@ -2593,6 +2653,7 @@ def materialize_cron_session_run(
     owner_profile: str,
     run: dict[str, Any],
     fallback_output: str | None = None,
+    history_read: bool = False,
 ) -> str | None:
     """Materialize one already-selected database run for WebUI session viewing."""
     sid = str((run or {}).get("session_id") or "").strip()
@@ -2607,6 +2668,22 @@ def materialize_cron_session_run(
     )
     is_v1_job = isinstance((job or {}).get("workspace_policy"), dict)
     execution_profile = _execution_profile_name(job) or owner
+    target_profile = _target_profile_for_job(job, owner)
+    if history_read:
+        try:
+            from api.models import Session
+
+            sidecar = Session.load_metadata_only(sid)
+            if _cron_history_sidecar_is_complete(
+                sidecar,
+                job=job,
+                target_profile=target_profile,
+                execution_profile=execution_profile,
+                run=run,
+            ):
+                return sid
+        except Exception:
+            logger.debug("cron history sidecar check failed for session_id=%s", sid, exc_info=True)
     try:
         profile_home = Path(_profile_home_for_name(execution_profile))
     except Exception:
@@ -2638,7 +2715,7 @@ def materialize_cron_session_run(
     return _materialize_and_settle_cron_session_found(
         job,
         found,
-        target_profile=_target_profile_for_job(job, owner),
+        target_profile=target_profile,
         execution_profile=execution_profile,
         fallback_output=fallback_output,
         run_mtime=(run or {}).get("ended_at") or (run or {}).get("started_at"),

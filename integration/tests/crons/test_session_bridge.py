@@ -103,6 +103,127 @@ def test_materialized_cron_session_ids_for_runs_maps_existing_sidecar(cron_env):
     }
 
 
+def test_history_read_skips_full_materialization_for_complete_sidecar(cron_env, monkeypatch):
+    from api.models import Session
+    from integration.crons import session_bridge
+
+    sid = "cron_job1_1700000100"
+    Session(
+        session_id=sid,
+        title="Cron run",
+        profile="default",
+        source_tag="cron",
+        is_cli_session=False,
+        workspace=str(cron_env["workspace"]),
+        workspace_mode="managed",
+        workspace_state="ready",
+        model="model",
+        project_id="cron-project",
+        cron_execution_profile="default",
+        cron_execution_ended_at=1700000105.0,
+        messages=[
+            {"role": "user", "content": "run", "timestamp": 1700000100.0},
+            {"role": "assistant", "content": "done", "timestamp": 1700000105.0},
+        ],
+    ).save()
+    sidecar_path = Session.load(sid).path
+    before = sidecar_path.read_bytes()
+
+    monkeypatch.setattr(session_bridge, "_profile_home_for_name", lambda _profile: cron_env["home"])
+    monkeypatch.setattr(
+        session_bridge,
+        "_materialize_and_settle_cron_session_found",
+        lambda *_args, **_kwargs: pytest.fail("complete history sidecar entered full materialization"),
+    )
+
+    assert session_bridge.materialize_cron_session_run(
+        {"id": "job1", "name": "Nightly", "profile": "default"},
+        owner_profile="default",
+        run={"session_id": sid, "started_at": 1700000100.0, "ended_at": 1700000105.0},
+        history_read=True,
+    ) == sid
+    assert sidecar_path.read_bytes() == before
+
+
+def test_history_read_falls_back_when_sidecar_boundary_is_missing(cron_env, monkeypatch):
+    from api.models import Session
+    from integration.crons import session_bridge
+
+    sid = "cron_job1_1700000200"
+    Session(
+        session_id=sid,
+        title="Cron run",
+        profile="default",
+        source_tag="cron",
+        is_cli_session=False,
+        workspace=str(cron_env["workspace"]),
+        workspace_mode="managed",
+        workspace_state="ready",
+        model="model",
+        cron_execution_profile="default",
+        messages=[{"role": "user", "content": "run", "timestamp": 1700000200.0}],
+    ).save()
+
+    calls = []
+    monkeypatch.setattr(session_bridge, "_profile_home_for_name", lambda _profile: cron_env["home"])
+    monkeypatch.setattr(
+        session_bridge,
+        "_materialize_and_settle_cron_session_found",
+        lambda *_args, **_kwargs: calls.append(True) or sid,
+    )
+
+    assert session_bridge.materialize_cron_session_run(
+        {"id": "job1", "name": "Nightly", "profile": "default"},
+        owner_profile="default",
+        run={"session_id": sid, "started_at": 1700000200.0, "ended_at": 1700000205.0},
+        history_read=True,
+    ) == sid
+    assert calls == [True]
+
+
+def test_history_read_falls_back_for_failed_sidecar_without_error_marker(cron_env, monkeypatch):
+    from api.models import Session
+    from integration.crons import session_bridge
+
+    sid = "cron_job1_1700000300"
+    Session(
+        session_id=sid,
+        title="Cron run",
+        profile="default",
+        source_tag="cron",
+        is_cli_session=False,
+        project_id="cron-project",
+        workspace=str(cron_env["workspace"]),
+        workspace_mode="managed",
+        workspace_state="ready",
+        model="model",
+        cron_execution_profile="default",
+        cron_execution_ended_at=1700000305.0,
+        messages=[{"role": "user", "content": "run", "timestamp": 1700000300.0}],
+    ).save()
+
+    calls = []
+    monkeypatch.setattr(session_bridge, "_profile_home_for_name", lambda _profile: cron_env["home"])
+    monkeypatch.setattr(
+        session_bridge,
+        "_materialize_and_settle_cron_session_found",
+        lambda *_args, **_kwargs: calls.append(True) or sid,
+    )
+
+    session_bridge.materialize_cron_session_run(
+        {"id": "job1", "name": "Nightly", "profile": "default"},
+        owner_profile="default",
+        run={
+            "session_id": sid,
+            "started_at": 1700000300.0,
+            "ended_at": 1700000305.0,
+            "end_reason": "cron_error",
+        },
+        history_read=True,
+    )
+    assert calls == [True]
+
+
 def test_hide_sidebar_cron_sessions_always_hidden(monkeypatch):
     monkeypatch.setenv("HERMES_INTEGRATION", "1")
     from api.models import _hide_from_default_sidebar
