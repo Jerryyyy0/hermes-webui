@@ -66,6 +66,110 @@ def test_integration_create_uses_single_profile_for_owner_and_execution(handler_
     assert payload["profile"] == "ops"
 
 
+def test_integration_create_persists_idle_window_and_returns_it(handler_env):
+    from cron.jobs import list_jobs
+    from api.profiles import cron_profile_context_for_home
+    from integration.crons.handlers import _handle_create
+
+    handler = MagicMock()
+    idle_window = {
+        "start_schedule": {"kind": "cron", "expr": "0 22 * * *", "display": "每天 22:00"},
+        "end_schedule": {"kind": "cron", "expr": "0 6 * * *", "display": "每天 06:00"},
+    }
+
+    _handle_create(
+        handler,
+        {
+            "profile": "ops",
+            "schedule": "every 1h",
+            "prompt": "ping",
+            "idle_window": idle_window,
+        },
+    )
+
+    with cron_profile_context_for_home(handler_env):
+        jobs = list_jobs(include_disabled=True)
+    assert jobs[0]["idle_window"] == idle_window
+    payload = json.loads(handler.wfile.write.call_args.args[0].decode("utf-8"))
+    assert payload["job"]["idle_window"] == idle_window
+
+
+def test_integration_create_defaults_idle_window_to_null(handler_env):
+    from cron.jobs import list_jobs
+    from api.profiles import cron_profile_context_for_home
+    from integration.crons.handlers import _handle_create
+
+    handler = MagicMock()
+    _handle_create(handler, {"profile": "ops", "schedule": "every 1h", "prompt": "ping"})
+
+    with cron_profile_context_for_home(handler_env):
+        jobs = list_jobs(include_disabled=True)
+    assert jobs[0]["idle_window"] is None
+    payload = json.loads(handler.wfile.write.call_args.args[0].decode("utf-8"))
+    assert payload["job"]["idle_window"] is None
+
+
+@pytest.mark.parametrize(
+    "idle_window",
+    [
+        {"start_schedule": {"kind": "cron", "expr": "0 22 * * *"}},
+        {
+            "start_schedule": {"kind": "once", "run_at": "2026-09-01T22:00:00+08:00"},
+            "end_schedule": {"kind": "cron", "expr": "0 6 * * *"},
+        },
+    ],
+)
+def test_integration_create_rejects_invalid_idle_window(handler_env, idle_window):
+    from cron.jobs import list_jobs
+    from api.profiles import cron_profile_context_for_home
+    from integration.crons.handlers import _handle_create
+
+    handler = MagicMock()
+    _handle_create(
+        handler,
+        {
+            "profile": "ops",
+            "schedule": "every 1h",
+            "prompt": "ping",
+            "idle_window": idle_window,
+        },
+    )
+
+    handler.send_response.assert_called_with(400)
+    with cron_profile_context_for_home(handler_env):
+        assert list_jobs(include_disabled=True) == []
+
+
+def test_integration_update_replaces_and_clears_idle_window(handler_env):
+    from integration.crons.handlers import _handle_update
+
+    handler = MagicMock()
+    idle_window = {
+        "start_schedule": {"kind": "cron", "expr": "0 22 * * *", "display": "每天 22:00"},
+        "end_schedule": {"kind": "cron", "expr": "0 6 * * *", "display": "每天 06:00"},
+    }
+    with patch(
+        "cron.jobs.update_job",
+        return_value={"id": "job1", "idle_window": idle_window},
+    ) as update_job:
+        _handle_update(
+            handler,
+            {"profile": "ops", "job_id": "job1", "idle_window": idle_window},
+        )
+    assert update_job.call_args.args == ("job1", {"profile": "ops", "idle_window": idle_window})
+
+    handler = MagicMock()
+    with patch(
+        "cron.jobs.update_job",
+        return_value={"id": "job1", "idle_window": None},
+    ) as update_job:
+        _handle_update(
+            handler,
+            {"profile": "ops", "job_id": "job1", "idle_window": None},
+        )
+    assert update_job.call_args.args == ("job1", {"profile": "ops", "idle_window": None})
+
+
 def test_integration_create_allows_missing_model_like_core_api(handler_env):
     from cron.jobs import list_jobs
     from api.profiles import cron_profile_context_for_home

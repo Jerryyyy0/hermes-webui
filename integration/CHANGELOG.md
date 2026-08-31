@@ -8,6 +8,8 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Added
 
+- **Cron Hub 闲时时段元数据** — `POST /api/integration/crons/create` 与 `update` 支持保存 `idle_window`（`start_schedule` / `end_schedule`，复用 `once` 或 `cron` schedule 形状），Cron 查询统一返回该字段；它只作为任务扩展元数据，不影响 Hermes Agent 的自动或手动调度。
+
 - **Integration workspace file overwrite** — 新增 `POST /api/integration/workspace/file/overwrite`，通过 multipart 的 `path` + `file` 覆盖已有 workspace 相对文件；外部绝对 Artifact 保持只读，成功响应仅返回 `ok`、`size` 与 `mtime_ns`。
 
 - **Runtime configuration API** — 新增 `GET /api/integration/config`，只读返回进程当前生效的 `BROWSER_PREVIEW_URL`，不暴露其它环境变量。

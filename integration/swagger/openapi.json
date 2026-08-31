@@ -991,6 +991,17 @@
                   "prompt": { "type": "string" },
                   "deliver": { "type": "string" },
                   "skills": { "type": "array", "items": { "type": "string" }, "description": "创建时附加的技能名列表" },
+                  "idle_window": {
+                    "type": "object",
+                    "nullable": true,
+                    "required": ["start_schedule", "end_schedule"],
+                    "additionalProperties": false,
+                    "description": "闲时时段信息；null 或省略表示未配置。该字段仅保存和查询，不影响 Cron 调度。",
+                    "properties": {
+                      "start_schedule": { "$ref": "#/components/schemas/IdleWindowSchedule" },
+                      "end_schedule": { "$ref": "#/components/schemas/IdleWindowSchedule" }
+                    }
+                  },
                   "workspace_policy": {
                     "type": "object",
                     "description": "可省略；服务端会保存默认 managed policy。worktree 必须提供已登记的 Git base_workspace。",
@@ -1023,6 +1034,17 @@
                 "properties": {
                   "profile": { "type": "string", "description": "任务所在 Profile（存储与执行相同）" },
                   "job_id": { "type": "string" },
+                  "idle_window": {
+                    "type": "object",
+                    "nullable": true,
+                    "required": ["start_schedule", "end_schedule"],
+                    "additionalProperties": false,
+                    "description": "完整替换闲时时段信息；null 清除，省略保持原值。该字段仅保存和查询，不影响 Cron 调度。",
+                    "properties": {
+                      "start_schedule": { "$ref": "#/components/schemas/IdleWindowSchedule" },
+                      "end_schedule": { "$ref": "#/components/schemas/IdleWindowSchedule" }
+                    }
+                  },
                   "workspace_policy": {
                     "type": "object",
                     "description": "仅显式迁移 legacy job 时提供；必须是完整的 V1 policy。",
@@ -5907,6 +5929,18 @@
         "type": "object",
         "additionalProperties": true
       },
+      "IdleWindowSchedule": {
+        "type": "object",
+        "description": "闲时时段的一端；复用 Cron schedule 形状。仅支持 once 或 cron，display 仅用于展示。",
+        "required": ["kind"],
+        "properties": {
+          "kind": { "type": "string", "enum": ["once", "cron"] },
+          "run_at": { "type": "string", "format": "date-time", "description": "kind=once 时必填，必须包含时区偏移" },
+          "expr": { "type": "string", "description": "kind=cron 时必填" },
+          "display": { "type": "string", "description": "可选展示文本；省略时服务端使用 run_at 或 expr" }
+        },
+        "additionalProperties": false
+      },
       "CronJob": {
         "type": "object",
         "description": "Hermes cron.jobs 持久化字段 + WebUI API 规范化字段。schedule 可为标准 cron 或 Hermes 自然语言（如 every 1h）。",
@@ -5921,6 +5955,17 @@
           "skills":              { "type": "array", "items": { "type": "string" } },
           "model":               { "type": "string", "nullable": true },
           "profile":             { "type": "string", "nullable": true, "description": "执行 Profile 名称；null 表示沿用服务器默认" },
+          "idle_window": {
+            "type": "object",
+            "nullable": true,
+            "required": ["start_schedule", "end_schedule"],
+            "additionalProperties": false,
+            "description": "Cron Hub 闲时时段元数据；null 表示未配置，仅保存和查询，不影响 Cron 调度。",
+            "properties": {
+              "start_schedule": { "$ref": "#/components/schemas/IdleWindowSchedule" },
+              "end_schedule": { "$ref": "#/components/schemas/IdleWindowSchedule" }
+            }
+          },
           "toast_notifications": { "type": "boolean", "description": "WebUI 完成 Toast；缺省 true" },
           "execution_bucket":     { "type": "string", "enum": ["running", "waiting", "completed", "error"], "description": "前端展示用执行大类：running=执行中，waiting=待执行/停用，completed=一次性任务已完成且不会自动再次调度，error=异常或中断" },
           "execution_state":      { "type": "string", "enum": ["manual_running", "scheduled_running", "once_completed", "once_interrupted", "last_run_error", "schedule_error", "scheduled_waiting", "last_success_waiting", "last_unknown_waiting", "paused_waiting", "disabled_waiting", "not_yet_run_waiting"], "description": "执行小类；once_completed 保留已完成的一次性任务，once_interrupted 表示执行 lease 过期后为避免重复副作用而未自动重试" },

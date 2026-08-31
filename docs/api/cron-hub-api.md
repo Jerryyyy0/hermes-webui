@@ -340,6 +340,18 @@ WebUI 后仍可保留未读游标。
   "prompt": "Summarize yesterday's work",
   "deliver": "local",
   "skills": ["daily-summary"],
+  "idle_window": {
+    "start_schedule": {
+      "kind": "cron",
+      "expr": "0 22 * * *",
+      "display": "每天 22:00"
+    },
+    "end_schedule": {
+      "kind": "cron",
+      "expr": "0 6 * * *",
+      "display": "每天 06:00"
+    }
+  },
   "toast_notifications": true
 }
 ```
@@ -354,7 +366,25 @@ WebUI 后仍可保留未读游标。
 | `name` | 否 | 任务名称 |
 | `deliver` | 否 | 投递方式，默认 `local` |
 | `skills` | 否 | 创建时附加的技能名列表，来自所选 Profile |
+| `idle_window` | 否 | 闲时起止信息：必须同时提供 `start_schedule`、`end_schedule`。两个对象复用 Cron schedule 形状，第一版支持 `once`（`run_at`）或 `cron`（`expr`），且两端 `kind` 必须相同。省略时响应返回 `null`；仅保存和查询，不影响 Cron 调度。 |
 | `toast_notifications` | 否 | 是否显示完成 toast，默认 true |
+
+一次性闲时窗口示例：
+
+```json
+{
+  "idle_window": {
+    "start_schedule": {
+      "kind": "once",
+      "run_at": "2026-09-01T22:00:00+08:00"
+    },
+    "end_schedule": {
+      "kind": "once",
+      "run_at": "2026-09-02T06:00:00+08:00"
+    }
+  }
+}
+```
 
 成功响应：
 
@@ -366,7 +396,19 @@ WebUI 后仍可保留未读游标。
     "id": "daily_report",
     "name": "Daily Report",
     "schedule": "0 9 * * *",
-    "profile": "research"
+    "profile": "research",
+    "idle_window": {
+      "start_schedule": {
+        "kind": "cron",
+        "expr": "0 22 * * *",
+        "display": "每天 22:00"
+      },
+      "end_schedule": {
+        "kind": "cron",
+        "expr": "0 6 * * *",
+        "display": "每天 06:00"
+      }
+    }
   }
 }
 ```
@@ -387,6 +429,7 @@ WebUI 后仍可保留未读游标。
   "schedule": "0 10 * * *",
   "prompt": "Summarize yesterday's work",
   "deliver": "local",
+  "idle_window": null,
   "toast_notifications": true
 }
 ```
@@ -397,6 +440,7 @@ WebUI 后仍可保留未读游标。
 |------|------|------|
 | `profile` | 是 | 任务所在 Profile（存储与执行相同） |
 | `job_id` | 是 | 任务 ID |
+| `idle_window` | 否 | 完整替换闲时起止信息；`null` 清除，省略则保持原值。必须为 `start_schedule` / `end_schedule` 成对对象；仅保存和查询，不影响 Cron 调度。 |
 | 其他字段 | 否 | 传给 `cron.jobs.update_job` 的更新内容 |
 
 成功响应：

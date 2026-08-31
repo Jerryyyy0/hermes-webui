@@ -165,7 +165,7 @@ Implementation: [`integration/assistant_bubbles/`](assistant_bubbles/). Route se
 | GET | `/api/crons/recent?all_profiles=1&since=` | Cross-profile completions + session materialize |
 | GET | `/api/crons/history`, `/run`, `/output` | Optional `?profile=` (storage and execution profile); history is `state.db` session-primary with optional output artifacts |
 | GET | `/api/integration/crons/unread` | Cron Hub unread run counts across profiles |
-| POST | `/api/integration/crons/create` | Create in the selected `profile` store and run under that same Profile (body: required `profile`, optional `skills`, optional V1 `workspace_policy`) |
+| POST | `/api/integration/crons/create` | Create in the selected `profile` store and run under that same Profile (body: required `profile`, optional `skills`, V1 `workspace_policy`, and `idle_window`; `idle_window` is saved metadata only and does not alter scheduling) |
 | POST | `/api/integration/crons/update\|delete\|run\|pause\|resume` | Same; all require `profile` + `job_id`; delete also clears that job's materialized sessions, state rows, and `cron/output/<job_id>/` history |
 | POST | `/api/integration/crons/unread/read` | Mark one Cron Hub job's current runs as read (`profile` + `job_id`) |
 

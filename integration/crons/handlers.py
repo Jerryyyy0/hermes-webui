@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 from contextlib import contextmanager
+from datetime import datetime
 
 from api.helpers import _sanitize_error, bad, j, require
 from api.profiles import cron_profile_context_for_home, get_hermes_home_for_profile
@@ -18,7 +19,77 @@ _UPDATE_FIELDS = {
     "skills", "skill", "model", "provider", "base_url", "script", "no_agent",
     "context_from", "enabled_toolsets", "workdir", "enabled", "state",
     "paused_at", "paused_reason", "workspace_policy", "toast_notifications",
+    "idle_window",
 }
+
+_IDLE_WINDOW_SCHEDULE_KINDS = {"once", "cron"}
+
+
+def _normalize_idle_window_schedule(value, field_name: str) -> dict:
+    if not isinstance(value, dict):
+        raise ValueError(f"idle_window.{field_name} 必须为对象")
+
+    kind = value.get("kind")
+    if kind not in _IDLE_WINDOW_SCHEDULE_KINDS:
+        raise ValueError(f"idle_window.{field_name}.kind 仅支持 once 或 cron")
+
+    if kind == "once":
+        if set(value) - {"kind", "run_at", "display"} or "run_at" not in value:
+            raise ValueError(f"idle_window.{field_name} 必须包含 kind 和 run_at")
+        run_at = value["run_at"]
+        if not isinstance(run_at, str):
+            raise ValueError(f"idle_window.{field_name}.run_at 必须为 ISO 8601 时间字符串")
+        try:
+            parsed = datetime.fromisoformat(run_at.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError(f"idle_window.{field_name}.run_at 必须为 ISO 8601 时间字符串") from exc
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError(f"idle_window.{field_name}.run_at 必须包含时区偏移")
+        normalized = {"kind": "once", "run_at": parsed.isoformat()}
+    else:
+        if set(value) - {"kind", "expr", "display"} or "expr" not in value:
+            raise ValueError(f"idle_window.{field_name} 必须包含 kind 和 expr")
+        expr = value["expr"]
+        if not isinstance(expr, str) or not expr.strip():
+            raise ValueError(f"idle_window.{field_name}.expr 必须为非空字符串")
+        normalized = {"kind": "cron", "expr": expr.strip()}
+
+    display = value.get("display")
+    if display is not None and (not isinstance(display, str) or not display.strip()):
+        raise ValueError(f"idle_window.{field_name}.display 必须为非空字符串")
+    normalized["display"] = display.strip() if isinstance(display, str) else normalized.get("run_at", normalized.get("expr"))
+    return normalized
+
+
+def _normalize_idle_window(body: dict, *, default=None):
+    """Validate Cron Hub-only idle-window metadata as an atomic object."""
+    if {"idle_start_time", "idle_end_time", "start_time", "end_time"}.intersection(body):
+        raise ValueError("不支持平铺时间字段，请使用 idle_window.start_schedule 和 end_schedule")
+    if "idle_window" not in body:
+        return default
+
+    idle_window = body["idle_window"]
+    if idle_window is None:
+        return None
+    if not isinstance(idle_window, dict):
+        raise ValueError("idle_window 必须为对象或 null")
+    if set(idle_window) != {"start_schedule", "end_schedule"}:
+        raise ValueError("idle_window 必须同时包含 start_schedule 和 end_schedule")
+
+    start_schedule = _normalize_idle_window_schedule(
+        idle_window["start_schedule"], "start_schedule"
+    )
+    end_schedule = _normalize_idle_window_schedule(
+        idle_window["end_schedule"], "end_schedule"
+    )
+    if start_schedule["kind"] != end_schedule["kind"]:
+        raise ValueError("idle_window 的开始和结束 schedule 必须使用相同 kind")
+    if (
+        start_schedule["kind"] == "once"
+        and datetime.fromisoformat(end_schedule["run_at"]) <= datetime.fromisoformat(start_schedule["run_at"])
+    ):
+        raise ValueError("idle_window.end_schedule.run_at 必须晚于 start_schedule.run_at")
+    return {"start_schedule": start_schedule, "end_schedule": end_schedule}
 
 
 def _respond(handler, payload, status: int = 200) -> bool:
@@ -106,6 +177,7 @@ def _handle_create(handler, body):
         return _respond_bad(handler, str(e))
     try:
         profile = _require_cron_hub_profile(body)
+        idle_window = _normalize_idle_window(body)
     except ValueError as e:
         return _respond_bad(handler, str(e))
 
@@ -132,7 +204,7 @@ def _handle_create(handler, body):
                 model=body.get("model") or None,
                 workspace_policy=workspace_policy,
             )
-            post_create: dict = {"profile": owner}
+            post_create: dict = {"profile": owner, "idle_window": idle_window}
             if not toast_notifications:
                 post_create["toast_notifications"] = False
             job = update_job(job["id"], post_create) or job
@@ -151,12 +223,15 @@ def _handle_update(handler, body):
         return _respond_bad(handler, str(e))
     try:
         profile = _require_cron_hub_profile(body)
+        idle_window = _normalize_idle_window(body)
     except ValueError as e:
         return _respond_bad(handler, str(e))
 
     from cron.jobs import update_job
 
     updates = {k: v for k, v in body.items() if k in _UPDATE_FIELDS and v is not None}
+    if "idle_window" in body:
+        updates["idle_window"] = idle_window
     updates["profile"] = profile
     try:
         with _owner_cron_context(profile) as owner:

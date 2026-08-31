@@ -44,6 +44,35 @@ def test_cron_api_serializes_legacy_profile_as_explicit_server_default():
     assert "profile" not in legacy, "API serialization must not mutate stored legacy jobs"
 
 
+def test_cron_api_serializes_missing_idle_window_as_null_without_mutating_job():
+    from api.routes import _cron_job_for_api
+
+    legacy = {"id": "legacy", "name": "Legacy job"}
+    payload = _cron_job_for_api(legacy)
+
+    assert payload["idle_window"] is None
+    assert "idle_window" not in legacy
+
+
+def test_cron_api_returns_persisted_idle_window_without_mutating_job():
+    from api.routes import _cron_job_for_api
+
+    idle_window = {
+        "start_schedule": {
+            "kind": "cron", "expr": "0 22 * * *", "display": "每天 22:00"
+        },
+        "end_schedule": {
+            "kind": "cron", "expr": "0 6 * * *", "display": "每天 06:00"
+        },
+    }
+    job = {"id": "nightly", "idle_window": idle_window}
+
+    payload = _cron_job_for_api(job)
+
+    assert payload["idle_window"] == idle_window
+    assert job["idle_window"] == idle_window
+
+
 @pytest.mark.parametrize(
     ("job", "bucket", "state"),
     [

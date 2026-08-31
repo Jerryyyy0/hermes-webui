@@ -1114,6 +1114,7 @@ def _cron_job_for_api(job: dict) -> dict:
     """
     payload = dict(job or {})
     payload.setdefault("profile", None)
+    payload.setdefault("idle_window", None)
     payload["toast_notifications"] = payload.get("toast_notifications") is not False
     execution_bucket, execution_state = _cron_execution_status_for_api(payload)
     payload["execution_bucket"] = execution_bucket
