@@ -132,7 +132,7 @@ WebUI 恢复仍以精确 `state.db` row 为 durable adapter。Manifest root 继�
 {{cron.workspace}}
 ```
 
-`cron/scheduler.py` 新增纯函数 `_prepare_cron_user_prompt(prompt, execution_session_id, execution_workspace)`，只负责保留 stored prompt、按可用 binding 展开 runtime token，并追加 runtime workspace block；不对用户指定的目录做拒绝校验。
+`cron/scheduler.py` 新增纯函数 `_prepare_cron_user_prompt(prompt, execution_session_id, execution_workspace)`，只负责保留 stored prompt 并按可用 binding 展开 runtime token；不对用户指定的目录做拒绝校验。workspace 说明不进入 user prompt，而通过 Agent 已有的 `ephemeral_system_prompt` 注入本轮 API 请求。
 
 `run_job()` 保留现有 wake-gate 顺序：先执行 pre-run script；脚本失败仍按既有失败语义返回，`wakeAgent=false` 仍静默结束本轮。对已创建 V1 execution，静默返回前必须写入正常结束边界（`cron_complete`，不展开 prompt、不写失败消息），避免留下无法 settlement 的 active `state.db` row。只有 gate 通过后，才调用 `_prepare_cron_user_prompt()`，再把结果交给 `_build_job_prompt(..., prepared_user_prompt=...)`。后者只负责注入 skill、script output 与 `context_from` 数据。
 
@@ -142,14 +142,13 @@ token 展开只影响本轮 assembled prompt，不修改 `jobs.json`。V1 bindin
 
 含 runtime token 的 V1 job 在有 binding 时展开为本轮值。没有 V1 binding 的 legacy job 不展开 token，保留原文并按既有 legacy 语义运行；runtime token 只是便利写法，不是阻止任务运行的配置门禁。
 
-V1 assembled prompt 追加简短 runtime block，说明本轮 session ID、默认 workspace，以及相对输出路径以当前 workspace 为基准；同时明确用户任务中显式指定的其它路径保持有效，避免 runtime block 与 stored prompt 形成冲突。legacy job 不注入该 block：
+V1 execution 通过 `ephemeral_system_prompt` 注入简短 runtime context，说明默认 workspace、相对路径解析规则，以及用户显式路径的优先级；该 context 不写入 SessionDB transcript，legacy job 不注入：
 
 ```text
-## Cron execution context
-Session: <execution_session_id>
+## Cron execution
 Default workspace: <execution_workspace>
-Resolve relative output paths against this default workspace.
-If the stored task explicitly specifies another absolute or stable project path, follow it unchanged.
+Resolve relative output paths against this workspace.
+Honor any explicit absolute or stable project path in the task unchanged.
 ```
 
 文件交付优先使用相对文件名，并从 `write_file` 的 `resolved_path` 构造 `MEDIA:`。只有确需绝对路径文本时才使用 `{{cron.workspace}}`。
@@ -162,7 +161,7 @@ If the stored task explicitly specifies another absolute or stable project path,
 
 `run_job()` 不再做 concrete path runtime backstop，也不会因为 prompt 中出现旧 session root 而 fail closed。V1 tuple 仍是 state.db、AIAgent、cwd 和 sidecar 的唯一运行时来源；prompt 中的路径是用户意图，不能反向改变该 tuple。
 
-这意味着 workspace block 是提示词级的软约束：模型通常会按当前 workspace 生成相对输出，但用户明确写入的绝对路径可以覆盖它，terminal 或脚本也可以写到 workspace 之外。本 RFC 不声称提供文件系统 sandbox。
+这意味着 workspace context 是提示词级的软约束：模型通常会按当前 workspace 生成相对输出，但用户明确写入的绝对路径可以覆盖它，terminal 或脚本也可以写到 workspace 之外。本 RFC 不声称提供文件系统 sandbox。
 
 Artifact settlement 与 prompt 路径解耦：系统不扫描 prompt 或目录来猜测成果，只消费已有受控工具证据、`MEDIA:` 和最终 assistant 交付路径。用户指定的 root 外绝对路径允许执行；若有符合现有白名单的成功 mutation/terminal 或最终交付证据，并通过 `external_references.policy`，可按既有契约登记为当前 execution 的外部直接引用。仅在 prompt 中提到路径不构成 Artifact 证据。
 
@@ -175,7 +174,7 @@ Artifact settlement 与 prompt 路径解耦：系统不扫描 prompt 或目录�
 | create / update agent-backed job | 是 | 是 | `jobs.json[].prompt` 原文保存 |
 | pause / disable / resume / trigger | 是 | 是 | 沿用既有 job 与 execution 语义，不因路径形式失败 |
 | delete | 是 | 是 | 删除流程不读取或改写 prompt |
-| automatic runtime | 是 | 是 | 仍按 V1 tuple 建立 session/workspace；workspace block 仅作提示 |
+| automatic runtime | 是 | 是 | 仍按 V1 tuple 建立 session/workspace；workspace context 仅通过 ephemeral system prompt 提示 |
 | no-agent script job | prompt 任意 | 是 | prompt 不参与执行，沿用 script 校验与执行语义 |
 
 用户指定的 root 外路径可以执行；是否进入当前 execution 的 Artifact 取决于既有成功工具/最终交付证据与 external-reference 安全 gate，而不是 prompt 路径形式。
@@ -184,14 +183,14 @@ Artifact settlement 与 prompt 路径解耦：系统不扫描 prompt 或目录�
 
 | Agent 文件 | 具体改动 | 核心验证 |
 | --- | --- | --- |
-| `cron/scheduler.py` | 解包既有 V1 tuple；保留 pre-run script/wake-gate 顺序，`wakeAgent=false` 结束 V1 execution 后静默返回；gate 通过后保留 stored prompt 原文、按可用 binding 展开 token 并追加 workspace block，再由 `_build_job_prompt()` 注入外部数据。 | state.db/cwd、AIAgent、工具 cwd 与 runtime block 精确匹配；用户指定的绝对路径原样生效；静默 tick 有结束边界；第二轮 block 不含第一轮 root。 |
+| `cron/scheduler.py` | 解包既有 V1 tuple；保留 pre-run script/wake-gate 顺序，`wakeAgent=false` 结束 V1 execution 后静默返回；gate 通过后保留 stored prompt 原文并按可用 binding 展开 token；workspace context 通过 `AIAgent(ephemeral_system_prompt=...)` 注入，不进入 user prompt。 | state.db/cwd、AIAgent、工具 cwd 与 ephemeral context 精确匹配；持久化 user prompt 不含 workspace block；用户指定的绝对路径原样生效；静默 tick 有结束边界。 |
 
 Agent 实现只触及 `cron/scheduler.py`。`cron/jobs.py`、`tools/cronjob_tools.py`、`cron/execution_workspace.py`、file tools、terminal 和 code execution 均不修改。
 
 Agent 回归测试放在：
 
 - `tests/cron/test_execution_workspace.py`：只补现有 tuple 与 `state.db/cwd` 一致、连续 trigger 不同、fallback 复用的断言；
-- 新建 `tests/cron/test_cron_execution_prompt.py`：绝对路径原文保留、token 按本轮 binding 展开、无 binding 时原文保留、workspace block 使用本轮值、wakeAgent=false 的 V1 end_session、provider fallback 失败时只关闭一次 owner session、claim 释放、相邻 job 继续、no-agent 不受影响。
+- 新建 `tests/cron/test_cron_execution_prompt.py`：绝对路径原文保留、token 按本轮 binding 展开、无 binding 时原文保留、user prompt 不含 workspace context、AIAgent ephemeral system context 使用本轮值、wakeAgent=false 的 V1 end_session、provider fallback 失败时只关闭一次 owner session、claim 释放、相邻 job 继续、no-agent 不受影响。
 
 最小实现形状如下：
 
@@ -493,7 +492,7 @@ scripts/repair_cron_manifest_artifacts.py --profile <profile> --session-id <cron
 ## 实施顺序
 
 1. **冻结回归 fixture**：保存无敏感内容的 stale-prompt、成功 `terminal` 和成功 `write_file` fixtures。先证明旧 prompt 跨轮保留，且 ordinary、exact-run、batch materialization 都缺少 decision。
-2. **Agent 最小 prompt 接缝**：保留 prompt 原文，加入当前 execution 的 workspace block 和可选 token 展开；先证明用户指定的绝对路径不被改写。
+2. **Agent 最小 prompt 接缝**：保留 user prompt 原文，仅展开可选 runtime token；将当前 execution 的 workspace context 放入 `ephemeral_system_prompt`，先证明用户指定的绝对路径不被改写。
 3. **WebUI settlement 边界**：抽取 settlement helper，并以 `_materialize_and_settle_cron_session_found()` 替换 raw materializer 的全部四类调用；删除 scheduler hook 的重复结算。
 4. **Continuation workspace gate**：V1 managed/worktree 的 ready 复用原 root，workspace_unverified 降级到批准的 default，危险状态拒绝；增加继续 A 与自动 B 并发、root 不同的回归测试。
 5. **可选 prompt 整理**：根据业务需要将部分固定目录改成相对路径或 token；不作为部署门禁。
@@ -544,7 +543,7 @@ WebUI 测试通过 `./scripts/test.sh` 运行。Agent PR 按 Agent 仓库既有�
 
 1. 先部署 WebUI settlement PR。它不依赖 Agent prompt 接缝，可立即修复自动 materialization 的新 Artifact decision。
 2. 审计 V1 sidecar 的 workspace state，修复可验证 binding 后部署 continuation gate；unverified session 保持阻止状态。
-3. 部署 Agent prompt binding PR；它只追加 workspace block、可选 token 展开，不改变现有 prompt 的可执行范围。
+3. 部署 Agent prompt binding PR；它只注入 ephemeral workspace context、展开可选 token，不改变现有 prompt 的可执行范围。
 4. 新自动 run、follow-up 和下一轮自动 run 验收通过后，再执行历史 Artifact exact-session repair。
 
 ### 发布前
