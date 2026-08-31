@@ -439,6 +439,34 @@ def test_persist_cron_turn_artifacts_stamps_one_real_turn_before_decision(monkey
     assert events[1][2][-1]["content"] == "Created `report.html`."
 
 
+def test_persist_cron_turn_artifacts_resettles_an_existing_nonempty_decision(monkeypatch):
+    """A resumed cron turn may append its final delivery after an earlier settle."""
+    import api.models as models
+    import api.streaming as streaming
+    import integration.session_manifest.store as manifest_store
+
+    monkeypatch.setattr(manifest_store, "load_manifest_decided_turn_keys", lambda _session: {"turn:1"})
+    session = SimpleNamespace(
+        session_id="cron_job_20260713_120000",
+        messages=_tool_trace(),
+        cron_execution_ended_at=100.0,
+        save=lambda: None,
+    )
+    persisted: list[str] = []
+    monkeypatch.setattr(models.Session, "load", lambda _sid: session)
+    monkeypatch.setattr(
+        streaming,
+        "_persist_turn_artifact_paths",
+        lambda _current, turn_key: persisted.append(turn_key) or {
+            "status": "persisted", "turn_key": turn_key,
+        },
+    )
+
+    _persist_cron_turn_artifacts(session.session_id)
+
+    assert persisted == ["turn:1"]
+
+
 def test_persist_cron_turn_artifacts_keeps_real_turns_contiguous(monkeypatch):
     import api.models as models
     import api.streaming as streaming

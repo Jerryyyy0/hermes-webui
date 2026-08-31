@@ -1717,6 +1717,7 @@ def _persist_turn_artifact_paths(
 
     try:
         from integration.session_manifest.manifest import (
+            _artifact_source_priority,
             artifact_workspace_root_for_session,
             _skills_dir_for_session,
             extract_turn_artifact_entries_for_manifest,
@@ -1747,24 +1748,38 @@ def _persist_turn_artifact_paths(
                 exc_info=True,
             )
             return finish({'status': 'failed', 'stage': 'extract', 'turn_key': _turn_key, 'artifact_count': 0})
-        # A final assistant reply is durable same-turn evidence. Keep stream-owned
-        # provenance for duplicates while adding any real files it explicitly names.
-        known_paths = {
-            str(entry.get('path') or '').strip()
-            for entry in _entries
-            if isinstance(entry, dict) and str(entry.get('path') or '').strip()
-        }
+        # A final assistant reply is durable same-turn evidence.  Retain both
+        # sources here; the canonical-path merge below chooses the stronger
+        # provenance instead of making the earlier stream event win merely by
+        # arrival order.
         _entries.extend(
             entry for entry in transcript_entries
-            if isinstance(entry, dict) and str(entry.get('path') or '').strip() not in known_paths
+            if isinstance(entry, dict) and str(entry.get('path') or '').strip()
         )
 
     try:
         workspace = artifact_workspace_root_for_session(s)
+        # A file can have both stream and transcript evidence (for example a
+        # write_file call followed by final MEDIA delivery).  Persist exactly
+        # one row per canonical path within this turn, keeping the stronger
+        # provenance used by the manifest extractor rather than letting event
+        # arrival order decide it.
+        deduped_entries = {}
+        for entry in _entries:
+            if not isinstance(entry, dict):
+                continue
+            path = str(entry.get('path') or '').strip()
+            if not path:
+                continue
+            existing = deduped_entries.get(path)
+            if existing is None or _artifact_source_priority(
+                str(entry.get('source_tool') or '')
+            ) > _artifact_source_priority(str(existing.get('source_tool') or '')):
+                deduped_entries[path] = entry
         _entries = filter_existing_turn_artifact_entries(
             workspace,
             _skills_dir_for_session(s),
-            _entries,
+            list(deduped_entries.values()),
         )
     except Exception:
         logger.warning(

@@ -285,18 +285,18 @@ def settle_materialized_cron_session(session) -> CronManifestSettlement:
             return CronManifestSettlement("failed", error_stage="save")
 
     from integration.session_manifest.manifest import _message_turns
-    from integration.session_manifest.store import load_manifest_decided_turn_keys
     from api.streaming import _persist_turn_artifact_paths
 
-    decided_turn_keys = load_manifest_decided_turn_keys(session)
     settled_turn_keys: list[str] = []
     for turn in _message_turns(stamped):
         turn_key = str(turn.get("turn_key") or "").strip()
         if not turn_key:
             continue
-        if turn_key in decided_turn_keys:
-            settled_turn_keys.append(turn_key)
-            continue
+        # A completed cron turn can be resumed and receive a final assistant
+        # delivery after an earlier non-empty decision was recorded.  The
+        # settlement entrypoint is additive and idempotent, so every durable
+        # real turn must re-enter it instead of treating any prior decision as
+        # terminal.
         decision = _persist_turn_artifact_paths(session, turn_key)
         if decision is None and getattr(session, "_cron_compatibility_stub", False):
             settled_turn_keys.append(turn_key)

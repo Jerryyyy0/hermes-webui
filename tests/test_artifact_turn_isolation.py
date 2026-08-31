@@ -59,6 +59,54 @@ def test_stream_owned_tool_evidence_settles_bound_turn_before_transcript_merge(t
     ]
 
 
+def test_settlement_dedupes_stream_and_transcript_evidence_by_stronger_source(tmp_path, monkeypatch):
+    from api import streaming
+    from integration.session_manifest.store import load_manifest_records
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    artifact = workspace / "report.html"
+    artifact.write_text("<html></html>", encoding="utf-8")
+    session = Session(
+        session_id="artifact-source-priority",
+        workspace=str(workspace),
+        active_stream_id="stream-priority",
+        messages=[
+            {"role": "user", "content": "生成报告", "_turn_key": "turn:1"},
+            {
+                "role": "assistant",
+                "tool_calls": [{
+                    "id": "write-report",
+                    "function": {"name": "write_file", "arguments": '{"path":"report.html"}'},
+                }],
+            },
+            {"role": "tool", "tool_call_id": "write-report", "content": "saved"},
+            {"role": "assistant", "content": f"MEDIA:{artifact}"},
+        ],
+    )
+    monkeypatch.setattr("integration.session_manifest.store.STATE_DIR", tmp_path / "state")
+    streaming.STREAM_LIVE_MANIFEST["stream-priority"] = {
+        "artifacts": [{
+            "turn_key": "turn:1",
+            "path": "report.html",
+            "source_tool": "media",
+            "preview": "file",
+        }],
+        "turns": [],
+    }
+
+    result = streaming._persist_turn_artifact_paths(
+        session,
+        "turn:1",
+        stream_id="stream-priority",
+    )
+
+    assert result["status"] == "persisted"
+    assert [(row["path"], row["source_tool"]) for row in load_manifest_records(session)] == [
+        ("report.html", "write_file"),
+    ]
+
+
 def test_completed_settlement_drops_stream_artifact_removed_before_turn_end(tmp_path, monkeypatch):
     from api import streaming
     from integration.session_manifest.manifest import build_session_manifest
