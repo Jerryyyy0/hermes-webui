@@ -51,6 +51,8 @@ flowchart TD
 - **Empty decision**：该 turn 只有一条 `path = ""`、`preview = "file"`、`source_tool = "assistant_prose"` 的 marker；marker 不进入 wire。
 - **无 decision**：当前 lineage/profile/逻辑 workspace root 没有任何 store row；GET 返回空 Manifest，不读取 transcript、tool calls 或 legacy sidecar 重建，也不写入 DB。
 
+
+
 ### 2.2 Repair 的触发时机
 
 当前实现**不会自动执行 repair**：打开会话、`GET /api/session/manifest`、SSE、正常/Gateway
@@ -131,18 +133,23 @@ expected/actual key、stage 与 terminal reason。
 | Skill mutation     | `skill_manage` 或实际写入工具 | mutation action、skill name/path、真实 `SKILL.md`     |
 | Terminal           | `terminal`             | 成功命令中的静态 `-o`/`--output`/`--print-to-pdf` 操作数     |
 | Media              | `media`                | assistant 显式 `MEDIA:<local-path>`                 |
-| Final assistant    | `assistant_prose`      | 当前 turn 最后一条 assistant 中经边界校验的既存路径      |
+| Final assistant    | `assistant_prose`      | 当前 turn 最后一条 assistant 中经边界校验的既存路径                |
 | Legacy             | 原有 source 或规范化值        | `session.turn_artifacts`，仅 lineage 完全无 decision 时 |
+
+
+
 
 ### 4.1 Artifact 资格矩阵
 
-| 来源 | 成为 file Artifact 的必要条件 | 路径表示 |
-| --- | --- | --- |
-| mutation | 当前 turn 成功 completed；结构化参数或 diff 给出路径。 | workspace 内相对；外部保留绝对路径。 |
-| terminal | 当前 turn 零退出；命令命中受控输出操作数。 | workspace 内相对；外部保留绝对路径。 |
-| 最后 assistant | 仅最后真实 assistant；路径边界、存在性与安全 gate 都通过。 | 相对/裸文件名必须在当前 workspace；绝对路径可在外部。 |
-| `MEDIA:` | assistant 显式本地 token；符合 media 规则。 | workspace 内相对；外部保留绝对路径。 |
-| skill | 成功 mutation 且可解析到真实 canonical `SKILL.md`。 | canonical skill 名。 |
+
+| 来源           | 成为 file Artifact 的必要条件                    | 路径表示                             |
+| ------------ | ----------------------------------------- | -------------------------------- |
+| mutation     | 当前 turn 成功 completed；结构化参数或 diff 给出路径。    | workspace 内相对；外部保留绝对路径。          |
+| terminal     | 当前 turn 零退出；命令命中受控输出操作数。                  | workspace 内相对；外部保留绝对路径。          |
+| 最后 assistant | 仅最后真实 assistant；路径边界、存在性与安全 gate 都通过。     | 相对/裸文件名必须在当前 workspace；绝对路径可在外部。 |
+| `MEDIA:`     | assistant 显式本地 token；符合 media 规则。         | workspace 内相对；外部保留绝对路径。          |
+| skill        | 成功 mutation 且可解析到真实 canonical `SKILL.md`。 | canonical skill 名。               |
+
 
 用户消息、较早 assistant、工具 start、失败/取消工具、读取工具、搜索命中、目录列表、terminal stdout、
 普通 URL、Python/heredoc 源码与全 workspace 扫描都不能仅凭路径产生 Artifact。
@@ -155,14 +162,16 @@ expected/actual key、stage 与 terminal reason。
 以下示例均假定工具已成功完成、目标文件仍存在且可预览；外部绝对路径还须通过受保护路径策略。
 `<workspace>` 是当前 session 的 workspace，`<sid>` 是当前 session id。
 
-| 证据 | 文件与结果 | 是否登记及持久化示例 |
-| --- | --- | --- |
-| 成功 mutation | `write_file(path="reports/报价单.docx")` 写入 `<workspace>/reports/报价单.docx`。 | 是；`path="reports/报价单.docx"`，`source_tool="write_file"`。 |
-| 成功 terminal | 零退出命令 `python chart.py --output /tmp/sales-chart.png`。 | 是；`path="/tmp/sales-chart.png"`，`source_tool="terminal"`。 |
-| 当前 turn 末条 assistant | 回复“已生成 `reports/总结.pdf`”，且该文件存在于 `<workspace>`。 | 是；`path="reports/总结.pdf"`，`source_tool="assistant_prose"`。 |
-| 当前 turn 末条 assistant | 回复“文件在 `/tmp/export/result.xlsx`”，且该外部文件通过策略。 | 是；`path="/tmp/export/result.xlsx"`，`source_tool="assistant_prose"`。 |
-| 显式 `MEDIA:` | assistant 消息为 `MEDIA:/tmp/preview.png`。 | 是；`path="/tmp/preview.png"`，`source_tool="media"`。 |
-| 会话附件或 memory | 末条 assistant 或 `MEDIA:` 明确给出 `${STATE_DIR}/attachments/<sid>/input.pdf` 或 `${HERMES_HOME}/memories/brief.md`。 | 可以；作为对应 `assistant_prose` 或 `media` Artifact，并以绝对路径登记。 |
+
+| 证据                   | 文件与结果                                                                                                         | 是否登记及持久化示例                                                          |
+| -------------------- | ------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| 成功 mutation          | `write_file(path="reports/报价单.docx")` 写入 `<workspace>/reports/报价单.docx`。                                      | 是；`path="reports/报价单.docx"`，`source_tool="write_file"`。             |
+| 成功 terminal          | 零退出命令 `python chart.py --output /tmp/sales-chart.png`。                                                        | 是；`path="/tmp/sales-chart.png"`，`source_tool="terminal"`。           |
+| 当前 turn 末条 assistant | 回复“已生成 `reports/总结.pdf`”，且该文件存在于 `<workspace>`。                                                               | 是；`path="reports/总结.pdf"`，`source_tool="assistant_prose"`。          |
+| 当前 turn 末条 assistant | 回复“文件在 `/tmp/export/result.xlsx`”，且该外部文件通过策略。                                                                 | 是；`path="/tmp/export/result.xlsx"`，`source_tool="assistant_prose"`。 |
+| 显式 `MEDIA:`          | assistant 消息为 `MEDIA:/tmp/preview.png`。                                                                       | 是；`path="/tmp/preview.png"`，`source_tool="media"`。                  |
+| 会话附件或 memory         | 末条 assistant 或 `MEDIA:` 明确给出 `${STATE_DIR}/attachments/<sid>/input.pdf` 或 `${HERMES_HOME}/memories/brief.md`。 | 可以；作为对应 `assistant_prose` 或 `media` Artifact，并以绝对路径登记。              |
+
 
 相对路径始终相对当前 session workspace；所以 `reports/总结.pdf` 不会到其它 session、下载目录或上轮
 workspace 中寻找。外部路径不会移动、复制或改写，持久化 row 只记录其绝对路径和当前 turn 的证据来源。
@@ -171,9 +180,6 @@ workspace 中寻找。外部路径不会移动、复制或改写，持久化 row
 `brief.md`、终端 stdout 列出了 `/tmp/result.pdf`、读取/搜索工具看到了该文件、较早 assistant 提到路径，
 或末条 assistant 给出不存在/受保护/`uploads/` 下的路径。它们必须另有上表所列的有效产出或当前末条
 assistant 证据；附件上传本身不会创建 Artifact row。
-
-
-
 
 ### 4.3 Mutation 工具
 
@@ -245,13 +251,13 @@ User 消息中的 MEDIA:、工具结果 JSON 的相似字段和普通 URL 都不
 正则必须同时通过四层边界：
 
 1. **词法边界：** 前后只能是字符串边界、空白、引号、反引号、Markdown 分隔符或标点。`report.pdf附件`、
-   `report.pdf.bak` 和 `abc/report.pdfx` 均不得截断匹配。
+  `report.pdf.bak` 和 `abc/report.pdfx` 均不得截断匹配。
 2. **路径边界：** 相对和裸文件名只在当前 `session.workspace` 解析，且结果仍在该目录。绝对路径可在外部，
-   但必须通过外部直接引用策略。
+  但必须通过外部直接引用策略。
 3. **文件边界：** 候选必须是存在的普通文件，非目录、非 cruft、非 `uploads/`，并通过对应 preview gate。
 4. **归属边界：** 候选只归当前 `turn_key`；read evidence 仅抑制同 turn、同 path 的 prose 候选。
 
-因此最终回复表格中的 ``报告.html`` 可成为成果；不存在的 ``摘要.md`` 不会被推断补全。中间 assistant
+因此最终回复表格中的 `报告.html` 可成为成果；不存在的 `摘要.md` 不会被推断补全。中间 assistant
 即使写出绝对路径或“文件位置”也不产生 prose artifact。
 
 ### 4.7 Read evidence
@@ -272,11 +278,13 @@ User 消息中的 MEDIA:、工具结果 JSON 的相似字段和普通 URL 都不
 同一 turn 的 file Artifact 以规范化后的 canonical path 去重。每个命中保存在内部 `hits[]`，但 wire/store
 只保留一行；不会因为同一路径被多次提及而产生多个 chip。
 
-| 优先级 | 来源 | 最终 `source_tool` 规则 |
-| --- | --- | --- |
-| 2 | `ARTIFACT_MUTATION_TOOLS` | 覆盖低优先级来源。 |
-| 1 | `media`、`assistant_prose` | 仅在尚无 mutation 来源时作为主来源。 |
-| 0 | terminal 等其它已允许来源 | 保留为主来源，除非之后出现更高优先级。 |
+
+| 优先级 | 来源                        | 最终 `source_tool` 规则     |
+| --- | ------------------------- | ----------------------- |
+| 2   | `ARTIFACT_MUTATION_TOOLS` | 覆盖低优先级来源。               |
+| 1   | `media`、`assistant_prose` | 仅在尚无 mutation 来源时作为主来源。 |
+| 0   | terminal 等其它已允许来源         | 保留为主来源，除非之后出现更高优先级。     |
+
 
 相同优先级不会因为后一次命中改写主来源。该规则只决定显示/持久化的 `source_tool`，不会把 read
 evidence、搜索结果或 stdout 提升为 Artifact 证据。
@@ -306,6 +314,8 @@ python .../md2word.py INPUT OUTPUT [options]
 不会扫描 stdout、`ls` 列表、`cat` 输入、Python `open()` 源码或 workspace 快照。
 
 ## 5. 路径规范化与安全
+
+
 
 ### 5.1 默认 workspace 与 Artifact 根
 
@@ -351,13 +361,15 @@ symlink；随后从 `/` 开始逐组件 `O_NOFOLLOW` 打开并验证普通文件
 以下示例中的 `<sid>`、`<turn>` 和根目录仅说明表示方式。`workspace_root` 始终是会话的 Artifact 根，
 不是外部文件的父目录。
 
-| 文件来源 | 持久化 `workspace_root` / `path` | wire `path` 与授权 |
-| --- | --- | --- |
-| managed workspace 文件 | `/workspaces` / `sessions/<sid>/exports/report.docx` | `sessions/<sid>/exports/report.docx`；按 integration workspace 相对路径预览。 |
-| 外部工具输出 | `/workspaces` / `/tmp/report.docx` | `/tmp/report.docx`；必须有精确已登记 row。 |
-| 会话附件 | `/workspaces` / `${STATE_DIR}/attachments/<sid>/input.pdf` | 绝对路径；上传本身不建 row，已登记 row 才可读。 |
-| Agent memory | `/workspaces` / `${HERMES_HOME}/memories/summary.md` | 绝对路径；必须有精确已登记 row。 |
-| 外部 `MEDIA:` | `/workspaces` / `/tmp/chart.pdf` | 绝对路径；保留 `source_tool=media`，但已登记 row 可预览。 |
+
+| 文件来源                 | 持久化 `workspace_root` / `path`                              | wire `path` 与授权                                                      |
+| -------------------- | ---------------------------------------------------------- | -------------------------------------------------------------------- |
+| managed workspace 文件 | `/workspaces` / `sessions/<sid>/exports/report.docx`       | `sessions/<sid>/exports/report.docx`；按 integration workspace 相对路径预览。 |
+| 外部工具输出               | `/workspaces` / `/tmp/report.docx`                         | `/tmp/report.docx`；必须有精确已登记 row。                                     |
+| 会话附件                 | `/workspaces` / `${STATE_DIR}/attachments/<sid>/input.pdf` | 绝对路径；上传本身不建 row，已登记 row 才可读。                                         |
+| Agent memory         | `/workspaces` / `${HERMES_HOME}/memories/summary.md`       | 绝对路径；必须有精确已登记 row。                                                   |
+| 外部 `MEDIA:`          | `/workspaces` / `/tmp/chart.pdf`                           | 绝对路径；保留 `source_tool=media`，但已登记 row 可预览。                            |
+
 
 相对 Artifact 的 URL 仍是 `GET /api/integration/workspace/file?path=<integration-root-relative-path>`。
 绝对行也复用该 URL，但 `path` 保持绝对；不会附加 session、profile 或 workspace-root 参数。
@@ -405,12 +417,14 @@ updated_at:     1787460613.456
 
 ### 5.3 Preview 授权矩阵
 
-| wire path / 来源 | 预览前必须满足 | 读取方式 | 失败结果 |
-| --- | --- | --- | --- |
-| workspace 相对 path | 可投影到 integration root、目标是普通非 cruft 文件 | 既有相对路径分支 | 不输出或 404。 |
-| 外部直接引用 | 精确持久化 Artifact row、允许来源、路径策略与无跟随 fd 成功 | 绝对路径分支 | Manifest 为 `expired`；HTTP 404。 |
-| 绝对 `media` Artifact | 精确持久化 `record_kind=artifact`、`preview=file`、`source_tool=media` 行，路径策略与无跟随 fd 成功 | 同一绝对路径分支 | Manifest 为 `expired`；HTTP 404。 |
-| skill | canonical skill 存在且 SkillHub preview 可用 | skill preview | 有 provenance 时 `expired`，否则不输出。 |
+
+| wire path / 来源      | 预览前必须满足                                                                          | 读取方式          | 失败结果                            |
+| ------------------- | -------------------------------------------------------------------------------- | ------------- | ------------------------------- |
+| workspace 相对 path   | 可投影到 integration root、目标是普通非 cruft 文件                                            | 既有相对路径分支      | 不输出或 404。                       |
+| 外部直接引用              | 精确持久化 Artifact row、允许来源、路径策略与无跟随 fd 成功                                           | 绝对路径分支        | Manifest 为 `expired`；HTTP 404。  |
+| 绝对 `media` Artifact | 精确持久化 `record_kind=artifact`、`preview=file`、`source_tool=media` 行，路径策略与无跟随 fd 成功 | 同一绝对路径分支      | Manifest 为 `expired`；HTTP 404。  |
+| skill               | canonical skill 存在且 SkillHub preview 可用                                          | skill preview | 有 provenance 时 `expired`，否则不输出。 |
+
 
 `is_external_artifact_reference()` 只定义外部直接引用的来源资格，故意不把 `media` 归入其中。
 `is_registered_external_preview_reference()` 只用于绝对路径 preview 查询，额外允许精确已登记的 `media` 行。
@@ -464,6 +478,8 @@ workspace 内的普通成果文件；workspace 外部引用、附件、memory、
 
 ## 6. 持久化
 
+
+
 ### 6.1 正常 turn 结算
 
 正常流式完成顺序：
@@ -496,14 +512,16 @@ Legacy `session.turn_artifacts` 不再是新会话写入目标，只在显式 ba
 
 ### 6.2 结算生命周期矩阵
 
-| 生命周期阶段 | Artifact 动作 | 失败语义 |
-| --- | --- | --- |
-| 成功 `tool_complete` | 可产生当前 turn 的内存候选和乐观 delta。 | 未完成、失败、取消或非零 exit code 不产生证据。 |
-| normal / Gateway 完成 | transcript durable 后，共用 turn settlement 合并候选并写入 DB。 | turn owner/key 不可信或持久化失败时，不写 empty。 |
-| error / cancel 完成 | 使用同一 turn-owner 校验与结算边界；只持久化已被验证的候选。 | journal 记录 terminal reason；不能把异常掩盖为“无成果”。 |
-| `done` 后刷新 | GET 从 DB 投影，并覆盖临时 delta。 | 外部文件已失效时显示 `expired`。 |
-| 重放 / 重启恢复 | 读取既有 lineage/root decision，不从 transcript 自动重建。 | 稳定 tool call 仍只归属原 turn。 |
-| 显式 repair / backfill | 仅按其各自范围写 SQLite。 | GET 从不触发 repair/backfill。 |
+
+| 生命周期阶段               | Artifact 动作                                         | 失败语义                                      |
+| -------------------- | --------------------------------------------------- | ----------------------------------------- |
+| 成功 `tool_complete`   | 可产生当前 turn 的内存候选和乐观 delta。                          | 未完成、失败、取消或非零 exit code 不产生证据。             |
+| normal / Gateway 完成  | transcript durable 后，共用 turn settlement 合并候选并写入 DB。 | turn owner/key 不可信或持久化失败时，不写 empty。       |
+| error / cancel 完成    | 使用同一 turn-owner 校验与结算边界；只持久化已被验证的候选。                | journal 记录 terminal reason；不能把异常掩盖为“无成果”。 |
+| `done` 后刷新           | GET 从 DB 投影，并覆盖临时 delta。                            | 外部文件已失效时显示 `expired`。                     |
+| 重放 / 重启恢复            | 读取既有 lineage/root decision，不从 transcript 自动重建。      | 稳定 tool call 仍只归属原 turn。                  |
+| 显式 repair / backfill | 仅按其各自范围写 SQLite。                                    | GET 从不触发 repair/backfill。                 |
+
 
 外部绝对路径不会进入 upsert 前的预览能力。只有 store 写入成功后的 GET 才能将它作为可点击的 file
 Artifact 返回；这避免 SSE 临时候选成为任意文件读取许可。
@@ -561,30 +579,36 @@ Manifest store 的第二份权威数据。
 
 ## 8. 实现模块与关键函数
 
+
+
 ### 8.1 关键函数
 
-| 函数                                         | 职责                                |
-| ------------------------------------------ | --------------------------------- |
-| `build_session_manifest`                   | GET manifest 总入口                  |
-| `_message_turns` / `_turn_message_slice`   | Turn 分组与切片                        |
-| `_collect_tool_events`                     | Transcript/tool_calls → ToolEvent |
-| `_collect_media_artifact_events`           | `MEDIA:` → events                 |
-| `_collect_final_assistant_artifact_events` | 当前轮末条 prose → events              |
-| `_tool_event_succeeded`                    | 统一工具成功门槛                          |
-| `ARTIFACT_EXCLUSION_READ_TOOLS`            | 文件读取瞬态排除分类                        |
-| `_terminal_output_paths`                   | 受控 terminal 输出操作数                 |
-| `_extract_turn_artifact_entries`           | 单 turn 共享提取                       |
-| `_resolve_manifest_path`                   | 路径规范化                             |
-| `_artifact_path_is_real`                   | Reconcile/持久化存在性闸门                |
-| `external_references.policy`               | 外部路径策略与无跟随 fd 打开              |
-| `external_references.references`           | 外部行判定与已登记 record 查询            |
-| `external_references.preview`              | 复用既有 workspace preview URL 的授权读取 |
-| `upsert_manifest_records`                  | 普通 store upsert                   |
-| `replace_manifest_turn_records`            | 原子替换单 turn decision               |
-| `repair_empty_manifest_turns`              | 显式维护时的 empty-only read-repair   |
+
+| 函数                                         | 职责                                              |
+| ------------------------------------------ | ----------------------------------------------- |
+| `build_session_manifest`                   | GET manifest 总入口                                |
+| `_message_turns` / `_turn_message_slice`   | Turn 分组与切片                                      |
+| `_collect_tool_events`                     | Transcript/tool_calls → ToolEvent               |
+| `_collect_media_artifact_events`           | `MEDIA:` → events                               |
+| `_collect_final_assistant_artifact_events` | 当前轮末条 prose → events                            |
+| `_tool_event_succeeded`                    | 统一工具成功门槛                                        |
+| `ARTIFACT_EXCLUSION_READ_TOOLS`            | 文件读取瞬态排除分类                                      |
+| `_terminal_output_paths`                   | 受控 terminal 输出操作数                               |
+| `_extract_turn_artifact_entries`           | 单 turn 共享提取                                     |
+| `_resolve_manifest_path`                   | 路径规范化                                           |
+| `_artifact_path_is_real`                   | Reconcile/持久化存在性闸门                              |
+| `external_references.policy`               | 外部路径策略与无跟随 fd 打开                                |
+| `external_references.references`           | 外部行判定与已登记 record 查询                             |
+| `external_references.preview`              | 复用既有 workspace preview URL 的授权读取                |
+| `upsert_manifest_records`                  | 普通 store upsert                                 |
+| `replace_manifest_turn_records`            | 原子替换单 turn decision                             |
+| `repair_empty_manifest_turns`              | 显式维护时的 empty-only read-repair                   |
 | `backfill_missing_manifest_records`        | 显式维护时、当前逻辑 root 的 lineage 无 decision 的 backfill |
-| `_row_to_wire` / `_rows_to_wire`           | Wire 与 expired projection         |
-| `_persist_turn_artifact_paths`             | Turn 完成持久化                        |
+| `_row_to_wire` / `_rows_to_wire`           | Wire 与 expired projection                       |
+| `_persist_turn_artifact_paths`             | Turn 完成持久化                                      |
+
+
+
 
 ### 8.2 模块归属与接缝
 
@@ -599,9 +623,6 @@ SQLite decision，`repair.py` 只承载显式维护操作。三者是唯一 Mani
 `api/streaming.py` 和 `api/gateway_chat.py` 只在共享 turn settlement 接缝调用
 `_persist_turn_artifact_paths()`。外部策略、SQLite 或 fd 逻辑不得复制到这些上游文件；公开 URL、
 请求参数、响应 schema 未变化，因此 integration OpenAPI 无需新增端点。
-
-
-
 
 ## 9. 测试
 
@@ -634,11 +655,12 @@ SQLite decision，`repair.py` 只承载显式维护操作。三者是唯一 Mani
 - Expired provenance；
 - Transcript save 早于 manifest decision。
 
-| 验收维度 | 必须证明的行为 |
-| --- | --- |
-| 来源 | mutation、受控 terminal、末条 assistant 和 `MEDIA:` 的资格正确；read/search/stdout 不升级为 Artifact。 |
-| 位置 | session workspace、默认根、外部普通目录、附件/memory 与受保护路径均按各自规则处理。 |
-| 活引用 | 删除、改名、symlink、策略拒绝变为 `expired`；内容修改和同名普通文件替换读取当前版本。 |
-| 生命周期 | normal、Gateway、error、cancel、SSE 刷新、重启/replay、replace/rebind 与 store 失败不破坏 decision。 |
-| 隔离 | profile、lineage、workspace root、turn 和同路径多来源不串读或串写。 |
-| 路由 | 既有 workspace preview 不回归；已登记绝对路径可读，未登记/过期/受保护路径均拒绝且不泄露路径。 |
+
+| 验收维度 | 必须证明的行为                                                                              |
+| ---- | ------------------------------------------------------------------------------------ |
+| 来源   | mutation、受控 terminal、末条 assistant 和 `MEDIA:` 的资格正确；read/search/stdout 不升级为 Artifact。 |
+| 位置   | session workspace、默认根、外部普通目录、附件/memory 与受保护路径均按各自规则处理。                               |
+| 活引用  | 删除、改名、symlink、策略拒绝变为 `expired`；内容修改和同名普通文件替换读取当前版本。                                  |
+| 生命周期 | normal、Gateway、error、cancel、SSE 刷新、重启/replay、replace/rebind 与 store 失败不破坏 decision。  |
+| 隔离   | profile、lineage、workspace root、turn 和同路径多来源不串读或串写。                                   |
+| 路由   | 既有 workspace preview 不回归；已登记绝对路径可读，未登记/过期/受保护路径均拒绝且不泄露路径。                            |
