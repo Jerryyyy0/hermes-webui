@@ -209,7 +209,8 @@ def _unique_workspace_bare_file_paths(workspace: Path, names: set[str]) -> dict[
     """Resolve explicitly delivered basenames to one safe workspace file each.
 
     This is deliberately a bounded lookup, not an inventory: callers supply
-    only basename candidates from the final assistant response, and ambiguity
+    only basename candidates from the final assistant response.  Multiple safe
+    matches resolve to the uniquely newest modification time; a newest-time tie
     or traversal failure fails closed.  The normal preview gate still validates
     each selected path before it can become an artifact.
     """
@@ -222,11 +223,10 @@ def _unique_workspace_bare_file_paths(workspace: Path, names: set[str]) -> dict[
     except (OSError, ValueError):
         return {}
 
-    matches: dict[str, list[str]] = {name: [] for name in names}
-    pending = set(names)
+    matches: dict[str, list[tuple[int, str]]] = {name: [] for name in names}
     entries_seen = 0
     stack = [root]
-    while stack and pending:
+    while stack:
         directory = stack.pop()
         try:
             with os.scandir(directory) as entries:
@@ -249,24 +249,32 @@ def _unique_workspace_bare_file_paths(workspace: Path, names: set[str]) -> dict[
                             continue
                         stack.append(Path(entry.path))
                         continue
-                    if not entry.is_file(follow_symlinks=False) or entry.name not in pending:
+                    if not entry.is_file(follow_symlinks=False) or entry.name not in matches:
                         continue
                     if ARTIFACT_IGNORE_RE.search(relative):
                         continue
                     if _file_preview_path(root, relative, MANIFEST_PREVIEW_FILE) is None:
                         continue
-                    found = matches[entry.name]
-                    found.append(relative)
-                    if len(found) > 1:
-                        pending.discard(entry.name)
+                    try:
+                        modified_ns = entry.stat(follow_symlinks=False).st_mtime_ns
+                    except OSError:
+                        continue
+                    matches[entry.name].append((modified_ns, relative))
         except OSError:
             return {}
 
-    return {
-        name: paths[0]
-        for name, paths in matches.items()
-        if len(paths) == 1
-    }
+    resolved: dict[str, str] = {}
+    for name, candidates in matches.items():
+        if not candidates:
+            continue
+        newest_modified_ns = max(modified_ns for modified_ns, _path in candidates)
+        newest_paths = [
+            path for modified_ns, path in candidates
+            if modified_ns == newest_modified_ns
+        ]
+        if len(newest_paths) == 1:
+            resolved[name] = newest_paths[0]
+    return resolved
 
 
 def _paths_from_last_assistant_message(

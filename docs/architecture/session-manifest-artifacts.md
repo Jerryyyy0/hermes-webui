@@ -228,7 +228,7 @@ User 消息中的 MEDIA:、工具结果 JSON 的相似字段和普通 URL 都不
 - _BROAD_FILENAME_EXT_RE：绝对路径、相对路径、裸文件名；
 - _LAST_ASSISTANT_TILDE_PATH_RE：~/... 路径候选。
 
-绝对路径可以在 session workspace 内或外：前者按既有 workspace 相对路径表示，后者原样以绝对路径表示为直接引用。含目录的相对路径只以当前 `session.workspace` 为基准解析，解析后必须仍位于该目录。裸文件名先按 workspace 根解析；仅根目录没有该文件时，才在当前 workspace 内进行一次受控递归唯一匹配：候选必须由最终 assistant 明确点名、是普通非 symlink 文件、不在 `uploads/` 或 cruft 目录、并且在受限条目数内恰好命中一个路径。零个或多个命中均跳过，不借用前序 turn、工具输出或目录描述补全。后续纯问答 turn 若最后一条 assistant 明确列出一个实际存在的 workspace 文件，仍可产生该 turn 的 `assistant_prose` artifact。
+绝对路径可以在 session workspace 内或外：前者按既有 workspace 相对路径表示，后者原样以绝对路径表示为直接引用。含目录的相对路径只以当前 `session.workspace` 为基准解析，解析后必须仍位于该目录。裸文件名先按 workspace 根解析；仅根目录没有该文件时，才在当前 workspace 内进行一次受控递归匹配：候选必须由最终 assistant 明确点名、是普通非 symlink 文件、不在 `uploads/` 或 cruft 目录，并在受限条目数内选取修改时间最新的匹配。若最新修改时间并列、没有命中或遍历失败则跳过，不借用前序 turn、工具输出或目录描述补全。后续纯问答 turn 若最后一条 assistant 明确列出一个实际存在的 workspace 文件，仍可产生该 turn 的 `assistant_prose` artifact。
 
 不依赖“已保存”“文件路径”等交付关键词。候选必须：
 

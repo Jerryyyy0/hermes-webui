@@ -2,6 +2,7 @@
 
 import copy
 import json
+import os
 import urllib.request
 from pathlib import Path
 
@@ -2083,12 +2084,30 @@ def test_paths_from_last_assistant_message_limits_final_deliveries_to_32(tmp_pat
     assert paths == filenames[:32]
 
 
-def test_paths_from_last_assistant_message_rejects_ambiguous_nested_bare_delivery(tmp_path):
+def test_paths_from_last_assistant_message_uses_newest_nested_bare_delivery(tmp_path):
     workspace = tmp_path / 'ws'
     (workspace / 'first').mkdir(parents=True)
     (workspace / 'second').mkdir()
-    (workspace / 'first' / 'report.pdf').write_bytes(b'first')
-    (workspace / 'second' / 'report.pdf').write_bytes(b'second')
+    first = workspace / 'first' / 'report.pdf'
+    second = workspace / 'second' / 'report.pdf'
+    first.write_bytes(b'first')
+    second.write_bytes(b'second')
+    os.utime(first, ns=(1_000_000_000, 1_000_000_000))
+    os.utime(second, ns=(2_000_000_000, 2_000_000_000))
+
+    assert _paths_from_last_assistant_message('已生成 report.pdf', workspace) == ['second/report.pdf']
+
+
+def test_paths_from_last_assistant_message_rejects_newest_time_tie(tmp_path):
+    workspace = tmp_path / 'ws'
+    (workspace / 'first').mkdir(parents=True)
+    (workspace / 'second').mkdir()
+    first = workspace / 'first' / 'report.pdf'
+    second = workspace / 'second' / 'report.pdf'
+    first.write_bytes(b'first')
+    second.write_bytes(b'second')
+    os.utime(first, ns=(1_000_000_000, 1_000_000_000))
+    os.utime(second, ns=(1_000_000_000, 1_000_000_000))
 
     assert _paths_from_last_assistant_message('已生成 report.pdf', workspace) == []
 

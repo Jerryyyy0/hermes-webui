@@ -39,7 +39,7 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
   subprocess by default and Profile Gateway readiness allows 300 seconds. Existing explicit
   test timeouts remain unchanged.
 
-- **Nested final-message Artifact delivery** — 当当前 turn 最后一条 assistant message 明确列出裸文件名而文件位于 workspace 子目录时，Session Manifest 现在会进行一次受限的唯一匹配并登记实际相对路径。根目录优先；同名多路径、`uploads/`、cruft、symlink、不可预览文件、目录遍历异常或超过 4,096 个条目时均失败关闭。重复提及继续只生成一个 Artifact。
+- **Nested final-message Artifact delivery** — 当当前 turn 最后一条 assistant message 明确列出裸文件名而文件位于 workspace 子目录时，Session Manifest 现在会进行一次受限匹配并登记实际相对路径。根目录优先；同名多路径时选择修改时间最新的文件，最新时间并列则失败关闭。`uploads/`、cruft、symlink、不可预览文件、目录遍历异常或超过 4,096 个条目时均失败关闭。重复提及继续只生成一个 Artifact。
 
 - **Knowledge base artifact upload limits removed** — `POST /api/integration/knowledge_base/upload_artifacts`
   不再限制单个文件大小、文件数量或单次同步的文件总大小；仍保留路径安全、文件存在性以及
