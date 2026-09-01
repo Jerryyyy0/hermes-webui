@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
+import stat
 import time
 from contextlib import closing
 from pathlib import Path
@@ -1055,6 +1057,95 @@ def delete_session_manifest_records(session_id: str, *, db_path: Path | str | No
                 conn.execute("DELETE FROM session_manifest_records WHERE session_id = ?", (sid,))
     except (sqlite3.Error, OSError):
         logger.debug("failed to delete session manifest records for %s", sid, exc_info=True)
+
+
+def _workspace_artifact_delete_parts(path: str | None) -> tuple[str, ...] | None:
+    """Return a conservative relative path suitable for anchored unlinking."""
+    try:
+        candidate = Path(str(path or "").strip())
+    except (TypeError, ValueError):
+        return None
+    if candidate.is_absolute():
+        return None
+    parts = candidate.parts
+    if not parts or any(part in {"", ".", ".."} for part in parts):
+        return None
+    return parts
+
+
+def _unlink_workspace_artifact(root: Path, parts: tuple[str, ...]) -> str:
+    """Unlink one regular file beneath *root* without following symlinks."""
+    try:
+        from api.workspace import open_anchored_fd
+
+        parent = root.joinpath(*parts[:-1]) if len(parts) > 1 else root
+        leaf = parts[-1]
+        supports_dir_fd = getattr(os, "supports_dir_fd", set())
+        if os.stat not in supports_dir_fd or os.unlink not in supports_dir_fd:
+            return "skipped"
+        parent_fd = open_anchored_fd(root, parent, want_dir=True)
+        try:
+            try:
+                mode = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False).st_mode
+            except FileNotFoundError:
+                return "missing"
+            if not stat.S_ISREG(mode):
+                return "skipped"
+            os.unlink(leaf, dir_fd=parent_fd)
+            return "deleted"
+        finally:
+            os.close(parent_fd)
+    except FileNotFoundError:
+        return "missing"
+    except (ImportError, OSError, RuntimeError, ValueError):
+        logger.debug("failed to delete Manifest-owned workspace artifact", exc_info=True)
+        return "failed"
+
+
+def delete_session_artifact_files(
+    session_id: str,
+    *,
+    db_path: Path | str | None = None,
+) -> dict[str, int]:
+    """Delete only safe, Manifest-owned workspace files for one session.
+
+    Absolute paths are external references and are deliberately retained. A
+    missing, malformed, symlinked, or non-regular target is also retained.
+    Callers remove the Manifest rows separately with the deleted session.
+    """
+    result = {"deleted": 0, "missing": 0, "skipped": 0, "failed": 0}
+    sid = str(session_id or "").strip()
+    if not _is_safe_session_id(sid):
+        return result
+    try:
+        with closing(_connect(db_path)) as conn:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT workspace_root, path
+                FROM session_manifest_records
+                WHERE session_id = ? AND record_kind = ? AND preview = ? AND path != ''
+                """,
+                (sid, ARTIFACT_RECORD_KIND, MANIFEST_PREVIEW_FILE),
+            ).fetchall()
+    except (sqlite3.Error, OSError):
+        logger.debug("failed to load session Manifest records for artifact deletion", exc_info=True)
+        result["failed"] += 1
+        return result
+
+    seen: set[tuple[str, tuple[str, ...]]] = set()
+    for row in rows:
+        parts = _workspace_artifact_delete_parts(row["path"])
+        root = effective_manifest_workspace_root(row["workspace_root"])
+        if parts is None or root is None:
+            result["skipped"] += 1
+            continue
+        key = (str(root), parts)
+        if key in seen:
+            continue
+        seen.add(key)
+        outcome = _unlink_workspace_artifact(root, parts)
+        result[outcome] += 1
+    return result
 
 
 def delete_session_manifest_turns(

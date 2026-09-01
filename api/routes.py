@@ -13432,6 +13432,18 @@ def handle_post(handler, parsed) -> bool:
                 except Exception:
                     pass
         worktree_retained = _worktree_retained_payload_for_session_id(sid)
+        delete_artifacts = bool(load_settings().get("session_delete_artifact", False))
+        if delete_artifacts:
+            try:
+                from integration.session_manifest.store import delete_session_artifact_files
+
+                delete_session_artifact_files(sid)
+            except Exception:
+                logger.warning(
+                    "Failed to delete Manifest-owned artifacts for session %s",
+                    sid,
+                    exc_info=True,
+                )
         try:
             event_profile = getattr(get_session(sid, metadata_only=True), "profile", None)
         except KeyError:

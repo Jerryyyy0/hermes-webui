@@ -9281,6 +9281,8 @@ _SETTINGS_DEFAULTS = {
     "sound_enabled": False,  # play notification sound when assistant finishes
     "rtl": False,  # right-to-left chat layout (chat messages + composer only)
     "notifications_enabled": False,  # browser notification when tab is in background
+    "skills_auto_update": False,  # persisted preference; does not trigger updates by itself
+    "session_delete_artifact": False,  # delete Manifest-owned workspace artifacts with a deleted session
     "show_thinking": True,  # show/hide thinking/reasoning blocks in chat view
     "simplified_tool_calling": True,  # legacy compatibility; Worklog renderer remains enabled
     "terminal_auto_expand_on_output": False,  # auto-expand terminal panel when output arrives while collapsed
@@ -9554,6 +9556,8 @@ _SETTINGS_BOOL_KEYS = {
     "sound_enabled",
     "rtl",
     "notifications_enabled",
+    "skills_auto_update",
+    "session_delete_artifact",
     "show_thinking",
     "terminal_auto_expand_on_output",
     "workspace_todos_tab",
