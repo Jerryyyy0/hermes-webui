@@ -7228,7 +7228,6 @@ def _message_window_for_display(
     return window, start_idx
 
 
-_LIMITED_TOOL_CONTENT_MAX_CHARS = 4096
 # Server-side ceiling on the ?msg_limit= tail-window size. A client could
 # otherwise request msg_limit=1000000 and force the server to assemble and
 # serialize an unbounded message payload (the frontend's own pagination grows
@@ -7295,48 +7294,6 @@ def _state_db_backstop_limit_for_display(session, msg_before) -> int | None:
         or getattr(session, "truncation_boundary", None) not in (None, "")
     )
     return None if has_boundary_prefix else _STATE_DB_DISPLAY_ROW_BACKSTOP
-
-
-_LIMITED_TOOL_CONTENT_NOTICE = (
-    "\n\n[Tool output truncated in paginated session response; "
-    "load the full transcript to inspect the complete result.]"
-)
-
-
-def _tool_message_for_limited_payload(message):
-    """Return a bounded copy of large hidden tool-result rows for paginated loads."""
-    if not isinstance(message, dict) or str(message.get("role") or "").lower() != "tool":
-        return message
-    content = message.get("content")
-    if content in (None, ""):
-        return message
-    if isinstance(content, str):
-        text = content
-    else:
-        try:
-            text = json.dumps(content, ensure_ascii=False, default=str)
-        except Exception:
-            text = str(content)
-    if len(text) <= _LIMITED_TOOL_CONTENT_MAX_CHARS:
-        return message
-    clipped = dict(message)
-    preview = text[:_LIMITED_TOOL_CONTENT_MAX_CHARS] + _LIMITED_TOOL_CONTENT_NOTICE
-    if isinstance(content, str):
-        clipped["content"] = preview
-    elif isinstance(content, list):
-        clipped["content"] = [{"type": "text", "text": preview}]
-    elif isinstance(content, dict):
-        clipped["content"] = {"_truncated": True, "preview": preview}
-    else:
-        clipped["content"] = preview
-    clipped["_content_truncated"] = True
-    clipped["_content_original_chars"] = len(text)
-    return clipped
-
-
-def _messages_for_limited_payload(messages) -> list:
-    """Bound hidden tool-result payloads before sending a msg_limit response."""
-    return [_tool_message_for_limited_payload(msg) for msg in list(messages or [])]
 
 
 def _limited_webui_messages_for_display(session, state_db_messages) -> list:
@@ -10850,8 +10807,8 @@ def handle_get(handler, parsed) -> bool:
         resolve_model = query.get("resolve_model", [resolve_model_default])[0] != "0"
         # ?msg_limit=N returns a tail window containing the last N visible
         # transcript rows. Hidden tool-result rows do not consume the budget;
-        # they are included only when they sit inside the selected window and
-        # are bounded before serialization. Older rows load on-demand.
+        # they are included only when they sit inside the selected window.
+        # Older rows load on-demand.
         # Clamp to _MAX_MSG_LIMIT so an oversized request (e.g. msg_limit=9999
         # from an outline jump, or a hostile value) can't force an unbounded
         # payload; the existing _messages_truncated signal covers the clamped
