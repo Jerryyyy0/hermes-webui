@@ -65,6 +65,10 @@ contributor guidance; it does not change runtime behavior or CI gates.
   while an agent run is active. Start here for busy-composer behavior, pending
   queued messages, interrupt replacement, steer visibility, or leftover-steer
   recovery changes.
+- [`docs/rfcs/threaded-agent-fast-cancellation.md`](rfcs/threaded-agent-fast-cancellation.md):
+  默认进程内、每轮一个线程执行路径的跨仓库取消契约。修改 Provider 请求中止、工具或
+  子进程中断、`ACTIVE_RUNS` settled、取消延迟，或在不迁移到 Runner 进程的前提下
+  安全启动排队后继轮次时，从这里开始。
 - [`docs/rfcs/README.md`](rfcs/README.md): RFC conventions and current RFC index.
 - [`docs/rfcs/session-sse-contract-v1.md`](rfcs/session-sse-contract-v1.md):
   proposed contract vocabulary, cursor/resume semantics, replay identity, snapshot
