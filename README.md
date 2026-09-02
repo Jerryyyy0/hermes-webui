@@ -250,6 +250,27 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Appends to existing textarea content (doesn't replace)
 - Hidden when browser doesn't support Web Speech API (Chrome, Edge, Safari)
 
+#### Compare local faster-whisper models
+
+`scripts/compare_faster_whisper_models.py` runs one audio file through one or
+more locally cached faster-whisper models and reports loading/transcription
+time, detected language, transcript, and optional character error rate (CER).
+It does not download models unless `--allow-download` is supplied explicitly.
+Run it with the same Python environment that runs Hermes Agent:
+
+```bash
+python scripts/compare_faster_whisper_models.py \
+  --models base,small,medium --language zh --json-out stt-comparison.json
+```
+
+Without an audio argument, the script recursively reads all supported audio
+files in `scripts/faster_whisper_samples/`. Pass one audio file plus
+`--reference-file expected.txt` to calculate its CER.
+The script also checks the default SenseVoiceSmall service at
+`http://192.168.1.137:38080`; use `--skip-funasr` to disable it or
+`--funasr-url URL` to override the address. It checks `/health` first and then
+prints each `/transcribe` response alongside the local model results.
+
 ### Profiles
 - Profile chip in the **composer footer** -- dropdown showing all profiles with gateway status and model info
 - Gateway status dots (green = running), model info, skill count per profile

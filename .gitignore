@@ -87,3 +87,7 @@ a.json
 # Local WebUI runtime data and credentials
 .webui_password
 attachments/
+
+# Local audio fixtures for faster-whisper model comparisons.
+scripts/faster_whisper_samples/*
+!scripts/faster_whisper_samples/README.md
