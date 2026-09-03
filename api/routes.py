@@ -13389,7 +13389,9 @@ def handle_post(handler, parsed) -> bool:
                 except Exception:
                     pass
         worktree_retained = _worktree_retained_payload_for_session_id(sid)
-        delete_artifacts = bool(load_settings().get("session_delete_artifact", False))
+        delete_artifacts = body.get("delete_artifacts", False)
+        if not isinstance(delete_artifacts, bool):
+            return bad(handler, "delete_artifacts must be a boolean", 400)
         if delete_artifacts:
             try:
                 from integration.session_manifest.store import delete_session_artifact_files

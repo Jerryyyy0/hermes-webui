@@ -54,7 +54,7 @@ def test_delete_session_artifact_files_only_removes_regular_workspace_files(tmp_
     assert link.is_symlink()
 
 
-def test_session_delete_uses_the_saved_artifact_setting(monkeypatch, tmp_path):
+def test_session_delete_uses_the_delete_artifacts_request_flag(monkeypatch, tmp_path):
     import api.background_process as background_process
     import api.config as config
     import api.models as models
@@ -68,10 +68,10 @@ def test_session_delete_uses_the_saved_artifact_setting(monkeypatch, tmp_path):
     sid = "deleteartifact02"
     cleanup_calls = []
     response = {}
-    monkeypatch.setattr(routes, "read_body", lambda _handler: {"session_id": sid})
+    request_body = {"session_id": sid}
+    monkeypatch.setattr(routes, "read_body", lambda _handler: request_body)
     monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
     monkeypatch.setattr(routes, "SESSION_DIR", tmp_path / "sessions")
-    monkeypatch.setattr(routes, "load_settings", lambda: {"session_delete_artifact": True})
     monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda _sid: {})
     monkeypatch.setattr(routes, "_is_messaging_session_id", lambda _sid: False)
     monkeypatch.setattr(routes, "_worktree_retained_payload_for_session_id", lambda _sid: {})
@@ -98,6 +98,30 @@ def test_session_delete_uses_the_saved_artifact_setting(monkeypatch, tmp_path):
     monkeypatch.setattr(terminal, "close_terminal", lambda _sid: None)
     monkeypatch.setattr(routes, "j", lambda _handler, payload, **_kwargs: response.update(payload) or True)
 
+    assert routes.handle_post(object(), SimpleNamespace(path="/api/session/delete")) is True
+    assert cleanup_calls == []
+    assert response == {"ok": True, "state_db_cleanup_failed": False}
+
+    invalid_response = {}
+    original_bad = routes.bad
+    monkeypatch.setattr(
+        routes,
+        "bad",
+        lambda _handler, message, status=400: invalid_response.update(
+            {"message": message, "status": status}
+        ) or True,
+    )
+    request_body["delete_artifacts"] = "true"
+    assert routes.handle_post(object(), SimpleNamespace(path="/api/session/delete")) is True
+    assert invalid_response == {
+        "message": "delete_artifacts must be a boolean",
+        "status": 400,
+    }
+    assert cleanup_calls == []
+    monkeypatch.setattr(routes, "bad", original_bad)
+
+    request_body["delete_artifacts"] = True
+    response.clear()
     assert routes.handle_post(object(), SimpleNamespace(path="/api/session/delete")) is True
     assert cleanup_calls == [sid]
     assert response == {"ok": True, "state_db_cleanup_failed": False}
