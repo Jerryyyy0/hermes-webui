@@ -2570,7 +2570,7 @@
       "post": {
         "tags": ["SkillPublish"],
         "summary": "创建申请单（草稿）",
-        "description": "publish：从本地 shared_skills_dir 读取技能元数据回填快照（本地不存在 404）；unpublish：校验归属（403）与 upstream_status=2（否则 409），必填 reason。同账号同技能同类型存在活跃申请单时 409。",
+        "description": "publish：从本地 shared_skills_dir 读取技能元数据回填快照（本地不存在 404）；unpublish：校验归属（403）与 upstream_status=2（否则 409），必填 reason。同账号同技能同类型存在活跃申请单时 409。changeLogs 可在创建时传入保存到草稿，后续编辑和提交时均可修改。更新上架（skill_versions 已有该技能记录）时后端自动回填 parent_id 为最新已发布申请单 ID，详情接口返回链式 parent_history。",
         "requestBody": {
           "required": true,
           "content": {
@@ -2582,7 +2582,18 @@
                   "account": { "type": "string", "description": "用户账号" },
                   "uuid": { "type": "string", "description": "用户 UUID" },
                   "application_type": { "type": "string", "enum": ["publish", "unpublish"], "description": "默认 publish" },
-                  "reason": { "type": "string", "description": "申请说明（unpublish 必填）" }
+                  "reason": { "type": "string", "description": "申请说明（unpublish 必填）" },
+                  "change_logs": {
+                    "type": "array",
+                    "description": "版本变更记录（可选），最多 20 条，每条 type 枚举：新增/优化/删除/修复，changeLog 最长 200 字符",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "type": { "type": "string", "enum": ["新增", "优化", "删除", "修复"], "description": "变更类型" },
+                        "changeLog": { "type": "string", "description": "变更内容" }
+                      }
+                    }
+                  }
                 },
                 "required": ["skill_name", "account"]
               }
@@ -2603,7 +2614,7 @@
       "get": {
         "tags": ["SkillPublish"],
         "summary": "申请单详情",
-        "description": "按申请单 ID 查询详情（含 tags/detail_json 解析与 audit_log 审批流水）。pending 状态先尝试增量同步上游审核事件。仅提交人可查看。",
+        "description": "按申请单 ID 查询详情（含 tags/detail_json/change_logs 解析与 audit_log 审批流水）。pending 状态先尝试增量同步上游审核事件。仅提交人可查看。change_logs 为版本变更记录数组，每项包含 type（新增/优化/删除/修复）和 changeLog。application 含 parent_id（更新上架时指向最新已发布申请单，首次上架为空串）。更新上架单额外返回 parent_history 数组：按时间从旧到新列出所有祖先申请单摘要及其完整 audit_log 审批流水（含管理员通过记录），用于展示链式版本演进历史。",
         "parameters": [
           { "name": "id", "in": "path", "required": true, "schema": { "type": "string" }, "description": "申请单 ID（skp- 前缀）" },
           { "name": "account", "in": "query", "required": true, "schema": { "type": "string" }, "description": "用户账号（须为提交人）" }
@@ -2631,7 +2642,7 @@
       "post": {
         "tags": ["SkillPublish"],
         "summary": "编辑草稿/已驳回申请单",
-        "description": "仅 draft / rejected 状态可编辑，且仅允许更新 application_type / reason / category（未传字段保持不变）。rejected 单编辑后状态不回退，仍需重新提交（产生 re_submit 流水，audit_comment 不清除）。application_type 变更时联动：切至 unpublish 需校验同用户无进行中的下架申请、技能由本人经 WebUI 发布且已上架，并回填最新版本号；切至 publish 清空版本号（提交时重新计算）并清空旧下架原因（除非本次请求显式传入新值）。用户身份从配置获取，无需传 account。",
+        "description": "仅 draft / rejected 状态可编辑，且仅允许更新 application_type / reason / category / changeLogs（未传字段保持不变）。rejected 单编辑后状态不回退，仍需重新提交（产生 re_submit 流水，audit_comment 不清除）。application_type 变更时联动：切至 unpublish 需校验同用户无进行中的下架申请、技能由本人经 WebUI 发布且已上架，并回填最新版本号；切至 publish 清空版本号（提交时重新计算）并清空旧下架原因（除非本次请求显式传入新值）。用户身份从配置获取，无需传 account。",
         "requestBody": {
           "required": true,
           "content": {
@@ -2641,7 +2652,18 @@
                 "properties": {
                   "application_type": { "type": "string", "enum": ["publish", "unpublish"], "description": "申请类型（可选）" },
                   "reason": { "type": "string", "description": "申请原因，下架申请必填（可选）" },
-                  "category": { "type": "string", "description": "技能分类（可选）" }
+                  "category": { "type": "string", "description": "技能分类（可选）" },
+                  "change_logs": {
+                    "type": "array",
+                    "description": "版本变更记录（可选），传入覆盖已有值，传 null 清空",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "type": { "type": "string", "enum": ["新增", "优化", "删除", "修复"], "description": "变更类型" },
+                        "changeLog": { "type": "string", "description": "变更内容" }
+                      }
+                    }
+                  }
                 }
               }
             }
@@ -2649,7 +2671,7 @@
         },
         "responses": {
           "200": { "description": "更新成功，返回最新申请单" },
-          "400": { "description": "申请类型无效 / 无可更新字段 / 下架申请必须填写 reason" },
+          "400": { "description": "申请类型无效 / 下架申请必须填写 reason" },
           "404": { "description": "申请单不存在" },
           "409": { "description": "仅草稿或已驳回状态的申请单可编辑 / 已存在进行中的同类型申请 / 技能非上架状态不可下架" }
         }
@@ -2660,7 +2682,7 @@
       "post": {
         "tags": ["SkillPublish"],
         "summary": "提交审核",
-        "description": "仅 draft/rejected 可提交。计算下一版本、刷新本地技能快照、打包临时 zip（系统临时目录）调上游 SkillHub（auto_approve=false），成功回填 upstream_* 并写 submit/re_submit 流水；409/上游异常回滚为 draft。临时 zip 在 finally 中删除。",
+        "description": "仅 draft/rejected 可提交。计算下一版本、刷新本地技能快照、打包临时 zip（系统临时目录）调上游 SkillHub（auto_approve=false），成功回填 upstream_* 并写 submit/re_submit 流水；409/上游异常回滚为 draft。临时 zip 在 finally 中删除。changeLogs 优先级：请求体传入 > 草稿中已保存的值。",
         "parameters": [
           { "name": "id", "in": "path", "required": true, "schema": { "type": "string" }, "description": "申请单 ID" }
         ],
@@ -2674,7 +2696,18 @@
                   "account": { "type": "string", "description": "用户账号（须为提交人）" },
                   "applicant_name": { "type": "string", "description": "申请人姓名" },
                   "applicant_org": { "type": "string", "description": "申请人单位" },
-                  "applicant_title": { "type": "string", "description": "申请人职务" }
+                  "applicant_title": { "type": "string", "description": "申请人职务" },
+                  "change_logs": {
+                    "type": "array",
+                    "description": "版本变更记录（上架申请时可选，最多 20 条；每条 type 枚举：新增/优化/删除/修复，changeLog 最长 200 字符）",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "type": { "type": "string", "enum": ["新增", "优化", "删除", "修复"], "description": "变更类型" },
+                        "changeLog": { "type": "string", "description": "变更内容" }
+                      }
+                    }
+                  }
                 },
                 "required": ["account"]
               }
@@ -2727,13 +2760,52 @@
       "get": {
         "tags": ["SkillPublish"],
         "summary": "申请单版本轨迹",
-        "description": "按 skill_name 查询全部版本轨迹（申请单表全状态）。",
+        "description": "按 skill_name 查询全部版本轨迹。数据来源为申请单表与版本表（skill_versions）合并：申请单存在的版本返回完整信息；申请单已删除但版本表仍有记录时降级返回（status=approved、audit_comment 为空，change_logs 从版本表冗余数据恢复），版本轨迹不因申请单删除而缺失。",
         "parameters": [
           { "name": "id", "in": "path", "required": true, "schema": { "type": "string" }, "description": "申请单 ID" },
           { "name": "skill_name", "in": "query", "required": true, "schema": { "type": "string" }, "description": "技能英文名" }
         ],
         "responses": {
-          "200": { "description": "版本轨迹列表（version/status/submitted_at/audited_at 等）" },
+          "200": {
+            "description": "版本轨迹列表",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "skill_name": { "type": "string" },
+                    "latest_version": { "type": "string" },
+                    "versions": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "version": { "type": "string" },
+                          "application_id": { "type": "string" },
+                          "status": { "type": "string" },
+                          "application_type": { "type": "string" },
+                          "submitted_at": { "type": "number" },
+                          "audited_at": { "type": "number" },
+                          "audit_comment": { "type": "string" },
+                          "change_logs": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "type": { "type": "string" },
+                                "changeLog": { "type": "string" }
+                              }
+                            },
+                            "description": "版本变更记录"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
           "400": { "description": "缺少 skill_name" }
         }
       }

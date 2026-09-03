@@ -319,15 +319,13 @@ def _call_update(handler, app_id, body):
 
 
 def test_post_update_draft_fields(db_update):
-    app = _draft(db_update, reason="old", category="tools")
+    app = _draft(db_update, reason="old")
     handler = MagicMock()
-    assert _call_update(handler, app["id"], {"reason": "new-reason",
-                                             "category": "productivity"}) is True
+    assert _call_update(handler, app["id"], {"reason": "new-reason"}) is True
     assert handler.send_response.call_args.args[0] == 200
     payload = _payload(handler)
     assert payload["ok"] is True
     assert payload["application"]["reason"] == "new-reason"
-    assert payload["application"]["category"] == "productivity"
     assert payload["application"]["application_type"] == "publish"
 
 
@@ -352,7 +350,7 @@ def test_post_update_rejected_fields(db_update):
     assert handler.send_response.call_args.args[0] == 200
     payload = _payload(handler)
     assert payload["application"]["reason"] == "更充分的理由"
-    assert payload["application"]["status"] == PublishStatus.REJECTED
+    assert payload["application"]["status"] == PublishStatus.DRAFT
     assert payload["application"]["audit_comment"] == "理由不充分"
 
 
@@ -366,6 +364,16 @@ def test_post_update_rejected_switch_to_unpublish(db_update):
     payload = _payload(handler)
     assert payload["application"]["application_type"] == "unpublish"
     assert payload["application"]["version"] == "1.0.0"
+    assert payload["application"]["status"] == PublishStatus.DRAFT
+
+
+def test_post_update_rejected_no_field_change_resets_to_draft(db_update):
+    app = _draft(db_update, status=PublishStatus.REJECTED, reason="same")
+    handler = MagicMock()
+    assert _call_update(handler, app["id"], {"reason": "same"}) is True
+    assert handler.send_response.call_args.args[0] == 200
+    payload = _payload(handler)
+    assert payload["application"]["status"] == PublishStatus.DRAFT
 
 
 def test_post_update_invalid_type_400(db_update):
@@ -375,11 +383,24 @@ def test_post_update_invalid_type_400(db_update):
     assert handler.send_response.call_args.args[0] == 400
 
 
-def test_post_update_no_fields_400(db_update):
-    app = _draft(db_update)
+def test_post_update_no_fields_is_idempotent_200(db_update):
+    app = _draft(db_update, reason="same")
     handler = MagicMock()
     assert _call_update(handler, app["id"], {}) is True
-    assert handler.send_response.call_args.args[0] == 400
+    assert handler.send_response.call_args.args[0] == 200
+    payload = _payload(handler)
+    assert payload["ok"] is True
+    assert payload["application"]["reason"] == "same"
+
+
+def test_post_update_unchanged_values_is_idempotent_200(db_update):
+    app = _draft(db_update, reason="same", application_type="publish")
+    handler = MagicMock()
+    assert _call_update(handler, app["id"],
+                        {"reason": "same", "application_type": "publish"}) is True
+    assert handler.send_response.call_args.args[0] == 200
+    payload = _payload(handler)
+    assert payload["ok"] is True
 
 
 def test_post_update_switch_to_unpublish(db_update):

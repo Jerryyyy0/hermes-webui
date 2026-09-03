@@ -198,6 +198,7 @@ def _apply_review_event(event: dict, account: str, *, db_path=None) -> bool:
                 "upstream_status": UPSTREAM_STATUS_LISTED,
                 "application_id": app["id"],
                 "released_at": occurred_at,
+                "change_logs": app.get("change_logs") or "[]",
             },
             db_path=db_path,
         )

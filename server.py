@@ -910,6 +910,33 @@ def main() -> None:
         daemon=True,
     ).start()
 
+    def _bootstrap_skill_update_check_safe() -> None:
+        try:
+            from integration.config import integration_enabled, skillhub_enabled
+            if not (integration_enabled() and skillhub_enabled()):
+                return
+            jitter_max = float(os.getenv("HERMES_SKILL_UPDATE_JITTER", "0") or "0")
+            if jitter_max > 0:
+                jitter = random.uniform(0, jitter_max)
+                log_info(
+                    f"[--] skill update check: waiting {jitter:.1f}s (jitter, max {jitter_max:.0f}s)"
+                )
+                time.sleep(jitter)
+            from integration.skills.version_check import check_updates_for_installed_skills
+            result = check_updates_for_installed_skills()
+            log_info(
+                f"[ok] skill update check: checked={result['checked']}, "
+                f"upgradable={result['upgradable']}, auto_updated={result['auto_updated']}"
+            )
+        except Exception:
+            logger.exception("skill update check failed")
+
+    threading.Thread(
+        target=_bootstrap_skill_update_check_safe,
+        name="skill-update-check",
+        daemon=True,
+    ).start()
+
     _abort_if_already_serving(HOST, PORT)
     httpd = QuietHTTPServer((HOST, PORT), Handler)
 
