@@ -49,6 +49,42 @@ worker 的真实生命周期。只有旧 worker、checkpoint 写线程以及所�
 因此，慢的不是 SSE 断开。SSE sidecar 可以提前释放，真正耗时的是从
 “取消请求已接受”到“旧轮次所有执行所有者都已停止”的过程。
 
+## 一轮会话的执行层级
+
+当前默认本地路径不是“每个工具都只对应一个线程”，而是多层执行结构：
+
+```text
+一次聊天轮次
+└── WebUI worker 线程
+    └── Agent.run_conversation()
+        ├── 串行工具：直接在 WebUI worker 线程执行
+        ├── 并发工具：每个工具提交到工具线程池
+        │   ├── tool worker 线程 A
+        │   ├── tool worker 线程 B
+        │   └── tool worker 线程 C
+        └── Terminal / Code Execution
+            └── 工具线程内部再启动操作系统子进程
+```
+
+各层职责如下：
+
+| 执行单元 | 作用 | 取消方式 |
+|---|---|---|
+| WebUI worker 线程 | 执行本轮 `_run_agent_streaming()`，承载 Agent 主循环和最终收尾 | WebUI 设置 cancel event，并调用 `AIAgent.interrupt()` |
+| Agent 主循环 | 调用 Provider、解析模型响应、决定下一批工具以及提交工具结果 | 检查 Agent 的 interrupt 状态，退出当前轮次循环 |
+| 串行工具 | 单个工具或要求串行的工具，直接运行在 Agent 当前 worker 线程 | 工具自身检查取消上下文或有限超时 |
+| 并发工具线程 | 多个可并行工具各自占用一个工具线程池 worker | `AIAgent.interrupt()` 将中断状态传播到已登记的工具线程；工具仍需主动响应 |
+| Terminal / Code Execution 子进程 | 工具线程负责等待，实际 shell/代码命令运行在操作系统子进程中 | 工具线程检测取消后终止并回收整个进程组 |
+
+因此，一轮会话至少有一个 WebUI worker；并发工具场景下还会临时增加多个工具
+线程；Terminal 或 Code Execution 又可能在工具线程内创建子进程。取消必须逐层
+传播：先通知 Agent，再通知工具线程，最后终止工具拥有的子进程或远程任务。
+
+“工具线程函数返回”与“工具产生的实际副作用已经停止”不是同一个事件。特别是
+并发工具执行器使用 `shutdown(wait=False)` 放弃等待时，底层工具线程可能仍然存在。
+只有工具线程以及它拥有的子进程、网络请求和远程任务都已停止，才能把该工具计为
+settled，才能注销 `ACTIVE_RUNS` 并启动同一会话的下一轮。
+
 ## 当前代码中已经具备的能力
 
 本方案建立在现有安全机制之上，不重复实现已经存在的能力：
