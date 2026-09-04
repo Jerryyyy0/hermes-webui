@@ -61,13 +61,15 @@ HTTP handler、状态变更和事件构造必须留在 `integration/async_delega
 ## Knowledge Base Manifest References
 
 `integration/knowledge_base/turn_references.py` 负责将 IThink 知识库 MCP 的两个精确
-搜索工具结果归一化为 Session Manifest references，并按 `(kbName, fileName)` 聚合。
-解析、大小限制、路径脱敏和 wire projection 都必须留在该目录；不新增数据库表或
-sidecar 状态。
+搜索工具结果归一化为 chunk candidates；`integration/knowledge_base/citations.py` 负责
+provider-only `_cite`、最终回答结算和已提交 Citation 投影。检索命中本身不构成公开
+Manifest reference；只有实际引用的 chunk 才随最终 assistant message 保存在既有
+Session `session.json` 中。不新增数据库表、sidecar 或独立 Citation JSON。
 
-允许的上游接缝只有 `integration/session_manifest/manifest.py`：它把已配对的 completed ToolEvent 交给
-解析器，并把结果放入既有 `manifest_delta` SSE 与 `GET /api/session/manifest` 的同一
-references wire。不得在 `api/streaming.py` 或前端重复解析 MCP 结果。
+`integration/session_manifest/manifest.py` 将 completed ToolEvent 交给解析器，但 live delta 会过滤
+知识库 candidates；`GET /api/session/manifest` 只从自洽的最终 message Citation/evidence
+生成 references wire。`api/streaming.py` 仅保留 hook、保存和出站过滤接缝，不解析 MCP JSON；
+前端也不得重复解析。
 
 公开字段、SSE 帧和生命周期只在 [Session Manifest HTTP/SSE 契约](api/session-manifest-api.md)
 维护；本节只记录 Fork 接缝与实现边界。

@@ -67,6 +67,9 @@ First-time contributor RFCs should be discussed in an issue before opening a PR.
   #3058 control-surface companion to #3400 for Queue, Steer, Stop-and-send,
   Interrupt, and leftover-steer inputs submitted while a long-running agent
   session is active.
+- [`threaded-agent-fast-cancellation.md`](threaded-agent-fast-cancellation.md) —
+  默认进程内、每轮一个线程模式下的快速且真实的取消方案，覆盖 Provider Transport
+  主动中止、工具与子进程取消、worker settled，以及排队后继轮次的安全启动。
 - [`session-sse-contract-v1.md`](session-sse-contract-v1.md) — #4812 Proposed
   contract vocabulary, replay identity, event taxonomy, cursor/resume semantics,
   and implementation gates for `GET /api/sessions/{session_id}/events`.

@@ -1600,6 +1600,7 @@ from api.helpers import (
     _security_headers,
     _sanitize_error,
     redact_session_data,
+    strip_knowledge_base_citations_for_copy,
     _redact_text,
     _CLIENT_DISCONNECT_ERRORS,
 )
@@ -7228,7 +7229,6 @@ def _message_window_for_display(
     return window, start_idx
 
 
-_LIMITED_TOOL_CONTENT_MAX_CHARS = 4096
 # Server-side ceiling on the ?msg_limit= tail-window size. A client could
 # otherwise request msg_limit=1000000 and force the server to assemble and
 # serialize an unbounded message payload (the frontend's own pagination grows
@@ -7295,48 +7295,6 @@ def _state_db_backstop_limit_for_display(session, msg_before) -> int | None:
         or getattr(session, "truncation_boundary", None) not in (None, "")
     )
     return None if has_boundary_prefix else _STATE_DB_DISPLAY_ROW_BACKSTOP
-
-
-_LIMITED_TOOL_CONTENT_NOTICE = (
-    "\n\n[Tool output truncated in paginated session response; "
-    "load the full transcript to inspect the complete result.]"
-)
-
-
-def _tool_message_for_limited_payload(message):
-    """Return a bounded copy of large hidden tool-result rows for paginated loads."""
-    if not isinstance(message, dict) or str(message.get("role") or "").lower() != "tool":
-        return message
-    content = message.get("content")
-    if content in (None, ""):
-        return message
-    if isinstance(content, str):
-        text = content
-    else:
-        try:
-            text = json.dumps(content, ensure_ascii=False, default=str)
-        except Exception:
-            text = str(content)
-    if len(text) <= _LIMITED_TOOL_CONTENT_MAX_CHARS:
-        return message
-    clipped = dict(message)
-    preview = text[:_LIMITED_TOOL_CONTENT_MAX_CHARS] + _LIMITED_TOOL_CONTENT_NOTICE
-    if isinstance(content, str):
-        clipped["content"] = preview
-    elif isinstance(content, list):
-        clipped["content"] = [{"type": "text", "text": preview}]
-    elif isinstance(content, dict):
-        clipped["content"] = {"_truncated": True, "preview": preview}
-    else:
-        clipped["content"] = preview
-    clipped["_content_truncated"] = True
-    clipped["_content_original_chars"] = len(text)
-    return clipped
-
-
-def _messages_for_limited_payload(messages) -> list:
-    """Bound hidden tool-result payloads before sending a msg_limit response."""
-    return [_tool_message_for_limited_payload(msg) for msg in list(messages or [])]
 
 
 def _limited_webui_messages_for_display(session, state_db_messages) -> list:
@@ -10850,8 +10808,8 @@ def handle_get(handler, parsed) -> bool:
         resolve_model = query.get("resolve_model", [resolve_model_default])[0] != "0"
         # ?msg_limit=N returns a tail window containing the last N visible
         # transcript rows. Hidden tool-result rows do not consume the budget;
-        # they are included only when they sit inside the selected window and
-        # are bounded before serialization. Older rows load on-demand.
+        # they are included only when they sit inside the selected window.
+        # Older rows load on-demand.
         # Clamp to _MAX_MSG_LIMIT so an oversized request (e.g. msg_limit=9999
         # from an outline jump, or a hostile value) can't force an unbounded
         # payload; the existing _messages_truncated signal covers the clamped
@@ -12691,7 +12649,7 @@ def handle_post(handler, parsed) -> bool:
                     "created_at": share_meta["share_created_at"],
                     "updated_at": share_meta["share_updated_at"],
                 },
-                "session": response_session.compact() | {"messages": response_session.messages},
+                "session": redact_session_data(response_session.compact() | {"messages": response_session.messages}),
             },
         )
 
@@ -12730,7 +12688,7 @@ def handle_post(handler, parsed) -> bool:
             handler,
             {
                 "ok": True,
-                "session": response_session.compact() | {"messages": response_session.messages},
+                "session": redact_session_data(response_session.compact() | {"messages": response_session.messages}),
             },
         )
 
@@ -12901,7 +12859,7 @@ def handle_post(handler, parsed) -> bool:
                 profile=getattr(s, "profile", None),
                 session_id=getattr(s, "session_id", None),
             )
-        payload = {"session": s.compact() | {"messages": s.messages}}
+        payload = {"session": redact_session_data(s.compact() | {"messages": s.messages})}
         if worktree_skipped:
             # Config-default worktree was skipped (non-git workspace); tell the
             # client the session is plain so the UI doesn't assume isolation.
@@ -12937,7 +12895,7 @@ def handle_post(handler, parsed) -> bool:
                 workspace_mode=getattr(session, "workspace_mode", None),
                 model=session.model,
                 model_provider=session.model_provider,
-                messages=copy.deepcopy(session.messages),
+                messages=strip_knowledge_base_citations_for_copy(session.messages),
                 tool_calls=copy.deepcopy(session.tool_calls),
                 # Reset ephemeral / per-session-instance flags. Duplicating an
                 # archived conversation should produce a visible (un-archived)
@@ -12963,7 +12921,7 @@ def handle_post(handler, parsed) -> bool:
                 # context_messages is the authoritative model-facing prefix — must be
                 # deepcopied so the duplicate has its own independent context that won't
                 # be mutated when the original session's context changes (#2914).
-                context_messages=copy.deepcopy(getattr(session, "context_messages", None) or []),
+                context_messages=strip_knowledge_base_citations_for_copy(getattr(session, "context_messages", None) or []),
                 # Gateway routing — if the user customized routing for this session,
                 # the duplicate should behave identically.
                 gateway_routing=copy.deepcopy(getattr(session, "gateway_routing", None)),
@@ -12993,7 +12951,7 @@ def handle_post(handler, parsed) -> bool:
             copied_session.save()
             publish_session_list_changed("session_duplicate", profile=getattr(copied_session, "profile", None))
 
-            return j(handler, {"session": copied_session.compact() | {"messages": copied_session.messages}})
+            return j(handler, {"session": redact_session_data(copied_session.compact() | {"messages": copied_session.messages})})
         except Exception as e:
             return bad(handler, str(e))
 
@@ -13385,7 +13343,7 @@ def handle_post(handler, parsed) -> bool:
                 logger.debug("Failed to close workspace terminal after workspace update")
         if str(getattr(s, "workspace_mode", "") or "").strip().lower() != "managed":
             set_last_workspace(new_ws)
-        return j(handler, {"session": s.compact() | {"messages": s.messages}})
+        return j(handler, {"session": redact_session_data(s.compact() | {"messages": s.messages})})
     if parsed.path == "/api/session/worktree/remove":
         sid = body.get("session_id", "")
         if not sid or not isinstance(sid, str) or not sid.strip():
@@ -13432,7 +13390,9 @@ def handle_post(handler, parsed) -> bool:
                 except Exception:
                     pass
         worktree_retained = _worktree_retained_payload_for_session_id(sid)
-        delete_artifacts = bool(load_settings().get("session_delete_artifact", False))
+        delete_artifacts = body.get("delete_artifacts", False)
+        if not isinstance(delete_artifacts, bool):
+            return bad(handler, "delete_artifacts must be a boolean", 400)
         if delete_artifacts:
             try:
                 from integration.session_manifest.store import delete_session_artifact_files
@@ -13736,7 +13696,7 @@ def handle_post(handler, parsed) -> bool:
                 s.truncation_watermark or 0,
             )
         return j(
-            handler, {"ok": True, "session": s.compact() | {"messages": s.messages}}
+            handler, {"ok": True, "session": redact_session_data(s.compact() | {"messages": s.messages})}
         )
 
     if parsed.path == "/api/session/branch":
@@ -13793,6 +13753,7 @@ def handle_post(handler, parsed) -> bool:
             forked_messages = source_messages[:keep_count]
         else:
             forked_messages = list(source_messages)
+        forked_messages = strip_knowledge_base_citations_for_copy(forked_messages)
 
         # Derive title
         if custom_title:
@@ -13816,7 +13777,7 @@ def handle_post(handler, parsed) -> bool:
             context_length=getattr(source, "context_length", None),
             threshold_tokens=getattr(source, "threshold_tokens", None),
             # context_messages — deep copy so the branch has independent context
-            context_messages=copy.deepcopy(getattr(source, "context_messages", None) or []),
+            context_messages=strip_knowledge_base_citations_for_copy(getattr(source, "context_messages", None) or []),
             # Gateway routing — inherit from source
             gateway_routing=copy.deepcopy(getattr(source, "gateway_routing", None)),
             # Context engine — inherit state so branch's context engine starts correctly
@@ -20880,7 +20841,7 @@ def _handle_chat_sync(handler, body):
         {
             "answer": result.get("final_response") or "",
             "status": "done" if result.get("completed", True) else "partial",
-            "session": s.compact() | {"messages": s.messages},
+            "session": redact_session_data(s.compact() | {"messages": s.messages}),
             "result": {k: v for k, v in result.items() if k != "messages"},
         },
     )

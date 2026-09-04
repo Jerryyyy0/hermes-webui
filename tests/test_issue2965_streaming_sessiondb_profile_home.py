@@ -159,7 +159,8 @@ def test_streaming_sessiondb_uses_session_profile_state_db(tmp_path, monkeypatch
     streaming.STREAM_REASONING_TEXT.clear()
     streaming.STREAM_LIVE_TOOL_CALLS.clear()
 
-    streaming.STREAMS[fake_session.active_stream_id] = queue.Queue()
+    stream_events = queue.Queue()
+    streaming.STREAMS[fake_session.active_stream_id] = stream_events
     old_home = os.environ.get("HERMES_HOME")
     try:
         streaming._run_agent_streaming(
@@ -178,6 +179,11 @@ def test_streaming_sessiondb_uses_session_profile_state_db(tmp_path, monkeypatch
 
     assert session_db_instances, "streaming should construct a SessionDB for session_search"
     assert session_db_instances[0].db_path == profile_home / "state.db"
+    emitted_event_names = []
+    while not stream_events.empty():
+        emitted_event_names.append(stream_events.get_nowait()[0])
+    assert "done" in emitted_event_names
+    assert "stream_end" in emitted_event_names
     with cfg.SESSION_AGENT_CACHE_LOCK:
         agent = cfg.SESSION_AGENT_CACHE[fake_session.session_id][0]
     assert agent._session_db.db_path == profile_home / "state.db"

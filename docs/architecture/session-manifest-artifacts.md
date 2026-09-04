@@ -83,8 +83,8 @@ decision 时补历史记录。它不能替代 repair，也不会覆盖已有的 
 `upsert_manifest_records()` 逐 path 写入或更新，不删除同 turn 的其它记录。`replace_manifest_turn_records()`
 在一个事务中删除同一逻辑 root 的旧 decision，再插入 replacement rows；它用于 empty repair 和明确替换。
 
-删除 session、裁剪 turn、rebind 和 repair 默认只改 SQLite 行。唯一例外是用户显式开启
-`session_delete_artifact` 后的会话删除：服务端仅按该会话 `preview=file` 的持久化 Artifact row，删除其
+删除 session、裁剪 turn、rebind 和 repair 默认只改 SQLite 行。唯一例外是删除请求显式传入
+`delete_artifacts=true` 后的会话删除：服务端仅按该会话 `preview=file` 的持久化 Artifact row，删除其
 受信任 workspace root 下的普通文件；绝不删除绝对外部引用、skill、目录或 symlink。数据库启用 WAL 与 busy
 timeout；写失败必须保留失败事实，不能改写为 empty decision。
 
@@ -466,7 +466,7 @@ updated_at:     1787460613.456
 
 Manifest 默认只拥有 SQLite row，不拥有源文件。裁剪 turn、`rebind`、empty repair 或
 `replace_manifest_turn_records()` 都只插入、更新或删除 record；会话删除也默认如此。仅当
-`session_delete_artifact=true` 时，会话删除会在移除 record 前，按持久化 `preview=file` row 安全删除其
+`delete_artifacts=true` 时，会话删除会在移除 record 前，按持久化 `preview=file` row 安全删除其
 workspace 内的普通成果文件；workspace 外部引用、附件、memory、skill、目录和 symlink 一律保留。
 
 外部 row 是活引用：删除、改名、权限变化、成为 symlink/非常规文件或后来命中安全策略时，GET 保留

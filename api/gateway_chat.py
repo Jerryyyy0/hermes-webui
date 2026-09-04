@@ -957,6 +957,7 @@ def _run_gateway_chat_streaming(
                 _apply_public_todos_to_manifest_delta,
                 extract_manifest_delta_from_tool_event,
                 merge_manifest_delta,
+                split_public_live_manifest_delta,
             )
             tid = str(event_payload.get("tid") or "").strip()
             args = event_payload.get("args") if isinstance(event_payload.get("args"), dict) else {}
@@ -976,11 +977,21 @@ def _run_gateway_chat_streaming(
                         return
                 elif not args:
                     return
+            full_result = event_payload.get("result")
+            if full_result is None:
+                full_result = event_payload.get("function_result")
             manifest_delta_sequence[0] += 1
             tool_event = ToolEvent(
                 name=str(event_payload.get("name") or ""),
                 args=args,
-                result=str(event_payload.get("preview") or "") if is_complete else "",
+                result=(
+                    str(full_result or "")
+                    if is_complete and str(event_payload.get("name") or "") in {
+                        "mcp__ithink_kb_mcp__searchKnowledgeBaseDocuments",
+                        "mcp__ithink_kb_mcp__searchKnowledgeBaseDocumentsAcross",
+                    }
+                    else str(event_payload.get("preview") or "") if is_complete else ""
+                ),
                 tid=tid,
                 status="error" if event_payload.get("is_error") else ("completed" if is_complete else "in_progress"),
                 source="gateway",
@@ -995,7 +1006,8 @@ def _run_gateway_chat_streaming(
                 skills_dir=_gateway_manifest_skills_dir(),
                 default_profile=_gateway_manifest_default_profile(),
             )
-            if not (delta.get("todos") or delta.get("artifacts") or delta.get("references")):
+            public_delta, _kb_rows = split_public_live_manifest_delta(delta)
+            if not (public_delta.get("todos") or public_delta.get("artifacts") or public_delta.get("references") or public_delta.get("turns")):
                 return
             with STREAMS_LOCK:
                 live_manifest = merge_manifest_delta(
@@ -1005,14 +1017,14 @@ def _run_gateway_chat_streaming(
                         "references": [],
                         "turns": [],
                     },
-                    delta,
+                    public_delta,
                     scope="active_stream",
                 )
                 STREAM_LIVE_MANIFEST[stream_id] = live_manifest
-                _apply_public_todos_to_manifest_delta(delta, live_manifest)
-            if not (delta.get("todos") or delta.get("artifacts") or delta.get("references")):
+                _apply_public_todos_to_manifest_delta(public_delta, live_manifest)
+            if not (public_delta.get("todos") or public_delta.get("artifacts") or public_delta.get("references") or public_delta.get("turns")):
                 return
-            put_gateway_event("manifest_delta", delta)
+            put_gateway_event("manifest_delta", public_delta)
         except Exception:
             logger.debug("Failed to emit gateway manifest_delta for %s", event_payload.get("name"), exc_info=True)
 
@@ -1496,6 +1508,7 @@ def _run_gateway_chat_streaming(
             from integration.session_manifest.manifest import (
                 extract_manifest_delta_from_turn_reconcile,
                 merge_manifest_delta,
+                split_public_live_manifest_delta,
             )
             manifest_delta_sequence[0] += 1
             reconcile_delta = extract_manifest_delta_from_turn_reconcile(
@@ -1508,7 +1521,11 @@ def _run_gateway_chat_streaming(
                 default_profile=_gateway_manifest_default_profile(),
                 skills_dir=_gateway_manifest_skills_dir(),
             )
-            if reconcile_delta.get("artifacts") or reconcile_delta.get("turns"):
+            public_reconcile_delta, _kb_rows = split_public_live_manifest_delta(reconcile_delta)
+            if (public_reconcile_delta.get("artifacts")
+                    or public_reconcile_delta.get("turns")
+                    or public_reconcile_delta.get("todos")
+                    or public_reconcile_delta.get("references")):
                 with STREAMS_LOCK:
                     live_manifest = merge_manifest_delta(
                         STREAM_LIVE_MANIFEST.get(stream_id) or {
@@ -1517,11 +1534,11 @@ def _run_gateway_chat_streaming(
                             "references": [],
                             "turns": [],
                         },
-                        reconcile_delta,
+                        public_reconcile_delta,
                         scope="active_stream",
                     )
                     STREAM_LIVE_MANIFEST[stream_id] = live_manifest
-                put_gateway_event("manifest_delta", reconcile_delta)
+                put_gateway_event("manifest_delta", public_reconcile_delta)
         except Exception:
             logger.debug("Failed to emit gateway turn_complete reconcile manifest_delta", exc_info=True)
         from api.streaming import _session_payload_with_full_messages

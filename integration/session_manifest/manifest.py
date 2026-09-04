@@ -1723,6 +1723,8 @@ def _extract_manifest_records(
     messages: list | None = None,
     *,
     skills_dir: Path | None = None,
+    profile: str = '',
+    session_id: str = '',
 ) -> tuple[list[dict], list[dict], list[dict]]:
     artifacts: dict[str, dict] = {}
     references: dict[str, dict] = {}
@@ -1844,6 +1846,8 @@ def _extract_manifest_records(
                     result=event.result,
                     status=event.status,
                     tid=event.tid,
+                    profile=profile,
+                    session_id=session_id,
                 )
             except Exception:
                 logger.debug('failed to extract knowledge-base turn references', exc_info=True)
@@ -1897,8 +1901,16 @@ def _extract_artifacts_and_references(
     workspace: Path,
     *,
     skills_dir: Path | None = None,
+    profile: str = '',
+    session_id: str = '',
 ) -> tuple[list[dict], list[dict]]:
-    artifacts, references, _turns = _extract_manifest_records(events, workspace, skills_dir=skills_dir)
+    artifacts, references, _turns = _extract_manifest_records(
+        events,
+        workspace,
+        skills_dir=skills_dir,
+        profile=profile,
+        session_id=session_id,
+    )
     return artifacts, references
 
 
@@ -2912,6 +2924,9 @@ def _merge_reference_wire_rows(existing_rows: list | None, incoming_rows: list |
         if not isinstance(page_content, str) or not page_content:
             return None
         chunk = {'page_content': page_content}
+        chunk_id = str(value.get('id') or '').strip()
+        if chunk_id:
+            chunk['id'] = chunk_id
         score = value.get('score')
         normalized_score: int | float | str = ''
         if not isinstance(score, bool) and isinstance(score, (int, float)):
@@ -2936,19 +2951,22 @@ def _merge_reference_wire_rows(existing_rows: list | None, incoming_rows: list |
             key = f'skill\0{path}'
             current = rows.setdefault(key, {'kind': 'skill', 'source': [], 'metadata': {'path': path}})
         elif kind == 'knowledge_base_document':
+            reference_id = str(row.get('id') or '').strip()
             kb_name = str(metadata.get('kbName') or '').strip()
             file_name = str(metadata.get('fileName') or '').strip()
             if not kb_name or not file_name:
                 continue
-            key = f'knowledge_base_document\0{kb_name}\0{file_name}'
+            key = f'knowledge_base_document\0{reference_id or (kb_name + chr(0) + file_name)}'
             current = rows.setdefault(key, {
                 'kind': 'knowledge_base_document',
                 'source': [],
                 'metadata': {'kbName': kb_name, 'fileName': file_name, 'chunks': []},
             })
+            if reference_id:
+                current['id'] = reference_id
             chunks = current['metadata']['chunks']
-            chunks_by_content = {
-                chunk.get('page_content'): chunk
+            chunks_by_identity = {
+                str(chunk.get('id') or '') or str(chunk.get('page_content') or ''): chunk
                 for chunk in chunks
                 if isinstance(chunk, dict) and isinstance(chunk.get('page_content'), str)
             }
@@ -2956,11 +2974,11 @@ def _merge_reference_wire_rows(existing_rows: list | None, incoming_rows: list |
                 chunk = normalize_chunk(raw_chunk)
                 if chunk is None:
                     continue
-                page_content = chunk['page_content']
-                existing_chunk = chunks_by_content.get(page_content)
+                identity = str(chunk.get('id') or '') or chunk['page_content']
+                existing_chunk = chunks_by_identity.get(identity)
                 if existing_chunk is None:
                     chunks.append(chunk)
-                    chunks_by_content[page_content] = chunk
+                    chunks_by_identity[identity] = chunk
                 elif existing_chunk.get('score') == '' and chunk['score'] != '':
                     existing_chunk['score'] = chunk['score']
             if not chunks:
@@ -3083,6 +3101,40 @@ def merge_manifest_delta(base: dict[str, Any] | None, delta: dict[str, Any] | No
     return base_manifest
 
 
+def split_public_live_manifest_delta(delta: dict[str, Any] | None) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Remove KB references from a live delta before merge or SSE emission.
+
+    Knowledge-base rows are candidates until final assistant settlement.  Other
+    manifest kinds retain their existing live behavior.
+    """
+    public_delta = copy.deepcopy(delta or {})
+    private_rows: list[dict[str, Any]] = []
+
+    def split_rows(rows: Any) -> list[dict[str, Any]]:
+        kept: list[dict[str, Any]] = []
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            if row.get('kind') == 'knowledge_base_document' or row.get('resource_type') == 'knowledge_base_document':
+                private_rows.append(row)
+            else:
+                kept.append(row)
+        return kept
+
+    public_delta['references'] = split_rows(public_delta.get('references'))
+    turns = []
+    for turn in public_delta.get('turns') or []:
+        if not isinstance(turn, dict):
+            continue
+        clean_turn = copy.deepcopy(turn)
+        clean_turn['references'] = split_rows(clean_turn.get('references'))
+        if clean_turn.get('artifacts') or clean_turn.get('references') or clean_turn.get('turn_key'):
+            turns.append(clean_turn)
+    if 'turns' in public_delta:
+        public_delta['turns'] = turns
+    return public_delta, private_rows
+
+
 def extract_manifest_delta_from_tool_event(
     event: ToolEvent,
     workspace: Path,
@@ -3110,7 +3162,11 @@ def extract_manifest_delta_from_tool_event(
         artifacts, references = [], []
     else:
         artifacts, references = _extract_artifacts_and_references(
-            [normalized_event], workspace, skills_dir=skills_dir,
+            [normalized_event],
+            workspace,
+            skills_dir=skills_dir,
+            profile=default_profile,
+            session_id=session_id,
         )
     artifact_root = artifact_workspace or workspace
     artifacts = _rebase_file_artifact_records(artifacts, workspace, artifact_root)
@@ -3347,8 +3403,48 @@ def build_session_manifest(session, source_info: dict[str, str] | None = None) -
     # is therefore added only by the reconcile pass below.
     todos = _extract_latest_todos(messages)
     artifacts, references, turns = _extract_manifest_records(
-        events, workspace, messages, skills_dir=skills_dir,
+        events,
+        workspace,
+        messages,
+        skills_dir=skills_dir,
+        profile=default_profile,
+        session_id=str(getattr(session, 'session_id', '') or ''),
     )
+    # A completed KB search is only a candidate. The final Manifest exposes
+    # KB references only when the model selected a chunk and the same persisted
+    # assistant message carries a self-consistent citation/evidence commit.
+    references = [
+        row for row in references
+        if str(row.get('resource_type') or '') != 'knowledge_base_document'
+    ]
+    for turn in turns:
+        turn['references'] = [
+            row for row in turn.get('references') or []
+            if str(row.get('resource_type') or '') != 'knowledge_base_document'
+        ]
+    try:
+        from integration.knowledge_base.citations import extract_committed_reference_rows
+
+        committed_records: dict[str, dict[str, Any]] = {}
+        committed_turn_records: dict[str, dict[str, dict[str, Any]]] = {}
+        for message_index, row in extract_committed_reference_rows(messages):
+            _merge_knowledge_base_records(committed_records, [row])
+            for turn in turns:
+                start = turn.get('start_msg_idx')
+                end = turn.get('end_msg_idx')
+                if isinstance(start, int) and isinstance(end, int) and start <= message_index <= end:
+                    turn_key = str(turn.get('turn_key') or '')
+                    turn_records = committed_turn_records.setdefault(turn_key, {})
+                    _merge_knowledge_base_records(turn_records, [row])
+                    break
+        references.extend(sorted(committed_records.values(), key=_reference_sort_key))
+        for turn in turns:
+            turn_key = str(turn.get('turn_key') or '')
+            turn['references'].extend(
+                sorted(committed_turn_records.get(turn_key, {}).values(), key=_reference_sort_key)
+            )
+    except Exception:
+        logger.debug('failed to project committed knowledge-base citations', exc_info=True)
 
     if source_info is None:
         try:

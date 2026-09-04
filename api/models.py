@@ -1242,6 +1242,7 @@ class Session:
                  active_stream_id: str=None,
                  active_stream_generation=None,
                  control_generation: int=0,
+                 session_revision: int = 0,
                  cancel_state: str='idle',
                  cancel_stream_id: str=None,
                  cancel_generation=None,
@@ -1340,6 +1341,10 @@ class Session:
             self.control_generation = max(0, int(control_generation or 0))
         except (TypeError, ValueError):
             self.control_generation = 0
+        try:
+            self.session_revision = max(0, int(session_revision or 0))
+        except (TypeError, ValueError):
+            self.session_revision = 0
         try:
             self.active_stream_generation = (
                 int(active_stream_generation)
@@ -1488,6 +1493,13 @@ class Session:
                 f"Reload with metadata_only=False before mutating state. "
                 f"See #1558."
             )
+        # Monotonic optimistic-concurrency guard used by citation settlement
+        # and other session mutations. Every durable write advances the
+        # revision so a stale attach cannot overwrite a newer transcript.
+        try:
+            self.session_revision = max(0, int(getattr(self, 'session_revision', 0) or 0)) + 1
+        except (TypeError, ValueError):
+            self.session_revision = 1
         if touch_updated_at:
             self.updated_at = time.time()
         # Write metadata fields first so load_metadata_only() can read them
@@ -1499,7 +1511,7 @@ class Session:
             'input_tokens', 'output_tokens', 'estimated_cost',
             'cache_read_tokens', 'cache_write_tokens',
             'personality', 'active_stream_id', 'active_stream_generation',
-            'control_generation', 'cancel_state', 'cancel_stream_id', 'cancel_generation',
+            'control_generation', 'session_revision', 'cancel_state', 'cancel_stream_id', 'cancel_generation',
             'pending_next_turns', 'last_error_at',
             'pending_user_message', 'pending_attachments', 'pending_started_at', 'pending_user_source', 'pending_turn_key',
             'compression_anchor_visible_idx', 'compression_anchor_message_key',
