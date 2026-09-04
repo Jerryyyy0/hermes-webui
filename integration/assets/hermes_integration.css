@@ -449,6 +449,9 @@
   border-radius: 8px;
   overflow: hidden;
 }
+.detail-json-dialog + .detail-json-dialog {
+  margin-top: 8px;
+}
 .detail-json-msg {
   padding: 10px 14px;
   font-size: 13px;

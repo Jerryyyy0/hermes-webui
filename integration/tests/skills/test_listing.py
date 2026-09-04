@@ -428,6 +428,40 @@ def test_local_all_skills_for_profile_uses_profile_dir(tmp_path):
     assert custom_b == []
 
 
+def test_local_all_skills_for_profile_includes_delisted(tmp_path):
+    raw = [{"name": "hub-live", "category": "tools"}]
+    ctx = _ctx_with_annotated(raw)
+    skills_dir = tmp_path / "skills"
+    delisted_dir = skills_dir / "hub-gone"
+    delisted_dir.mkdir(parents=True)
+    (delisted_dir / "SKILL.md").write_text(
+        "---\nname: hub-gone\ndescription: Delisted but installed.\n---\n",
+        encoding="utf-8",
+    )
+    (delisted_dir / ".hub_installed").write_text("", encoding="utf-8")
+    (delisted_dir / ".category").write_text("tools", encoding="utf-8")
+
+    with patch("integration.skills.listing.skills_dir_for_profile", return_value=skills_dir):
+        with patch(
+            "integration.skills.listing.skillhub._hub_installed_index",
+            return_value={"hub-gone": "hub-gone", "hub-live": "hub-live"},
+        ):
+            with patch(
+                "integration.skills.listing.skillhub._disabled_skill_names_for_profile",
+                return_value=set(),
+            ):
+                with patch(
+                    "integration.skills.listing.local_skills._scan_custom_skill_dicts",
+                    return_value=[],
+                ):
+                    installed_hub, custom_skills = listing._local_all_skills_for_profile(ctx, "p1")
+
+    assert [s["name"] for s in installed_hub] == ["hub-live", "hub-gone"]
+    assert installed_hub[1]["installed"] is True
+    assert installed_hub[1]["category"] == "tools"
+    assert custom_skills == []
+
+
 def test_local_all_skills_for_profile_applies_profile_disabled(tmp_path):
     raw = [{"name": "hub-x", "category": ""}]
     ctx = _ctx_with_annotated(raw)

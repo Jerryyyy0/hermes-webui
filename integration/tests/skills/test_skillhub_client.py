@@ -115,6 +115,92 @@ def test_list_hub_skills_filtered_installed(hub_url):
         assert skills[0]["name"] == "a"
 
 
+def test_list_hub_skills_filtered_installed_includes_delisted(hub_url):
+    ctx = skillhub._HubCatalogContext(
+        raw_skills=[],
+        hub_names=set(),
+        installed_index={},
+        annotated_all=[
+            {"name": "a", "installed": True, "custom": False},
+            {"name": "b", "installed": False, "custom": False},
+        ],
+        locked_names=set(),
+        delisted_installed=[
+            {"name": "gone", "installed": True, "custom": False, "disabled": False},
+        ],
+    )
+    with patch("integration.skills.skillhub.build_hub_catalog_context", return_value=ctx):
+        skills, total = skillhub.list_hub_skills_filtered(
+            "",
+            "installed",
+            None,
+            1,
+            20,
+        )
+        assert total == 2
+        assert {s["name"] for s in skills} == {"a", "gone"}
+
+
+def test_compute_scope_stats_counts_delisted(hub_url):
+    ctx = skillhub._HubCatalogContext(
+        raw_skills=[],
+        hub_names=set(),
+        installed_index={},
+        annotated_all=[
+            {"name": "a", "installed": True},
+            {"name": "b", "installed": False},
+        ],
+        locked_names=set(),
+        delisted_installed=[{"name": "gone", "installed": True}],
+    )
+    stats = skillhub.compute_scope_stats_from(ctx, custom_count=0)
+    assert stats == {
+        "hub": 2,
+        "installed": 2,
+        "not_installed": 1,
+        "custom": 0,
+    }
+
+
+def test_build_hub_catalog_context_builds_delisted(hub_url, tmp_path):
+    skills_dir = tmp_path / "skills"
+    delisted_dir = skills_dir / "hub-gone"
+    delisted_dir.mkdir(parents=True)
+    (delisted_dir / "SKILL.md").write_text(
+        "---\nname: hub-gone\ndescription: Delisted but installed.\n---\n",
+        encoding="utf-8",
+    )
+    (delisted_dir / ".hub_installed").write_text("", encoding="utf-8")
+    (delisted_dir / ".category").write_text("tools", encoding="utf-8")
+
+    with patch(
+        "integration.skills.skillhub.fetch_all_hub_skills",
+        return_value=[{"name": "hub-live"}],
+    ):
+        with patch("integration.skills.skillhub.shared_skills_dir", return_value=skills_dir):
+            with patch("integration.skills.skillhub.skills_dir_for_profile", return_value=skills_dir):
+                with patch("integration.skills.skillhub._hub_installed_index", return_value={"hub-gone": "hub-gone"}):
+                    with patch(
+                        "integration.skills.skillhub._hub_installed_profiles_all",
+                        return_value={
+                            "hub-gone": [
+                                {"profile": "default", "dir_name": "hub-gone", "skill_dir": delisted_dir}
+                            ]
+                        },
+                    ):
+                        with patch(
+                            "integration.skills.no_self_improve.get_no_self_improve_names",
+                            return_value=set(),
+                        ):
+                            ctx = skillhub.build_hub_catalog_context()
+
+    assert ctx.hub_names == {"hub-live"}
+    assert [s["name"] for s in ctx.delisted_installed] == ["hub-gone"]
+    assert ctx.delisted_installed[0]["installed"] is True
+    assert ctx.delisted_installed[0]["dir_name"] == "hub-gone"
+    assert ctx.delisted_installed[0]["category"] == "tools"
+
+
 def test_list_hub_catalog_paged_sort_and_pagination(hub_url):
     annotated = [
         {"name": "c", "mtime": 1.0, "installed": False},
@@ -365,3 +451,81 @@ def test_re_extract_skill_meta_502_raises(hub_url):
     with patch("integration.skills.skillhub._client", return_value=mock_client):
         with pytest.raises(httpx.HTTPStatusError):
             skillhub.re_extract_skill_meta("some-skill")
+
+
+def test_annotate_installed_has_update_respects_unreachable(hub_url, tmp_path):
+    """Installed skills whose upstream is marked unreachable never show has_update."""
+    skills_dir = tmp_path / "skills"
+    installed = skills_dir / "stale"
+    installed.mkdir(parents=True)
+    (installed / "SKILL.md").write_text("# skill", encoding="utf-8")
+    (installed / ".hub_installed").write_text("1", encoding="utf-8")
+
+    with patch("api.profiles.list_profiles_api", return_value=[{"name": "default"}]):
+        with patch("integration.skills.skillhub.skills_dir_for_profile", return_value=skills_dir):
+            with patch(
+                "integration.skills.version_store.list_all",
+                return_value=[
+                    {
+                        "catalog_name": "stale",
+                        "local_version": "1.0.0",
+                        "upstream_version": "2.0.0",
+                        "upstream_unreachable": 1,
+                    }
+                ],
+            ):
+                result = skillhub.annotate_installed(
+                    [{"name": "stale"}],
+                )
+
+    assert result[0]["installed"] is True
+    assert result[0]["has_update"] is False
+
+
+def test_annotate_installed_has_update_true_when_reachable(hub_url, tmp_path):
+    """Installed skills with a reachable upstream newer version show has_update."""
+    skills_dir = tmp_path / "skills"
+    installed = skills_dir / "fresh"
+    installed.mkdir(parents=True)
+    (installed / "SKILL.md").write_text("# skill", encoding="utf-8")
+    (installed / ".hub_installed").write_text("1", encoding="utf-8")
+
+    with patch("api.profiles.list_profiles_api", return_value=[{"name": "default"}]):
+        with patch("integration.skills.skillhub.skills_dir_for_profile", return_value=skills_dir):
+            with patch(
+                "integration.skills.version_store.list_all",
+                return_value=[
+                    {
+                        "catalog_name": "fresh",
+                        "local_version": "1.0.0",
+                        "upstream_version": "2.0.0",
+                        "upstream_unreachable": 0,
+                    }
+                ],
+            ):
+                result = skillhub.annotate_installed(
+                    [{"name": "fresh"}],
+                )
+
+    assert result[0]["installed"] is True
+    assert result[0]["has_update"] is True
+
+
+def test_record_install_version_none_detail_appends_profile(hub_url, tmp_path):
+    """_record_install_version with detail=None appends the profile without wiping."""
+    with patch("integration.skills.version_store.record_install") as mock_ri:
+        skillhub._record_install_version("demo", None, profile="p2", dir_name="demo")
+
+    mock_ri.assert_called_once_with(
+        "demo",
+        profile="p2",
+        dir_name="demo",
+    )
+    # No display_name, category, local_version, change_logs, published_at passed
+
+
+def test_do_upgrade_rejects_delisted_skill(hub_url):
+    """_do_upgrade raises SkillUpgradeNotFoundError for a delisted-installed skill."""
+    with patch("integration.skills.skillhub.is_delisted_installed", return_value=True):
+        with pytest.raises(skillhub.SkillUpgradeNotFoundError, match="已从市场下架"):
+            skillhub._do_upgrade("delisted-skill", "upgrade")

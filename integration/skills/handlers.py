@@ -17,6 +17,9 @@ from integration.skills.sort_utils import (
 )
 from integration.skills.utils import stream_zip_to_handler
 
+# Test injection point (set via monkeypatch in tests, like skill_publish handlers)
+_DB_PATH = None
+
 
 def _respond(handler, payload, status: int = 200, *, exc_info=None) -> bool:
     j(handler, payload, status=status, exc_info=exc_info)
@@ -40,6 +43,12 @@ def try_handle_get(handler, parsed) -> bool:
         return _get_no_self_improve(handler)
     if not skillhub_enabled():
         return False
+    if path == "/api/skillhub/updates":
+        return _get_skillhub_updates(handler, parsed)
+    if path == "/api/skillhub/updates/summary":
+        return _get_skillhub_updates_summary(handler)
+    if path == "/api/skillhub/skill-versions":
+        return _get_skillhub_skill_versions(handler, parsed)
     if path == "/api/skillhub/skills":
         return _get_skillhub_skills(handler, parsed)
     if path == "/api/skillhub/categories":
@@ -256,6 +265,8 @@ def try_handle_post(handler, parsed, body: dict | None) -> bool:
         return _post_skillhub_re_extract(handler, body)
     if not skillhub_enabled():
         return False
+    if path == "/api/skillhub/upgrade":
+        return _post_skillhub_upgrade(handler, body)
     if path == "/api/skillhub/install":
         return _post_skillhub_install(handler, parsed, body)
     if path == "/api/skillhub/install-to-profiles":
@@ -836,5 +847,146 @@ def _get_skillhub_installed_profiles(handler, parsed) -> bool:
     try:
         result = skillhub.get_skill_installed_profiles(name)
         return _respond(handler, result)
+    except Exception as exc:
+        return _respond_bad(handler, str(exc), 502)
+
+
+# ---------------------------------------------------------------------------
+# Version update endpoints (plan Steps 6)
+# ---------------------------------------------------------------------------
+
+_REFRESH_RUNNING = False
+
+
+def _get_skillhub_updates(handler, parsed) -> bool:
+    """GET /api/skillhub/updates?refresh=0|1&include_all=0|1"""
+    import threading
+
+    from api.config import load_settings
+    from integration.skills.version_check import check_updates_for_installed_skills
+    from integration.skills.version_store import list_all as vs_list_all
+
+    qs = _qs(parsed)
+    refresh = (qs.get("refresh") or ["0"])[0] == "1"
+    include_all = (qs.get("include_all") or ["0"])[0] == "1"
+    db = _DB_PATH
+
+    if refresh:
+        global _REFRESH_RUNNING
+        if not _REFRESH_RUNNING:
+            _REFRESH_RUNNING = True
+
+            def _run_refresh():
+                global _REFRESH_RUNNING
+                try:
+                    check_updates_for_installed_skills(db_path=db, auto_upgrade=False)
+                except Exception as exc:
+                    _log.warning("skillhub/updates refresh failed: %s", exc)
+                finally:
+                    _REFRESH_RUNNING = False
+
+            threading.Thread(
+                target=_run_refresh, name="skillhub-updates-refresh", daemon=True
+            ).start()
+
+    try:
+        settings = load_settings()
+        auto_update_enabled = bool(settings.get("skills_auto_update"))
+        all_items = vs_list_all(db_path=db)
+        # checked_at = the latest upstream_checked_at across all installed skills
+        checked_at = max(
+            (r.get("upstream_checked_at") for r in all_items if r.get("upstream_checked_at")),
+            default=None,
+        )
+        if not include_all:
+            items = [i for i in all_items if _has_update(i)]
+        else:
+            items = all_items
+        return _respond(handler, {
+            "ok": True,
+            "checked_at": checked_at,
+            "auto_update_enabled": auto_update_enabled,
+            "refresh_pending": _REFRESH_RUNNING,
+            "items": items,
+            "total": len(items),
+        })
+    except Exception as exc:
+        return _respond_bad(handler, str(exc), 502)
+
+
+def _has_update(row: dict) -> bool:
+    if row.get("upstream_unreachable"):
+        return False
+    from integration.skill_publish.version_utils import semver_gt
+    upstream = str(row.get("upstream_version") or "").strip()
+    local = str(row.get("local_version") or "").strip()
+    return bool(upstream and local and semver_gt(upstream, local))
+
+
+def _get_skillhub_updates_summary(handler) -> bool:
+    """GET /api/skillhub/updates/summary — lightweight badge endpoint."""
+    from api.config import load_settings
+    from integration.skills.version_store import list_upgradable
+
+    db = _DB_PATH
+    try:
+        settings = load_settings()
+        auto_update_enabled = bool(settings.get("skills_auto_update"))
+        upgradable = list_upgradable(db_path=db)
+        return _respond(handler, {
+            "ok": True,
+            "count": len(upgradable),
+            "auto_update_enabled": auto_update_enabled,
+        })
+    except Exception as exc:
+        return _respond_bad(handler, str(exc), 502)
+
+
+def _post_skillhub_upgrade(handler, body) -> bool:
+    """POST /api/skillhub/upgrade — upgrade one skill."""
+    name = str(body.get("name") or "").strip()
+    if not name:
+        return _respond_bad(handler, "name required", 400)
+    # Check if installed
+    from integration.skills.version_store import get as vs_get
+    db = _DB_PATH
+    row = vs_get(name, db_path=db)
+    if row is None:
+        return _respond_bad(handler, "未安装该技能", 404)
+    try:
+        result = skillhub.upgrade_skill(name, action="upgrade")
+        return _respond(handler, result)
+    except skillhub.SkillUpgradeError as exc:
+        return _respond_bad(handler, str(exc), exc.status_code)
+    except NotImplementedError:
+        return _respond_bad(handler, "升级功能尚未实现", 501)
+    except Exception as exc:
+        return _respond_bad(handler, str(exc), 502)
+
+
+def _get_skillhub_skill_versions(handler, parsed) -> bool:
+    """GET /api/skillhub/skill-versions?name=xxx — version history from upstream."""
+    from integration.skills.version_store import get as vs_get
+
+    qs = _qs(parsed)
+    name = (qs.get("name") or [""])[0]
+    if not name:
+        return _respond_bad(handler, "name required", 400)
+    db = _DB_PATH
+
+    try:
+        versions = skillhub.fetch_version_history(name)
+        row = vs_get(name, db_path=db)
+        current_version = str(row.get("local_version") or "") if row else ""
+        latest_version = str(row.get("upstream_version") or "") if row else ""
+
+        return _respond(handler, {
+            "ok": True,
+            "name": name,
+            "current_version": current_version,
+            "latest_version": latest_version,
+            "delisted": skillhub.is_delisted_installed(name),
+            "versions": versions,
+        })
     except Exception as exc:
         return _respond_bad(handler, str(exc), 502)

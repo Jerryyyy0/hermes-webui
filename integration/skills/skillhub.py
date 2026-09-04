@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -32,6 +32,38 @@ from integration.skills.utils import (
 _log = get_logger(__name__)
 _TIMEOUT = 150.0
 _HUB_CATALOG_NAME_SIDECAR = ".hub_catalog_name"
+
+
+class SkillUpgradeError(Exception):
+    """Base class for upgrade-specific errors.
+
+    ``status_code`` is the HTTP status code that handlers should return.
+    """
+
+    def __init__(self, message: str, status_code: int = 400):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class SkillUpgradeConflictError(SkillUpgradeError):
+    """Upgrade already in progress or skill is already at latest version."""
+
+    def __init__(self, message: str):
+        super().__init__(message, status_code=409)
+
+
+class SkillUpgradeNotFoundError(SkillUpgradeError):
+    """Skill is not installed / doesn't exist upstream."""
+
+    def __init__(self, message: str):
+        super().__init__(message, status_code=404)
+
+
+class SkillUpgradeUpstreamError(SkillUpgradeError):
+    """Upstream download / API failure."""
+
+    def __init__(self, message: str):
+        super().__init__(message, status_code=502)
 
 
 def _camel_to_snake(name: str) -> str:
@@ -181,6 +213,137 @@ def download_bytes(name: str) -> bytes:
         return resp.content
 
 
+# ---------------------------------------------------------------------------
+# Batch version query + version history (upstream interfaces 2 & 3)
+# ---------------------------------------------------------------------------
+
+def fetch_versions_batch(names: list[str]) -> dict:
+    """POST /api/skills/versions (batch). Returns {"items": [...], "missing": [...]}.
+
+    Falls back to per-skill fetch_skill_detail if upstream returns 404.
+    Requests are chunked into groups of 100 per the upstream spec.
+    """
+    if not names:
+        return {"items": [], "missing": []}
+
+    all_items: list[dict] = []
+    all_missing: list[str] = []
+    chunks = [names[i : i + 100] for i in range(0, len(names), 100)]
+
+    for chunk in chunks:
+        try:
+            result = _fetch_versions_batch_one(chunk)
+            all_items.extend(result.get("items", []))
+            all_missing.extend(result.get("missing", []))
+        except Exception as exc:
+            _log.warning("skillhub batch versions chunk failed, falling back: %s", exc)
+            fallback = _fetch_versions_batch_fallback(chunk)
+            all_items.extend(fallback.get("items", []))
+            all_missing.extend(fallback.get("missing", []))
+
+    return {"items": all_items, "missing": all_missing}
+
+
+def _fetch_versions_batch_one(names: list[str]) -> dict:
+    """Single batch request; raises on non-200 (caller handles fallback)."""
+    with _client() as client:
+        resp = client.post(
+            f"{_hub_base()}/api/skills/versions",
+            json={"names": names},
+        )
+        if resp.status_code == 404:
+            raise RuntimeError("batch endpoint not found (404)")
+        resp.raise_for_status()
+        data = resp.json()
+
+    if not isinstance(data, dict):
+        return {"items": [], "missing": list(names)}
+
+    items = data.get("items") or []
+    missing = data.get("missing") or []
+    mapped_items = [_map_upstream_fields(dict(i)) for i in items if isinstance(i, dict)]
+    return {"items": mapped_items, "missing": list(missing)}
+
+
+def _fetch_versions_batch_fallback(names: list[str]) -> dict:
+    """Fallback: fetch each skill detail individually."""
+    items: list[dict] = []
+    missing: list[str] = []
+    for name in names:
+        try:
+            detail = fetch_skill_detail(name)
+            ver = detail.get("version") or ""
+            if ver:
+                items.append(detail)
+            else:
+                missing.append(name)
+        except Exception:
+            missing.append(name)
+    return {"items": items, "missing": missing}
+
+
+def fetch_version_history(name: str) -> list[dict]:
+    """GET /api/skills/{name}/versions. Returns list of version dicts (newest first).
+
+    Falls back to empty list on 404 (upstream doesn't have the endpoint yet).
+    """
+    try:
+        with _client() as client:
+            resp = client.get(
+                f"{_hub_base()}/api/skills/{_skill_path(name)}/versions"
+            )
+            if resp.status_code == 404:
+                return []
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception:
+        _log.debug("skillhub fetch_version_history failed for %s", name, exc_info=True)
+        return []
+
+    if not isinstance(data, dict):
+        return []
+    versions = data.get("versions") or []
+    result: list[dict] = []
+    for v in versions:
+        if not isinstance(v, dict):
+            continue
+        mapped = _map_upstream_fields(v)
+        result.append(mapped)
+    return result
+
+
+def _record_install_version(
+    catalog_name: str,
+    detail: dict | None,
+    *,
+    profile: str = "default",
+    dir_name: str = "",
+) -> None:
+    """Shared helper for install_skill / install_skill_to_profile.
+
+    When *detail* is ``None`` (e.g. the skill was delisted and copied from a
+    local install), the profile is still appended to ``installed_profiles``
+    but existing version fields are preserved.
+    """
+    from integration.skills.version_store import normalize_change_logs, record_install
+
+    if not catalog_name:
+        return
+    if not detail:
+        record_install(catalog_name, profile=profile, dir_name=dir_name)
+        return
+    record_install(
+        catalog_name,
+        display_name=str(detail.get("display_name") or ""),
+        category=str(detail.get("category") or ""),
+        local_version=str(detail.get("version") or ""),
+        change_logs=normalize_change_logs(detail.get("change_logs")),
+        published_at=str(detail.get("published_at") or ""),
+        profile=profile,
+        dir_name=dir_name,
+    )
+
+
 def _read_local_skill_description(skills_dir: Path, dir_name: str) -> str:
     """Read description from local SKILL.md when installed under dir_name."""
     rel = str(dir_name or "").strip()
@@ -220,6 +383,20 @@ def _read_hub_catalog_name_sidecar(skill_dir: Path) -> str:
         return ""
     try:
         return sidecar.read_text(encoding="utf-8").strip()
+    except Exception:
+        return ""
+
+
+def _read_local_skill_category(skills_dir: Path, dir_name: str) -> str:
+    """Read category from the local ``.category`` marker when installed under dir_name."""
+    rel = str(dir_name or "").strip()
+    if not rel:
+        return ""
+    candidate = (skills_dir / rel).resolve()
+    if not skill_path_within(skills_dir, candidate) or not candidate.is_dir():
+        return ""
+    try:
+        return (candidate / ".category").read_text(encoding="utf-8").strip()
     except Exception:
         return ""
 
@@ -308,10 +485,29 @@ def _hub_installed_index(skills_dir: Path) -> dict[str, str]:
 
 
 def _hub_installed_index_all_profiles() -> dict[str, tuple[str, str]]:
-    """Map catalog skill name to (profile_name, dir_name), scanning all profiles."""
-    from api.profiles import list_profiles_api
+    """Map catalog skill name to (profile_name, dir_name), scanning all profiles.
 
+    For skills installed in multiple profiles, returns the first one found.
+    Use :func:`_hub_installed_profiles_all` when you need every profile.
+    """
     combined: dict[str, tuple[str, str]] = {}
+    for skill_name, installs in _hub_installed_profiles_all().items():
+        if installs:
+            first = installs[0]
+            combined[skill_name] = (first["profile"], first["dir_name"])
+    return combined
+
+
+def _hub_installed_profiles_all() -> dict[str, list[dict]]:
+    """Map catalog skill name to list of ``{profile, dir_name, skill_dir}`` across all profiles.
+
+    Each entry is a dict with profile name, relative dir_name, and absolute skill_dir Path.
+    Order is the profile iteration order from :func:`list_profiles_api`.
+    """
+    from api.profiles import list_profiles_api
+    from pathlib import Path
+
+    combined: dict[str, list[dict]] = {}
     profiles = list_profiles_api()
     for p in profiles:
         profile_name = str(p.get("name") or "").strip()
@@ -322,9 +518,13 @@ def _hub_installed_index_all_profiles() -> dict[str, tuple[str, str]]:
             index = _hub_installed_index(skills_dir)
         except Exception:
             continue
-        # First profile to install a skill wins (dedup by name)
         for skill_name, dir_name in index.items():
-            combined.setdefault(skill_name, (profile_name, dir_name))
+            entry = {
+                "profile": profile_name,
+                "dir_name": dir_name,
+                "skill_dir": (skills_dir / dir_name).resolve(),
+            }
+            combined.setdefault(skill_name, []).append(entry)
     return combined
 
 
@@ -335,25 +535,40 @@ def annotate_installed(
     index_profile: str = "default",
     locked_names: set[str] | None = None,
     disabled_names: set[str] | None = None,
+    profile_index: dict[str, tuple[str, str]] | None = None,
 ) -> list[dict]:
     """Mark hub catalog items with local install state across all profiles.
 
     When ``installed_index`` is provided, treat it as installs under
     ``index_profile`` (default ``default``). Pass ``disabled_names`` to
     override the active-process disabled set (e.g. target profile config).
+    Pass ``profile_index`` to reuse an already-computed all-profiles index
+    (name → (profile, dir_name)) instead of rescanning every profile.
     """
     # Use all-profiles index by default
-    profile_index: dict[str, tuple[str, str]] = {}
-    if installed_index is not None:
-        profile_label = str(index_profile or "default").strip() or "default"
-        for k, v in installed_index.items():
-            profile_index[k] = (profile_label, v)
-    else:
-        try:
-            profile_index = _hub_installed_index_all_profiles()
-        except Exception as exc:
-            _log.debug("annotate_installed all-profiles failed: %s", exc)
-            profile_index = {}
+    if profile_index is None:
+        profile_index = {}
+        if installed_index is not None:
+            profile_label = str(index_profile or "default").strip() or "default"
+            for k, v in installed_index.items():
+                profile_index[k] = (profile_label, v)
+        else:
+            try:
+                profile_index = _hub_installed_index_all_profiles()
+            except Exception as exc:
+                _log.debug("annotate_installed all-profiles failed: %s", exc)
+                profile_index = {}
+
+    # Load version store data once for all installed skills
+    version_map: dict[str, dict] = {}
+    try:
+        from integration.skill_publish.version_utils import semver_gt
+        from integration.skills.version_store import list_all as vs_list_all
+
+        for row in vs_list_all():
+            version_map[row["catalog_name"]] = row
+    except Exception:
+        pass
 
     disabled = disabled_names if disabled_names is not None else _disabled_skill_names()
     lock_fields_ok = True
@@ -395,6 +610,24 @@ def annotate_installed(
                         skill["display_description"] = dd
                     if ic:
                         skill["icon"] = ic
+            # Attach version info from version_store
+            vrow = version_map.get(skill_name)
+            if vrow:
+                skill["current_version"] = str(vrow.get("local_version") or "")
+                skill["latest_version"] = str(vrow.get("upstream_version") or "")
+                if vrow.get("upstream_unreachable"):
+                    skill["has_update"] = False
+                else:
+                    up = str(vrow.get("upstream_version") or "").strip()
+                    lo = str(vrow.get("local_version") or "").strip()
+                    try:
+                        skill["has_update"] = bool(up and lo and semver_gt(up, lo))
+                    except Exception:
+                        skill["has_update"] = False
+            else:
+                skill["current_version"] = ""
+                skill["latest_version"] = ""
+                skill["has_update"] = False
         skill.pop("catalog_only", None)
         if lock_fields_ok:
             try:
@@ -434,6 +667,7 @@ class _HubCatalogContext:
     installed_index: dict[str, str]
     annotated_all: list[dict]
     locked_names: set[str]
+    delisted_installed: list[dict] = field(default_factory=list)
 
 
 def _hub_names_from_skills(skills: list[dict]) -> set[str]:
@@ -461,29 +695,77 @@ def build_hub_catalog_context() -> _HubCatalogContext:
         locked_names = get_no_self_improve_names()
     except Exception:
         locked_names = set()
+    try:
+        all_profiles = _hub_installed_profiles_all()
+    except Exception as exc:
+        _log.debug("build_hub_catalog_context all-profiles index failed: %s", exc)
+        all_profiles = {}
+    profile_index = {
+        name: (installs[0]["profile"], installs[0]["dir_name"])
+        for name, installs in all_profiles.items()
+        if installs
+    }
     annotated = [dict(skill) for skill in raw_skills]
-    # Don't pass installed_index so annotate_installed scans all profiles
     annotate_installed(
         annotated,
         locked_names=locked_names,
+        profile_index=profile_index,
     )
+    delisted = _build_delisted_installed(hub_names, locked_names, profile_index)
     return _HubCatalogContext(
         raw_skills=raw_skills,
         hub_names=hub_names,
         installed_index=installed_index,
         annotated_all=annotated,
         locked_names=locked_names,
+        delisted_installed=delisted,
     )
+
+
+def _build_delisted_installed(
+    hub_names: set[str],
+    locked_names: set[str],
+    profile_index: dict[str, tuple[str, str]],
+) -> list[dict]:
+    """Synthetic rows for installed skills that no longer appear in the hub catalog.
+
+    The upstream catalog only lists currently-published skills; a delisted
+    skill still has its local ``.hub_installed`` marker and must stay visible
+    under scope=installed. The all-profiles index may alias several names to
+    the same directory — collapse to one row per (profile, dir).
+    """
+    rows: list[dict] = []
+    seen_dirs: set[tuple[str, str]] = set()
+    for name, (profile_name, dir_name) in profile_index.items():
+        key = str(name or "").strip()
+        if not key or key in hub_names:
+            continue
+        dir_key = (str(profile_name or ""), str(dir_name or ""))
+        if not dir_key[1] or dir_key in seen_dirs:
+            continue
+        seen_dirs.add(dir_key)
+        category = ""
+        try:
+            category = _read_local_skill_category(
+                skills_dir_for_profile(dir_key[0]), dir_key[1]
+            )
+        except Exception:
+            category = ""
+        rows.append({"name": key, "category": category})
+    if not rows:
+        return []
+    annotate_installed(rows, locked_names=locked_names, profile_index=profile_index)
+    return rows
 
 
 def compute_scope_stats_from(ctx: _HubCatalogContext, *, custom_count: int) -> dict[str, int]:
     """Global scope tab counts from a prebuilt hub catalog context."""
     hub_count = len(ctx.annotated_all)
-    installed_count = sum(1 for skill in ctx.annotated_all if skill.get("installed"))
+    catalog_installed = sum(1 for skill in ctx.annotated_all if skill.get("installed"))
     return {
         "hub": hub_count,
-        "installed": installed_count,
-        "not_installed": hub_count - installed_count,
+        "installed": catalog_installed + len(ctx.delisted_installed),
+        "not_installed": hub_count - catalog_installed,
         "custom": custom_count,
     }
 
@@ -564,6 +846,13 @@ def list_hub_catalog_filtered_from(
     skills = _filter_skills_by_category(ctx.annotated_all, category, all_categories)
     if scope == "installed":
         skills = [skill for skill in skills if skill.get("installed")]
+        if ctx.delisted_installed:
+            delisted = _filter_skills_by_category(
+                [dict(skill) for skill in ctx.delisted_installed],
+                category,
+                all_categories,
+            )
+            skills = skills + delisted
     elif scope == "not_installed":
         skills = [skill for skill in skills if not skill.get("installed")]
     skills = _filter_skills_by_q(skills, q)
@@ -691,6 +980,75 @@ def hub_all_catalog_names() -> set[str]:
     return build_hub_catalog_context().hub_names
 
 
+def is_delisted_installed(name: str) -> bool:
+    """True when the skill is installed locally (`.hub_installed`) but absent from the upstream catalog."""
+    key = str(name or "").strip()
+    if not key:
+        return False
+    try:
+        hub_names = _hub_names_from_skills(fetch_all_hub_skills(category=None))
+    except Exception:
+        return False
+    if key in hub_names:
+        return False
+    try:
+        installs = _hub_installed_profiles_all()
+    except Exception:
+        return False
+    return bool(installs.get(key))
+
+
+def _copy_existing_local_install(
+    name: str, target: Path, *, exclude_skills_dir: Path | None = None
+) -> bool:
+    """Copy skill files from an existing install in another profile (upstream delisted)."""
+    import shutil
+
+    key = str(name or "").strip()
+    if not key:
+        return False
+    try:
+        installs = _hub_installed_profiles_all()
+    except Exception:
+        return False
+    for entry in installs.get(key) or []:
+        src = Path(entry.get("skill_dir") or "")
+        if not src.is_dir() or not find_skill_main_file(src):
+            continue
+        if exclude_skills_dir is not None:
+            try:
+                src.resolve().relative_to(Path(exclude_skills_dir).resolve())
+                continue
+            except ValueError:
+                pass
+        target.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(src, target, dirs_exist_ok=True)
+        return True
+    return False
+
+
+def _install_fallback_from_doc_or_local(
+    name: str, target: Path, *, exclude_skills_dir: Path | None = None
+) -> None:
+    """Fallback install when the upstream zip download fails.
+
+    Writes SKILL.md from the upstream doc endpoint; when that also fails
+    (e.g. the skill was delisted from the hub), copies an existing local
+    install from another profile so the skill stays installable.
+    """
+    try:
+        doc = fetch_doc(name)
+    except Exception:
+        if _copy_existing_local_install(
+            name, target, exclude_skills_dir=exclude_skills_dir
+        ):
+            return
+        raise
+    text = str(doc.get("content") or "")
+    target.mkdir(parents=True, exist_ok=True)
+    (target / "SKILL.md").write_text(text, encoding="utf-8")
+
+
 def install_skill(name: str, display_name: str = "", category: str = "") -> dict:
     skills_dir = shared_skills_dir()
     skills_dir.mkdir(parents=True, exist_ok=True)
@@ -719,15 +1077,9 @@ def install_skill(name: str, display_name: str = "", category: str = "") -> dict
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code != 404:
             raise
-        doc = fetch_doc(name)
-        text = str(doc.get("content") or "")
-        target.mkdir(parents=True, exist_ok=True)
-        (target / "SKILL.md").write_text(text, encoding="utf-8")
+        _install_fallback_from_doc_or_local(name, target, exclude_skills_dir=skills_dir)
     except Exception:
-        doc = fetch_doc(name)
-        text = str(doc.get("content") or "")
-        target.mkdir(parents=True, exist_ok=True)
-        (target / "SKILL.md").write_text(text, encoding="utf-8")
+        _install_fallback_from_doc_or_local(name, target, exclude_skills_dir=skills_dir)
 
     if cat_seg:
         (target / ".category").write_text(cat_seg, encoding="utf-8")
@@ -737,6 +1089,7 @@ def install_skill(name: str, display_name: str = "", category: str = "") -> dict
     if catalog_name:
         (target / _HUB_CATALOG_NAME_SIDECAR).write_text(catalog_name, encoding="utf-8")
     # Save .detail.json from upstream for structured detail display
+    detail_data = None
     try:
         import json as _json
         detail_data = fetch_skill_detail(name)
@@ -747,6 +1100,16 @@ def install_skill(name: str, display_name: str = "", category: str = "") -> dict
             )
     except Exception as exc:
         _log.debug("Could not save .detail.json for %s: %s", name, exc)
+    # Record version info (non-blocking)
+    try:
+        from integration.skills.version_store import normalize_change_logs, record_install
+
+        _record_install_version(
+            catalog_name, detail_data, profile="default",
+            dir_name=_skill_dir_rel_path(target, skills_dir),
+        )
+    except Exception as exc:
+        _log.debug("version_store.record_install failed for %s: %s", name, exc)
     try:
         from integration.skills.no_self_improve import add_names
 
@@ -791,15 +1154,9 @@ def install_skill_to_profile(
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code != 404:
             raise
-        doc = fetch_doc(name)
-        text = str(doc.get("content") or "")
-        target.mkdir(parents=True, exist_ok=True)
-        (target / "SKILL.md").write_text(text, encoding="utf-8")
+        _install_fallback_from_doc_or_local(name, target, exclude_skills_dir=skills_dir)
     except Exception:
-        doc = fetch_doc(name)
-        text = str(doc.get("content") or "")
-        target.mkdir(parents=True, exist_ok=True)
-        (target / "SKILL.md").write_text(text, encoding="utf-8")
+        _install_fallback_from_doc_or_local(name, target, exclude_skills_dir=skills_dir)
 
     if cat_seg:
         (target / ".category").write_text(cat_seg, encoding="utf-8")
@@ -808,6 +1165,7 @@ def install_skill_to_profile(
     catalog_name = str(name or "").strip()
     if catalog_name:
         (target / _HUB_CATALOG_NAME_SIDECAR).write_text(catalog_name, encoding="utf-8")
+    detail_data = None
     try:
         import json as _json
         detail_data = fetch_skill_detail(name)
@@ -818,6 +1176,14 @@ def install_skill_to_profile(
             )
     except Exception as exc:
         _log.debug("Could not save .detail.json for %s: %s", name, exc)
+    # Record version info (non-blocking)
+    try:
+        _record_install_version(
+            catalog_name, detail_data, profile=profile_name,
+            dir_name=_skill_dir_rel_path(target, skills_dir),
+        )
+    except Exception as exc:
+        _log.debug("version_store.record_install failed for %s: %s", name, exc)
     try:
         from integration.skills.no_self_improve import add_names
         add_names([name])
@@ -832,6 +1198,190 @@ def install_skill_to_profile(
         "category": cat_seg or "",
         "dir_name": _skill_dir_rel_path(target, skills_dir),
     }
+
+
+# ---------------------------------------------------------------------------
+# upgrade_skill
+# ---------------------------------------------------------------------------
+
+_UPGRADE_LOCKS: dict[str, __import__("threading").Lock] = {}
+
+
+def _upgrade_lock(catalog_name: str):
+    import threading
+    lock = _UPGRADE_LOCKS.get(catalog_name)
+    if lock is None:
+        lock = threading.Lock()
+        _UPGRADE_LOCKS[catalog_name] = lock
+    return lock
+
+
+def upgrade_skill(name: str, action: str = "upgrade") -> dict:
+    """Upgrade an installed SkillHub skill to the latest upstream version.
+
+    Downloads the latest zip, replaces skill content in all installed profiles,
+    rewrites sidecars, and updates version tracking records.
+    """
+    import shutil
+    import tempfile
+
+    from integration.skills.version_store import (
+        normalize_change_logs,
+        record_upgrade,
+        refresh_upstream,
+    )
+
+    catalog_name = str(name or "").strip()
+    if not catalog_name:
+        raise SkillUpgradeError("name required")
+
+    lock = _upgrade_lock(catalog_name)
+    if not lock.acquire(blocking=False):
+        raise SkillUpgradeConflictError("upgrade already in progress")
+
+    try:
+        return _do_upgrade(catalog_name, action)
+    finally:
+        lock.release()
+
+
+def _do_upgrade(catalog_name: str, action: str) -> dict:
+    from integration.skills.version_store import (
+        normalize_change_logs,
+        record_upgrade,
+        refresh_upstream,
+    )
+
+    if is_delisted_installed(catalog_name):
+        raise SkillUpgradeNotFoundError("该技能已从市场下架，无法升级")
+
+    # 1. Fetch upstream detail (reused for every profile)
+    detail = fetch_skill_detail(catalog_name)
+    new_version = str(detail.get("version") or "").strip()
+    if not new_version:
+        raise SkillUpgradeUpstreamError("upstream returned no version")
+    change_logs = normalize_change_logs(detail.get("change_logs"))
+    published_at = str(detail.get("published_at") or "")
+
+    # 2. Enumerate installed profiles (single scan across all profiles)
+    all_installs = _hub_installed_profiles_all()
+    installed = all_installs.get(catalog_name, [])
+    if not installed:
+        raise SkillUpgradeNotFoundError("skill not installed in any profile")
+
+    results: list[dict] = []
+    any_success = False
+
+    # 3. Upgrade each profile (detail passed in to avoid re-fetching)
+    for entry in installed:
+        result = _upgrade_one_profile(
+            catalog_name,
+            entry["profile"],
+            entry["skill_dir"],
+            new_version,
+            detail=detail,
+        )
+        results.append(result)
+        if result.get("ok"):
+            any_success = True
+            try:
+                _ensure_skill_enabled(entry["profile"], catalog_name)
+            except Exception:
+                pass
+
+    # 4. Update current version record
+    if any_success:
+        try:
+            record_upgrade(catalog_name, new_version=new_version)
+        except Exception as exc:
+            _log.debug("record_upgrade failed: %s", exc)
+        try:
+            refresh_upstream(
+                catalog_name,
+                upstream_version=new_version,
+                change_logs=change_logs,
+                published_at=published_at,
+            )
+        except Exception:
+            pass
+
+    return {"ok": any_success, "name": catalog_name, "version": new_version, "results": results}
+
+
+def _upgrade_one_profile(
+    catalog_name: str,
+    profile_name: str,
+    skill_dir: Path,
+    new_version: str,
+    *,
+    detail: dict | None = None,
+) -> dict:
+    """Upgrade a single profile's skill directory. Returns per-profile result.
+
+    ``detail`` is the upstream skill detail dict (optional). When provided,
+    it is written directly to ``.detail.json`` without re-fetching.
+    """
+    import shutil
+
+    # Verify .hub_installed still exists (prevents mid-upgrade uninstall races)
+    if not (skill_dir / ".hub_installed").is_file():
+        return {"profile": profile_name, "ok": False, "error": "skill uninstalled during upgrade"}
+
+    backup_dir = skill_dir.parent / f".upgrade-backup-{catalog_name}-{int(__import__('time').time())}"
+
+    try:
+        # Backup: rename current dir
+        skill_dir.rename(backup_dir)
+    except Exception as exc:
+        return {"profile": profile_name, "ok": False, "error": f"backup failed: {exc}"}
+
+    try:
+        # Download and extract to a temp dir, then move into place
+        zip_bytes = download_bytes(catalog_name)
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        extract_zip_and_flatten(zip_bytes, skill_dir)
+    except Exception as exc:
+        # Rollback: restore backup
+        _log.warning("upgrade download/extract failed for %s/%s: %s", profile_name, catalog_name, exc)
+        try:
+            if skill_dir.exists():
+                shutil.rmtree(skill_dir)
+            backup_dir.rename(skill_dir)
+        except Exception:
+            _log.exception("rollback also failed for %s/%s", profile_name, catalog_name)
+        return {"profile": profile_name, "ok": False, "error": f"download failed: {exc}"}
+
+    # Rewrite sidecars from backup (preserve category, catalog name)
+    try:
+        cat_file = backup_dir / ".category"
+        if cat_file.is_file():
+            (skill_dir / ".category").write_text(
+                cat_file.read_text(encoding="utf-8"), encoding="utf-8"
+            )
+        (skill_dir / ".hub_installed").write_text("1", encoding="utf-8")
+        (skill_dir / _HUB_CATALOG_NAME_SIDECAR).write_text(catalog_name, encoding="utf-8")
+        install_name_file = backup_dir / ".install_name"
+        if install_name_file.is_file():
+            (skill_dir / ".install_name").write_text(
+                install_name_file.read_text(encoding="utf-8"), encoding="utf-8"
+            )
+        # Write fresh .detail.json
+        import json as _json
+        detail_data = detail if isinstance(detail, dict) else fetch_skill_detail(catalog_name)
+        if isinstance(detail_data, dict) and detail_data:
+            (skill_dir / ".detail.json").write_text(
+                _json.dumps(detail_data, ensure_ascii=False, indent=2), encoding="utf-8",
+            )
+    except Exception as exc:
+        _log.warning("sidecar rewrite failed for %s/%s: %s", profile_name, catalog_name, exc)
+
+    # Clean up backup
+    try:
+        shutil.rmtree(backup_dir)
+    except Exception:
+        _log.debug("backup cleanup failed: %s", backup_dir)
+
+    return {"profile": profile_name, "ok": True}
 
 
 def _ensure_skill_enabled(profile_name: str, skill_name: str) -> None:
@@ -961,6 +1511,12 @@ def delete_skill_from_all_profiles(name: str, dir_name: str = "") -> dict:
                 results.append({"profile": profile_name, "ok": False, "error": result.get("error", "unknown")})
         except Exception as exc:
             results.append({"profile": profile_name, "ok": False, "error": str(exc)})
+    # Clean up version tracking records (non-blocking)
+    try:
+        from integration.skills.version_store import remove as version_store_remove
+        version_store_remove(name)
+    except Exception as exc:
+        _log.debug("version_store.remove failed for %s: %s", name, exc)
     return {"ok": True, "results": results}
 
 

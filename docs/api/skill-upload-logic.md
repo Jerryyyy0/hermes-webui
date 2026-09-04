@@ -218,7 +218,7 @@ multipart 上传不设置 WebUI 侧的文件大小上限；反向代理或上游
     "useMode": "使用说明",
     "triggerKeywords": ["关键词1"],
     "requiredInfo": [{"label": "信息项", "required": true}],
-    "dialogExample": {"user": "示例问法", "assistant": "示例回应"}
+    "dialogExample": [{"user": "示例问法", "assistant": "示例回应"}]
   }
 }
 ```
@@ -314,10 +314,12 @@ Step 2: POST /api/skillhub/skill/detail
     "requiredInfo": [
       {"label": "待分析的 CSV 文件", "required": true}
     ],
-    "dialogExample": {
-      "user": "帮我分析这份数据",
-      "assistant": "好的，正在处理..."
-    }
+    "dialogExample": [
+      {
+        "user": "帮我分析这份数据",
+        "assistant": "好的，正在处理..."
+      }
+    ]
   }
 }
 ```

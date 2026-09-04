@@ -533,13 +533,22 @@
       html += section(tl('skill_detail_required_info', 'Required Info'), `<ul class="detail-json-list">${items}</ul>`);
     }
 
-    if (detail.dialogExample && (detail.dialogExample.user || detail.dialogExample.assistant)) {
-      const ex = detail.dialogExample;
-      let chat = '<div class="detail-json-dialog">';
-      if (ex.user) chat += `<div class="detail-json-msg user"><span class="detail-json-role">${tl('skill_detail_user', 'User')}</span>${esc(ex.user)}</div>`;
-      if (ex.assistant) chat += `<div class="detail-json-msg assistant"><span class="detail-json-role">${tl('skill_detail_assistant', 'Assistant')}</span>${esc(ex.assistant)}</div>`;
-      chat += '</div>';
+    // dialogExample may be a single {user, assistant} object, an array of such
+    // objects (multiple examples), or a plain string (legacy form)
+    const rawDialog = detail.dialogExample;
+    const dialogEntries = Array.isArray(rawDialog)
+      ? rawDialog.filter(ex => ex && typeof ex === 'object' && (ex.user || ex.assistant))
+      : (rawDialog && typeof rawDialog === 'object' && (rawDialog.user || rawDialog.assistant)) ? [rawDialog] : [];
+    if (dialogEntries.length) {
+      const chat = dialogEntries.map(ex => {
+        let conv = '<div class="detail-json-dialog">';
+        if (ex.user) conv += `<div class="detail-json-msg user"><span class="detail-json-role">${tl('skill_detail_user', 'User')}</span>${esc(ex.user)}</div>`;
+        if (ex.assistant) conv += `<div class="detail-json-msg assistant"><span class="detail-json-role">${tl('skill_detail_assistant', 'Assistant')}</span>${esc(ex.assistant)}</div>`;
+        return conv + '</div>';
+      }).join('');
       html += section(tl('skill_detail_dialog_example', 'Dialog Example'), chat);
+    } else if (typeof rawDialog === 'string' && rawDialog.trim()) {
+      html += section(tl('skill_detail_dialog_example', 'Dialog Example'), `<p>${esc(rawDialog)}</p>`);
     }
 
     // Show rendered SKILL.md below the structured detail

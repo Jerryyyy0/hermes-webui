@@ -170,8 +170,30 @@ def _get_detail(handler, qs: dict[str, str], app_id: str) -> bool:
     payload = dict(app)
     payload["tags"] = _parse_json_field(app.get("tags"), [])
     payload["detail_json"] = _parse_json_field(app.get("detail_json"), None)
+    payload["change_logs"] = _parse_json_field(app.get("change_logs"), [])
     audit_log = store.list_audit_log(app_id, db_path=_DB_PATH)
-    return _respond(handler, {"application": payload, "audit_log": audit_log})
+    ancestors = store.get_ancestor_chain(app_id, db_path=_DB_PATH)
+    history = [
+        {
+            "application_id": a.get("id"),
+            "version": a.get("version") or "",
+            "status": a.get("status"),
+            "application_type": a.get("application_type"),
+            "submitted_at": a.get("submitted_at"),
+            "audited_at": a.get("audited_at"),
+            "audit_comment": a.get("audit_comment") or "",
+            "audit_log": store.list_audit_log(a.get("id") or "", db_path=_DB_PATH),
+        }
+        for a in ancestors
+    ]
+    return _respond(
+        handler,
+        {
+            "application": payload,
+            "audit_log": audit_log,
+            "parent_history": history,
+        },
+    )
 
 
 def _get_application_versions(handler, qs: dict[str, str], app_id: str) -> bool:
@@ -179,7 +201,7 @@ def _get_application_versions(handler, qs: dict[str, str], app_id: str) -> bool:
     if not skill_name:
         return _respond_bad(handler, "缺少 skill_name 参数", 400)
     latest = store.get_latest_version(skill_name, db_path=_DB_PATH)
-    apps = store.list_application_versions(skill_name, db_path=_DB_PATH)
+    apps = store.list_merged_versions(skill_name, db_path=_DB_PATH)
     return _respond(
         handler,
         {
@@ -194,6 +216,7 @@ def _get_application_versions(handler, qs: dict[str, str], app_id: str) -> bool:
                     "submitted_at": a.get("submitted_at"),
                     "audited_at": a.get("audited_at"),
                     "audit_comment": a.get("audit_comment") or "",
+                    "change_logs": _parse_json_field(a.get("change_logs"), []),
                 }
                 for a in apps
             ],
@@ -280,11 +303,27 @@ def _post_create(handler, body: dict) -> bool:
         "hidden": 0,
     }
 
+    raw_change_logs = body.get("change_logs")
+    if raw_change_logs is not None:
+        from integration.skills.version_store import normalize_change_logs
+        clean = normalize_change_logs(raw_change_logs)
+        if raw_change_logs and not clean:
+            return _respond_bad(handler, "change_logs 格式不合法", 400)
+        import json as _json
+        fields["change_logs"] = _json.dumps(clean, ensure_ascii=False)
+
     if app_type == ApplicationType.PUBLISH:
         snapshot = _read_local_skill_snapshot(skill_name)
         if snapshot is None:
             return _respond_bad(handler, "本地技能不存在，请先上传技能后再申请发布", 404)
         fields.update(snapshot)
+        # Non-first publish: link to the ancestor application so the
+        # version chain stays traceable (is_first=false has a source).
+        latest = store.get_latest_version(skill_name, db_path=_DB_PATH)
+        if latest:
+            parent_id = latest.get("application_id") or ""
+            if parent_id:
+                fields["parent_id"] = parent_id
     else:
         latest = store.get_latest_version(skill_name, db_path=_DB_PATH)
         if not latest:
@@ -366,7 +405,7 @@ def _parse_frontmatter(text: str):
 # ── POST update (draft only) ─────────────────────────────────────────────────
 
 
-_UPDATABLE_FIELDS = ("application_type", "reason")
+_UPDATABLE_FIELDS = ("application_type", "reason", "change_logs")
 
 
 def _post_update(handler, app_id: str, body: dict) -> bool:
@@ -376,6 +415,7 @@ def _post_update(handler, app_id: str, body: dict) -> bool:
     if app.get("status") not in (PublishStatus.DRAFT, PublishStatus.REJECTED):
         return _respond_bad(handler, "仅草稿或已驳回状态的申请单可编辑", 409)
 
+    is_rejected = app.get("status") == PublishStatus.REJECTED
     update_fields: dict[str, Any] = {}
     if "application_type" in body:
         new_type = str(body.get("application_type") or "").strip()
@@ -386,11 +426,24 @@ def _post_update(handler, app_id: str, body: dict) -> bool:
         if new_type != app.get("application_type"):
             update_fields["application_type"] = new_type
     if "reason" in body:
-        update_fields["reason"] = str(body.get("reason") or "").strip()
-    if not update_fields:
-        return _respond_bad(
-            handler, "无可更新字段，仅支持 application_type / reason", 400
-        )
+        new_reason = str(body.get("reason") or "").strip()
+        if new_reason != (app.get("reason") or ""):
+            update_fields["reason"] = new_reason
+    if "change_logs" in body:
+        from integration.skills.version_store import normalize_change_logs
+        raw = body.get("change_logs")
+        if raw is None:
+            new_logs_str = "[]"
+        else:
+            clean = normalize_change_logs(raw)
+            if raw and not clean:
+                return _respond_bad(handler, "change_logs 格式不合法", 400)
+            import json as _json
+            new_logs_str = _json.dumps(clean, ensure_ascii=False)
+        if new_logs_str != (app.get("change_logs") or "[]"):
+            update_fields["change_logs"] = new_logs_str
+    # 无实际变更时幂等成功：前端"编辑后提交"会先保存再 submit，
+    # 若因无变更返回 400 会中断后续提交流程
 
     resulting_type = (
         update_fields.get("application_type")
@@ -431,6 +484,10 @@ def _post_update(handler, app_id: str, body: dict) -> bool:
             # reason 是下架申请专属字段；本次请求未显式传入时清空旧下架原因
             if "reason" not in update_fields:
                 update_fields["reason"] = ""
+
+    # 驳回单编辑后重置为草稿，等同于允许重新提交
+    if is_rejected:
+        update_fields["status"] = PublishStatus.DRAFT
 
     store.update_application(app_id, fields=update_fields, db_path=_DB_PATH)
     refreshed = store.get_application(app_id, db_path=_DB_PATH)
@@ -496,6 +553,16 @@ def _post_submit(handler, app_id: str, body: dict) -> bool:
 
         if app_type == ApplicationType.PUBLISH:
             assert tmp_zip is not None
+            from integration.skills.version_store import normalize_change_logs
+            raw_change_logs = body.get("change_logs")
+            if raw_change_logs is not None:
+                clean_change_logs = normalize_change_logs(raw_change_logs)
+                if raw_change_logs and not clean_change_logs:
+                    return _respond_bad(handler, "change_logs 格式不合法", 400)
+            else:
+                clean_change_logs = _parse_json_field(
+                    app.get("change_logs"), []
+                ) or None
             resp = client.upload_skill(
                 tmp_zip,
                 f"{app['skill_name']}-{version}.zip",
@@ -510,6 +577,7 @@ def _post_submit(handler, app_id: str, body: dict) -> bool:
                 applicant_title=str(body.get("applicant_title") or ""),
                 source="user",
                 category=update_fields.get("category") or "",
+                change_logs=clean_change_logs,
             )
         else:
             resp = client.unpublish_skill(
@@ -533,6 +601,11 @@ def _post_submit(handler, app_id: str, body: dict) -> bool:
             "upstream_application_id": str(resp.get("applicationId") or ""),
             "upstream_status": str(resp.get("status") or "") or pending_status,
         }
+        if app_type == ApplicationType.PUBLISH and clean_change_logs is not None:
+            import json as _json
+            upstream_fields["change_logs"] = _json.dumps(
+                clean_change_logs, ensure_ascii=False
+            )
         if resp.get("name"):
             upstream_fields["upstream_name"] = str(resp["name"])
         if resp.get("skillId"):
@@ -709,9 +782,11 @@ def _list_item(app: dict, is_first: bool) -> dict:
         "category", "tags", "application_type", "reason", "version", "status",
         "submitter_account", "upstream_name", "upstream_skill_id",
         "upstream_application_id", "upstream_status", "audit_comment",
-        "created_at", "updated_at", "submitted_at", "audited_at", "hidden",
+        "parent_id", "created_at", "updated_at", "submitted_at", "audited_at",
+        "hidden",
     )
     result = {k: app.get(k) for k in keys}
+    result["tags"] = _parse_json_field(app.get("tags"), [])
     result["is_first"] = is_first
     return result
 
@@ -723,7 +798,11 @@ def _public_app(app: dict) -> dict:
         "reason", "version", "status", "submitter_account", "applicant_name",
         "applicant_org", "applicant_title", "platform", "upstream_name",
         "upstream_skill_id", "upstream_application_id", "upstream_status",
-        "audit_comment", "created_at", "updated_at", "submitted_at", "audited_at",
-        "hidden",
+        "audit_comment", "change_logs", "parent_id", "created_at", "updated_at",
+        "submitted_at", "audited_at", "hidden",
     )
-    return {k: app.get(k) for k in keys}
+    result = {k: app.get(k) for k in keys}
+    result["tags"] = _parse_json_field(app.get("tags"), [])
+    result["detail_json"] = _parse_json_field(app.get("detail_json"), None)
+    result["change_logs"] = _parse_json_field(app.get("change_logs"), [])
+    return result

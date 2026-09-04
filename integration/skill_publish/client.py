@@ -90,6 +90,7 @@ def upload_skill(
     applicant_title: str = "",
     source: str = "user",
     category: str = "",
+    change_logs: list[dict] | None = None,
 ) -> dict[str, Any]:
     """B2: POST /api/admin/upload (multipart). Returns parsed response dict.
 
@@ -117,6 +118,9 @@ def upload_skill(
         data["applicantTitle"] = applicant_title
     if category:
         data["category"] = category
+    if change_logs:
+        import json as _json
+        data["changeLogs"] = _json.dumps(change_logs, ensure_ascii=False)
     _log.info(
         "skillhub upload request: skill=%s version=%s fields=%s",
         zip_filename, version, data,

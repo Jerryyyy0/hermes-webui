@@ -28,8 +28,8 @@ _APPLICATION_COLUMNS = (
     "applicant_name", "applicant_org", "applicant_title", "platform",
     "external_user_id", "upstream_name", "upstream_skill_id",
     "upstream_application_id", "upstream_status", "audit_comment",
-    "audit_event_id", "created_at", "updated_at", "submitted_at", "audited_at",
-    "hidden", "hidden_at",
+    "audit_event_id", "change_logs", "parent_id", "created_at", "updated_at",
+    "submitted_at", "audited_at", "hidden", "hidden_at",
 )
 
 
@@ -51,6 +51,15 @@ def _connect(db_path: Path | str | None = None) -> sqlite3.Connection:
         pass
     _ensure_schema(conn)
     return conn
+
+
+def _migrate_add_column(
+    conn: sqlite3.Connection, table: str, column: str, definition: str
+) -> None:
+    try:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+    except sqlite3.OperationalError:
+        pass
 
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
@@ -83,6 +92,8 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
           upstream_status TEXT NOT NULL DEFAULT '',
           audit_comment TEXT NOT NULL DEFAULT '',
           audit_event_id INTEGER,
+          change_logs TEXT NOT NULL DEFAULT '[]',
+          parent_id TEXT NOT NULL DEFAULT '',
           created_at REAL NOT NULL,
           updated_at REAL NOT NULL,
           submitted_at REAL,
@@ -145,6 +156,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
           upstream_status_updated_at REAL,
           application_id TEXT NOT NULL DEFAULT '',
           release_notes TEXT NOT NULL DEFAULT '',
+          change_logs TEXT NOT NULL DEFAULT '[]',
           is_latest INTEGER NOT NULL DEFAULT 0,
           released_at REAL,
           created_at REAL NOT NULL,
@@ -161,6 +173,13 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_skill_versions_latest"
         " ON skill_versions(skill_name, is_latest)"
     )
+    _migrate_add_column(conn, "skill_application_forms", "change_logs", "TEXT NOT NULL DEFAULT '[]'")
+    _migrate_add_column(conn, "skill_application_forms", "parent_id", "TEXT NOT NULL DEFAULT ''")
+    _migrate_add_column(conn, "skill_versions", "change_logs", "TEXT NOT NULL DEFAULT '[]'")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_skill_apps_parent"
+        " ON skill_application_forms(parent_id)"
+    )
     conn.commit()
 
 
@@ -176,6 +195,8 @@ def create_application(
     *, fields: dict[str, Any], db_path: Path | str | None = None
 ) -> dict[str, Any]:
     data = {key: fields.get(key, "") for key in _APPLICATION_COLUMNS}
+    if not data.get("change_logs"):
+        data["change_logs"] = "[]"
     data["id"] = data["id"] or new_application_id()
     ts = now()
     if not data.get("created_at"):
@@ -448,6 +469,10 @@ def insert_version_and_demote(
 ) -> None:
     """Insert a new latest version and demote the previous one atomically (6.3)."""
     ts = now()
+    raw_change_logs = fields.get("change_logs", "[]")
+    if not isinstance(raw_change_logs, str):
+        import json as _json
+        raw_change_logs = _json.dumps(raw_change_logs, ensure_ascii=False)
     data = {
         "skill_name": fields["skill_name"],
         "version": fields["version"],
@@ -458,6 +483,7 @@ def insert_version_and_demote(
         "upstream_status_updated_at": ts,
         "application_id": fields.get("application_id", ""),
         "release_notes": fields.get("release_notes", ""),
+        "change_logs": raw_change_logs,
         "is_latest": 1,
         "released_at": fields.get("released_at", ts),
         "created_at": ts,
@@ -474,9 +500,9 @@ def insert_version_and_demote(
             INSERT INTO skill_versions (
               skill_name, version, submitter_account, display_name,
               upstream_skill_id, upstream_status, upstream_status_updated_at,
-              application_id, release_notes, is_latest, released_at,
+              application_id, release_notes, change_logs, is_latest, released_at,
               created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             tuple(data.values()),
         )
@@ -522,6 +548,79 @@ def list_application_versions(
             (skill_name,),
         ).fetchall()
     return [_row_to_application(r) for r in rows]
+
+
+def list_merged_versions(
+    skill_name: str, *, db_path: Path | str | None = None
+) -> list[dict[str, Any]]:
+    """Merged version history: application forms plus skill_versions rows.
+
+    ``skill_application_forms`` holds rich detail (status, audit_comment,
+    change_logs) but rows vanish when a form is hard-deleted. ``skill_versions``
+    rows survive deletion, so they backfill missing entries. Application-form
+    data wins on conflict; result is ordered by submitted/released time ASC.
+    """
+    apps = list_application_versions(skill_name, db_path=db_path)
+    with closing(_connect(db_path)) as conn:
+        vrows = conn.execute(
+            "SELECT * FROM skill_versions WHERE skill_name = ?"
+            " ORDER BY released_at ASC",
+            (skill_name,),
+        ).fetchall()
+
+    by_version: dict[str, dict[str, Any]] = {}
+    for a in apps:
+        by_version.setdefault(a.get("version") or "", a)
+    for row in vrows:
+        version = row["version"] or ""
+        if not version or version in by_version:
+            continue
+        by_version[version] = {
+            "id": row["application_id"] or "",
+            "version": version,
+            "status": PublishStatus.APPROVED,  # reached skill_versions => approved
+            "application_type": "publish",
+            "submitted_at": row["released_at"],
+            "audited_at": row["released_at"],
+            "audit_comment": "",
+            "change_logs": row["change_logs"] or "[]",
+        }
+    entries = [v for v in by_version.values() if v.get("version")]
+    entries.sort(key=lambda v: v.get("submitted_at") or 0)
+    return entries
+
+
+def get_ancestor_chain(
+    app_id: str, *, max_depth: int = 20, db_path: Path | str | None = None
+) -> list[dict[str, Any]]:
+    """Walk parent_id from ``app_id`` up to the root, oldest ancestor first.
+
+    Returns ancestor application dicts (excluding ``app_id`` itself).
+    Guards against cycles and runaway depth.
+    """
+    chain: list[dict[str, Any]] = []
+    seen = {app_id}
+    current_id = app_id
+    with closing(_connect(db_path)) as conn:
+        for _ in range(max_depth):
+            row = conn.execute(
+                "SELECT * FROM skill_application_forms WHERE id = ?", (current_id,)
+            ).fetchone()
+            if not row:
+                break
+            parent_id = (row["parent_id"] or "").strip()
+            if not parent_id or parent_id in seen:
+                break
+            seen.add(parent_id)
+            prow = conn.execute(
+                "SELECT * FROM skill_application_forms WHERE id = ?", (parent_id,)
+            ).fetchone()
+            if not prow:
+                break
+            chain.append(_row_to_application(prow))
+            current_id = parent_id
+    chain.reverse()
+    return chain
 
 
 def compute_is_first_for_apps(
