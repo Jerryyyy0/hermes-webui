@@ -879,7 +879,7 @@ def _get_skillhub_updates(handler, parsed) -> bool:
             def _run_refresh():
                 global _REFRESH_RUNNING
                 try:
-                    check_updates_for_installed_skills(db_path=db)
+                    check_updates_for_installed_skills(db_path=db, auto_upgrade=False)
                 except Exception as exc:
                     _log.warning("skillhub/updates refresh failed: %s", exc)
                 finally:
@@ -915,6 +915,8 @@ def _get_skillhub_updates(handler, parsed) -> bool:
 
 
 def _has_update(row: dict) -> bool:
+    if row.get("upstream_unreachable"):
+        return False
     from integration.skill_publish.version_utils import semver_gt
     upstream = str(row.get("upstream_version") or "").strip()
     local = str(row.get("local_version") or "").strip()
@@ -983,6 +985,7 @@ def _get_skillhub_skill_versions(handler, parsed) -> bool:
             "name": name,
             "current_version": current_version,
             "latest_version": latest_version,
+            "delisted": skillhub.is_delisted_installed(name),
             "versions": versions,
         })
     except Exception as exc:

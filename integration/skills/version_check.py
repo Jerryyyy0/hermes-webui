@@ -13,7 +13,7 @@ from typing import Any
 _log = logging.getLogger(__name__)
 
 
-def check_updates_for_installed_skills(db_path=None) -> dict:
+def check_updates_for_installed_skills(db_path=None, auto_upgrade=True) -> dict:
     """Batch-check all installed skills for upstream updates.
 
     Returns ``{checked: int, upgradable: int, auto_updated: int}``.
@@ -90,7 +90,7 @@ def check_updates_for_installed_skills(db_path=None) -> dict:
     auto_updated = 0
     try:
         settings = load_settings()
-        if settings.get("skills_auto_update"):
+        if auto_upgrade and settings.get("skills_auto_update"):
             for row in upgradable_list:
                 name = row.get("catalog_name") or ""
                 if not name:
