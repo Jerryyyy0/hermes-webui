@@ -7411,6 +7411,9 @@ def _run_agent_streaming(
     _checkpoint_stop = None
     _ckpt_thread = None
     _agent_lock = None
+    _kb_registry = None
+    _kb_hook = None
+    _citation_settlement_id = ''
     _profile_context_started = _stream_diag_monotonic_ms()
     try:
         # Register this stream with the global streaming meter and start the 1 Hz
@@ -7750,6 +7753,9 @@ def _run_agent_streaming(
             _metering_last_emit = [time.monotonic() - 1]  # fire immediately on first token
             _metering_output_deltas = [0]
             _metering_reasoning_deltas = [0]
+            from integration.knowledge_base.citations import CitationTokenStreamFilter
+            _citation_token_filter = CitationTokenStreamFilter()
+            _citation_reasoning_filter = CitationTokenStreamFilter()
 
             def _flush_reasoning_buffer():
                 # This branch emits each reasoning delta immediately, so no buffered
@@ -7793,7 +7799,15 @@ def _run_agent_streaming(
             def on_token(text):
                 nonlocal _token_sent
                 if text is None:
+                    visible_tail = _citation_token_filter.finish()
+                    if visible_tail:
+                        if stream_id in STREAM_PARTIAL_TEXT:
+                            STREAM_PARTIAL_TEXT[stream_id] += visible_tail
+                        put('token', {'text': visible_tail})
                     return  # end-of-stream sentinel
+                visible_text = _citation_token_filter.feed(text)
+                if not visible_text:
+                    return
                 _token_sent = True
                 # Accumulate partial text so cancel_stream() can persist it (#893).
                 #
@@ -7818,8 +7832,8 @@ def _run_agent_streaming(
                 # and would entangle the documented LOCK -> STREAMS_LOCK ordering — not
                 # worth it for a recoverable staleness window.
                 if stream_id in STREAM_PARTIAL_TEXT:
-                    STREAM_PARTIAL_TEXT[stream_id] += str(text)
-                put('token', {'text': text})
+                    STREAM_PARTIAL_TEXT[stream_id] += visible_text
+                put('token', {'text': visible_text})
                 # Update live throughput from stream delta callbacks, not from
                 # byte/character length. If a backend cannot provide live deltas,
                 # the frontend hides TPS rather than showing an estimate.
@@ -7830,9 +7844,14 @@ def _run_agent_streaming(
             def on_reasoning(text):
                 nonlocal _reasoning_segments, _current_reasoning_idx, _tool_boundary_advanced
                 if text is None:
+                    reasoning_tail = _citation_reasoning_filter.finish()
+                    if reasoning_tail:
+                        put('reasoning', {'text': reasoning_tail})
                     return
                 _tool_boundary_advanced = False
-                reasoning_delta = str(text)
+                reasoning_delta = _citation_reasoning_filter.feed(text)
+                if not reasoning_delta:
+                    return
                 # Some runtimes mirror user-visible progress text through the
                 # reasoning channel after it already streamed as normal assistant
                 # output. Treat that as an echo, otherwise the UI renders the
@@ -7864,7 +7883,8 @@ def _run_agent_streaming(
                 _current_reasoning_idx += 1
                 if text is None:
                     return
-                visible = str(text).strip()
+                from integration.knowledge_base.citations import strip_internal_citation_markers
+                visible = str(strip_internal_citation_markers(text)).strip()
                 if not visible:
                     return
                 already_streamed = bool(cb_kwargs.get('already_streamed', False)) or _is_visible_output_echo(visible)
@@ -7891,6 +7911,28 @@ def _run_agent_streaming(
             _manifest_default_profile = str(getattr(s, 'profile', None) or '').strip()
             from integration.session_manifest.manifest import artifact_workspace_root_for_session as _artifact_root_for_session
             _manifest_workspace_root = _artifact_root_for_session(s)
+            try:
+                from integration.knowledge_base.citations import (
+                    CandidateRegistry,
+                    CandidateScope,
+                    KnowledgeBaseCitationHook,
+                )
+                _kb_scope = CandidateScope(
+                    profile=_manifest_default_profile,
+                    session_id=session_id,
+                    stream_id=stream_id,
+                    worker_generation=(
+                        getattr(s, 'active_stream_generation', None)
+                        or getattr(s, 'control_generation', 0)
+                    ),
+                    turn_key=_manifest_turn_key,
+                )
+                _kb_registry = CandidateRegistry(_kb_scope)
+                _kb_hook = KnowledgeBaseCitationHook(_kb_registry)
+            except Exception:
+                logger.debug('Failed to initialize knowledge-base citation hook', exc_info=True)
+                _kb_registry = None
+                _kb_hook = None
 
             def _tool_args_snapshot(args):
                 args_snap = {}
@@ -7917,6 +7959,7 @@ def _run_agent_streaming(
                         _apply_public_todos_to_manifest_delta,
                         extract_manifest_delta_from_tool_event,
                         merge_manifest_delta,
+                        split_public_live_manifest_delta,
                     )
                     _manifest_delta_sequence[0] += 1
                     _event = ToolEvent(
@@ -7938,7 +7981,8 @@ def _run_agent_streaming(
                         default_profile=_manifest_default_profile,
                         artifact_workspace=_manifest_workspace_root,
                     )
-                    if not (_delta.get('todos') or _delta.get('artifacts') or _delta.get('references')):
+                    _public_delta, _kb_rows = split_public_live_manifest_delta(_delta)
+                    if not (_public_delta.get('todos') or _public_delta.get('artifacts') or _public_delta.get('references') or _public_delta.get('turns')):
                         return
                     with STREAMS_LOCK:
                         _live_manifest = merge_manifest_delta(
@@ -7948,14 +7992,14 @@ def _run_agent_streaming(
                                 'references': [],
                                 'turns': [],
                             },
-                            _delta,
+                            _public_delta,
                             scope='active_stream',
                         )
                         STREAM_LIVE_MANIFEST[stream_id] = _live_manifest
-                        _apply_public_todos_to_manifest_delta(_delta, _live_manifest)
-                    if not (_delta.get('todos') or _delta.get('artifacts') or _delta.get('references')):
+                        _apply_public_todos_to_manifest_delta(_public_delta, _live_manifest)
+                    if not (_public_delta.get('todos') or _public_delta.get('artifacts') or _public_delta.get('references') or _public_delta.get('turns')):
                         return
-                    put('manifest_delta', _delta)
+                    put('manifest_delta', _public_delta)
                 except Exception:
                     logger.debug('Failed to emit manifest_delta for tool %s', name, exc_info=True)
 
@@ -7964,6 +8008,7 @@ def _run_agent_streaming(
                     from integration.session_manifest.manifest import (
                         extract_manifest_delta_from_turn_reconcile,
                         merge_manifest_delta,
+                        split_public_live_manifest_delta,
                     )
                     _manifest_delta_sequence[0] += 1
                     _delta = extract_manifest_delta_from_turn_reconcile(
@@ -7978,7 +8023,8 @@ def _run_agent_streaming(
                         tool_calls=list(getattr(s, 'tool_calls', None) or []),
                         artifact_workspace=_manifest_workspace_root,
                     )
-                    if not (_delta.get('artifacts') or _delta.get('turns')):
+                    _public_delta, _kb_rows = split_public_live_manifest_delta(_delta)
+                    if not (_public_delta.get('artifacts') or _public_delta.get('turns') or _public_delta.get('todos') or _public_delta.get('references')):
                         return
                     with STREAMS_LOCK:
                         _live_manifest = merge_manifest_delta(
@@ -7988,11 +8034,11 @@ def _run_agent_streaming(
                                 'references': [],
                                 'turns': [],
                             },
-                            _delta,
+                            _public_delta,
                             scope='active_stream',
                         )
                         STREAM_LIVE_MANIFEST[stream_id] = _live_manifest
-                    put('manifest_delta', _delta)
+                    put('manifest_delta', _public_delta)
                 except Exception:
                     logger.debug('Failed to emit turn_complete reconcile manifest_delta', exc_info=True)
 
@@ -8173,9 +8219,22 @@ def _run_agent_streaming(
                     return
 
                 if event_type == 'tool.completed':
+                    _full_result = (
+                        cb_kwargs.get('result')
+                        if cb_kwargs.get('result') is not None
+                        else preview
+                    )
+                    if _kb_registry is not None:
+                        _kb_registry.add_completed_result(
+                            name=name,
+                            args=args,
+                            result=_full_result,
+                            tid=cb_kwargs.get('tool_call_id') or '',
+                            status='error' if bool(cb_kwargs.get('is_error', False)) else 'completed',
+                        )
                     _record_async_delegation_dispatch(
                         name,
-                        cb_kwargs.get('result') if cb_kwargs.get('result') is not None else preview,
+                        _full_result,
                     )
                     for live_tc in reversed(_live_tool_calls):
                         if live_tc.get('done'):
@@ -8201,7 +8260,14 @@ def _run_agent_streaming(
                     _emit_manifest_delta(
                         name,
                         args,
-                        result=preview or '',
+                        result=(
+                            _full_result
+                            if str(name or '') in {
+                                'mcp__ithink_kb_mcp__searchKnowledgeBaseDocuments',
+                                'mcp__ithink_kb_mcp__searchKnowledgeBaseDocumentsAcross',
+                            }
+                            else preview or ''
+                        ),
                         status='error' if bool(cb_kwargs.get('is_error', False)) else 'completed',
                     )
                     put('tool_complete', {
@@ -8290,6 +8356,14 @@ def _run_agent_streaming(
 
             def on_tool_complete(tool_call_id, name, args, function_result):
                 try:
+                    if _kb_registry is not None:
+                        _kb_registry.add_completed_result(
+                            name=name,
+                            args=args,
+                            result=function_result,
+                            tid=tool_call_id,
+                            status='completed',
+                        )
                     _record_live_tool_complete(tool_call_id, name, function_result)
                     _record_async_delegation_dispatch(name, function_result)
                     if tool_call_id and tool_call_id not in _live_tool_event_complete_ids:
@@ -8314,7 +8388,10 @@ def _run_agent_streaming(
                         _emit_manifest_delta(
                             name,
                             args,
-                            result=result_snippet,
+                            result=(function_result if str(name or '') in {
+                                'mcp__ithink_kb_mcp__searchKnowledgeBaseDocuments',
+                                'mcp__ithink_kb_mcp__searchKnowledgeBaseDocumentsAcross',
+                            } else result_snippet),
                             tid=tool_call_id,
                             status='completed',
                         )
@@ -8625,6 +8702,8 @@ def _run_agent_streaming(
             # re-instantiated fresh each turn (#855).
             if 'gateway_session_key' in _agent_params:
                 _agent_kwargs['gateway_session_key'] = session_id
+            if 'knowledge_base_citation_hook' in _agent_params and _kb_hook is not None:
+                _agent_kwargs['knowledge_base_citation_hook'] = _kb_hook
             _agent_init_timings = []
             _agent_init_total_ms = [0.0]
             _model_request_started = [None]
@@ -8820,6 +8899,8 @@ def _run_agent_streaming(
                         agent.reasoning_callback = _agent_kwargs.get('reasoning_callback')
                     if hasattr(agent, 'clarify_callback'):
                         agent.clarify_callback = _agent_kwargs.get('clarify_callback')
+                    if hasattr(agent, 'knowledge_base_citation_hook'):
+                        agent.knowledge_base_citation_hook = _kb_hook
                     if 'prefill_messages' in _agent_kwargs and hasattr(agent, 'prefill_messages'):
                         agent.prefill_messages = list(_agent_kwargs.get('prefill_messages') or [])
                     if _session_db is not None:
@@ -9922,8 +10003,6 @@ def _run_agent_streaming(
                     live_tool_calls=_live_tool_calls,
                 )
                 s.tool_calls = tool_calls
-                s.active_stream_id = None
-                s.active_stream_generation = None
                 s.pending_user_message = None
                 s.pending_attachments = []
                 s.pending_started_at = None
@@ -10186,7 +10265,99 @@ def _run_agent_streaming(
                 # Make the completed transcript durable before publishing the
                 # manifest decision derived from its final assistant message.
                 _final_save_started = _stream_diag_monotonic_ms()
-                s.save()
+                _citation_attached = False
+                if _kb_hook is not None:
+                    _settlement_id = str(
+                        (result or {}).get('citation_settlement_id')
+                        or (result or {}).get('settlement_id')
+                        or ''
+                    ) if isinstance(result, dict) else ''
+                    _settlement = _kb_hook.settlement(_settlement_id) if _settlement_id else None
+                    if _settlement is not None:
+                        _citation_settlement_id = _settlement_id
+                        _final_idx = None
+                        message_snapshot = None
+                        owner_snapshot = None
+                        revision_snapshot = None
+                        try:
+                            from integration.knowledge_base.citations import (
+                                attach_settlement_to_message,
+                                strip_orphan_citation_markers,
+                            )
+                            # Attach, save and commit under the outer session lock.
+                            # The revision check closes the check-then-use gap with
+                            # edit/retry/truncate or another concurrent stream.
+                            # The enclosing writeback scope already owns _agent_lock.
+                            # Re-entering its non-reentrant threading.Lock here would
+                            # deadlock after a successful model response, before the
+                            # terminal done event can be emitted.
+                            with contextlib.nullcontext():
+                                owner_snapshot = (
+                                    getattr(s, 'active_stream_id', None),
+                                    getattr(s, 'active_stream_generation', None),
+                                )
+                                revision_snapshot = int(getattr(s, 'session_revision', 0) or 0)
+                                if not ephemeral:
+                                    if str(getattr(s, 'active_stream_id', '') or '') != str(stream_id):
+                                        raise RuntimeError('active stream owner changed before citation settlement')
+                                    current_generation = getattr(s, 'active_stream_generation', None)
+                                    expected_generation = _settlement.scope.worker_generation
+                                    if str(current_generation) != str(expected_generation):
+                                        raise RuntimeError('active stream generation changed before citation settlement')
+                                expected_revision = int(getattr(s, 'session_revision', 0) or 0)
+                                _final_idx = next(
+                                    (idx for idx in range(len(s.messages) - 1, -1, -1)
+                                     if isinstance(s.messages[idx], dict)
+                                     and s.messages[idx].get('role') == 'assistant'),
+                                    None,
+                                )
+                                if _final_idx is not None:
+                                    message_snapshot = copy.deepcopy(s.messages[_final_idx])
+                                    _kb_hook.mark_attached_pending(_settlement_id)
+                                    _citation_attached = attach_settlement_to_message(
+                                        s.messages[_final_idx], _settlement
+                                    )
+                                    if not _citation_attached:
+                                        raise RuntimeError('final assistant message does not match citation settlement')
+                                else:
+                                    raise RuntimeError('final assistant message not found for citation settlement')
+                                if int(getattr(s, 'session_revision', 0) or 0) != expected_revision:
+                                    raise RuntimeError('session revision changed before citation settlement')
+                                # Clear the owner in the same atomic session-file
+                                # replacement as content, citations and evidence.
+                                # The in-memory token reservation is consumed only
+                                # after this durable write returns successfully.
+                                s.active_stream_id = None
+                                s.active_stream_generation = None
+                                s.save()
+                                _kb_hook.commit(_settlement_id)
+                        except Exception:
+                            _citation_attached = False
+                            try:
+                                if _final_idx is not None and message_snapshot is not None:
+                                    s.messages[_final_idx] = message_snapshot
+                                if owner_snapshot is not None:
+                                    s.active_stream_id, s.active_stream_generation = owner_snapshot
+                                if revision_snapshot is not None:
+                                    s.session_revision = revision_snapshot
+                                s.messages = strip_orphan_citation_markers(s.messages)
+                                _kb_hook.invalidate(_settlement_id)
+                            except Exception:
+                                logger.debug('Failed to rollback citation settlement', exc_info=True)
+                            logger.debug('Failed to attach knowledge-base citation settlement', exc_info=True)
+                # Keep the stream owner until the citation-bearing message has
+                # been validated. On failure, the rollback above leaves plain
+                # content, which is still saved as the completed answer without
+                # a citation. The successful Citation path already persisted the
+                # owner cleanup in the same atomic session-file replacement.
+                if not _citation_attached:
+                    # This fallback is still inside the outer writeback lock.
+                    # Do not acquire _agent_lock again: it is a threading.Lock,
+                    # not an RLock.
+                    with contextlib.nullcontext():
+                        s.active_stream_id = None
+                        s.active_stream_generation = None
+                        s.save()
                 _final_save_ms = _stream_diag_elapsed_ms(_final_save_started)
                 _artifact_decision = _persist_turn_artifact_paths(
                     s,
@@ -11059,6 +11230,20 @@ def _run_agent_streaming(
             # Clean up the stream-owner registry so stale stream_id→session_id
             # mappings do not accumulate over thousands of completed streams (#6351).
             unregister_stream_owner(stream_id)
+            # Candidate registry contains provider-only evidence and opaque
+            # tokens; release it on every terminal path (success/error/cancel).
+            if _kb_hook is not None:
+                try:
+                    _kb_hook.invalidate_all(reason='stream_terminal')
+                except Exception:
+                    logger.debug("Failed to invalidate pending knowledge-base settlements", exc_info=True)
+            if _kb_registry is not None:
+                try:
+                    _kb_registry.clear()
+                except Exception:
+                    logger.debug("Failed to clear knowledge-base citation registry", exc_info=True)
+            _kb_hook = None
+            _kb_registry = None
             # NOTE: do NOT discard PENDING_GOAL_CONTINUATION here. The marker
             # is set by goal_continue (line ~3328) inside the SAME function
             # call and consumed atomically by `_start_chat_stream_for_session`

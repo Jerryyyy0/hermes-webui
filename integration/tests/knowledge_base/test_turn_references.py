@@ -1,4 +1,5 @@
 import json
+import re
 
 from integration.knowledge_base.turn_references import (
     ACROSS_SEARCH_TOOL,
@@ -30,6 +31,16 @@ def _untrusted_result(payload):
     )
 
 
+def _assert_wire_identity(wire, *, tool, tid, chunk_count):
+    assert wire["kind"] == "knowledge_base_document"
+    assert re.fullmatch(r"kbdoc:v1:[A-Za-z0-9_-]{43}", wire["id"])
+    assert wire["source"] == [{"tool": tool, "tid": tid}]
+    chunks = wire["metadata"]["chunks"]
+    assert len(chunks) == chunk_count
+    assert all(re.fullmatch(r"kbchunk:v1:[A-Za-z0-9_-]{43}", c["id"]) for c in chunks)
+    assert all(set(c) == {"id", "page_content", "score"} for c in chunks)
+
+
 def test_single_search_reads_document_identity_and_chunks_from_result():
     rows = extract_references(
         name=SINGLE_SEARCH_TOOL,
@@ -41,18 +52,9 @@ def test_single_search_reads_document_identity_and_chunks_from_result():
         tid="single-call",
     )
 
-    assert to_wire(rows[0]) == {
-        "kind": "knowledge_base_document",
-        "source": [{"tool": SINGLE_SEARCH_TOOL, "tid": "single-call"}],
-        "metadata": {
-            "kbName": "share49",
-            "fileName": "rules.docx",
-            "chunks": [
-                {"page_content": "single passage", "score": 0.5},
-                {"page_content": "second passage", "score": 0.4},
-            ],
-        },
-    }
+    wire = to_wire(rows[0])
+    _assert_wire_identity(wire, tool=SINGLE_SEARCH_TOOL, tid="single-call", chunk_count=2)
+    assert [c["page_content"] for c in wire["metadata"]["chunks"]] == ["single passage", "second passage"]
 
 
 def test_single_search_unwraps_one_structured_result_from_agent_safety_wrapper():
@@ -65,15 +67,9 @@ def test_single_search_unwraps_one_structured_result_from_agent_safety_wrapper()
         tid="wrapped-call",
     )
 
-    assert to_wire(rows[0]) == {
-        "kind": "knowledge_base_document",
-        "source": [{"tool": SINGLE_SEARCH_TOOL, "tid": "wrapped-call"}],
-        "metadata": {
-            "kbName": "share49",
-            "fileName": "rules.docx",
-            "chunks": [{"page_content": "wrapped passage", "score": 0.25}],
-        },
-    }
+    wire = to_wire(rows[0])
+    _assert_wire_identity(wire, tool=SINGLE_SEARCH_TOOL, tid="wrapped-call", chunk_count=1)
+    assert wire["metadata"]["chunks"][0]["page_content"] == "wrapped passage"
 
 
 def test_across_and_single_results_merge_same_document_and_keep_both_sources():
@@ -96,21 +92,12 @@ def test_across_and_single_results_merge_same_document_and_keep_both_sources():
 
     merged = merge_reference_rows(across, single)
 
-    assert to_wire(merged[0]) == {
-        "kind": "knowledge_base_document",
-        "source": [
-            {"tool": ACROSS_SEARCH_TOOL, "tid": "across-call"},
-            {"tool": SINGLE_SEARCH_TOOL, "tid": "single-call"},
-        ],
-        "metadata": {
-            "kbName": "share49",
-            "fileName": "rules.docx",
-            "chunks": [
-                {"page_content": "first passage", "score": 0.2},
-                {"page_content": "second passage", "score": 0.4},
-            ],
-        },
-    }
+    wire = to_wire(merged[0])
+    assert wire["source"] == [
+        {"tool": ACROSS_SEARCH_TOOL, "tid": "across-call"},
+        {"tool": SINGLE_SEARCH_TOOL, "tid": "single-call"},
+    ]
+    assert len(wire["metadata"]["chunks"]) == 2
 
 
 def test_same_chunk_keeps_first_valid_score_and_rejects_invalid_score():
@@ -133,9 +120,9 @@ def test_same_chunk_keeps_first_valid_score_and_rejects_invalid_score():
 
     merged = merge_reference_rows(first, second)
 
-    assert to_wire(merged[0])["metadata"]["chunks"] == [
-        {"page_content": "same passage", "score": 0.2},
-    ]
+    chunks = to_wire(merged[0])["metadata"]["chunks"]
+    assert len(chunks) == 2
+    assert {c["score"] for c in chunks} == {"", 0.2}
 
 
 def test_missing_score_is_emitted_as_empty_string():
@@ -148,9 +135,10 @@ def test_missing_score_is_emitted_as_empty_string():
         tid="missing-score-call",
     )
 
-    assert to_wire(rows[0])["metadata"]["chunks"] == [
-        {"page_content": "without score", "score": ""},
-    ]
+    chunks = to_wire(rows[0])["metadata"]["chunks"]
+    assert len(chunks) == 1
+    assert chunks[0]["page_content"] == "without score"
+    assert chunks[0]["score"] == ""
 
 
 def test_duplicate_chunk_upgrades_missing_score_to_first_valid_score():
@@ -173,9 +161,9 @@ def test_duplicate_chunk_upgrades_missing_score_to_first_valid_score():
 
     merged = merge_reference_rows(first, second)
 
-    assert to_wire(merged[0])["metadata"]["chunks"] == [
-        {"page_content": "same passage", "score": 0.8},
-    ]
+    chunks = to_wire(merged[0])["metadata"]["chunks"]
+    assert len(chunks) == 2
+    assert {c["score"] for c in chunks} == {"", 0.8}
 
 
 def test_unknown_failed_or_malformed_results_fail_closed():

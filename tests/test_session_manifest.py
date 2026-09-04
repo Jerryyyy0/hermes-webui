@@ -410,7 +410,7 @@ def test_build_session_manifest_drops_unattributed_expired_candidate(tmp_path, m
 
     monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
 
-    def _fake_extract(events, ws, messages=None, *, skills_dir=None):
+    def _fake_extract(events, ws, messages=None, *, skills_dir=None, profile='', session_id=''):
         return (
             [{
                 'path': 'tmp_fix.py',
@@ -570,22 +570,20 @@ def test_manifest_delta_merges_knowledge_base_document_across_both_mcp_tools(tmp
         second,
     )
 
-    assert merged['references'] == [{
-        'kind': 'knowledge_base_document',
-        'source': [
-            {'tool': 'mcp__ithink_kb_mcp__searchKnowledgeBaseDocumentsAcross', 'tid': 'across-call'},
-            {'tool': 'mcp__ithink_kb_mcp__searchKnowledgeBaseDocuments', 'tid': 'single-call'},
-        ],
-        'metadata': {
-            'kbName': 'share49',
-            'fileName': 'rules.docx',
-            'chunks': [
-                {'page_content': 'first passage', 'score': 0.2},
-                {'page_content': 'second passage', 'score': 0.3},
-                {'page_content': 'third passage', 'score': 0.4},
-            ],
-        },
-    }]
+    assert len(merged['references']) == 1
+    reference = merged['references'][0]
+    assert reference['kind'] == 'knowledge_base_document'
+    assert reference['id'].startswith('kbdoc:v1:')
+    assert reference['source'] == [
+        {'tool': 'mcp__ithink_kb_mcp__searchKnowledgeBaseDocumentsAcross', 'tid': 'across-call'},
+        {'tool': 'mcp__ithink_kb_mcp__searchKnowledgeBaseDocuments', 'tid': 'single-call'},
+    ]
+    assert reference['metadata']['kbName'] == 'share49'
+    assert reference['metadata']['fileName'] == 'rules.docx'
+    assert [chunk['page_content'] for chunk in reference['metadata']['chunks']] == [
+        'first passage', 'second passage', 'third passage',
+    ]
+    assert all(chunk['id'].startswith('kbchunk:v1:') for chunk in reference['metadata']['chunks'])
     assert merged['turns'][0]['references'] == merged['references']
 
 
@@ -627,7 +625,7 @@ def test_manifest_delta_keeps_first_valid_score_for_duplicate_chunk():
     ]
 
 
-def test_historical_manifest_derives_knowledge_base_references_without_artifact_decision(tmp_path, monkeypatch):
+def test_manifest_does_not_publish_uncited_knowledge_base_search_results(tmp_path, monkeypatch):
     workspace = tmp_path / 'ws'
     workspace.mkdir()
     result = json.dumps({'result': json.dumps([{
@@ -658,9 +656,91 @@ def test_historical_manifest_derives_knowledge_base_references_without_artifact_
 
     assert source_info['manifest_source'] == 'none'
     assert manifest['artifacts'] == []
-    assert manifest['references'][0]['metadata']['chunks'] == [
-        {'page_content': 'historical passage', 'score': ''},
-    ]
+    assert manifest['references'] == []
+    assert manifest['turns'][0]['references'] == []
+
+
+def test_manifest_publishes_only_committed_cited_chunk(tmp_path, monkeypatch):
+    from integration.knowledge_base.turn_references import extract_references
+
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    result = json.dumps({'result': json.dumps([{
+        'metadata': {'kbName': 'share49', 'fileName': 'rules.docx'},
+        'type': 'Document',
+        'chunks': [
+            {'page_content': 'selected passage', 'score': 0.7},
+            {'page_content': 'unused passage', 'score': 0.6},
+        ],
+    }])})
+    parsed = extract_references(
+        name='mcp__ithink_kb_mcp__searchKnowledgeBaseDocumentsAcross',
+        args={},
+        result=result,
+        tid='kb-call',
+        profile='default',
+        session_id='kb-cited-reference',
+    )[0]
+    selected = parsed['chunks'][0]
+    session = Session(
+        session_id='kb-cited-reference',
+        workspace=str(workspace),
+        messages=[
+            {'role': 'user', 'content': 'search', '_turn_key': 'turn:1'},
+            {'role': 'assistant', 'tool_calls': [{
+                'id': 'kb-call',
+                'function': {
+                    'name': 'mcp__ithink_kb_mcp__searchKnowledgeBaseDocumentsAcross',
+                    'arguments': '{}',
+                },
+            }]},
+            {'role': 'tool', 'tool_call_id': 'kb-call', 'content': result},
+            {
+                'role': 'assistant',
+                'content': '结论。<sup data-c="1">[1]</sup>',
+                'citations': [{
+                    'citation_id': 'kbcite:v1:test:1',
+                    'ordinal': 1,
+                    'reference_id': parsed['reference_id'],
+                    'chunk_ids': [selected['chunk_id']],
+                    'source': {
+                        'tool': 'mcp__ithink_kb_mcp__searchKnowledgeBaseDocumentsAcross',
+                        'tid': 'kb-call',
+                    },
+                }],
+                '_knowledge_base_citation_evidence': [{
+                    'reference_id': parsed['reference_id'],
+                    'chunk_id': selected['chunk_id'],
+                    'kb_name': 'share49',
+                    'file_name': 'rules.docx',
+                    'page_content': 'selected passage',
+                    'score': 0.7,
+                }],
+            },
+        ],
+        tool_calls=[],
+    )
+    monkeypatch.setattr('integration.session_manifest.manifest._load_display_messages', lambda s: list(s.messages))
+
+    manifest = build_session_manifest(session, source_info={})
+
+    assert manifest['references'] == [{
+        'kind': 'knowledge_base_document',
+        'id': parsed['reference_id'],
+        'source': [{
+            'tool': 'mcp__ithink_kb_mcp__searchKnowledgeBaseDocumentsAcross',
+            'tid': 'kb-call',
+        }],
+        'metadata': {
+            'kbName': 'share49',
+            'fileName': 'rules.docx',
+            'chunks': [{
+                'id': selected['chunk_id'],
+                'page_content': 'selected passage',
+                'score': 0.7,
+            }],
+        },
+    }]
     assert manifest['turns'][0]['references'] == manifest['references']
 
 

@@ -1600,6 +1600,7 @@ from api.helpers import (
     _security_headers,
     _sanitize_error,
     redact_session_data,
+    strip_knowledge_base_citations_for_copy,
     _redact_text,
     _CLIENT_DISCONNECT_ERRORS,
 )
@@ -12648,7 +12649,7 @@ def handle_post(handler, parsed) -> bool:
                     "created_at": share_meta["share_created_at"],
                     "updated_at": share_meta["share_updated_at"],
                 },
-                "session": response_session.compact() | {"messages": response_session.messages},
+                "session": redact_session_data(response_session.compact() | {"messages": response_session.messages}),
             },
         )
 
@@ -12687,7 +12688,7 @@ def handle_post(handler, parsed) -> bool:
             handler,
             {
                 "ok": True,
-                "session": response_session.compact() | {"messages": response_session.messages},
+                "session": redact_session_data(response_session.compact() | {"messages": response_session.messages}),
             },
         )
 
@@ -12858,7 +12859,7 @@ def handle_post(handler, parsed) -> bool:
                 profile=getattr(s, "profile", None),
                 session_id=getattr(s, "session_id", None),
             )
-        payload = {"session": s.compact() | {"messages": s.messages}}
+        payload = {"session": redact_session_data(s.compact() | {"messages": s.messages})}
         if worktree_skipped:
             # Config-default worktree was skipped (non-git workspace); tell the
             # client the session is plain so the UI doesn't assume isolation.
@@ -12894,7 +12895,7 @@ def handle_post(handler, parsed) -> bool:
                 workspace_mode=getattr(session, "workspace_mode", None),
                 model=session.model,
                 model_provider=session.model_provider,
-                messages=copy.deepcopy(session.messages),
+                messages=strip_knowledge_base_citations_for_copy(session.messages),
                 tool_calls=copy.deepcopy(session.tool_calls),
                 # Reset ephemeral / per-session-instance flags. Duplicating an
                 # archived conversation should produce a visible (un-archived)
@@ -12920,7 +12921,7 @@ def handle_post(handler, parsed) -> bool:
                 # context_messages is the authoritative model-facing prefix — must be
                 # deepcopied so the duplicate has its own independent context that won't
                 # be mutated when the original session's context changes (#2914).
-                context_messages=copy.deepcopy(getattr(session, "context_messages", None) or []),
+                context_messages=strip_knowledge_base_citations_for_copy(getattr(session, "context_messages", None) or []),
                 # Gateway routing — if the user customized routing for this session,
                 # the duplicate should behave identically.
                 gateway_routing=copy.deepcopy(getattr(session, "gateway_routing", None)),
@@ -12950,7 +12951,7 @@ def handle_post(handler, parsed) -> bool:
             copied_session.save()
             publish_session_list_changed("session_duplicate", profile=getattr(copied_session, "profile", None))
 
-            return j(handler, {"session": copied_session.compact() | {"messages": copied_session.messages}})
+            return j(handler, {"session": redact_session_data(copied_session.compact() | {"messages": copied_session.messages})})
         except Exception as e:
             return bad(handler, str(e))
 
@@ -13342,7 +13343,7 @@ def handle_post(handler, parsed) -> bool:
                 logger.debug("Failed to close workspace terminal after workspace update")
         if str(getattr(s, "workspace_mode", "") or "").strip().lower() != "managed":
             set_last_workspace(new_ws)
-        return j(handler, {"session": s.compact() | {"messages": s.messages}})
+        return j(handler, {"session": redact_session_data(s.compact() | {"messages": s.messages})})
     if parsed.path == "/api/session/worktree/remove":
         sid = body.get("session_id", "")
         if not sid or not isinstance(sid, str) or not sid.strip():
@@ -13695,7 +13696,7 @@ def handle_post(handler, parsed) -> bool:
                 s.truncation_watermark or 0,
             )
         return j(
-            handler, {"ok": True, "session": s.compact() | {"messages": s.messages}}
+            handler, {"ok": True, "session": redact_session_data(s.compact() | {"messages": s.messages})}
         )
 
     if parsed.path == "/api/session/branch":
@@ -13752,6 +13753,7 @@ def handle_post(handler, parsed) -> bool:
             forked_messages = source_messages[:keep_count]
         else:
             forked_messages = list(source_messages)
+        forked_messages = strip_knowledge_base_citations_for_copy(forked_messages)
 
         # Derive title
         if custom_title:
@@ -13775,7 +13777,7 @@ def handle_post(handler, parsed) -> bool:
             context_length=getattr(source, "context_length", None),
             threshold_tokens=getattr(source, "threshold_tokens", None),
             # context_messages — deep copy so the branch has independent context
-            context_messages=copy.deepcopy(getattr(source, "context_messages", None) or []),
+            context_messages=strip_knowledge_base_citations_for_copy(getattr(source, "context_messages", None) or []),
             # Gateway routing — inherit from source
             gateway_routing=copy.deepcopy(getattr(source, "gateway_routing", None)),
             # Context engine — inherit state so branch's context engine starts correctly
@@ -20839,7 +20841,7 @@ def _handle_chat_sync(handler, body):
         {
             "answer": result.get("final_response") or "",
             "status": "done" if result.get("completed", True) else "partial",
-            "session": s.compact() | {"messages": s.messages},
+            "session": redact_session_data(s.compact() | {"messages": s.messages}),
             "result": {k: v for k, v in result.items() if k != "messages"},
         },
     )

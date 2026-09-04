@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import math
 import re
@@ -33,10 +35,98 @@ def _score(value: Any) -> int | float | None:
         return None
 
 
-def _chunk(page_content: str, score: Any) -> dict[str, Any]:
+def _index(value: Any) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    return parsed if parsed >= 0 else 0
+
+
+def _base64url_digest(value: str) -> str:
+    digest = hashlib.sha256(value.encode("utf-8")).digest()
+    return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+
+
+def _immutable_document_id(metadata: dict[str, Any]) -> str:
+    for key in ("document_id", "documentId"):
+        value = _text(metadata.get(key))
+        if value:
+            return value
+    return ""
+
+
+def _immutable_chunk_id(raw_chunk: dict[str, Any]) -> str:
+    for key in ("chunk_id", "chunkId", "id"):
+        value = _text(raw_chunk.get(key))
+        if value:
+            return value
+    return ""
+
+
+def _document_id(
+    *,
+    metadata: dict[str, Any],
+    kb_name: str,
+    file_name: str,
+    profile: str,
+    session_id: str,
+    authority_namespace: str,
+) -> str:
+    immutable_id = _immutable_document_id(metadata)
+    namespace = _text(authority_namespace)
+    if immutable_id and namespace:
+        key = "immutable\0" + namespace + "\0" + immutable_id
+    elif namespace:
+        key = "named\0" + namespace + "\0" + kb_name + "\0" + file_name
+    else:
+        local_identity = immutable_id or (kb_name + "\0" + file_name)
+        key = "session\0" + _text(profile) + "\0" + _text(session_id) + "\0" + local_identity
+    return "kbdoc:v1:" + _base64url_digest(key)
+
+
+def _chunk_id(
+    *,
+    raw_chunk: dict[str, Any],
+    reference_id: str,
+    tool: str,
+    tid: str,
+    row_index: int,
+    chunk_index: int,
+    page_content: str,
+) -> tuple[str, bool]:
+    immutable_id = _immutable_chunk_id(raw_chunk)
+    if immutable_id:
+        key = "immutable\0" + reference_id + "\0" + immutable_id
+        return "kbchunk:v1:" + _base64url_digest(key), True
+    source_call_key = tool + "\0" + tid
+    key = (
+        "call-scoped\0" + source_call_key + "\0" + str(row_index)
+        + "\0" + str(chunk_index) + "\0" + page_content
+    )
+    return "kbchunk:v1:" + _base64url_digest(key), False
+
+
+def _chunk(
+    page_content: str,
+    score: Any,
+    *,
+    chunk_id: str,
+    immutable: bool,
+    source_tool: str,
+    source_tid: str,
+    row_index: int = 0,
+    chunk_index: int = 0,
+) -> dict[str, Any]:
     chunk: dict[str, Any] = {"page_content": page_content}
     normalized_score = _score(score)
     chunk["score"] = normalized_score if normalized_score is not None else ""
+    chunk["chunk_id"] = chunk_id
+    chunk["_immutable_chunk_id"] = immutable
+    chunk["_source_tool"] = source_tool
+    chunk["_source_tid"] = source_tid
+    chunk["_row_index"] = row_index
+    chunk["_chunk_index"] = chunk_index
     return chunk
 
 
@@ -93,6 +183,9 @@ def _result_rows(result: Any) -> list[dict[str, Any]]:
 
 
 def reference_key(row: dict[str, Any]) -> str:
+    reference_id = _text(row.get("reference_id"))
+    if reference_id:
+        return reference_id
     return "\0".join((
         _text(row.get("kb_name")),
         _text(row.get("file_name")),
@@ -106,6 +199,9 @@ def extract_references(
     result: Any,
     status: Any = "completed",
     tid: Any = "",
+    profile: Any = "",
+    session_id: Any = "",
+    authority_namespace: Any = "",
 ) -> list[dict[str, Any]]:
     """Return grouped MCP document results as internal reference candidates.
 
@@ -119,7 +215,8 @@ def extract_references(
     if not tool or _text(status).lower() != "completed":
         return []
     candidates: list[dict[str, Any]] = []
-    for row in _result_rows(result):
+    normalized_tid = _text(tid)
+    for row_index, row in enumerate(_result_rows(result)):
         metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
         if row.get("type") != "Document":
             continue
@@ -127,14 +224,42 @@ def extract_references(
         file_name = _text(metadata.get("fileName"))
         if not kb_name or not file_name:
             continue
+        reference_id = _document_id(
+            metadata=metadata,
+            kb_name=kb_name,
+            file_name=file_name,
+            profile=_text(profile),
+            session_id=_text(session_id),
+            authority_namespace=_text(authority_namespace),
+        )
         chunks = []
-        for raw_chunk in row.get("chunks") if isinstance(row.get("chunks"), list) else []:
+        for chunk_index, raw_chunk in enumerate(
+            row.get("chunks") if isinstance(row.get("chunks"), list) else []
+        ):
             if not isinstance(raw_chunk, dict):
                 continue
             content = raw_chunk.get("page_content")
             if not isinstance(content, str) or not content:
                 continue
-            chunks.append(_chunk(content, raw_chunk.get("score")))
+            chunk_id, immutable = _chunk_id(
+                raw_chunk=raw_chunk,
+                reference_id=reference_id,
+                tool=tool,
+                tid=normalized_tid,
+                row_index=row_index,
+                chunk_index=chunk_index,
+                page_content=content,
+            )
+            chunks.append(_chunk(
+                content,
+                raw_chunk.get("score"),
+                chunk_id=chunk_id,
+                immutable=immutable,
+                source_tool=tool,
+                source_tid=normalized_tid,
+                row_index=row_index,
+                chunk_index=chunk_index,
+            ))
         if not chunks:
             continue
         candidates.append({
@@ -142,8 +267,9 @@ def extract_references(
             "resource_type": "knowledge_base_document",
             "kb_name": kb_name,
             "file_name": file_name,
+            "reference_id": reference_id,
             "chunks": chunks,
-            "sources": [{"tool": tool, "tid": _text(tid)}],
+            "sources": [{"tool": tool, "tid": normalized_tid}],
         })
     return merge_reference_rows([], candidates)
 
@@ -161,11 +287,21 @@ def merge_reference_rows(
             continue
         current = rows.get(key)
         if current is None:
+            kb_name = _text(row.get("kb_name"))
+            file_name = _text(row.get("file_name"))
             current = {
                 "kind": "knowledge_base_document",
                 "resource_type": "knowledge_base_document",
-                "kb_name": _text(row.get("kb_name")),
-                "file_name": _text(row.get("file_name")),
+                "kb_name": kb_name,
+                "file_name": file_name,
+                "reference_id": _text(row.get("reference_id")) or _document_id(
+                    metadata={},
+                    kb_name=kb_name,
+                    file_name=file_name,
+                    profile="",
+                    session_id="",
+                    authority_namespace="",
+                ),
                 "chunks": [],
                 "sources": [],
             }
@@ -185,10 +321,10 @@ def merge_reference_rows(
             if source_key not in source_keys:
                 current["sources"].append(normalized)
                 source_keys.add(source_key)
-        chunks_by_content = {
-            chunk.get("page_content"): chunk
+        chunks_by_identity = {
+            chunk.get("chunk_id"): chunk
             for chunk in current["chunks"]
-            if isinstance(chunk, dict) and isinstance(chunk.get("page_content"), str)
+            if isinstance(chunk, dict) and chunk.get("chunk_id")
         }
         for chunk in row.get("chunks") or []:
             if not isinstance(chunk, dict):
@@ -196,11 +332,27 @@ def merge_reference_rows(
             page_content = chunk.get("page_content")
             if not isinstance(page_content, str) or not page_content:
                 continue
-            normalized = _chunk(page_content, chunk.get("score"))
-            existing_chunk = chunks_by_content.get(page_content)
+            chunk_id = _text(chunk.get("chunk_id"))
+            if not chunk_id:
+                # Legacy rows without IDs remain distinct by encounter order;
+                # never collapse them by their text.
+                chunk_id = "kbchunk:v1:" + _base64url_digest(
+                    "legacy\0" + str(len(current["chunks"])) + "\0" + page_content
+                )
+            normalized = _chunk(
+                page_content,
+                chunk.get("score"),
+                chunk_id=chunk_id,
+                immutable=bool(chunk.get("_immutable_chunk_id")),
+                source_tool=_text(chunk.get("_source_tool")),
+                source_tid=_text(chunk.get("_source_tid")),
+                row_index=_index(chunk.get("_row_index", 0)),
+                chunk_index=_index(chunk.get("_chunk_index", 0)),
+            )
+            existing_chunk = chunks_by_identity.get(chunk_id)
             if existing_chunk is None:
                 current["chunks"].append(normalized)
-                chunks_by_content[page_content] = normalized
+                chunks_by_identity[chunk_id] = normalized
             elif existing_chunk.get("score") == "" and normalized.get("score") != "":
                 existing_chunk["score"] = normalized["score"]
     return sorted(rows.values(), key=lambda row: (row["kb_name"], row["file_name"]))
@@ -216,10 +368,18 @@ def to_wire(row: dict[str, Any]) -> dict[str, Any] | None:
         return None
     return {
         "kind": "knowledge_base_document",
+        "id": record.get("reference_id"),
         "source": record["sources"],
         "metadata": {
             "kbName": record["kb_name"],
             "fileName": record["file_name"],
-            "chunks": record["chunks"],
+            "chunks": [
+                {
+                    "id": chunk.get("chunk_id"),
+                    "page_content": chunk.get("page_content", ""),
+                    "score": chunk.get("score", ""),
+                }
+                for chunk in record["chunks"]
+            ],
         },
     }

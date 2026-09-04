@@ -6,20 +6,20 @@
 
 ## 0. Manifest 的定位与资源边界
 
-Session Manifest 是从会话活动派生出的轻量索引，服务于 Workspace Inspector 的 Tasks、Artifacts、References，以及聊天区每轮的 artifact chips。它不是 transcript、执行 journal，也不是 workspace 文件清单。
+Session Manifest 是从会话活动生成的轻量派生索引，服务于 Workspace Inspector 的 Tasks、Artifacts、References，以及聊天区每轮的 artifact chips。它不是 transcript、执行 journal，也不是 workspace 文件清单。
 
 | 数据 | 含义 | 明确排除 |
 | --- | --- | --- |
 | Tasks | 当前轮 `todo` 工具产生的最新任务快照 | 历史流水、助手正文中的列表 |
 | Artifacts | 当前会话由明确成果证据创建、修改或交付的文件/技能 | 搜索命中、目录列表、输入文件、跨字段推断 |
-| References | 明确成功 `skill_view` 的技能，或受支持知识库 MCP 返回的文档命中 | 文件读取、搜索、列目录、助手普通提及 |
+| References | 明确成功 `skill_view` 的技能，或最终 assistant message 已验证 Citation 实际采用的知识库 chunk | 未被最终答案引用的检索命中、文件读取、搜索、列目录、助手普通提及 |
 | Turns | 按真实 user 消息划分的 per-turn artifacts/references 视图 | transcript、完整执行历史、Agent internal scaffold、model-only context anchor |
 
 同一资源在一个 Manifest 中只保留一个主归类，优先级为 `artifacts > references`。缺失字段保持为空或跳过，不从相似字段推断、复制或补全。
 
 Artifacts 只接受成功 completed 工具的结构化证据、显式 `MEDIA:`、成功 skill mutation，或当前 turn 最后一条 assistant 中经严格验证的路径。工具和最终 assistant 的绝对路径可成为外部直接引用；相对路径仍必须位于当前 session workspace。工具 start、文件读取、terminal stdout、目录列表、中间 assistant prose 和全 workspace 扫描不构成 artifact 证据；具体白名单与路径 gate 以 [Artifacts 实现文档](../architecture/session-manifest-artifacts.md) 为准。
 
-References 只接受成功 completed 的 `skill_view` 或本页列出的两个知识库 MCP 工具。知识库 reference 不写入 `session_manifest.db`，也不新增数据库表或 sidecar；artifact store 只负责 artifacts 的成果/空决策。
+References 中的 Skill 只接受成功 completed 的 `skill_view`。两个知识库 MCP 工具的 completed 结果只产生当前 stream 的私有候选；只有模型在最终回答中选择的 chunk 通过结算并随最终 assistant message 原子保存后，才成为知识库 reference。知识库 reference 不写入 `session_manifest.db`；`citations[]` 与私有 evidence 保存在既有 Session `session.json`，Manifest 按需投影，不新增数据库表或独立 JSON。
 
 ## 1. GET `/api/session/manifest`
 
@@ -61,6 +61,7 @@ GET /api/session/manifest?session_id=abc123
       },
       {
         "kind": "knowledge_base_document",
+        "id": "kbdoc:v1:Fb8...",
         "source": [
           {
             "tool": "mcp__ithink_kb_mcp__searchKnowledgeBaseDocumentsAcross",
@@ -71,7 +72,7 @@ GET /api/session/manifest?session_id=abc123
           "kbName": "share49",
           "fileName": "电力市场运行基本规则.docx",
           "chunks": [
-            { "page_content": "第一章 总则……", "score": 0.82 }
+            { "id": "kbchunk:v1:Q3c...", "page_content": "第一章 总则……", "score": 0.82 }
           ]
         }
       }
@@ -99,7 +100,7 @@ GET /api/session/manifest?session_id=abc123
 | 值 | 含义 |
 | --- | --- |
 | `db` | 使用 artifact store 中的非空或 empty decision |
-| `none` | 当前 lineage 无 artifact store decision；`artifacts` 保持空，但仍从已完成工具事件派生 references |
+| `none` | 当前 lineage 无 artifact store decision；`artifacts` 保持空，references 仍可从 Skill 工具证据和已提交 Citation 派生 |
 | `unknown` | 异常或无法判断 |
 
 GET 是只读的：不得执行 artifact backfill 或 empty-decision repair，不得更新 session `updated_at`、sidebar recency，也不得发布 session-list 变更事件。没有 artifact store decision 时不重建历史 artifacts；references 不依赖该 store。
@@ -251,6 +252,7 @@ Manifest 不返回文件或技能正文。非 expired 且 `preview` 为 `file`/`
 ```json
 {
   "kind": "knowledge_base_document",
+  "id": "kbdoc:v1:Fb8...",
   "source": [
     {
       "tool": "mcp__ithink_kb_mcp__searchKnowledgeBaseDocuments",
@@ -261,7 +263,7 @@ Manifest 不返回文件或技能正文。非 expired 且 `preview` 为 `file`/`
     "kbName": "share49",
     "fileName": "电力市场运行基本规则.docx",
     "chunks": [
-      { "page_content": "第一章 总则……", "score": 0.82 }
+      { "id": "kbchunk:v1:Q3c...", "page_content": "第一章 总则……", "score": 0.82 }
     ]
   }
 }
@@ -272,6 +274,7 @@ Manifest 不返回文件或技能正文。非 expired 且 `preview` 为 `file`/`
 ```json
 {
   "kind": "knowledge_base_document",
+  "id": "kbdoc:v1:Fb8...",
   "source": [
     {
       "tool": "mcp__ithink_kb_mcp__searchKnowledgeBaseDocumentsAcross",
@@ -286,8 +289,8 @@ Manifest 不返回文件或技能正文。非 expired 且 `preview` 为 `file`/`
     "kbName": "share49",
     "fileName": "电力市场运行基本规则.docx",
     "chunks": [
-      { "page_content": "第一章 总则……", "score": 0.82 },
-      { "page_content": "第二章 市场成员……", "score": 0.71 }
+      { "id": "kbchunk:v1:Q3c...", "page_content": "第一章 总则……", "score": 0.82 },
+      { "id": "kbchunk:v1:R4d...", "page_content": "第二章 市场成员……", "score": 0.71 }
     ]
   }
 }
@@ -296,18 +299,20 @@ Manifest 不返回文件或技能正文。非 expired 且 `preview` 为 `file`/`
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | `kind` | string | `skill` 或 `knowledge_base_document` |
+| `id` | string | `kind=knowledge_base_document` 时的稳定 `reference_id`；与 assistant message 的 `citations[].reference_id` 相同 |
 | `source` | object[] | 来源工具与工具调用 ID；`skill` 使用 `skill_view`，知识库文档可聚合多个 MCP 调用 |
 | `metadata.path` | string | `kind=skill` 时的 canonical skill 名 |
 | `metadata.kbName` | string | `kind=knowledge_base_document` 时的知识库名 |
 | `metadata.fileName` | string | 文档文件名；单库工具从其私有 `metadata.source` 仅取 basename，不向浏览器透传原路径 |
-| `metadata.chunks` | object[] | 文档命中片段，保留工具返回顺序并按 `page_content` 去重 |
+| `metadata.chunks` | object[] | 仅包含最终答案实际引用且验证通过的片段，按稳定 chunk ID 合并 |
+| `metadata.chunks[].id` | string | 稳定 chunk ID；与 `citations[].chunk_ids[0]` 相同 |
 | `metadata.chunks[].page_content` | string | 下游返回的原始内容，不改写 |
 | `metadata.chunks[].score` | number or string | 下游返回的原始分数；不存在或无效时为 `""` |
 | `status` | string | 可选；当前仅 `expired`，表示 Skill 有历史来源但当前不可预览 |
 
 `score` 是每个命中片段的原始分数，不是筛选阈值；`scoreThreshold` 仍属于知识库搜索请求参数。Manifest 不对分数做归一化，也不改变下游定义的大小关系；下游没有返回有效 score 时统一写为 `""`。
 
-知识库工具结果仅接受最多 50 条、总编码不超过 1 MiB 的 JSON 列表；畸形、失败、未知工具或超限结果一律跳过。Reference 是 transcript/tool-call 派生索引，不写入 artifact store，因此无需新增数据库表。
+知识库候选工具结果仅接受最多 50 条、总编码不超过 1 MiB 的 JSON 列表；畸形、失败、未知工具或超限结果一律跳过。最终 Reference 还必须通过同一 assistant message 内 `content marker + citations[] + 私有 evidence` 的一致性校验；未引用的候选不公开。Reference 不写入 artifact store，因此无需新增数据库表或 sidecar。
 
 ### `turns[]`：按 user turn 的局部投影
 
@@ -324,6 +329,7 @@ Manifest 不返回文件或技能正文。非 expired 且 `preview` 为 `file`/`
   "references": [
     {
       "kind": "knowledge_base_document",
+      "id": "kbdoc:v1:Fb8...",
       "source": [
         {
           "tool": "mcp__ithink_kb_mcp__searchKnowledgeBaseDocumentsAcross",
@@ -334,7 +340,7 @@ Manifest 不返回文件或技能正文。非 expired 且 `preview` 为 `file`/`
         "kbName": "share49",
         "fileName": "电力市场运行基本规则.docx",
         "chunks": [
-          { "page_content": "第一章 总则……", "score": 0.82 }
+          { "id": "kbchunk:v1:Q3c...", "page_content": "第一章 总则……", "score": 0.82 }
         ]
       }
     }
@@ -427,21 +433,13 @@ event: manifest_delta
 data: {"version":2,"session_id":"abc123","stream_id":"stream-xyz","turn_key":"turn:4","sequence":10,"artifacts":[],"references":[{"kind":"skill","source":[{"tool":"skill_view","tid":"call-skill-1"}],"metadata":{"path":"research-skill"}}]}
 ```
 
-### 知识库 MCP 示例
+### 知识库 MCP 不发送实时 reference delta
 
-以下是 `searchKnowledgeBaseDocuments` 成功完成时的完整 SSE 帧。具体文档的来源保留在
-`references[].source[]`，使用完整的 MCP 工具名和调用 ID；delta 顶层不重复携带工具
-完成事件字段。
-
-```text
-event: manifest_delta
-data: {"version":2,"session_id":"5ccfb09bb7a7","stream_id":"stream-xyz","turn_key":"turn:4","sequence":12,"artifacts":[],"references":[{"kind":"knowledge_base_document","source":[{"tool":"mcp__ithink_kb_mcp__searchKnowledgeBaseDocuments","tid":"call_00_nvU4eugjt9ji9RA6gxWu6032"}],"metadata":{"kbName":"share49","fileName":"电力市场运行基本规则.docx","chunks":[{"page_content":"第一章 总则……","score":0.82}]}}]}
-
-```
-
-同一调用返回多个文档时，`references[]` 包含多条行；同一 turn 内两个受支持工具命中同一
-`(kbName, fileName)` 时，客户端按既有合并规则合并为一条，追加不重复的
-`source[]` 与 `metadata.chunks[]`。
+`searchKnowledgeBaseDocuments` 和 `searchKnowledgeBaseDocumentsAcross` 成功完成时只在服务端
+创建当前 stream 的 Citation candidates。此时模型尚未证明最终采用了哪些 chunk，因此
+`manifest_delta.references[]`、`turns[].references[]` 和 `STREAM_LIVE_MANIFEST` 都必须过滤
+`knowledge_base_document`。最终 assistant message 原子保存后，客户端通过
+`GET /api/session/manifest` 获得实际采用的 document/chunk。
 
 ### Turn reconcile 成果 delta
 
@@ -458,7 +456,7 @@ data: {"version":2,"session_id":"abc123","stream_id":"stream-xyz","turn_key":"tu
 | 阶段 | Tasks | Artifacts | References |
 | --- | --- | --- | --- |
 | `tool_start` | 不发射 | 不发射工具 artifact | 不发射 |
-| `tool_complete` | 成功 `todo` 顶层 `todos[]` | 仅成功工具的参数、结果、diff 或 terminal 输出操作数 | 成功 `skill_view`，或两个受支持知识库 MCP 工具的有效结果 |
+| `tool_complete` | 成功 `todo` 顶层 `todos[]` | 仅成功工具的参数、结果、diff 或 terminal 输出操作数 | 仅成功 `skill_view`；知识库检索只创建私有 candidate，不发送 reference delta |
 | `turn_complete` | 不发射 | 工具强证据、`MEDIA:` 与最后一条 assistant 的严格路径提取 | 不发射 |
 
 `tool_start` 只可携带待配对的工具参数，永不产生 artifact/reference。`tool_complete` 仅在与同一 `stream_id + tid` 的 start 配对且成功时解析工具参数；complete 缺参数且没有对应 start、或配对身份不一致时不产生工具 artifact。`turn_complete` 中的最终 assistant 路径只扫描最后一条真实 assistant message：绝对路径可为外部直接引用；相对路径与裸文件名只在当前 session workspace 解析。外部直接引用需先持久化，随后由 GET Manifest 作为可预览成果返回。
@@ -470,9 +468,9 @@ SSE 是乐观派生状态，不写入 transcript，不进入模型上下文，�
 | 对象 | 规则 |
 | --- | --- |
 | Session artifacts | 按 profile + canonical path 去重 |
-| Session references | Skill 按 canonical skill path；知识库文档按 `(kbName, fileName)` 去重 |
+| Session references | Skill 按 canonical skill path；知识库文档按稳定 `id` 合并 |
 | Turn artifacts/references | 按 `turn_key` 合并；artifact 按 path，reference 按其身份键去重 |
-| 知识库文档 | 同文档合并 `source[]` 与 `metadata.chunks[]`；chunk 按原始 `page_content` 去重并保持首次出现顺序；同一 chunk 的 score 保留首次有效值 |
+| 知识库文档 | 仅合并已提交 Citation；同 `id` 文档合并 `source[]`，chunk 按 `metadata.chunks[].id` 合并并保留首次有效 score |
 | Skills | 同技能 artifact 优先于 skill reference |
 | Todos | 当前轮按 `id` 合并；出站前过滤无展示内容项 |
 | 缺失字段 | 保持空或跳过，不跨字段推断 |

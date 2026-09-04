@@ -1039,6 +1039,93 @@ def _redact_messages(messages, *, _enabled: bool):
     return redacted
 
 
+_PRIVATE_KB_EVIDENCE_KEY = '_knowledge_base_citation_evidence'
+_INTERNAL_KB_MARKER_RE = _re.compile(r'\[\[c:[A-Za-z0-9_-]{16}\]\]')
+_RENDERED_KB_MARKER_RE = _re.compile(r'<sup\s+data-c="(\d+)">\[(\d+)\]</sup>')
+
+
+def public_session_projection(session_dict: dict) -> dict:
+    """Return a detached session payload safe for every public response.
+
+    Citation evidence and provider-facing candidate markers are host-private.
+    Keep the public ``content``/``citations`` contract intact while removing
+    those fields recursively, including from mutation and error responses.
+    """
+    def project(value):
+        if isinstance(value, str):
+            return _INTERNAL_KB_MARKER_RE.sub('', value)
+        if isinstance(value, list):
+            return [project(item) for item in value]
+        if isinstance(value, dict):
+            raw_evidence = value.get(_PRIVATE_KB_EVIDENCE_KEY)
+            projected = {
+                key: project(item)
+                for key, item in value.items()
+                if key not in {_PRIVATE_KB_EVIDENCE_KEY, '_cite'}
+            }
+            # A marker is public only when the same message carries a
+            # self-consistent citation and private evidence mapping. This
+            # hides orphaned superscripts left by a crash between Agent
+            # state.db and WebUI Session save, without a second journal file.
+            if projected.get('role') == 'assistant' and 'content' in projected:
+                citations = projected.get('citations') if isinstance(projected.get('citations'), list) else []
+                evidence = raw_evidence if isinstance(raw_evidence, list) else []
+                evidence_keys = {
+                    (str(item.get('reference_id') or ''), str(item.get('chunk_id') or ''))
+                    for item in evidence if isinstance(item, dict)
+                }
+                ordinals = set()
+                valid_citations = True
+                for item in citations:
+                    if not isinstance(item, dict) or not str(item.get('ordinal') or '').isdigit():
+                        valid_citations = False
+                        break
+                    chunks = item.get('chunk_ids') if isinstance(item.get('chunk_ids'), list) else []
+                    key = (str(item.get('reference_id') or ''), str(chunks[0] if chunks else ''))
+                    if not key[0] or not key[1] or key not in evidence_keys:
+                        valid_citations = False
+                        break
+                    ordinals.add(str(item['ordinal']))
+                if citations and not valid_citations:
+                    projected.pop('citations', None)
+                    ordinals = set()
+                def strip_marker(match):
+                    return match.group(0) if match.group(1) == match.group(2) and match.group(1) in ordinals else ''
+                def strip_content(value):
+                    if isinstance(value, str):
+                        return _RENDERED_KB_MARKER_RE.sub(strip_marker, value)
+                    if isinstance(value, list):
+                        return [strip_content(item) for item in value]
+                    if isinstance(value, dict):
+                        return {key: strip_content(item) for key, item in value.items()}
+                    return value
+                projected['content'] = strip_content(projected['content'])
+            return projected
+        return value
+
+    projected = project(session_dict)
+    return projected if isinstance(projected, dict) else {}
+
+
+def strip_knowledge_base_citations_for_copy(messages):
+    """Drop server-owned KB citation metadata when history enters a new session.
+
+    A duplicate/branch has a new session identity and cannot reuse the source
+    in-memory settlement. The copied transcript remains readable, but old
+    markers and mappings are removed atomically instead of being misattributed.
+    """
+    projected = public_session_projection({"messages": messages or []})
+    copied = projected.get("messages") if isinstance(projected, dict) else []
+    if not isinstance(copied, list):
+        return []
+    for message in copied:
+        if not isinstance(message, dict):
+            continue
+        message.pop("citations", None)
+        message["content"] = _RENDERED_KB_MARKER_RE.sub("", message.get("content", "")) if isinstance(message.get("content"), str) else message.get("content")
+    return copied
+
+
 def redact_session_data(session_dict: dict) -> dict:
     """Redact credentials from message content, tool data, and session sidecars.
 
@@ -1054,7 +1141,9 @@ def redact_session_data(session_dict: dict) -> dict:
     """
     from api.config import load_settings
     _enabled = bool(load_settings().get("api_redact_enabled", True))
-    result = dict(session_dict)
+    # Projection is deliberately independent of the configurable credential
+    # redactor: disabling ``api_redact_enabled`` must not expose KB evidence.
+    result = public_session_projection(session_dict)
     if isinstance(result.get('title'), str):
         result['title'] = _redact_text(result['title'], _enabled=_enabled)
     if 'messages' in result:
