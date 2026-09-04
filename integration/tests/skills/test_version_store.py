@@ -213,6 +213,38 @@ def test_list_upgradable_filters(tmp_path):
     assert "current" not in names
 
 
+def test_list_upgradable_excludes_unreachable(tmp_path):
+    db = tmp_path / "test.db"
+    version_store.record_install(
+        "delisted", local_version="1.0.0",
+        profile="default", dir_name="tools/delisted", db_path=db,
+    )
+    version_store.refresh_upstream("delisted", upstream_version="2.0.0", db_path=db)
+    version_store.mark_upstream_unreachable("delisted", db_path=db)
+
+    result = version_store.list_upgradable(db_path=db)
+    names = [r["catalog_name"] for r in result]
+    assert "delisted" not in names
+
+
+def test_record_install_preserves_local_version_on_empty_update(tmp_path):
+    db = tmp_path / "test.db"
+    version_store.record_install(
+        "demo", local_version="1.0.0",
+        profile="default", dir_name="tools/demo", db_path=db,
+    )
+    version_store.refresh_upstream("demo", upstream_version="1.2.0", db_path=db)
+
+    # Re-record with empty local_version (simulating a no-detail copy install)
+    version_store.record_install(
+        "demo", local_version="",
+        profile="p2", dir_name="demo", db_path=db,
+    )
+    row = version_store.get("demo", db_path=db)
+    assert row["local_version"] == "1.0.0"  # preserved, not wiped
+    assert any(p.get("profile") == "p2" for p in row["installed_profiles"])
+
+
 # ---------------------------------------------------------------------------
 # remove
 # ---------------------------------------------------------------------------

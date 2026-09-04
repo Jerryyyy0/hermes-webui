@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -314,15 +314,23 @@ def fetch_version_history(name: str) -> list[dict]:
 
 def _record_install_version(
     catalog_name: str,
-    detail: dict,
+    detail: dict | None,
     *,
     profile: str = "default",
     dir_name: str = "",
 ) -> None:
-    """Shared helper for install_skill / install_skill_to_profile."""
+    """Shared helper for install_skill / install_skill_to_profile.
+
+    When *detail* is ``None`` (e.g. the skill was delisted and copied from a
+    local install), the profile is still appended to ``installed_profiles``
+    but existing version fields are preserved.
+    """
     from integration.skills.version_store import normalize_change_logs, record_install
 
     if not catalog_name:
+        return
+    if not detail:
+        record_install(catalog_name, profile=profile, dir_name=dir_name)
         return
     record_install(
         catalog_name,
@@ -375,6 +383,20 @@ def _read_hub_catalog_name_sidecar(skill_dir: Path) -> str:
         return ""
     try:
         return sidecar.read_text(encoding="utf-8").strip()
+    except Exception:
+        return ""
+
+
+def _read_local_skill_category(skills_dir: Path, dir_name: str) -> str:
+    """Read category from the local ``.category`` marker when installed under dir_name."""
+    rel = str(dir_name or "").strip()
+    if not rel:
+        return ""
+    candidate = (skills_dir / rel).resolve()
+    if not skill_path_within(skills_dir, candidate) or not candidate.is_dir():
+        return ""
+    try:
+        return (candidate / ".category").read_text(encoding="utf-8").strip()
     except Exception:
         return ""
 
@@ -513,25 +535,29 @@ def annotate_installed(
     index_profile: str = "default",
     locked_names: set[str] | None = None,
     disabled_names: set[str] | None = None,
+    profile_index: dict[str, tuple[str, str]] | None = None,
 ) -> list[dict]:
     """Mark hub catalog items with local install state across all profiles.
 
     When ``installed_index`` is provided, treat it as installs under
     ``index_profile`` (default ``default``). Pass ``disabled_names`` to
     override the active-process disabled set (e.g. target profile config).
+    Pass ``profile_index`` to reuse an already-computed all-profiles index
+    (name → (profile, dir_name)) instead of rescanning every profile.
     """
     # Use all-profiles index by default
-    profile_index: dict[str, tuple[str, str]] = {}
-    if installed_index is not None:
-        profile_label = str(index_profile or "default").strip() or "default"
-        for k, v in installed_index.items():
-            profile_index[k] = (profile_label, v)
-    else:
-        try:
-            profile_index = _hub_installed_index_all_profiles()
-        except Exception as exc:
-            _log.debug("annotate_installed all-profiles failed: %s", exc)
-            profile_index = {}
+    if profile_index is None:
+        profile_index = {}
+        if installed_index is not None:
+            profile_label = str(index_profile or "default").strip() or "default"
+            for k, v in installed_index.items():
+                profile_index[k] = (profile_label, v)
+        else:
+            try:
+                profile_index = _hub_installed_index_all_profiles()
+            except Exception as exc:
+                _log.debug("annotate_installed all-profiles failed: %s", exc)
+                profile_index = {}
 
     # Load version store data once for all installed skills
     version_map: dict[str, dict] = {}
@@ -589,12 +615,15 @@ def annotate_installed(
             if vrow:
                 skill["current_version"] = str(vrow.get("local_version") or "")
                 skill["latest_version"] = str(vrow.get("upstream_version") or "")
-                up = str(vrow.get("upstream_version") or "").strip()
-                lo = str(vrow.get("local_version") or "").strip()
-                try:
-                    skill["has_update"] = bool(up and lo and semver_gt(up, lo))
-                except Exception:
+                if vrow.get("upstream_unreachable"):
                     skill["has_update"] = False
+                else:
+                    up = str(vrow.get("upstream_version") or "").strip()
+                    lo = str(vrow.get("local_version") or "").strip()
+                    try:
+                        skill["has_update"] = bool(up and lo and semver_gt(up, lo))
+                    except Exception:
+                        skill["has_update"] = False
             else:
                 skill["current_version"] = ""
                 skill["latest_version"] = ""
@@ -638,6 +667,7 @@ class _HubCatalogContext:
     installed_index: dict[str, str]
     annotated_all: list[dict]
     locked_names: set[str]
+    delisted_installed: list[dict] = field(default_factory=list)
 
 
 def _hub_names_from_skills(skills: list[dict]) -> set[str]:
@@ -665,29 +695,77 @@ def build_hub_catalog_context() -> _HubCatalogContext:
         locked_names = get_no_self_improve_names()
     except Exception:
         locked_names = set()
+    try:
+        all_profiles = _hub_installed_profiles_all()
+    except Exception as exc:
+        _log.debug("build_hub_catalog_context all-profiles index failed: %s", exc)
+        all_profiles = {}
+    profile_index = {
+        name: (installs[0]["profile"], installs[0]["dir_name"])
+        for name, installs in all_profiles.items()
+        if installs
+    }
     annotated = [dict(skill) for skill in raw_skills]
-    # Don't pass installed_index so annotate_installed scans all profiles
     annotate_installed(
         annotated,
         locked_names=locked_names,
+        profile_index=profile_index,
     )
+    delisted = _build_delisted_installed(hub_names, locked_names, profile_index)
     return _HubCatalogContext(
         raw_skills=raw_skills,
         hub_names=hub_names,
         installed_index=installed_index,
         annotated_all=annotated,
         locked_names=locked_names,
+        delisted_installed=delisted,
     )
+
+
+def _build_delisted_installed(
+    hub_names: set[str],
+    locked_names: set[str],
+    profile_index: dict[str, tuple[str, str]],
+) -> list[dict]:
+    """Synthetic rows for installed skills that no longer appear in the hub catalog.
+
+    The upstream catalog only lists currently-published skills; a delisted
+    skill still has its local ``.hub_installed`` marker and must stay visible
+    under scope=installed. The all-profiles index may alias several names to
+    the same directory — collapse to one row per (profile, dir).
+    """
+    rows: list[dict] = []
+    seen_dirs: set[tuple[str, str]] = set()
+    for name, (profile_name, dir_name) in profile_index.items():
+        key = str(name or "").strip()
+        if not key or key in hub_names:
+            continue
+        dir_key = (str(profile_name or ""), str(dir_name or ""))
+        if not dir_key[1] or dir_key in seen_dirs:
+            continue
+        seen_dirs.add(dir_key)
+        category = ""
+        try:
+            category = _read_local_skill_category(
+                skills_dir_for_profile(dir_key[0]), dir_key[1]
+            )
+        except Exception:
+            category = ""
+        rows.append({"name": key, "category": category})
+    if not rows:
+        return []
+    annotate_installed(rows, locked_names=locked_names, profile_index=profile_index)
+    return rows
 
 
 def compute_scope_stats_from(ctx: _HubCatalogContext, *, custom_count: int) -> dict[str, int]:
     """Global scope tab counts from a prebuilt hub catalog context."""
     hub_count = len(ctx.annotated_all)
-    installed_count = sum(1 for skill in ctx.annotated_all if skill.get("installed"))
+    catalog_installed = sum(1 for skill in ctx.annotated_all if skill.get("installed"))
     return {
         "hub": hub_count,
-        "installed": installed_count,
-        "not_installed": hub_count - installed_count,
+        "installed": catalog_installed + len(ctx.delisted_installed),
+        "not_installed": hub_count - catalog_installed,
         "custom": custom_count,
     }
 
@@ -768,6 +846,13 @@ def list_hub_catalog_filtered_from(
     skills = _filter_skills_by_category(ctx.annotated_all, category, all_categories)
     if scope == "installed":
         skills = [skill for skill in skills if skill.get("installed")]
+        if ctx.delisted_installed:
+            delisted = _filter_skills_by_category(
+                [dict(skill) for skill in ctx.delisted_installed],
+                category,
+                all_categories,
+            )
+            skills = skills + delisted
     elif scope == "not_installed":
         skills = [skill for skill in skills if not skill.get("installed")]
     skills = _filter_skills_by_q(skills, q)
@@ -895,6 +980,75 @@ def hub_all_catalog_names() -> set[str]:
     return build_hub_catalog_context().hub_names
 
 
+def is_delisted_installed(name: str) -> bool:
+    """True when the skill is installed locally (`.hub_installed`) but absent from the upstream catalog."""
+    key = str(name or "").strip()
+    if not key:
+        return False
+    try:
+        hub_names = _hub_names_from_skills(fetch_all_hub_skills(category=None))
+    except Exception:
+        return False
+    if key in hub_names:
+        return False
+    try:
+        installs = _hub_installed_profiles_all()
+    except Exception:
+        return False
+    return bool(installs.get(key))
+
+
+def _copy_existing_local_install(
+    name: str, target: Path, *, exclude_skills_dir: Path | None = None
+) -> bool:
+    """Copy skill files from an existing install in another profile (upstream delisted)."""
+    import shutil
+
+    key = str(name or "").strip()
+    if not key:
+        return False
+    try:
+        installs = _hub_installed_profiles_all()
+    except Exception:
+        return False
+    for entry in installs.get(key) or []:
+        src = Path(entry.get("skill_dir") or "")
+        if not src.is_dir() or not find_skill_main_file(src):
+            continue
+        if exclude_skills_dir is not None:
+            try:
+                src.resolve().relative_to(Path(exclude_skills_dir).resolve())
+                continue
+            except ValueError:
+                pass
+        target.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(src, target, dirs_exist_ok=True)
+        return True
+    return False
+
+
+def _install_fallback_from_doc_or_local(
+    name: str, target: Path, *, exclude_skills_dir: Path | None = None
+) -> None:
+    """Fallback install when the upstream zip download fails.
+
+    Writes SKILL.md from the upstream doc endpoint; when that also fails
+    (e.g. the skill was delisted from the hub), copies an existing local
+    install from another profile so the skill stays installable.
+    """
+    try:
+        doc = fetch_doc(name)
+    except Exception:
+        if _copy_existing_local_install(
+            name, target, exclude_skills_dir=exclude_skills_dir
+        ):
+            return
+        raise
+    text = str(doc.get("content") or "")
+    target.mkdir(parents=True, exist_ok=True)
+    (target / "SKILL.md").write_text(text, encoding="utf-8")
+
+
 def install_skill(name: str, display_name: str = "", category: str = "") -> dict:
     skills_dir = shared_skills_dir()
     skills_dir.mkdir(parents=True, exist_ok=True)
@@ -923,15 +1077,9 @@ def install_skill(name: str, display_name: str = "", category: str = "") -> dict
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code != 404:
             raise
-        doc = fetch_doc(name)
-        text = str(doc.get("content") or "")
-        target.mkdir(parents=True, exist_ok=True)
-        (target / "SKILL.md").write_text(text, encoding="utf-8")
+        _install_fallback_from_doc_or_local(name, target, exclude_skills_dir=skills_dir)
     except Exception:
-        doc = fetch_doc(name)
-        text = str(doc.get("content") or "")
-        target.mkdir(parents=True, exist_ok=True)
-        (target / "SKILL.md").write_text(text, encoding="utf-8")
+        _install_fallback_from_doc_or_local(name, target, exclude_skills_dir=skills_dir)
 
     if cat_seg:
         (target / ".category").write_text(cat_seg, encoding="utf-8")
@@ -941,6 +1089,7 @@ def install_skill(name: str, display_name: str = "", category: str = "") -> dict
     if catalog_name:
         (target / _HUB_CATALOG_NAME_SIDECAR).write_text(catalog_name, encoding="utf-8")
     # Save .detail.json from upstream for structured detail display
+    detail_data = None
     try:
         import json as _json
         detail_data = fetch_skill_detail(name)
@@ -1005,15 +1154,9 @@ def install_skill_to_profile(
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code != 404:
             raise
-        doc = fetch_doc(name)
-        text = str(doc.get("content") or "")
-        target.mkdir(parents=True, exist_ok=True)
-        (target / "SKILL.md").write_text(text, encoding="utf-8")
+        _install_fallback_from_doc_or_local(name, target, exclude_skills_dir=skills_dir)
     except Exception:
-        doc = fetch_doc(name)
-        text = str(doc.get("content") or "")
-        target.mkdir(parents=True, exist_ok=True)
-        (target / "SKILL.md").write_text(text, encoding="utf-8")
+        _install_fallback_from_doc_or_local(name, target, exclude_skills_dir=skills_dir)
 
     if cat_seg:
         (target / ".category").write_text(cat_seg, encoding="utf-8")
@@ -1022,6 +1165,7 @@ def install_skill_to_profile(
     catalog_name = str(name or "").strip()
     if catalog_name:
         (target / _HUB_CATALOG_NAME_SIDECAR).write_text(catalog_name, encoding="utf-8")
+    detail_data = None
     try:
         import json as _json
         detail_data = fetch_skill_detail(name)
@@ -1107,6 +1251,9 @@ def _do_upgrade(catalog_name: str, action: str) -> dict:
         record_upgrade,
         refresh_upstream,
     )
+
+    if is_delisted_installed(catalog_name):
+        raise SkillUpgradeNotFoundError("该技能已从市场下架，无法升级")
 
     # 1. Fetch upstream detail (reused for every profile)
     detail = fetch_skill_detail(catalog_name)

@@ -35,6 +35,18 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Fixed
 
+- **SkillHub 已安装列表包含已下架技能** — `scope=installed`（及 `local_all` / 会话气泡 `skills_count` 聚合）此前基于上游目录 ∩ 本地 `.hub_installed` 的交集计算，技能在市场下架后即使本地仍已安装也会从列表消失。现在 catalog context 额外用全 profile 安装索引合成「已下架仍安装」条目（按 profile+dir 去重，读取本地 SKILL.md 描述、`.category` 分类与版本信息），合并进 `scope=installed` 结果与 `stats.installed` 计数；`local_all` 同样按该 Profile 的安装索引补充这些条目，市场不可达时的本地兜底逻辑不变。
+
+- **skill-versions 接口返回 `delisted` 标识** — `GET /api/skillhub/skill-versions?name=…` 新增 `delisted` 布尔字段：技能本地已安装（存在 `.hub_installed`）但不在市场目录时为 `true`，前端可据此提示「该技能已从市场下架」；市场目录不可达或技能在售时为 `false`。
+
+- **下架技能可继续安装/关联到其它 Profile** — `install_skill` / `install_skill_to_profile` 在上游 zip 下载与 doc 接口均失败（如技能已下架）时，回退为从其它 Profile 的本地已有安装整目录复制（含 `.category`、`.detail.json` 等 sidecar），使「关联助理 / 同步 Profile / 批量安装」对已下架但仍安装的技能不再返回 404。
+
+- **`upstream_unreachable` 标志实际生效** — `mark_upstream_unreachable` 写入的 `upstream_unreachable=1` 此前从未被读取端消费（`list_upgradable`、`_has_update`、`annotate_installed` 的 `has_update`），导致下架技能若恰好有待更新版本则红点永久误报、升级永远失败。现在三处读取方均检查该标志：标记为不可达的技能不再显示可升级状态，自动更新循环也不会反复尝试升级它。
+
+- **本地复制安装时版本记录保留** — `_record_install_version` 现在容忍 `detail=None`（下架技能本地复制路径），仅追加 Profile 到 `installed_profiles` 而不覆盖已有版本数据；`record_install` 的 UPDATE 对 `local_version` 改用 COALESCE（和 `display_name` 一致），防止空字符串清空已有版本。
+
+- **下架技能升级返回友好错误** — `_do_upgrade` 在访问上游前检测已下架技能，直接抛出 `SkillUpgradeNotFoundError("该技能已从市场下架，无法升级")`，前端收到 404 而非原始 httpx 502 错误信息。
+
 - **Resilient Profile Gateway cold starts** — runtime verification now allows 60 seconds per
   subprocess by default and Profile Gateway readiness allows 300 seconds. Existing explicit
   test timeouts remain unchanged.

@@ -150,10 +150,17 @@ def list_all(*, db_path=None) -> list[dict]:
 
 
 def list_upgradable(*, db_path=None) -> list[dict]:
-    """Return installed skills that have a newer upstream version."""
+    """Return installed skills that have a newer upstream version.
+
+    Skills whose upstream is marked unreachable (e.g. delisted from the
+    market, or transient upstream downtime) are excluded so they don't
+    show a permanent "upgradable" red dot.
+    """
     all_rows = list_all(db_path=db_path)
     result = []
     for row in all_rows:
+        if row.get("upstream_unreachable"):
+            continue
         upstream = str(row.get("upstream_version") or "").strip()
         local = str(row.get("local_version") or "").strip()
         if upstream and local and semver_gt(upstream, local):
@@ -197,7 +204,7 @@ def record_install(
                 UPDATE skill_install_versions SET
                   display_name = COALESCE(NULLIF(?, ''), display_name),
                   category = COALESCE(NULLIF(?, ''), category),
-                  local_version = ?,
+                  local_version = COALESCE(NULLIF(?, ''), local_version),
                   installed_profiles = ?,
                   updated_at = ?
                 WHERE catalog_name = ?

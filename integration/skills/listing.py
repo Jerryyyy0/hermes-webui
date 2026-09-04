@@ -57,6 +57,42 @@ def _envelope(
     }
 
 
+def _delisted_installed_for_profile(
+    ctx: skillhub._HubCatalogContext,
+    installed_index: dict[str, str],
+    profile_key: str,
+    disabled: set[str],
+    skills_dir=None,
+) -> list[dict]:
+    """Installed skills absent from the upstream catalog (e.g. delisted), for one profile."""
+    if skills_dir is None:
+        skills_dir = skills_dir_for_profile(profile_key)
+    by_dir: dict[str, str] = {}
+    for name, dir_name in installed_index.items():
+        skill_name = str(name or "").strip()
+        dir_key = str(dir_name or "").strip()
+        if not skill_name or not dir_key or skill_name in ctx.hub_names:
+            continue
+        by_dir.setdefault(dir_key, skill_name)
+    if not by_dir:
+        return []
+    synthetic = [
+        {
+            "name": skill_name,
+            "category": skillhub._read_local_skill_category(skills_dir, dir_key),
+        }
+        for dir_key, skill_name in by_dir.items()
+    ]
+    skillhub.annotate_installed(
+        synthetic,
+        installed_index=installed_index,
+        index_profile=profile_key,
+        locked_names=ctx.locked_names,
+        disabled_names=disabled,
+    )
+    return [skill for skill in synthetic if skill.get("installed")]
+
+
 def _local_all_skills_for_profile(
     ctx: skillhub._HubCatalogContext,
     profile: str,
@@ -75,6 +111,11 @@ def _local_all_skills_for_profile(
         disabled_names=disabled,
     )
     installed_hub = [skill for skill in annotated if skill.get("installed")]
+    installed_hub.extend(
+        _delisted_installed_for_profile(
+            ctx, installed_index, profile_key, disabled, skills_dir=skills_dir
+        )
+    )
     custom_skills = [
         dict(skill)
         for skill in local_skills._scan_custom_skill_dicts(

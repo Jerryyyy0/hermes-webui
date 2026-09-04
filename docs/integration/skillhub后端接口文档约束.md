@@ -199,10 +199,12 @@ GET  /api/skills?dimension=category:数据分析&dimension=year:2024
                 "required":true
             }
         ],
-        "dialogExample":{
-            "user":"帮我分析这份销售数据的月度趋势",
-            "assistant":"好的，正在解析 CSV 并计算月度趋势..."
-        }
+        "dialogExample":[
+            {
+                "user":"帮我分析这份销售数据的月度趋势",
+                "assistant":"好的，正在解析 CSV 并计算月度趋势..."
+            }
+        ]
     },
     "published_at":"2026-06-25 17:30:00",
     "favorite_count": 12
