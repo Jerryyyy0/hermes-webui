@@ -7772,6 +7772,7 @@ def get_state_db_session_messages(
     since_timestamp=None,
     include_inactive: bool = False,
     limit=None,
+    include_ids: bool = False,
 ) -> list:
     """Read messages for a Hermes session from state.db.
 
@@ -7802,6 +7803,9 @@ def get_state_db_session_messages(
     ``active=0`` archive rows back in resurrects pre-compaction history and can
     make every later turn re-trigger compression. Pass ``include_inactive=True``
     only for explicit recovery/audit views.
+
+    ``include_ids`` is an internal reconciliation option.  It adds the private
+    ``_state_db_id`` marker without changing the public session payload shape.
     """
     try:
         import sqlite3
@@ -7942,6 +7946,10 @@ def get_state_db_session_messages(
                     'content': row['content'],
                     'timestamp': row['timestamp'],
                 }
+                # Keep database row identity private to reconciliation callers;
+                # the public session response must retain its existing shape.
+                if include_ids and 'id' in row.keys():
+                    msg['_state_db_id'] = row['id']
                 for col in optional:
                     if col not in row.keys():
                         continue
@@ -8464,6 +8472,125 @@ def _drop_covered_legacy_user_aggregates(messages: list) -> list:
     return list(messages or [])
 
 
+def _timestamp_message_identity(message: dict):
+    """Return the strict identity used only for timestamp reconciliation."""
+    if not isinstance(message, dict):
+        return ("non_dict", repr(message))
+    message_id = message.get("id") or message.get("message_id") or message.get("_state_db_id")
+    if message_id not in (None, ""):
+        return ("id", str(message_id))
+    role = str(message.get("role") or "").strip().lower()
+    content = _normalized_session_message_content(message)
+    if role == "user":
+        try:
+            from api.streaming import _strip_workspace_prefix
+
+            content = " ".join(_strip_workspace_prefix(content, include_legacy=True).split())
+        except Exception:
+            pass
+    tool_calls = message.get("tool_calls")
+    try:
+        tool_calls = json.dumps(tool_calls, sort_keys=True, separators=(",", ":"), default=str) if tool_calls else ""
+    except Exception:
+        tool_calls = repr(tool_calls)
+    return (
+        "legacy",
+        role,
+        content,
+        str(message.get("tool_call_id") or ""),
+        str(message.get("tool_name") or message.get("name") or ""),
+        tool_calls,
+    )
+
+
+def reconcile_message_timestamps(sidecar_messages: list, state_messages: list) -> dict:
+    """Copy only proven state.db timestamps into a sidecar projection.
+
+    Matching is order-preserving and fail-closed.  The returned messages are
+    shallow copies, so callers such as GET /api/session never dirty the loaded
+    Session object or its JSON file.
+    """
+    sidecar = [dict(m) if isinstance(m, dict) else m for m in (sidecar_messages or [])]
+    state = [m for m in (state_messages or []) if isinstance(m, dict)]
+    side_ids = {
+        str(m.get("id") or m.get("message_id"))
+        for m in sidecar if isinstance(m, dict) and (m.get("id") or m.get("message_id")) not in (None, "")
+    }
+    state_ids = {
+        str(m.get("id") or m.get("message_id") or m.get("_state_db_id"))
+        for m in state if (m.get("id") or m.get("message_id") or m.get("_state_db_id")) not in (None, "")
+    }
+    shared_ids = side_ids & state_ids
+
+    def key_for(message):
+        raw_id = message.get("id") or message.get("message_id") or message.get("_state_db_id")
+        # ID matching is authoritative only when both projections expose the
+        # same ID. Otherwise fall back to the strict content/tool identity.
+        if raw_id not in (None, "") and str(raw_id) in shared_ids:
+            return ("id", str(raw_id))
+        clone = dict(message)
+        clone.pop("id", None)
+        clone.pop("message_id", None)
+        clone.pop("_state_db_id", None)
+        return _timestamp_message_identity(clone)
+
+    state_by_key = {}
+    for index, message in enumerate(state):
+        if message.get("timestamp") in (None, ""):
+            continue
+        state_by_key.setdefault(key_for(message), []).append(index)
+    side_by_key = {}
+    for index, message in enumerate(sidecar):
+        if isinstance(message, dict):
+            side_by_key.setdefault(key_for(message), []).append(index)
+
+    matched = updated = ambiguous = 0
+    used_state = set()
+    pairs = []
+    for key, side_indexes in side_by_key.items():
+        state_indexes = state_by_key.get(key, [])
+        if not state_indexes:
+            continue
+        if len(side_indexes) != len(state_indexes) and (len(side_indexes) > 1 or len(state_indexes) > 1):
+            ambiguous += min(len(side_indexes), len(state_indexes))
+            continue
+        # Equal multiplicities are unambiguous in transcript order.  A single
+        # occurrence is likewise safe even when other identities are repeated.
+        for side_index, state_index in zip(side_indexes, state_indexes):
+            if state_index in used_state:
+                continue
+            used_state.add(state_index)
+            pairs.append((side_index, state_index))
+
+    ordered_pairs = []
+    last_state_index = -1
+    for side_index, state_index in sorted(pairs):
+        if state_index <= last_state_index:
+            # A crossing identity would reorder turns; fail closed for the
+            # later sidecar row instead of applying a plausible-looking time.
+            ambiguous += 1
+            continue
+        last_state_index = state_index
+        ordered_pairs.append((side_index, state_index))
+
+    for side_index, state_index in ordered_pairs:
+        matched += 1
+        timestamp = state[state_index].get("timestamp")
+        if sidecar[side_index].get("timestamp") != timestamp:
+            sidecar[side_index]["timestamp"] = timestamp
+            updated += 1
+    matched_side = {side for side, _ in ordered_pairs}
+    matched_state = {state_index for _, state_index in ordered_pairs}
+    return {
+        "messages": sidecar,
+        "matched": matched,
+        "updated": updated,
+        "ambiguous": ambiguous,
+        "unmatched_sidecar": sum(1 for i, m in enumerate(sidecar) if isinstance(m, dict) and i not in matched_side),
+        "unmatched_state": len(state) - len(matched_state),
+    }
+
+
 def _sidecar_has_terminal_partial_error(sidecar_messages: list) -> bool:
     """Return True when WebUI already owns an interrupted live partial turn.
 
@@ -8851,6 +8978,9 @@ def merge_session_messages_append_only(
     so the empty-sidecar recovery can distinguish a legitimate prefix from a
     deleted suffix instead of guessing by dropping one turn pair.
     """
+    # Reconcile timestamps in the in-memory sidecar projection before the
+    # append-only merge.  This never persists the copied sidecar messages.
+    sidecar_messages = reconcile_message_timestamps(sidecar_messages, state_messages)["messages"]
     sidecar_messages = _drop_covered_legacy_user_aggregates(sidecar_messages)
     state_messages = _drop_covered_legacy_user_aggregates(state_messages)
     # Per-invocation cache keyed by message identity. Sidecar/state message objects

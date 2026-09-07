@@ -64,6 +64,7 @@ from api.models import (
     _evict_sessions_over_cap,
     clear_process_wakeup_pause,
     get_state_db_session_messages,
+    reconcile_message_timestamps,
     record_process_wakeup_provider_unavailable_pause,
     reconciled_state_db_messages_for_session,
 )
@@ -9103,6 +9104,7 @@ def _run_agent_streaming(
             else:
                 _external_state_messages = get_state_db_session_messages(
                     getattr(s, 'session_id', None),
+                    profile=getattr(s, 'profile', None) or None,
                 )
             _previous_messages = list(
                 reconciled_state_db_messages_for_session(
@@ -9946,6 +9948,18 @@ def _run_agent_streaming(
                         'usage': _live_usage_snapshot(),
                     })
 
+                # Refresh state.db after the agent has committed this turn, then
+                # copy only proven timestamps into the sidecar projection.
+                try:
+                    _final_state_messages = get_state_db_session_messages(
+                        getattr(s, 'session_id', None),
+                        profile=getattr(s, 'profile', None) or None,
+                        include_ids=True,
+                    )
+                    _reconciled = reconcile_message_timestamps(s.messages, _final_state_messages)
+                    s.messages = _reconciled["messages"]
+                except Exception as _timestamp_sync_error:
+                    logger.debug("state.db timestamp reconciliation skipped: %s", _timestamp_sync_error)
                 # Stamp 'timestamp' on any messages that don't have one yet,
                 # preserving transcript order across compacted/reconciled batches.
                 _stamp_missing_message_timestamps(s.messages)

@@ -37,7 +37,13 @@ from api.config import (
 from integration.approval_localization import localize_approval_payload
 from integration.project_logging import get_logger
 from api.helpers import _redact_text, redact_session_data
-from api.models import clear_process_wakeup_pause, get_session, merge_session_messages_append_only
+from api.models import (
+    clear_process_wakeup_pause,
+    get_session,
+    get_state_db_session_messages,
+    merge_session_messages_append_only,
+    reconcile_message_timestamps,
+)
 from api.run_journal import RunJournalWriter, bound_run_journal_snapshot_args
 from api.workspace import resolve_session_workspace
 
@@ -1428,6 +1434,18 @@ def _run_gateway_chat_streaming(
             if cancel_event.is_set():
                 _restore_cancelled_success_writeback()
                 return
+            # Gateway deployments may not expose the local state.db. In that
+            # case the reader returns no rows and the explicit Gateway times
+            # remain authoritative; never infer replacements.
+            try:
+                gateway_state = get_state_db_session_messages(
+                    getattr(s, "session_id", None),
+                    profile=getattr(s, "profile", None) or None,
+                    include_ids=True,
+                )
+                s.messages = reconcile_message_timestamps(s.messages, gateway_state)["messages"]
+            except Exception:
+                logger.debug("Gateway state.db timestamp reconciliation skipped", exc_info=True)
             s.save()
             from api.streaming import _persist_turn_artifact_paths
 
