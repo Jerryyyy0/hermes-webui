@@ -140,6 +140,11 @@ identity key 或哈希算法发生不兼容变化，才新增 `v2` 前缀；实�
 `id` 是文档级 ID；`metadata.chunks[].id` 是片段级 ID。一个候选文档只有在成功 completed 的实际
 工具结果可被严格解析时才进入 Manifest，沿用现有 fail-closed 规则。
 
+同一 document 的 `metadata.chunks[]` 按有效数值 `score` 降序输出；相同 score 保持工具结果中的原始顺序，缺失、
+非数值或非有限 score 排在最后。provider-facing 工具结果也必须在每个 Document 内按同一规则排列 chunks，并在排序
+前保留各 chunk 已绑定的 `_cite`，确保模型所见顺序和 Manifest 详情一致。此排序不改变 candidate 的原始
+`row_index + chunk_index` 身份，也不改变最终 `citations[].ordinal` 的正文出现顺序。
+
 `references[]` 仍然表示“检索候选”，不因增加 `id` 而改成“已在回答中使用”。外部前端需要展示最终
 引用时，必须以 `message.citations[]` 为准。
 

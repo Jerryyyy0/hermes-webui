@@ -57,6 +57,27 @@ def test_single_search_reads_document_identity_and_chunks_from_result():
     assert [c["page_content"] for c in wire["metadata"]["chunks"]] == ["single passage", "second passage"]
 
 
+def test_chunks_are_sorted_by_descending_score_with_stable_ties_and_missing_last():
+    rows = extract_references(
+        name=SINGLE_SEARCH_TOOL,
+        args={},
+        result=_preview([_document("share49", "rules.docx", [
+            {"page_content": "low", "score": 0.2},
+            {"page_content": "high first", "score": 0.9},
+            {"page_content": "without score"},
+            {"page_content": "high second", "score": 0.9},
+        ])]),
+        tid="score-order-call",
+    )
+
+    chunks = to_wire(rows[0])["metadata"]["chunks"]
+
+    assert [chunk["page_content"] for chunk in chunks] == [
+        "high first", "high second", "low", "without score",
+    ]
+    assert [chunk["score"] for chunk in chunks] == [0.9, 0.9, 0.2, ""]
+
+
 def test_single_search_unwraps_one_structured_result_from_agent_safety_wrapper():
     rows = extract_references(
         name=SINGLE_SEARCH_TOOL,

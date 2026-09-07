@@ -2916,6 +2916,7 @@ def _merge_rows_by_path(existing_rows: list | None, incoming_rows: list | None) 
 
 def _merge_reference_wire_rows(existing_rows: list | None, incoming_rows: list | None) -> list[dict]:
     """Merge the public reference wire without treating it as a file row."""
+    from integration.knowledge_base.turn_references import sort_chunks_by_score
 
     def normalize_chunk(value: Any) -> dict[str, Any] | None:
         if not isinstance(value, dict):
@@ -3001,6 +3002,10 @@ def _merge_reference_wire_rows(existing_rows: list | None, incoming_rows: list |
                 source_keys.add(source_key)
         if str(row.get('status') or '').strip() == MANIFEST_STATUS_EXPIRED:
             current['status'] = MANIFEST_STATUS_EXPIRED
+    for row in rows.values():
+        if row.get('kind') == 'knowledge_base_document':
+            metadata = row.get('metadata') if isinstance(row.get('metadata'), dict) else {}
+            metadata['chunks'] = sort_chunks_by_score(metadata.get('chunks') or [])
     valid_rows = [
         row for row in rows.values()
         if row.get('kind') != 'knowledge_base_document'
