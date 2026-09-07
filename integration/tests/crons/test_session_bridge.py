@@ -2171,6 +2171,107 @@ def test_reconcile_cron_transcript_keeps_matching_webui_followup(
     assert session.messages[-1]["content"] == "cron prompt"
 
 
+def test_cron_session_read_reconcile_preserves_newer_followup_error(
+    cron_env, monkeypatch
+):
+    """A stale reader must not save over a settled WebUI error tail."""
+    from api.models import Session
+    from integration.crons import session_bridge
+
+    sid = "cron_job1_1700000860"
+    stale = Session(
+        session_id=sid,
+        profile="default",
+        source_tag="cron",
+        cron_execution_profile=str(cron_env["home"]),
+        cron_execution_ended_at=200.0,
+        messages=[
+            {"role": "user", "content": "cron prompt", "timestamp": 100.0},
+            {"role": "assistant", "content": "cron answer", "timestamp": 200.0},
+        ],
+    )
+    stale.save()
+
+    latest = Session.load(sid)
+    latest.messages.extend([
+        {"role": "user", "content": "重新试下", "timestamp": 300.0, "_turn_key": "turn:2"},
+        {
+            "role": "assistant",
+            "content": "**发生错误:** 模型服务返回错误，请稍后重试。",
+            "timestamp": 301.0,
+            "_error": True,
+            "_error_type": "provider_error",
+        },
+    ])
+    latest.save()
+
+    reconciled = []
+
+    def reconcile(current):
+        reconciled.append([message["content"] for message in current.messages])
+        return True
+
+    monkeypatch.setattr(session_bridge, "reconcile_cron_session_transcript", reconcile)
+
+    refreshed = session_bridge.reconcile_cron_session_for_read(stale)
+
+    assert reconciled == [[
+        "cron prompt",
+        "cron answer",
+        "重新试下",
+        "**发生错误:** 模型服务返回错误，请稍后重试。",
+    ]]
+    assert refreshed.messages[-1]["_error"] is True
+    assert Session.load(sid).messages[-1]["_error"] is True
+
+
+def test_cron_reconcile_preserves_untimestamped_persisted_followup_error(monkeypatch):
+    from api import models
+    from integration.crons import session_bridge
+
+    retry_text = "重新试下"
+    error_text = "**发生错误:** 模型服务返回错误，请稍后重试。"
+    session = SimpleNamespace(
+        session_id="cron_33f474cee0ba_20260907_093733_66febcec",
+        profile="default",
+        source_tag="cron",
+        cron_execution_ended_at=1788745099.433799,
+        messages=[
+            {"role": "user", "content": "cron prompt", "timestamp": 1788745069.6840608},
+            {
+                "role": "user",
+                "content": retry_text,
+                "id": 8,
+                "_db_persisted": True,
+                "_turn_key": "turn:2",
+            },
+            {
+                "role": "assistant",
+                "content": error_text,
+                "timestamp": 1788745165,
+                "_error": True,
+                "_error_type": "error",
+            },
+        ],
+    )
+
+    monkeypatch.setattr(
+        models,
+        "get_state_db_session_messages",
+        lambda *args, **kwargs: [
+            {"role": "user", "content": "cron prompt", "timestamp": 1788745069.6840608},
+            {"role": "user", "content": retry_text, "timestamp": 1788745151.4757},
+        ],
+    )
+
+    changed = session_bridge.reconcile_cron_session_transcript(session)
+
+    assert changed is True
+    assert [message["content"] for message in session.messages[-2:]] == [retry_text, error_text]
+    assert session.messages[-2]["timestamp"] == 1788745151.4757
+    assert session.messages[-1]["_error"] is True
+
+
 def _failed_cron_output(detail="Connection error."):
     return f"# Cron Job: Nightly (FAILED)\n\n## Error\n\n```\n{detail}\n```\n"
 

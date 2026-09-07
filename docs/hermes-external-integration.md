@@ -35,7 +35,7 @@ record 查询与预览授权：`policy.py` 负责逐组件无跟随 fd 打开与
 `integration/crons/` 负责 Cron workspace policy、当前执行物化、生命周期与 Cron
 Hub 状态。允许修改的上游接缝如下：
 
-- `api/routes.py`：Cron handler 与运行完成钩子的薄委派。
+- `api/routes.py`：Cron handler、运行完成钩子与 session GET 锁内 transcript 重协调的薄委派。
 - `api/models.py`：`import_cli_session()` 接收显式 workspace binding。
 - `api/workspace.py`：通过 `resolve_session_workspace()` 集中将 V1 未验证 Cron
   workspace 降级为 WebUI 已批准的默认 workspace，而不使用未验证 root；legacy
@@ -68,8 +68,9 @@ Session `session.json` 中。不新增数据库表、sidecar 或独立 Citation 
 
 `integration/session_manifest/manifest.py` 将 completed ToolEvent 交给解析器，但 live delta 会过滤
 知识库 candidates；`GET /api/session/manifest` 只从自洽的最终 message Citation/evidence
-生成 references wire。`api/streaming.py` 仅保留 hook、保存和出站过滤接缝，不解析 MCP JSON；
-前端也不得重复解析。
+生成 references wire。该模块还在 stream 起始处以持久化 Manifest reference 为基线，并在出站前生成
+完整、已去重的顶层 `references` 快照；`api/streaming.py` 与 `api/gateway_chat.py` 仅保留该共享投影的
+调用、hook、保存和出站过滤接缝，不解析 MCP JSON；前端直接替换该快照，不重复解析或合并。
 
 公开字段、SSE 帧和生命周期只在 [Session Manifest HTTP/SSE 契约](api/session-manifest-api.md)
 维护；本节只记录 Fork 接缝与实现边界。

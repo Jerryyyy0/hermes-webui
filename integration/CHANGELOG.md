@@ -47,6 +47,10 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 - **下架技能升级返回友好错误** — `_do_upgrade` 在访问上游前检测已下架技能，直接抛出 `SkillUpgradeNotFoundError("该技能已从市场下架，无法升级")`，前端收到 404 而非原始 httpx 502 错误信息。
 
+- **Cron follow-up error retention** — Cron 会话读取重协调会先用 `state.db` 补齐已持久化 WebUI user 消息缺失的时间戳，再划分执行前缀与后续对话，避免刷新时删除该 user 及其 assistant 错误消息。
+
+- **Manifest SSE reference snapshots** — 本地与 Gateway 聊天流的 `manifest_delta.references` 现在由服务端以已持久化 Manifest 为基线累计、去重并合并 `source[]` 后发送完整快照；消费者按 `stream_id:sequence` 去重后可直接替换顶层 references，无需自行合并。知识库候选继续仅在最终 Citation 结算后公开。
+
 - **Resilient Profile Gateway cold starts** — runtime verification now allows 60 seconds per
   subprocess by default and Profile Gateway readiness allows 300 seconds. Existing explicit
   test timeouts remain unchanged.

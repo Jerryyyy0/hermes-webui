@@ -64,6 +64,7 @@ from api.models import (
     _evict_sessions_over_cap,
     clear_process_wakeup_pause,
     get_state_db_session_messages,
+    reconcile_message_timestamps,
     record_process_wakeup_provider_unavailable_pause,
     reconciled_state_db_messages_for_session,
 )
@@ -5775,8 +5776,18 @@ def _merge_display_messages_after_agent_result(
 
     if _messages_have_prefix(result_messages, previous_context):
         candidates = result_messages[len(previous_context):]
-        candidates = _strip_replayed_prefix(previous_display, candidates)
-        candidates = _strip_replayed_prefix(previous_context, candidates)
+        # An assistant/tool delta after the shared prefix belongs to this turn,
+        # even when its visible text repeats the preceding assistant reply.
+        # The loop below retains its adjacent-replay guard after inserting the
+        # current user boundary, which distinguishes a new repeated answer from
+        # a duplicated result row.
+        if not (
+            candidates
+            and isinstance(candidates[0], dict)
+            and candidates[0].get('role') in ('assistant', 'tool')
+        ):
+            candidates = _strip_replayed_prefix(previous_display, candidates)
+            candidates = _strip_replayed_prefix(previous_context, candidates)
     else:
         current_user_idx = _find_current_user_turn(result_messages, msg_text)
         marker_candidates = [
@@ -7428,6 +7439,10 @@ def _run_agent_streaming(
         # in the outer finally next to _clear_thread_env().
         _turn_session_identity_tokens = _set_turn_session_identity(session_id)
         s = get_session(session_id)
+        from integration.session_manifest.manifest import seed_live_manifest_references
+        _live_manifest_seed = seed_live_manifest_references(s)
+        with STREAMS_LOCK:
+            STREAM_LIVE_MANIFEST[stream_id] = _live_manifest_seed
         _turn_pending_source = getattr(s, 'pending_user_source', None) or 'webui'
         update_active_run(stream_id, phase="running", session_id=session_id)
         s.workspace = str(resolve_session_workspace(s, workspace, requested_is_trusted=True))
@@ -7958,7 +7973,7 @@ def _run_agent_streaming(
                         ToolEvent,
                         _apply_public_todos_to_manifest_delta,
                         extract_manifest_delta_from_tool_event,
-                        merge_manifest_delta,
+                        merge_live_manifest_delta_for_sse,
                         split_public_live_manifest_delta,
                     )
                     _manifest_delta_sequence[0] += 1
@@ -7985,7 +8000,7 @@ def _run_agent_streaming(
                     if not (_public_delta.get('todos') or _public_delta.get('artifacts') or _public_delta.get('references') or _public_delta.get('turns')):
                         return
                     with STREAMS_LOCK:
-                        _live_manifest = merge_manifest_delta(
+                        _live_manifest, _public_delta = merge_live_manifest_delta_for_sse(
                             STREAM_LIVE_MANIFEST.get(stream_id) or {
                                 'todos': {'items': []},
                                 'artifacts': [],
@@ -8007,7 +8022,7 @@ def _run_agent_streaming(
                 try:
                     from integration.session_manifest.manifest import (
                         extract_manifest_delta_from_turn_reconcile,
-                        merge_manifest_delta,
+                        merge_live_manifest_delta_for_sse,
                         split_public_live_manifest_delta,
                     )
                     _manifest_delta_sequence[0] += 1
@@ -8027,7 +8042,7 @@ def _run_agent_streaming(
                     if not (_public_delta.get('artifacts') or _public_delta.get('turns') or _public_delta.get('todos') or _public_delta.get('references')):
                         return
                     with STREAMS_LOCK:
-                        _live_manifest = merge_manifest_delta(
+                        _live_manifest, _public_delta = merge_live_manifest_delta_for_sse(
                             STREAM_LIVE_MANIFEST.get(stream_id) or {
                                 'todos': {'items': []},
                                 'artifacts': [],
@@ -9103,6 +9118,7 @@ def _run_agent_streaming(
             else:
                 _external_state_messages = get_state_db_session_messages(
                     getattr(s, 'session_id', None),
+                    profile=getattr(s, 'profile', None) or None,
                 )
             _previous_messages = list(
                 reconciled_state_db_messages_for_session(
@@ -9624,12 +9640,15 @@ def _run_agent_streaming(
                     canonical_turn_key=_manifest_turn_key,
                 )
                 _is_agent_result_terminal = _agent_result_terminal_failure(result)
+                _agent_reported_empty_error = 'error' in result and result.get('error') == ''
                 _terminal_failure = (
                     _captured_terminal_failure
                     or _is_agent_result_terminal
+                    or bool(_last_err)
+                    or _agent_reported_empty_error
                     or (
                         not _token_sent
-                        and _session_lacks_final_assistant_answer(_all_result_messages)
+                        and _saved_transcript_lacks_final_answer
                     )
                 )
                 _result_status = str(result.get('status') or result.get('state') or '').strip().lower()
@@ -9670,7 +9689,12 @@ def _run_agent_streaming(
                                 logger.debug("Failed to append cancelled turn journal event", exc_info=True)
                         put('cancel', {'message': 'Cancelled by user'})
                         return
-                    _last_err = getattr(agent, '_last_error', None) or result.get('error') or ''
+                    _last_err = (
+                        getattr(agent, '_last_error', None)
+                        or result.get('error')
+                        or _captured_terminal_error[0]
+                        or ''
+                    )
                     _err_str = str(_last_err) if _last_err else ''
                     _classification = _classify_provider_error(
                         _err_str,
@@ -9946,6 +9970,18 @@ def _run_agent_streaming(
                         'usage': _live_usage_snapshot(),
                     })
 
+                # Refresh state.db after the agent has committed this turn, then
+                # copy only proven timestamps into the sidecar projection.
+                try:
+                    _final_state_messages = get_state_db_session_messages(
+                        getattr(s, 'session_id', None),
+                        profile=getattr(s, 'profile', None) or None,
+                        include_ids=True,
+                    )
+                    _reconciled = reconcile_message_timestamps(s.messages, _final_state_messages)
+                    s.messages = _reconciled["messages"]
+                except Exception as _timestamp_sync_error:
+                    logger.debug("state.db timestamp reconciliation skipped: %s", _timestamp_sync_error)
                 # Stamp 'timestamp' on any messages that don't have one yet,
                 # preserving transcript order across compacted/reconciled batches.
                 _stamp_missing_message_timestamps(s.messages)

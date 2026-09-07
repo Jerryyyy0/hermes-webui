@@ -1856,25 +1856,33 @@ def reconcile_cron_session_transcript(
         _session_message_dedup_key,
         get_state_db_session_messages,
         merge_session_messages_append_only,
+        reconcile_message_timestamps,
     )
 
-    split = cron_execution_prefix_and_suffix(session)
+    original_messages = list(getattr(session, "messages", None) or [])
+    execution_profile = str(
+        getattr(session, "cron_execution_profile", None) or getattr(session, "profile", None) or ""
+    ).strip() or None
+    all_db_messages = get_state_db_session_messages(session.session_id, profile=execution_profile)
+    # A persisted WebUI user can still lack a sidecar timestamp. Repair it from
+    # the full Agent snapshot before deciding where the Cron execution ends.
+    reconciled_messages = reconcile_message_timestamps(
+        original_messages,
+        all_db_messages,
+    )["messages"]
+    split = cron_execution_prefix_and_suffix(session, reconciled_messages)
     if split is None:
         # Legacy materialization may not yet know execution_ended_at. It has no
         # reply suffix to preserve, so retain the historical whole-transcript
         # fallback here. The reply-start prepare gate remains fail-closed.
-        sidecar_prefix = list(getattr(session, "messages", None) or [])
+        sidecar_prefix = reconciled_messages
         suffix = []
     else:
         sidecar_prefix, suffix = split
-    execution_profile = str(
-        getattr(session, "cron_execution_profile", None) or getattr(session, "profile", None) or ""
-    ).strip() or None
     try:
         execution_ended_at = float(getattr(session, "cron_execution_ended_at", None))
     except (TypeError, ValueError):
         execution_ended_at = None
-    all_db_messages = get_state_db_session_messages(session.session_id, profile=execution_profile)
     db_messages = [
         message
         for message in all_db_messages
@@ -1917,7 +1925,6 @@ def reconcile_cron_session_transcript(
             if key not in known:
                 merged_prefix.append(message)
                 known.add(key)
-    changed = merged_prefix != sidecar_prefix
     if fallback_output and job is not None and not any(
         isinstance(message, dict) and message.get("role") == "user"
         for message in merged_prefix
@@ -1933,16 +1940,15 @@ def reconcile_cron_session_transcript(
         )[0]
         merged_prefix.append(fallback_user)
         merged_prefix.sort(key=lambda message: _cron_error_timestamp(message.get("timestamp")))
-        changed = True
     if fallback_output and not any(
         isinstance(message, dict) and message.get("role") == "assistant"
         for message in db_messages
     ):
-        changed = _append_missing_cron_response(
+        _append_missing_cron_response(
             merged_prefix,
             fallback_output,
             timestamp=run_mtime or getattr(session, "created_at", None),
-        ) or changed
+        )
     from integration.crons.hooks import (
         _stamp_cron_manifest_turn_keys,
         normalize_cron_manifest_messages,
@@ -1954,10 +1960,41 @@ def reconcile_cron_session_transcript(
             collapse_execution_replayed_users=split is not None,
         )
     )
-    changed = merged_prefix != sidecar_prefix
+    final_messages = [*merged_prefix, *suffix]
+    changed = final_messages != original_messages
     if changed:
-        session.messages = [*merged_prefix, *suffix]
+        session.messages = final_messages
     return changed
+
+
+def reconcile_cron_session_for_read(session):
+    """Reconcile a Cron session read without overwriting a newer sidecar tail.
+
+    ``GET /api/session`` can race a terminal streaming write: its cached Session
+    object may predate a just-persisted WebUI follow-up error. Read
+    reconciliation is itself a write when the Agent execution prefix changed,
+    so load the latest full sidecar while holding the same per-session lock as
+    chat-start and streaming before saving it back.
+    """
+    sid = str(getattr(session, "session_id", "") or "").strip()
+    if not sid or str(getattr(session, "source_tag", "") or "") != "cron":
+        return session
+
+    from api.config import _get_session_agent_lock
+    from api.models import LOCK, SESSIONS, Session
+
+    with _get_session_agent_lock(sid):
+        latest = Session.load(sid)
+        if latest is None or getattr(latest, "_loaded_metadata_only", False):
+            return session
+        if str(getattr(latest, "source_tag", "") or "") != "cron":
+            return latest
+        if reconcile_cron_session_transcript(latest):
+            latest.save(touch_updated_at=False)
+        with LOCK:
+            SESSIONS[sid] = latest
+            SESSIONS.move_to_end(sid)
+        return latest
 
 
 def read_cron_output_for_run(

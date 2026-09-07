@@ -576,7 +576,7 @@ function applySessionManifestDelta(delta){
     _sessionManifest.todos = {items: _cloneManifestValue(delta.todos.items)};
   }
   _sessionManifest.artifacts = _mergeManifestRows(_sessionManifest.artifacts, delta.artifacts);
-  _sessionManifest.references = _mergeManifestReferences(_sessionManifest.references, delta.references);
+  if(Array.isArray(delta.references)) _sessionManifest.references = _cloneManifestValue(delta.references);
   _sessionManifest.turns = _mergeManifestTurns(_sessionManifest.turns, incomingTurns);
   _sessionManifest.live = delta.stream_id ? {stream_id: delta.stream_id, source:'sse'} : _sessionManifest.live;
   renderSessionInspector();

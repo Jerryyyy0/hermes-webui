@@ -3101,6 +3101,37 @@ def merge_manifest_delta(base: dict[str, Any] | None, delta: dict[str, Any] | No
     return base_manifest
 
 
+def seed_live_manifest_references(session: Any) -> dict[str, list[dict]]:
+    """Seed a stream with the session's persisted public reference snapshot."""
+    try:
+        manifest = build_session_manifest(session)
+        references = manifest.get('references') if isinstance(manifest, dict) else []
+        return {'references': copy.deepcopy(references)} if isinstance(references, list) else {}
+    except Exception:
+        logger.debug('failed to seed live manifest references', exc_info=True)
+        return {}
+
+
+def merge_live_manifest_delta_for_sse(
+    base: dict[str, Any] | None,
+    delta: dict[str, Any] | None,
+    *,
+    scope: str = 'active_stream',
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Merge a live delta, snapshot top-level references, and retain its turn delta."""
+    outbound = copy.deepcopy(delta or {})
+    turn_references = copy.deepcopy(outbound.get('references') or [])
+    if not isinstance(outbound.get('turns'), list) and outbound.get('turn_key'):
+        outbound['turns'] = [{
+            'turn_key': outbound['turn_key'],
+            'artifacts': copy.deepcopy(outbound.get('artifacts') or []),
+            'references': turn_references,
+        }]
+    live_manifest = merge_manifest_delta(base, outbound, scope=scope)
+    outbound['references'] = copy.deepcopy(live_manifest.get('references') or [])
+    return live_manifest, outbound
+
+
 def split_public_live_manifest_delta(delta: dict[str, Any] | None) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Remove KB references from a live delta before merge or SSE emission.
 

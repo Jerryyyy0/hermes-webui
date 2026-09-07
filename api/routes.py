@@ -10843,10 +10843,9 @@ def handle_get(handler, parsed) -> bool:
             if _diag: _diag.stage("session.resolve")
             s = get_session(sid, metadata_only=(not load_messages))
             if load_messages and is_cron_session(sid, getattr(s, "source_tag", None)):
-                from integration.crons.session_bridge import reconcile_cron_session_transcript
+                from integration.crons.session_bridge import reconcile_cron_session_for_read
 
-                if reconcile_cron_session_transcript(s):
-                    s.save(touch_updated_at=False)
+                s = reconcile_cron_session_for_read(s)
             _t_session_resolved = _time.monotonic()
             if _diag: _diag.stage("session.message_source")
             _session_profile = getattr(s, 'profile', None) or None

@@ -404,33 +404,39 @@ Orphan artifact 仍保留在顶层 `artifacts`，但不进入正常 `turns[]`。
 | `turn_key` | stream 启动时确定；前端不得从 `stream_id` 推断 |
 | `sequence` | 单 stream 内单调递增 |
 | `todos` | 可选；SSE 可额外含 `mode: "replace_latest"` |
-| `artifacts` / `references` | 可选；row schema 与 GET 相同 |
+| `artifacts` | 可选；本次变化的增量，row schema 与 GET 相同 |
+| `references` | 当前 session 在该 stream 内的完整、已去重快照；row schema 与 GET 相同，消费方直接替换顶层 references |
+| `turns` | 当前 `turn_key` 的局部增量；其 `references` 仅包含本次工具事件产生的引用，绝不是顶层快照 |
 
 `todos`、`artifacts`、`references` 均为空时不发送 delta。
 
 每条 delta 至少包含 `version`、`session_id`、`stream_id`、`turn_key`、`sequence`，再携带本次
-有变化的 `todos`、`artifacts` 或 `references`。顶层不携带工具调用来源；引用来源只在
-`references[].source[]` 中表达。
+有变化的 `todos` 或 `artifacts`，以及当前 stream 的完整 `references` 快照。stream 建立时该快照
+以已持久化 Manifest 的 references 为基线；每次成功 `skill_view` 会在服务端完成去重、source 合并后
+更新快照。顶层不携带工具调用来源；引用来源只在 `references[].source[]` 中表达。
+
+顶层 `references` 与 `turns[].references` 有意使用不同的范围：前者是 session 快照，后者仅保留
+当前 turn 的增量归属。消费方若只展示 session references，只需按 `stream_id:sequence` 去重后替换顶层字段。
 
 ### Todo delta
 
 ```text
 event: manifest_delta
-data: {"version":2,"session_id":"abc123","stream_id":"stream-xyz","turn_key":"turn:4","sequence":8,"todos":{"items":[{"id":"draft","content":"撰写答复","status":"in_progress"}],"mode":"replace_latest"},"artifacts":[],"references":[]}
+data: {"version":2,"session_id":"abc123","stream_id":"stream-xyz","turn_key":"turn:4","sequence":8,"todos":{"items":[{"id":"draft","content":"撰写答复","status":"in_progress"}],"mode":"replace_latest"},"artifacts":[],"references":[],"turns":[{"turn_key":"turn:4","artifacts":[],"references":[]}]}
 ```
 
 ### 文件成果 delta
 
 ```text
 event: manifest_delta
-data: {"version":2,"session_id":"abc123","stream_id":"stream-xyz","turn_key":"turn:4","sequence":9,"artifacts":[{"path":"reports/result.md","preview":"file","source_tool":"write_file","profile":"ops"}],"references":[]}
+data: {"version":2,"session_id":"abc123","stream_id":"stream-xyz","turn_key":"turn:4","sequence":9,"artifacts":[{"path":"reports/result.md","preview":"file","source_tool":"write_file","profile":"ops"}],"references":[],"turns":[{"turn_key":"turn:4","artifacts":[{"path":"reports/result.md","preview":"file","source_tool":"write_file","profile":"ops"}],"references":[]}]}
 ```
 
 ### Skill 引用 delta
 
 ```text
 event: manifest_delta
-data: {"version":2,"session_id":"abc123","stream_id":"stream-xyz","turn_key":"turn:4","sequence":10,"artifacts":[],"references":[{"kind":"skill","source":[{"tool":"skill_view","tid":"call-skill-1"}],"metadata":{"path":"research-skill"}}]}
+data: {"version":2,"session_id":"abc123","stream_id":"stream-xyz","turn_key":"turn:4","sequence":10,"artifacts":[],"references":[{"kind":"skill","source":[{"tool":"skill_view","tid":"call-skill-1"}],"metadata":{"path":"research-skill"}}],"turns":[{"turn_key":"turn:4","artifacts":[],"references":[{"kind":"skill","source":[{"tool":"skill_view","tid":"call-skill-1"}],"metadata":{"path":"research-skill"}}]}]}
 ```
 
 ### 知识库 MCP 不发送实时 reference delta
@@ -444,7 +450,7 @@ data: {"version":2,"session_id":"abc123","stream_id":"stream-xyz","turn_key":"tu
 ### Turn reconcile 成果 delta
 
 turn reconcile 仅补充 artifacts；它的 `turns[]` 仅含当前 `turn_key` 的局部 artifacts，
-references 固定为空。
+references 固定为空。顶层 `references` 仍为完整快照，因而可包含本 stream 先前的 Skill 引用。
 
 ```text
 event: manifest_delta
@@ -456,8 +462,8 @@ data: {"version":2,"session_id":"abc123","stream_id":"stream-xyz","turn_key":"tu
 | 阶段 | Tasks | Artifacts | References |
 | --- | --- | --- | --- |
 | `tool_start` | 不发射 | 不发射工具 artifact | 不发射 |
-| `tool_complete` | 成功 `todo` 顶层 `todos[]` | 仅成功工具的参数、结果、diff 或 terminal 输出操作数 | 仅成功 `skill_view`；知识库检索只创建私有 candidate，不发送 reference delta |
-| `turn_complete` | 不发射 | 工具强证据、`MEDIA:` 与最后一条 assistant 的严格路径提取 | 不发射 |
+| `tool_complete` | 成功 `todo` 顶层 `todos[]` | 仅成功工具的参数、结果、diff 或 terminal 输出操作数 | 成功 `skill_view` 更新服务端快照；知识库检索只创建私有 candidate |
+| `turn_complete` | 不发射 | 工具强证据、`MEDIA:` 与最后一条 assistant 的严格路径提取 | 不产生新引用，但继续携带当前完整快照 |
 
 `tool_start` 只可携带待配对的工具参数，永不产生 artifact/reference。`tool_complete` 仅在与同一 `stream_id + tid` 的 start 配对且成功时解析工具参数；complete 缺参数且没有对应 start、或配对身份不一致时不产生工具 artifact。`turn_complete` 中的最终 assistant 路径只扫描最后一条真实 assistant message：绝对路径可为外部直接引用；相对路径与裸文件名只在当前 session workspace 解析。外部直接引用需先持久化，随后由 GET Manifest 作为可预览成果返回。
 
@@ -469,6 +475,7 @@ SSE 是乐观派生状态，不写入 transcript，不进入模型上下文，�
 | --- | --- |
 | Session artifacts | 按 profile + canonical path 去重 |
 | Session references | Skill 按 canonical skill path；知识库文档按稳定 `id` 合并 |
+| SSE 顶层 references | 服务端以已持久化 references 为基线合并本 stream 的 Skill 引用后发送完整快照；消费方按 `stream_id:sequence` 去重后直接替换，不自行合并 |
 | Turn artifacts/references | 按 `turn_key` 合并；artifact 按 path，reference 按其身份键去重 |
 | 知识库文档 | 仅合并已提交 Citation；同 `id` 文档合并 `source[]`，chunk 按 `metadata.chunks[].id` 合并并保留首次有效 score |
 | Skills | 同技能 artifact 优先于 skill reference |
@@ -481,7 +488,7 @@ SSE 是乐观派生状态，不写入 transcript，不进入模型上下文，�
 
 | 阶段 | Inspector | 聊天区 chips |
 | --- | --- | --- |
-| 流式进行中 | 合并 `manifest_delta` 乐观更新 | 不展示 |
+| 流式进行中 | 合并 todos/artifacts/turns，并直接替换顶层 `references` 快照 | 不展示 |
 | 本轮 `done` 后 | `GET /api/session/manifest` 覆盖 SSE | 使用 `manifest.turns[].artifacts` 刷新 |
 | 切换/打开会话 | 拉取 GET manifest | 按 GET 结果渲染 |
 | 离开会话 | 清空前端 manifest cache | 清理当前会话绑定 |
@@ -494,7 +501,7 @@ SSE 是乐观派生状态，不写入 transcript，不进入模型上下文，�
 | --- | --- |
 | `refresh()` | 拉取 GET manifest |
 | `clear()` | 清空缓存 |
-| `applyDelta(delta)` | 幂等合并 SSE delta |
+| `applyDelta(delta)` | 按 sequence 幂等处理 SSE delta；直接替换顶层 references 快照，并合并其它增量字段 |
 | `getTurnArtifacts(turnKey)` | 获取某轮 artifacts |
 | `openManifestPreview(item)` | 非 expired 条目按 `preview` 分发 |
 | `isManifestPreviewable(item)` | 排除 expired，并检查 `file`/`skill` |
