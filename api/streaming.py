@@ -8588,12 +8588,7 @@ def _run_agent_streaming(
             # (fixes: TypeError: AIAgent.__init__() got an unexpected keyword
             # argument 'credential_pool' — issue #772)
             import inspect as _inspect
-            _agent_signature = _inspect.signature(_AIAgent.__init__)
-            _agent_params = set(_agent_signature.parameters)
-            _agent_accepts_kwargs = any(
-                parameter.kind == _inspect.Parameter.VAR_KEYWORD
-                for parameter in _agent_signature.parameters.values()
-            )
+            _agent_params = set(_inspect.signature(_AIAgent.__init__).parameters)
             try:
                 _agent_source_file = _inspect.getsourcefile(_AIAgent) or _inspect.getfile(_AIAgent)
             except Exception:
@@ -8701,7 +8696,7 @@ def _run_agent_streaming(
                 _agent_kwargs['tool_start_callback'] = on_tool_start
             if 'tool_complete_callback' in _agent_params:
                 _agent_kwargs['tool_complete_callback'] = on_tool_complete
-            if 'status_callback' in _agent_params or _agent_accepts_kwargs:
+            if 'status_callback' in _agent_params:
                 _agent_kwargs['status_callback'] = _agent_status_callback
             if 'max_iterations' in _agent_params and _max_iterations_cfg is not None:
                 _agent_kwargs['max_iterations'] = _max_iterations_cfg

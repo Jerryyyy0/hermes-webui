@@ -2225,6 +2225,53 @@ def test_cron_session_read_reconcile_preserves_newer_followup_error(
     assert Session.load(sid).messages[-1]["_error"] is True
 
 
+def test_cron_reconcile_preserves_untimestamped_persisted_followup_error(monkeypatch):
+    from api import models
+    from integration.crons import session_bridge
+
+    retry_text = "重新试下"
+    error_text = "**发生错误:** 模型服务返回错误，请稍后重试。"
+    session = SimpleNamespace(
+        session_id="cron_33f474cee0ba_20260907_093733_66febcec",
+        profile="default",
+        source_tag="cron",
+        cron_execution_ended_at=1788745099.433799,
+        messages=[
+            {"role": "user", "content": "cron prompt", "timestamp": 1788745069.6840608},
+            {
+                "role": "user",
+                "content": retry_text,
+                "id": 8,
+                "_db_persisted": True,
+                "_turn_key": "turn:2",
+            },
+            {
+                "role": "assistant",
+                "content": error_text,
+                "timestamp": 1788745165,
+                "_error": True,
+                "_error_type": "error",
+            },
+        ],
+    )
+
+    monkeypatch.setattr(
+        models,
+        "get_state_db_session_messages",
+        lambda *args, **kwargs: [
+            {"role": "user", "content": "cron prompt", "timestamp": 1788745069.6840608},
+            {"role": "user", "content": retry_text, "timestamp": 1788745151.4757},
+        ],
+    )
+
+    changed = session_bridge.reconcile_cron_session_transcript(session)
+
+    assert changed is True
+    assert [message["content"] for message in session.messages[-2:]] == [retry_text, error_text]
+    assert session.messages[-2]["timestamp"] == 1788745151.4757
+    assert session.messages[-1]["_error"] is True
+
+
 def _failed_cron_output(detail="Connection error."):
     return f"# Cron Job: Nightly (FAILED)\n\n## Error\n\n```\n{detail}\n```\n"
 
