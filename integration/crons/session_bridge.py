@@ -1960,6 +1960,36 @@ def reconcile_cron_session_transcript(
     return changed
 
 
+def reconcile_cron_session_for_read(session):
+    """Reconcile a Cron session read without overwriting a newer sidecar tail.
+
+    ``GET /api/session`` can race a terminal streaming write: its cached Session
+    object may predate a just-persisted WebUI follow-up error. Read
+    reconciliation is itself a write when the Agent execution prefix changed,
+    so load the latest full sidecar while holding the same per-session lock as
+    chat-start and streaming before saving it back.
+    """
+    sid = str(getattr(session, "session_id", "") or "").strip()
+    if not sid or str(getattr(session, "source_tag", "") or "") != "cron":
+        return session
+
+    from api.config import _get_session_agent_lock
+    from api.models import LOCK, SESSIONS, Session
+
+    with _get_session_agent_lock(sid):
+        latest = Session.load(sid)
+        if latest is None or getattr(latest, "_loaded_metadata_only", False):
+            return session
+        if str(getattr(latest, "source_tag", "") or "") != "cron":
+            return latest
+        if reconcile_cron_session_transcript(latest):
+            latest.save(touch_updated_at=False)
+        with LOCK:
+            SESSIONS[sid] = latest
+            SESSIONS.move_to_end(sid)
+        return latest
+
+
 def read_cron_output_for_run(
     job_id: str,
     *,

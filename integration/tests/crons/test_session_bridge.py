@@ -2171,6 +2171,60 @@ def test_reconcile_cron_transcript_keeps_matching_webui_followup(
     assert session.messages[-1]["content"] == "cron prompt"
 
 
+def test_cron_session_read_reconcile_preserves_newer_followup_error(
+    cron_env, monkeypatch
+):
+    """A stale reader must not save over a settled WebUI error tail."""
+    from api.models import Session
+    from integration.crons import session_bridge
+
+    sid = "cron_job1_1700000860"
+    stale = Session(
+        session_id=sid,
+        profile="default",
+        source_tag="cron",
+        cron_execution_profile=str(cron_env["home"]),
+        cron_execution_ended_at=200.0,
+        messages=[
+            {"role": "user", "content": "cron prompt", "timestamp": 100.0},
+            {"role": "assistant", "content": "cron answer", "timestamp": 200.0},
+        ],
+    )
+    stale.save()
+
+    latest = Session.load(sid)
+    latest.messages.extend([
+        {"role": "user", "content": "重新试下", "timestamp": 300.0, "_turn_key": "turn:2"},
+        {
+            "role": "assistant",
+            "content": "**发生错误:** 模型服务返回错误，请稍后重试。",
+            "timestamp": 301.0,
+            "_error": True,
+            "_error_type": "provider_error",
+        },
+    ])
+    latest.save()
+
+    reconciled = []
+
+    def reconcile(current):
+        reconciled.append([message["content"] for message in current.messages])
+        return True
+
+    monkeypatch.setattr(session_bridge, "reconcile_cron_session_transcript", reconcile)
+
+    refreshed = session_bridge.reconcile_cron_session_for_read(stale)
+
+    assert reconciled == [[
+        "cron prompt",
+        "cron answer",
+        "重新试下",
+        "**发生错误:** 模型服务返回错误，请稍后重试。",
+    ]]
+    assert refreshed.messages[-1]["_error"] is True
+    assert Session.load(sid).messages[-1]["_error"] is True
+
+
 def _failed_cron_output(detail="Connection error."):
     return f"# Cron Job: Nightly (FAILED)\n\n## Error\n\n```\n{detail}\n```\n"
 

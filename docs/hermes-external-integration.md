@@ -35,7 +35,7 @@ record 查询与预览授权：`policy.py` 负责逐组件无跟随 fd 打开与
 `integration/crons/` 负责 Cron workspace policy、当前执行物化、生命周期与 Cron
 Hub 状态。允许修改的上游接缝如下：
 
-- `api/routes.py`：Cron handler 与运行完成钩子的薄委派。
+- `api/routes.py`：Cron handler、运行完成钩子与 session GET 锁内 transcript 重协调的薄委派。
 - `api/models.py`：`import_cli_session()` 接收显式 workspace binding。
 - `api/workspace.py`：通过 `resolve_session_workspace()` 集中将 V1 未验证 Cron
   workspace 降级为 WebUI 已批准的默认 workspace，而不使用未验证 root；legacy
