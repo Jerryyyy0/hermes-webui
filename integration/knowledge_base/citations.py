@@ -14,6 +14,7 @@ from integration.knowledge_base.turn_references import (
     ACROSS_SEARCH_TOOL,
     SINGLE_SEARCH_TOOL,
     extract_references,
+    sort_chunks_by_score,
 )
 
 _TOOLS = frozenset({SINGLE_SEARCH_TOOL, ACROSS_SEARCH_TOOL})
@@ -365,6 +366,7 @@ def _annotate_rows(rows: Any, *, tool: str, tid: str, registry: CandidateRegistr
             )
             if token:
                 chunk["_cite"] = token
+        row["chunks"] = sort_chunks_by_score(row["chunks"])
     return result
 
 

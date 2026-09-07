@@ -202,6 +202,10 @@ function resolveCitation(manifest: any, citation: Citation) {
 }
 ```
 
+同一 document 的 `metadata.chunks[]` 按有效数值 `score` 从大到小返回；相同 score 保持下游结果中的原始顺序，
+缺失、非数值或非有限 score 排在最后。provider 注入给模型的同一 document chunks 使用完全相同的排序，因此前端
+详情列表与模型优先看到的片段一致。该规则不改变 `citations[].ordinal`，也不按 score 重排顶层 `references[]`。
+
 点击 `<sup data-c="N">[N]</sup>` 时：
 
 1. 将 `N` 解析为正整数；

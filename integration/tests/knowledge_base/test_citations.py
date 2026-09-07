@@ -48,6 +48,10 @@ def test_provider_annotation_is_chunk_scoped_and_preserves_wrapper():
     assert annotated.startswith("<untrusted_tool_result")
     assert annotated.endswith("</untrusted_tool_result>")
     assert annotated.count('_cite') == 2
+    payload = json.loads(annotated.split(">", 1)[1].rsplit("</untrusted_tool_result>", 1)[0])
+    chunks = json.loads(payload["result"])[0]["chunks"]
+    assert [chunk["score"] for chunk in chunks] == [0.2, 0.1]
+    assert all(chunk.get("_cite") for chunk in chunks)
 
 
 def test_settlement_replaces_only_model_selected_chunk_and_exposes_mapping():

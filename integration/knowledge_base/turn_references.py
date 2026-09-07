@@ -35,6 +35,23 @@ def _score(value: Any) -> int | float | None:
         return None
 
 
+def sort_chunks_by_score(chunks: list[Any]) -> list[Any]:
+    """Return chunks in descending finite-score order, stably.
+
+    Missing, invalid, and non-finite scores sort after every valid score.  The
+    original order remains the deterministic tie-breaker, including for chunks
+    without a usable score.
+    """
+    def key(indexed_chunk: tuple[int, Any]) -> tuple[int, int | float, int]:
+        index, chunk = indexed_chunk
+        score = _score(chunk.get("score")) if isinstance(chunk, dict) else None
+        if score is None:
+            return (1, 0, index)
+        return (0, -score, index)
+
+    return [chunk for _, chunk in sorted(enumerate(chunks), key=key)]
+
+
 def _index(value: Any) -> int:
     try:
         parsed = int(value)
@@ -268,7 +285,7 @@ def extract_references(
             "kb_name": kb_name,
             "file_name": file_name,
             "reference_id": reference_id,
-            "chunks": chunks,
+            "chunks": sort_chunks_by_score(chunks),
             "sources": [{"tool": tool, "tid": normalized_tid}],
         })
     return merge_reference_rows([], candidates)
@@ -277,7 +294,7 @@ def extract_references(
 def merge_reference_rows(
     existing: list[dict[str, Any]], incoming: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Merge same-document rows, preserving source and passage encounter order."""
+    """Merge same-document rows, retaining sources and score-ordering chunks."""
     rows: dict[str, dict[str, Any]] = {}
     for row in [*existing, *incoming]:
         if not isinstance(row, dict):
@@ -355,7 +372,10 @@ def merge_reference_rows(
                 chunks_by_identity[chunk_id] = normalized
             elif existing_chunk.get("score") == "" and normalized.get("score") != "":
                 existing_chunk["score"] = normalized["score"]
-    return sorted(rows.values(), key=lambda row: (row["kb_name"], row["file_name"]))
+    merged_rows = sorted(rows.values(), key=lambda row: (row["kb_name"], row["file_name"]))
+    for row in merged_rows:
+        row["chunks"] = sort_chunks_by_score(row["chunks"])
+    return merged_rows
 
 
 def to_wire(row: dict[str, Any]) -> dict[str, Any] | None:

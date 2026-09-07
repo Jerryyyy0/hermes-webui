@@ -583,7 +583,7 @@ def test_manifest_delta_merges_knowledge_base_document_across_both_mcp_tools(tmp
     assert reference['metadata']['kbName'] == 'share49'
     assert reference['metadata']['fileName'] == 'rules.docx'
     assert [chunk['page_content'] for chunk in reference['metadata']['chunks']] == [
-        'first passage', 'second passage', 'third passage',
+        'third passage', 'second passage', 'first passage',
     ]
     assert all(chunk['id'].startswith('kbchunk:v1:') for chunk in reference['metadata']['chunks'])
     assert merged['turns'][0]['references'] == merged['references']
