@@ -535,7 +535,7 @@ def test_live_settlement_empty_hint_does_not_append_empty_emphasis(tmp_path, mon
 
     error_content = saved.messages[-1]["content"]
     assert saved.messages[-1]["_error"] is True
-    assert error_content == "**Error:** synthetic hard failure"
+    assert error_content == "**发生错误:** 模型服务返回错误，请稍后重试。"
     assert "\n\n**" not in error_content
     assert not error_content.endswith("**")
 
@@ -778,4 +778,43 @@ def test_non_auth_seeded_replayed_assistant_does_not_satisfy_current_turn(tmp_pa
     apperrors = [data for event, data in events if event == "apperror"]
     assert apperrors, "expected apperror for seeded replay silent failure"
     assert apperrors[-1]["type"] == "no_response"
+    assert not any(event == "done" for event, _ in events)
+
+
+def test_provider_failure_before_first_token_uses_current_turn_boundary(tmp_path, monkeypatch):
+    session = _prepare_session(
+        "seeded_provider_failure_before_token",
+        "stream_seeded_provider_failure_before_token",
+        pending_user_message="重新试下",
+    )
+    _seed_prior_turn(
+        session,
+        prior_user="Earlier question",
+        prior_assistant="Earlier answer",
+    )
+
+    class ProviderFailureBeforeTokenAgent(MockAgent):
+        def run_conversation(self, **kwargs):
+            self._last_error = "HTTP 500: sensitive_words_detected"
+            history = list(kwargs.get("conversation_history") or [])
+            return {
+                "messages": history + [{"role": "assistant", "content": "Earlier answer"}],
+            }
+
+    fake_queue = _run_stream(
+        monkeypatch,
+        session,
+        "stream_seeded_provider_failure_before_token",
+        ProviderFailureBeforeTokenAgent,
+        workspace=str(tmp_path),
+    )
+    saved = Session.load("seeded_provider_failure_before_token")
+    assert saved is not None
+
+    assert any(msg.get("role") == "user" and msg.get("content") == "重新试下" for msg in saved.messages)
+    assert saved.messages[-1]["_error"] is True
+
+    events = _queue_events(fake_queue)
+    apperrors = [data for event, data in events if event == "apperror"]
+    assert apperrors and apperrors[-1]["type"] == "error"
     assert not any(event == "done" for event, _ in events)

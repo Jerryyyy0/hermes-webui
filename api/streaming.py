@@ -5776,8 +5776,18 @@ def _merge_display_messages_after_agent_result(
 
     if _messages_have_prefix(result_messages, previous_context):
         candidates = result_messages[len(previous_context):]
-        candidates = _strip_replayed_prefix(previous_display, candidates)
-        candidates = _strip_replayed_prefix(previous_context, candidates)
+        # An assistant/tool delta after the shared prefix belongs to this turn,
+        # even when its visible text repeats the preceding assistant reply.
+        # The loop below retains its adjacent-replay guard after inserting the
+        # current user boundary, which distinguishes a new repeated answer from
+        # a duplicated result row.
+        if not (
+            candidates
+            and isinstance(candidates[0], dict)
+            and candidates[0].get('role') in ('assistant', 'tool')
+        ):
+            candidates = _strip_replayed_prefix(previous_display, candidates)
+            candidates = _strip_replayed_prefix(previous_context, candidates)
     else:
         current_user_idx = _find_current_user_turn(result_messages, msg_text)
         marker_candidates = [
@@ -8574,7 +8584,12 @@ def _run_agent_streaming(
             # (fixes: TypeError: AIAgent.__init__() got an unexpected keyword
             # argument 'credential_pool' — issue #772)
             import inspect as _inspect
-            _agent_params = set(_inspect.signature(_AIAgent.__init__).parameters)
+            _agent_signature = _inspect.signature(_AIAgent.__init__)
+            _agent_params = set(_agent_signature.parameters)
+            _agent_accepts_kwargs = any(
+                parameter.kind == _inspect.Parameter.VAR_KEYWORD
+                for parameter in _agent_signature.parameters.values()
+            )
             try:
                 _agent_source_file = _inspect.getsourcefile(_AIAgent) or _inspect.getfile(_AIAgent)
             except Exception:
@@ -8682,7 +8697,7 @@ def _run_agent_streaming(
                 _agent_kwargs['tool_start_callback'] = on_tool_start
             if 'tool_complete_callback' in _agent_params:
                 _agent_kwargs['tool_complete_callback'] = on_tool_complete
-            if 'status_callback' in _agent_params:
+            if 'status_callback' in _agent_params or _agent_accepts_kwargs:
                 _agent_kwargs['status_callback'] = _agent_status_callback
             if 'max_iterations' in _agent_params and _max_iterations_cfg is not None:
                 _agent_kwargs['max_iterations'] = _max_iterations_cfg
@@ -9626,12 +9641,15 @@ def _run_agent_streaming(
                     canonical_turn_key=_manifest_turn_key,
                 )
                 _is_agent_result_terminal = _agent_result_terminal_failure(result)
+                _agent_reported_empty_error = 'error' in result and result.get('error') == ''
                 _terminal_failure = (
                     _captured_terminal_failure
                     or _is_agent_result_terminal
+                    or bool(_last_err)
+                    or _agent_reported_empty_error
                     or (
                         not _token_sent
-                        and _session_lacks_final_assistant_answer(_all_result_messages)
+                        and _saved_transcript_lacks_final_answer
                     )
                 )
                 _result_status = str(result.get('status') or result.get('state') or '').strip().lower()
@@ -9672,7 +9690,12 @@ def _run_agent_streaming(
                                 logger.debug("Failed to append cancelled turn journal event", exc_info=True)
                         put('cancel', {'message': 'Cancelled by user'})
                         return
-                    _last_err = getattr(agent, '_last_error', None) or result.get('error') or ''
+                    _last_err = (
+                        getattr(agent, '_last_error', None)
+                        or result.get('error')
+                        or _captured_terminal_error[0]
+                        or ''
+                    )
                     _err_str = str(_last_err) if _last_err else ''
                     _classification = _classify_provider_error(
                         _err_str,
