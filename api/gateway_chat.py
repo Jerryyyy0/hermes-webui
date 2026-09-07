@@ -962,7 +962,7 @@ def _run_gateway_chat_streaming(
                 ToolEvent,
                 _apply_public_todos_to_manifest_delta,
                 extract_manifest_delta_from_tool_event,
-                merge_manifest_delta,
+                merge_live_manifest_delta_for_sse,
                 split_public_live_manifest_delta,
             )
             tid = str(event_payload.get("tid") or "").strip()
@@ -1016,7 +1016,7 @@ def _run_gateway_chat_streaming(
             if not (public_delta.get("todos") or public_delta.get("artifacts") or public_delta.get("references") or public_delta.get("turns")):
                 return
             with STREAMS_LOCK:
-                live_manifest = merge_manifest_delta(
+                live_manifest, public_delta = merge_live_manifest_delta_for_sse(
                     STREAM_LIVE_MANIFEST.get(stream_id) or {
                         "todos": {"items": []},
                         "artifacts": [],
@@ -1040,6 +1040,10 @@ def _run_gateway_chat_streaming(
     usage = {"input_tokens": 0, "output_tokens": 0, "estimated_cost": 0}
     try:
         s = get_session(session_id)
+        from integration.session_manifest.manifest import seed_live_manifest_references
+        live_manifest_seed = seed_live_manifest_references(s)
+        with STREAMS_LOCK:
+            STREAM_LIVE_MANIFEST[stream_id] = live_manifest_seed
         from api.config import get_config  # imported lazily to avoid config-cycle churn
 
         cfg = get_config()
@@ -1525,7 +1529,7 @@ def _run_gateway_chat_streaming(
         try:
             from integration.session_manifest.manifest import (
                 extract_manifest_delta_from_turn_reconcile,
-                merge_manifest_delta,
+                merge_live_manifest_delta_for_sse,
                 split_public_live_manifest_delta,
             )
             manifest_delta_sequence[0] += 1
@@ -1545,7 +1549,7 @@ def _run_gateway_chat_streaming(
                     or public_reconcile_delta.get("todos")
                     or public_reconcile_delta.get("references")):
                 with STREAMS_LOCK:
-                    live_manifest = merge_manifest_delta(
+                    live_manifest, public_reconcile_delta = merge_live_manifest_delta_for_sse(
                         STREAM_LIVE_MANIFEST.get(stream_id) or {
                             "todos": {"items": []},
                             "artifacts": [],

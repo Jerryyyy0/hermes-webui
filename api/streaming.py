@@ -7439,6 +7439,10 @@ def _run_agent_streaming(
         # in the outer finally next to _clear_thread_env().
         _turn_session_identity_tokens = _set_turn_session_identity(session_id)
         s = get_session(session_id)
+        from integration.session_manifest.manifest import seed_live_manifest_references
+        _live_manifest_seed = seed_live_manifest_references(s)
+        with STREAMS_LOCK:
+            STREAM_LIVE_MANIFEST[stream_id] = _live_manifest_seed
         _turn_pending_source = getattr(s, 'pending_user_source', None) or 'webui'
         update_active_run(stream_id, phase="running", session_id=session_id)
         s.workspace = str(resolve_session_workspace(s, workspace, requested_is_trusted=True))
@@ -7969,7 +7973,7 @@ def _run_agent_streaming(
                         ToolEvent,
                         _apply_public_todos_to_manifest_delta,
                         extract_manifest_delta_from_tool_event,
-                        merge_manifest_delta,
+                        merge_live_manifest_delta_for_sse,
                         split_public_live_manifest_delta,
                     )
                     _manifest_delta_sequence[0] += 1
@@ -7996,7 +8000,7 @@ def _run_agent_streaming(
                     if not (_public_delta.get('todos') or _public_delta.get('artifacts') or _public_delta.get('references') or _public_delta.get('turns')):
                         return
                     with STREAMS_LOCK:
-                        _live_manifest = merge_manifest_delta(
+                        _live_manifest, _public_delta = merge_live_manifest_delta_for_sse(
                             STREAM_LIVE_MANIFEST.get(stream_id) or {
                                 'todos': {'items': []},
                                 'artifacts': [],
@@ -8018,7 +8022,7 @@ def _run_agent_streaming(
                 try:
                     from integration.session_manifest.manifest import (
                         extract_manifest_delta_from_turn_reconcile,
-                        merge_manifest_delta,
+                        merge_live_manifest_delta_for_sse,
                         split_public_live_manifest_delta,
                     )
                     _manifest_delta_sequence[0] += 1
@@ -8038,7 +8042,7 @@ def _run_agent_streaming(
                     if not (_public_delta.get('artifacts') or _public_delta.get('turns') or _public_delta.get('todos') or _public_delta.get('references')):
                         return
                     with STREAMS_LOCK:
-                        _live_manifest = merge_manifest_delta(
+                        _live_manifest, _public_delta = merge_live_manifest_delta_for_sse(
                             STREAM_LIVE_MANIFEST.get(stream_id) or {
                                 'todos': {'items': []},
                                 'artifacts': [],

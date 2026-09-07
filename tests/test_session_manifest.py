@@ -41,6 +41,8 @@ from integration.session_manifest.manifest import (
     extract_manifest_delta_from_tool_event,
     filter_existing_turn_artifact_paths,
     merge_manifest_delta,
+    merge_live_manifest_delta_for_sse,
+    seed_live_manifest_references,
     turn_artifacts_for_wire,
     _turn_message_slice,
 )
@@ -1939,6 +1941,77 @@ def test_merge_manifest_delta_is_idempotent_by_path():
         'preview': 'file',
         'source_tool': 'write_file',
     }]
+
+
+def test_sse_manifest_delta_references_are_a_full_live_snapshot():
+    historical = _skill_reference('historical-skill', 'history-call')
+    first = {
+        'session_id': 'sid',
+        'stream_id': 'stream1',
+        'turn_key': 'turn:2',
+        'sequence': 1,
+        'artifacts': [],
+        'references': [_skill_reference('research-skill', 'first-call')],
+    }
+    repeated = {
+        'session_id': 'sid',
+        'stream_id': 'stream1',
+        'turn_key': 'turn:2',
+        'sequence': 2,
+        'artifacts': [],
+        'references': [_skill_reference('research-skill', 'second-call')],
+    }
+    artifact_only = {
+        'session_id': 'sid',
+        'stream_id': 'stream1',
+        'turn_key': 'turn:2',
+        'sequence': 3,
+        'artifacts': [{'path': 'report.md', 'preview': 'file', 'source_tool': 'write_file'}],
+        'references': [],
+    }
+
+    live, first_outbound = merge_live_manifest_delta_for_sse(
+        {'references': [historical]}, first,
+    )
+    live, repeated_outbound = merge_live_manifest_delta_for_sse(live, repeated)
+    _live, artifact_outbound = merge_live_manifest_delta_for_sse(live, artifact_only)
+
+    assert first_outbound['references'] == [historical, _skill_reference('research-skill', 'first-call')]
+    assert repeated_outbound['references'] == [
+        historical,
+        {
+            'kind': 'skill',
+            'source': [
+                {'tool': 'skill_view', 'tid': 'first-call'},
+                {'tool': 'skill_view', 'tid': 'second-call'},
+            ],
+            'metadata': {'path': 'research-skill'},
+        },
+    ]
+    assert artifact_outbound['references'] == repeated_outbound['references']
+    assert repeated_outbound['turns'] == [{
+        'turn_key': 'turn:2',
+        'artifacts': [],
+        'references': [_skill_reference('research-skill', 'second-call')],
+    }]
+    assert artifact_outbound['turns'] == [{
+        'turn_key': 'turn:2',
+        'artifacts': [{'path': 'report.md', 'preview': 'file', 'source_tool': 'write_file'}],
+        'references': [],
+    }]
+
+
+def test_seed_live_manifest_references_uses_existing_manifest(monkeypatch):
+    expected = [_skill_reference('historical-skill', 'history-call')]
+    monkeypatch.setattr(
+        'integration.session_manifest.manifest.build_session_manifest',
+        lambda _session: {'references': expected},
+    )
+
+    seeded = seed_live_manifest_references(object())
+
+    assert seeded == {'references': expected}
+    assert seeded['references'] is not expected
 
 
 def test_merge_manifest_delta_merges_partial_todo_updates_by_id():
