@@ -1,4 +1,4 @@
-# Cron Lazy Skill 提示注入方案
+# Cron Skill 提示压缩方案
 
 - **Status:** Proposed
 - **Author:** Hermes WebUI maintainers
@@ -7,19 +7,20 @@
 
 ## 决策摘要
 
-Cron 的首条 user message 不再内联完整 skill 正文。`_build_job_prompt()` 改为：
+Cron 不再在首条 user message 内联完整 Skill 正文。改造只发生在现有
+`cron/scheduler.py` 的 Cron prompt 组装与 `AIAgent(...)` 构造接缝：
 
 1. 不向 user message 注入旧的第 1--4 层；
-2. 保留第 5 层，即用户保存的任务 prompt（含本轮 runtime token 展开）；
-3. 紧跟任务 prompt 追加中文的已配置 skill 名称及加载要求；
-4. Agent 在开始执行前通过 `skill_view(name)` 取得完整正文，正文以 tool result 而非
-   user message 到达模型；
-5. 原来的 Cron delivery / `[SILENT]` 规则移入 ephemeral system context，不再属于
-   user message。
+2. 保留第 5 层，即任务 prompt、runtime token 展开、script stdout/error 与
+   `context_from` 输出；
+3. 在第 5 层末尾追加一行紧凑的中文 Skill 名称提示；
+4. Cron delivery / `[SILENT]` 规则与已有 workspace 说明一起放入本轮的
+   ephemeral system context；
+5. 不强制 Agent 调用 `skill_view`，也不新增工具、状态对象、tool gate 或 finalizer。
 
-这不是纯展示压缩，而是把 job 的 skill 交付方式从 inline 改为 lazy load。模型最终仍会
-看到并遵循 skill 正文；减少的是首个 user message 和首个模型请求的输入大小，不保证减少
-整轮 token、数据库总大小或后续 replay 的上下文长度。
+因此 `jobs.json.skills` 在 Cron user message 中的含义调整为“可参考使用的 Skill 名称”。
+Agent 需要时可调用既有 `skill_view`；不调用不会被系统拦截或要求重试。这是刻意的语义
+变化，用较小的接缝换取更短、职责更清晰的首条 user message。
 
 ## 当前问题
 
@@ -27,41 +28,39 @@ Cron 的首条 user message 不再内联完整 skill 正文。`_build_job_prompt
 
 | 层 | 当前内容 | 当前来源 |
 | --- | --- | --- |
-| 1 | `[IMPORTANT: The user has invoked ...]` | scheduler skill wrapper |
+| 1 | `[IMPORTANT: The user has invoked ...]` | scheduler Skill wrapper |
 | 2 | 完整 SKILL.md | scheduler 同步调用 `skill_view()` |
-| 3 | `The user has provided ...` | scheduler skill/task bridge |
+| 3 | `The user has provided ...` | scheduler Skill/task bridge |
 | 4 | Cron delivery 与 `[SILENT]` 规则 | scheduler Cron hint |
-| 5 | 用户的任务 prompt，以及可选 script/context 数据 | `jobs.json` 与运行时数据 |
+| 5 | 任务 prompt、script/context 动态数据 | `jobs.json` 与运行时数据 |
 
 真实任务 `39c23c0be177` 的一条 user message 约 13,572 字符，其中
-`web-research-fallbacks` 的完整正文约 11,547 字符（约 85%）。该正文是静态工作流
-手册，不是用户本次实际输入。
+`web-research-fallbacks` 的完整正文约 11,547 字符，约占 85%。这部分是静态工作流手册，
+不是本轮用户任务或运行数据。
 
-## 目标与非目标
+## 目标与边界
 
 ### 目标
 
-1. 默认 Cron 首条 user message 不包含完整 skill、skill wrapper、skill/task bridge 或
+1. 默认 Cron 首条 user message 不包含完整 Skill、Skill wrapper、Skill/task bridge 或
    Cron fixed hint。
-2. 用户任务 prompt 始终是 user message 的第一部分；skill 名称以中文 block 追加在其后。
-3. 声明了 `skills` 的 Cron 在首次有意义的执行动作前，必须成功加载全部声明 skill。
-4. `skills` 工具集在这种 Cron 中必定可用；不可用、缺失或安全扫描失败时，在 Agent
-   做副作用前明确失败。
-5. 保持 Cron 自动交付、`[SILENT]`、workspace context、Artifact settlement、execution
-   identity 与 `no_agent=True` 的已有语义。
-6. 普通 chat、voice、gateway 与非 Cron Agent 不改变 skill 注入或工具语义。
+2. 第 5 层的 script/context 注入顺序、wake gate、截断和错误语义保持不变。
+3. 有配置 Skill 时，在第 5 层末尾追加紧凑的单行中文名称提示。
+4. 自动交付、`[SILENT]`、workspace context、Artifact settlement、execution identity 与
+   `no_agent=True` 的现有语义保持不变。
+5. 普通 chat、voice、gateway、通用 tool dispatch、`skills_tool` 和 conversation loop 不变。
 
 ### 非目标
 
-- 不让 Agent 完全不知道 skill 正文；它仍需在 `skill_view` tool result 中读取正文。
-- 不承诺总 token 或 `state.db` 总字节数下降。完整正文在 tool result 后仍进入模型历史，
-  并可能持久化为 tool row。
-- 不把 job `skills` 的语义降级为“模型可忽略的推荐项”。历史上它表示本轮应遵循的工作流。
-- 不移除 Cron 的 delivery / `[SILENT]` 行为，只把它从 user 层迁移到 ephemeral system 层。
-- 不修改 skill 内容、SkillHub 安装流程、`jobs.json` 的 skill 字段格式或 workspace 分配。
-- 不修改 `no_agent=True` 的 script-only 运行路径。
+- 不保证模型读取每个声明 Skill，也不把 `jobs.json.skills` 当作强制工作流。
+- 不新增 `CronSkillLoadPlan`、`cron_runtime_context`、Skill digest、tool gate 或 finalizer。
+- 不修改 Skill 内容、SkillHub、`jobs.json` 字段结构、workspace 分配或 toolset 配置。
+- 不保留 scheduler 的 bundle 正文展开；bundle 名称与普通 Skill 名称一样只作为参考文本展示。
+- 不保证整轮 token 或 `state.db` 总字节数下降；Agent 主动调用 `skill_view` 时，完整正文仍会
+  作为 tool result 进入后续上下文并可能持久化。
+- 不修改 `no_agent=True` 的 script-only 路径。
 
-## 新的提示词与工具链
+## 改造后的提示词
 
 ### 首条 user message
 
@@ -77,29 +76,28 @@ Cron 的首条 user message 不再内联完整 skill 正文。`_build_job_prompt
 ```
 
 本轮 workspace 为 `/workspace/sessions/cron/default/cron_daily_0900` 时，首条 user
-message 必须是：
+message 是：
 
 ```text
 根据最新数据生成日报，写到
 /workspace/sessions/cron/default/cron_daily_0900/日报.md
 
-## 可用技能
-
-本任务可参考使用以下技能。需要使用某项技能时，请调用
-`skill_view(name=...)` 查看其完整规则：
-
-- `score-report`
+本任务可参考使用以下技能：score-report
 ```
 
-它不再包含第 1、2、3、4 层，也不直接包含 script stdout 或 `context_from` 正文。
+技能提示不使用 Markdown 标题、列表或调用指令，但保留与任务正文之间的空行。多个名称保持
+job 的声明顺序并以中文逗号连接：
 
-若没有声明 skill，则不追加 `## 可用技能` block。`skills` 为字符串、列表或 legacy
-`skill` 时使用同一个归一化列表；名称按 job 配置的声明顺序去重。未知/空名称不能写入
-prompt，而是在 Agent 启动前返回明确的 job 配置错误。
+```text
+本任务可参考使用以下技能：score-report，web-research-fallbacks
+```
 
-#### `script` 与 `context_from` 同时存在的例子
+`skills` 为字符串、列表或 legacy `skill` 时沿用现有归一化方式。空值不产生提示；重复值
+保持原声明，不在本次改动中新增去重或配置校验语义。
 
-若同一 job 还配置了运行前脚本和上游任务输入：
+### 完整端到端示例
+
+下面 job 同时配置 Skill、运行前脚本和上游输出：
 
 ```json
 {
@@ -111,38 +109,66 @@ prompt，而是在 Agent 启动前返回明确的 job 配置错误。
 }
 ```
 
-本轮执行顺序为：
+本轮 execution 为：
 
 ```text
-1. scheduler 执行 scripts/fetch_scores.py，并按现有规则通过 wake gate。
-2. scheduler 收集 stdout/error，以及 yesterday-snooker 的最新输出；
-   它们暂存为本轮 execution 的 runtime context，不拼接到首条 user message。
-3. Agent 收到的首条 user message 仍只有“任务正文 + 可用技能名称”，形状与上例相同。
-4. Agent 读取 score-report 后，调用只读的 cron_runtime_context。
-5. 该 tool result 返回已收集的脚本和上游结果，Agent 再据此完成任务。
+session_id = cron_daily12345678_20260907_090000_abcd1234
+workspace  = /workspace/sessions/cron/default/cron_daily12345678_20260907_090000_abcd1234
 ```
 
-第 4 步的 tool result 例如：
+脚本 stdout 为：
 
 ```text
-## Pre-run script output
+今日完成 3 场比赛数据采集。
+{"wakeAgent": true}
+```
 
-赛事接口返回：今日已结束 3 场；待开赛 2 场；数据更新时间 09:02。
+上游任务的最新输出为：
 
+```text
+昨日重点：张三晋级八强；今日首场将在 14:00 开始。
+```
+
+改造后的首条 user message 为：
+
+````text
 ## Output from job 'yesterday-snooker'
+The following is the most recent output from a preceding cron job. Use it as context for your analysis.
 
-昨日重点：某选手晋级八强；今日首场将在 14:00 开始。
+```
+昨日重点：张三晋级八强；今日首场将在 14:00 开始。
 ```
 
-脚本成功但没有 stdout 时，保持现有静默语义：不启动 Agent，也不会产生该 tool result。
-未找到 `context_from` 的上游输出时，只省略对应段落，不把配置字段或空占位文本写入
-user message。脚本失败时，沿用当前 agent-backed Cron 语义：将错误摘要放入同一 runtime
-context，仍唤醒 Agent 生成面向用户的失败报告。
+## Script Output
+The following data was collected by a pre-run script. Use it as context for your analysis.
+
+```
+今日完成 3 场比赛数据采集。
+```
+
+根据最新数据生成日报，写到
+/workspace/sessions/cron/default/cron_daily12345678_20260907_090000_abcd1234/日报.md
+
+本任务可参考使用以下技能：score-report
+````
+
+其中 script/context 的标题、说明、代码块和顺序与当前 `_build_job_prompt()` 一致；本次仅移除
+完整 Skill 及旧第 1--4 层。`{"wakeAgent": true}` 是控制行，只用于 scheduler 是否唤醒
+Agent 的判断，不进入 user message。
+
+若 Agent 判断 `score-report` 有帮助，可使用既有工具：
+
+```text
+skill_view(name="score-report")
+```
+
+完整正文以该工具的 result 进入模型后续上下文。若 Agent 不调用，该 Cron 仍可继续正常执行和
+交付最终回复。
 
 ### ephemeral system context
 
-原第 4 层不应被删除，而是和已有 workspace instruction 合并为只在本轮 API 调用有效的
-ephemeral system context：
+原第 4 层不删除，而是与已有 workspace instruction 合并为本轮 API 调用有效的 ephemeral
+system context：
 
 ```text
 ## Cron execution
@@ -155,255 +181,107 @@ Your final response is delivered automatically. Do not send it yourself.
 If there is genuinely nothing new to report, reply with exactly [SILENT].
 ```
 
-它不进入 user message 或展示 transcript。`[SILENT]` 的解析和 delivery adapter 保持现有
-行为；迁移只能改变提示词层级，不能改变 marker 文本或 delivery 逻辑。
+它不进入 user message 或展示 transcript。对于 legacy Cron，workspace 段为空，但 Cron delivery
+段仍存在；对于 `no_agent=True`，两段均不构造，因为该路径本来不会创建 AIAgent。
 
 ### script 与 `context_from`
 
-为满足“第 1--4 层都不注入、仅在第 5 层后追加 skill 名称”的规则，本 RFC 同时将
-script stdout/error 与 `context_from` 正文从首条 user message 移至各自的受控 tool result：
+它们继续属于第 5 层。scheduler 先运行 `script` 并检查 wake gate，再读取 `context_from`
+指定上游 job 的最新 Markdown 输出，将成功取得的动态数据按现有规则置于任务 prompt 前面。
+最后才追加 Skill 名称提示。
 
-```text
-pre-run script succeeds
-  -> scheduler collects its result into this execution's runtime context
-  -> Agent calls cron_runtime_context after loading a skill
-  -> tool dispatcher returns the collected script result
-
-context_from latest output is available
-  -> scheduler collects it into this execution's runtime context
-  -> Agent calls cron_runtime_context
-  -> tool dispatcher returns the collected upstream result
-```
-
-这里的 `cron_runtime_context` 不是 scheduler 主动插入的一条消息，也不是通用的文件或命令
-工具。scheduler 在 Agent 启动前只做两件事：运行已配置的 pre-run script，并根据
-`context_from` 读取已允许的上游 job 最新输出。它把结果绑定到当前 execution session 的
-只读 runtime context；模型看不到这些暂存数据，直到自己发起 `cron_runtime_context()` tool
-call。tool dispatcher 只返回当前 execution 已收集的内容，不接受模型提供的路径、命令或
-job ID。
-
-以如下 job 为例：
-
-```json
-{
-  "prompt": "生成今日战报，保存到日报.md",
-  "skills": ["score-report"],
-  "script": "scripts/fetch_scores.py",
-  "context_from": ["yesterday-job"]
-}
-```
-
-假设 pre-run script 收集到“今日完成 3 场比赛数据采集”，而 `yesterday-job` 的最近输出为
-“张三晋级八强”。新运行路径为：
-
-```text
-1. scheduler 执行 scripts/fetch_scores.py，并先检查其 wake gate。
-2. gate 允许唤醒后，scheduler 将脚本输出和上游输出绑定到本轮 execution。
-3. Agent 首条 user message 仍仅含任务正文和 score-report 名称。
-4. Agent 调用 skill_view(name="score-report")，取得完整 skill 正文。
-5. Agent 调用 cron_runtime_context()，得到以下 tool result：
-
-   ## Pre-run script output
-   今日完成 3 场比赛数据采集。
-
-   ## Output from job 'yesterday-job'
-   张三晋级八强。
-6. Agent 使用该 tool result 和 skill 规则完成报告。
-```
-
-分支语义保持现有契约：
-
-| 条件 | 新方案行为 |
+| 条件 | 行为 |
 | --- | --- |
-| script 最后一条有效输出为 `{"wakeAgent": false}` | 本轮静默结束；不启动 Agent、不加载 skill，也不创建可读取的 runtime context。 |
-| script 成功但没有业务 stdout | 保持现有静默语义，不启动 Agent。 |
-| script 失败 | 仍唤醒 agent-backed Cron；错误摘要进入 runtime context，供 Agent 生成失败报告。 |
-| 上游 job 无目录、无 Markdown、内容为空或读取失败 | 静默省略该 job 对应段落；不写入空占位或错误文本。 |
-| 无 script 且无可用上游输出 | 不注册本轮 `cron_runtime_context`；Agent 不需要调用它。 |
+| script 最后一条有效输出为 `{"wakeAgent": false}` | 静默结束；不创建 Agent 或 prompt。 |
+| script 成功但无 stdout | 保持现有静默语义。 |
+| script 失败 | 错误摘要按现有 `## Script Error` 形式进入第 5 层，Agent 生成失败报告。 |
+| 上游 job 无目录、无 Markdown、内容为空或读取失败 | 静默省略对应段落。 |
+| 无 script 且无可用上游输出 | user message 只有任务正文和可选 Skill 名称提示。 |
 
-`context_from` 的读取上限、有效 job ID 校验和“取最近 Markdown 输出”的规则沿用现有
-`_build_job_prompt()` 行为；此次改动只改变内容交付位置，不扩展它可读取的范围。
+job ID 校验、最新文件选择和 8K 截断均保持现状。此次不改变动态数据来源、顺序或边界。
 
-这个 internal-only `cron_runtime_context` tool 不是通用文件读取能力：它只返回 scheduler
-已经按当前规则取得的 script stdout/error 与允许的上游 job 输出，并携带来源类型和 job
-ID；不接受模型提供的路径、命令或 source ID。内容保留现有大小限制。没有数据时不创建
-tool result。这样 user message 的第 5 层始终只表示用户任务，而不是动态采集数据。
+## 最小代码改动
 
-## 必需的执行约束
+所有代码改动都限制在：
 
-仅在 user message 中写“可用技能”不够。语言模型可能跳过 `skill_view`、先调用 web 或
-terminal，甚至直接给出最终答复。为保持现有 `job.skills` 的强语义，Cron Agent 必须持有
-每轮独立的 `CronSkillLoadPlan`：
+`/Users/wzq/Downloads/NLP-PyProject/hermes-agent/cron/scheduler.py`
 
-```text
-execution session ID
-  -> required skill names
-  -> preflight-resolved canonical skill paths
-  -> content digest + scanner result
-  -> loaded skill names for this turn
-```
+### Prompt 组装
 
-约束规则：
-
-1. scheduler 在构建 Agent 前解析每个已配置 skill、确认存在，并按 Cron 专用规则扫描
-   正文；此步骤**不把正文拼入 prompt**。
-2. 该 job 必须拥有 `skill_view`；`enabled_toolsets` 缩窄配置时，scheduler 必须为本轮
-   加入最小 `skills` toolset，或在启动前以 `required_skill_tool_unavailable` 失败。
-3. Agent 只要尚未加载 `CronSkillLoadPlan` 中全部 skill，工具调度器只允许对应的
-   `skill_view(name)`；web、terminal、file、MCP 及其它产生外部副作用的工具必须返回
-   `required_skill_not_loaded`。
-4. Agent 若在未完成加载时尝试直接结束，turn finalizer 必须把该结果视为未满足的
-   required-skill precondition，要求它调用缺失的 `skill_view`，而不是交付报告。
-5. `skill_view` 对 Cron required skill 必须读取本轮 preflight 的 canonical path/digest；
-   若文件在 preflight 后变更、被替换或重定向到不同内容，返回
-   `skill_content_changed_before_load`，不交付正文。
-6. `skill_view` 返回正文前复用 Cron fail-closed scanner。普通 interactive `skill_view`
-   的“告警后继续返回”语义不能用于这条自动执行路径。
-7. 全部 skill 成功加载后，才允许 `cron_runtime_context` tool 返回脚本/上游数据；之后
-   才恢复正常工具集与任务执行。
-
-这组 guard 必须在 tool dispatch/finalization 层实现，而不能只依赖中文 prompt。prompt
-说明使用“可用技能”，但 `jobs.json.skills` 的实际执行语义仍是 required；未来若要支持
-真正可选的 skill，应新增显式 `optional_skills` 字段，不能改变已有字段的含义。
-
-## 代码改动
-
-### Agent：prompt 组装
-
-文件：`/Users/wzq/Downloads/NLP-PyProject/hermes-agent/cron/scheduler.py`
-
-将当前 `_build_job_prompt()` 拆为职责明确的私有 helper：
+1. 保留 `_prepare_cron_user_prompt()` 的 runtime token 展开职责。
+2. 将现有 `_cron_workspace_instruction()` 扩展或改名为
+   `_cron_execution_system_instruction(execution_workspace)`：保留 V1 workspace 段，并无条件
+   添加 agent-backed Cron 的 delivery / `[SILENT]` 段。
+3. 在 `_build_job_prompt()` 中保留 script/context 组装；删除 `skill_view`、`bump_use`、bundle
+   展开、Skill wrapper 和 Skill/task bridge。
+4. 使用一个局部 helper 从 `skills` 或 legacy `skill` 得到非空名称，并在 prompt 非空时追加：
 
 ```python
-def _resolve_cron_skill_load_plan(job: dict) -> CronSkillLoadPlan: ...
-def _prepare_cron_user_prompt(...): ...  # 保持 token 展开职责
-def _build_lazy_skill_notice(plan: CronSkillLoadPlan) -> str: ...
-def _build_cron_user_message(prepared_user_prompt: str, plan: CronSkillLoadPlan) -> str: ...
-def _cron_execution_system_instruction(workspace: str | None) -> str: ...
+prompt += f"\n\n本任务可参考使用以下技能：{'，'.join(skill_names)}"
 ```
 
-新的 `run_job()` 数据流：
+5. `_scan_assembled_cron_prompt()` 继续扫描最终 user message。由于完整 Skill 不再由 scheduler
+   拼入，调用时不再以 `has_skills=True` 放宽扫描；script/context 仍按既有
+   `has_injected_data=True` 路径处理。
+6. `run_job()` 在既有 `AIAgent(...)` 调用处传入 ephemeral system context；不修改
+   `agent_init.py`、tool dispatch、`tools/skills_tool.py`、finalizer 或 conversation loop。
+
+新的数据流：
 
 ```text
-pre-run wake gate
+pre-run script / wake gate
   -> _prepare_cron_user_prompt()
-  -> _resolve_cron_skill_load_plan()        # resolve + digest + scan，未注入正文
-  -> _build_cron_user_message()
-       = prepared user task + Chinese skill notice
-  -> AIAgent(..., cron_skill_load_plan=plan,
-             ephemeral_system_prompt=_cron_execution_system_instruction(...))
+  -> _build_job_prompt()
+       = script/context 第 5 层 + task + compact skill-name hint
+  -> AIAgent(ephemeral_system_prompt=workspace + Cron delivery)
   -> run_conversation(user_message)
-  -> enforced skill_view(s)
-  -> cron_runtime_context tool result（若存在）
-  -> normal task tool loop
+  -> normal tool loop; Agent may call existing skill_view
 ```
 
-`_build_job_prompt()` 可作为兼容 facade 保留，但其 Cron 默认路径必须返回新 user message；
-旧的 inline builder 移为私有 `_build_inline_skill_prompt()`，只服务隔离兼容测试或未来
-明确 opt-in 的 legacy mode。不能在同一默认路径中先拼接全文、再从字符串删除；这样会让
-扫描、日志和异常路径再次泄漏正文。
-
-### Agent：工具与状态接缝
-
-| 文件/模块 | 具体改动 |
-| --- | --- |
-| `agent/agent_init.py` | 保存 immutable `cron_skill_load_plan` 与 per-turn loaded-name set；初始化时深拷贝，避免 provider fallback/并发 Agent 串用状态。 |
-| `agent/tool_executor.py` 或现有工具 dispatch 统一 gate | 调用 tool 前检查 required skills 是否已加载；只放行所需 `skill_view`，其余工具返回结构化拒绝。 |
-| `tools/skills_tool.py` | 为 Cron required-skill 调用增加 plan-aware handler：验证 canonical path、digest、Cron scanner 后返回正文，并标记为已加载。不得修改普通 interactive skill_view 的兼容行为。 |
-| `agent/turn_finalizer.py` | 在最终答复前验证所有 required skills 已加载；未加载时把缺失名称作为下一轮强制 tool action，而不交付最终文本。 |
-| `cron/scheduler.py` / Cron 专属工具模块 | 注册只读、参数不可控的 `cron_runtime_context`；将既有 script/context 采集结果延后以 tool result 形式提供。 |
-| `agent/conversation_loop.py` | 保持 tool result 顺序和持久化；不把 tool result 回填到首条 user message。 |
-
-`CronSkillLoadPlan` 必须按 execution session ID 绑定，provider fallback 共享同一次 execution
-的同一 plan；下一次 automatic trigger 创建新 plan，重新读取并扫描当前 skill 内容。
-
-### WebUI
-
-本方案不改 WebUI HTTP、SSE、Manifest schema 或 Cron Hub API。WebUI 会自然展示更短的
-首条 user message；完整 skill 和 runtime data 若由 Agent 持久化，则展示为对应 tool call
-及 tool result，而不是伪装成用户输入。
+不新增 feature flag、持久化字段或 inline escape hatch。回滚只需还原本次 scheduler 改动，
+不涉及 `jobs.json`、session、workspace 或 Manifest 数据迁移。
 
 ## 生命周期与失败语义
 
 | 场景 | 行为 |
 | --- | --- |
-| 无 skill 的 agent Cron | user message 仅为用户任务；不创建 plan，不增加 guard。 |
-| 有 skill，全部存在且安全 | user message 为任务 + 中文名称；按顺序强制 `skill_view` 后开始工作。 |
-| skill 缺失 | AIAgent 启动前失败，持久化明确错误摘要；不调用 provider。 |
-| preflight scanner 拒绝 | AIAgent 启动前失败；不把被拒绝正文写入 user message、tool row 或日志。 |
-| `skill_view` digest 变化 / TOCTOU | 拒绝正文和后续动作，结束为 `cron_error`。 |
-| 模型跳过 skill、直接工具调用 | tool gate 返回 `required_skill_not_loaded`；模型只能补齐 `skill_view`。 |
-| 模型跳过 skill、直接最终答复 | finalizer 拒绝交付，要求加载缺失 skill。 |
-| `wakeAgent=false` | 与现状相同：不建 prompt、不读 skill、不创建 plan、不启动 Agent。 |
-| script 成功但无 stdout | 保持现有静默语义，不创建 runtime context tool。 |
-| `no_agent=true` | 完全不经过 lazy skill / runtime-context 链路。 |
-| provider fallback | 共用 execution ID、workspace、plan 和已加载 skill 状态；不重新创建 workspace。 |
+| 无 Skill 的 agent-backed Cron | user message 仅保留现有第 5 层。 |
+| 有 Skill 且工具可用 | 名称提示出现；Agent 可自行调用现有 `skill_view`。 |
+| 有 Skill 但 `skills` toolset 被禁用 | 名称提示仍出现；不新增失败或自动启用工具。 |
+| 名称不存在 | 名称照原配置展示；不在 scheduler 预读、扫描或阻断。 |
+| bundle 名称 | 按配置名称展示，不由 scheduler 展开 bundle 正文。 |
+| 模型不调用 `skill_view` | 正常继续工具循环和最终交付。 |
+| 模型调用 `skill_view` | 复用现有 handler、扫描、tool result 持久化和 Skill 使用计数语义。 |
+| `wakeAgent=false` / script 空输出 | 保持现有不构造 AIAgent 的静默语义。 |
+| `no_agent=true` | 完全不走 prompt 或 ephemeral system context 链路。 |
+| provider fallback | 沿用当前 continuation、execution ID 和 workspace 语义。 |
 
 ## 测试计划
 
-### Prompt 形状
+在 `hermes-agent/tests/cron/test_cron_execution_prompt.py` 与
+`hermes-agent/tests/cron/test_scheduler.py` 添加或更新定向测试：
 
-在 `hermes-agent/tests/cron/test_cron_execution_prompt.py` 新增断言：
+1. 有 Skill 的 user message 包含任务、现有 script/context 数据与单行中文名称提示。
+2. user message 不含 Skill wrapper、Skill 正文 sentinel、Skill/task bridge 或 Cron delivery hint。
+3. `skills` 字符串、列表、legacy `skill`、空值和保留声明顺序的行为正确。
+4. prompt 组装不会调用 scheduler 内的 `skill_view` 或 `bump_use`。
+5. V1 Cron 的 workspace 与 Cron delivery 都在 ephemeral system prompt，不在 user row。
+6. legacy agent-backed Cron 只有 delivery system context；`no_agent=True` 不创建 AIAgent。
+7. script stdout/error、`context_from`、`wakeAgent=false`、空 stdout 和 8K 截断保持现有行为。
+8. 已有 workspace 权威值测试补充断言：`SessionDB.ensure_session(cwd=...)`、`TERMINAL_CWD` 和
+   V1 ephemeral workspace 使用同一 execution tuple 值。
 
-1. 有 skill 的默认 user message 只含 prepared task 和中文 `## 可用技能` block；
-2. 不含旧 wrapper、完整 skill sentinel、skill/task bridge、Cron hint、script stdout 或
-   `context_from` 正文；
-3. skill 名称顺序、去重、legacy `skill` 兼容、空 skill 和 runtime token 展开正确；
-4. Cron delivery/workspace instruction 存在于 ephemeral system prompt，且不在 user row；
-5. 无 skill job 不注入空 notice。
+验证命令：
 
-### 执行与安全
-
-在 `tests/cron/test_scheduler.py`、`tests/tools/test_skills_tool.py` 与 tool-dispatch 测试中
-覆盖：
-
-| 场景 | 必须断言 |
-| --- | --- |
-| required skill 正常加载 | 首个 user message 无正文；`skill_view` tool result 有正文；随后工具可用。 |
-| 未加载时 web/terminal/file/MCP | 被统一 gate 拒绝，错误码为 `required_skill_not_loaded`。 |
-| 未加载时最终答复 | 不交付，finalizer 继续要求 `skill_view`。 |
-| missing skill | provider 零调用、无副作用、明确错误。 |
-| scanner-rejected skill | provider 零调用、正文不写入 DB/日志。 |
-| preflight 后内容变更 | digest 检查拒绝，不向模型返回更改后的正文。 |
-| `enabled_toolsets` 排除 skills | scheduler 强制加入最小 skill_view 或启动前明确失败；二者选择固定且有测试。 |
-| script/context | 首条 user message 不含动态正文；required skill 加载后由 `cron_runtime_context` tool result 提供。 |
-| `[SILENT]` | system context 提供规则；exact marker 继续抑制 delivery。 |
-| fallback | 同一 execution 不重复 plan、skill tool result 或 user message。 |
-| no-agent / wake false | 不加载 skill、不增加额外 provider/tool call。 |
-
-### 回归验证
-
-同一 fixture 在旧 inline 路径与新 lazy 路径分别执行，验证：
-
-- 最终文件、最终回答和 Artifact decision 相同；
-- 新路径的首个 provider 请求不含 skill sentinel；`skill_view` 后的下一请求包含它；
-- 新路径多出恰好一次每 required skill 的 `skill_view` 轮次；
-- Cron delivery 只发送一次，`[SILENT]` 不发送；
-- SessionDB 的首条 user `content` 不含 skill 正文，skill 正文只出现在允许的 tool row。
-
-## 发布与回滚
-
-这是默认 prompt/工具语义变更，必须分阶段发布：
-
-1. **观察模式**：scheduler 创建并扫描 plan、记录“本轮会要求加载哪些 skill”，但仍使用
-   inline prompt；验证现有 jobs 的工具集和 skill 可用性。
-2. **Opt-in lazy mode**：通过受控 profile/job feature flag 启用新路径，验证真实 Cron 的
-   tool gate、delivery、fallback 和 Artifact。
-3. **默认 lazy mode**：观察模式无缺失/扫描/工具集异常后，才将新规则设为默认。
-4. **保留 inline escape hatch**：紧急回滚只切回 inline builder，不改 jobs.json、session、
-   workspace 或 Manifest rows。
-
-观测只记录 job ID、session ID、plan skill 数、首次请求字符数、skill-load 成功/失败、
-gate 拒绝次数、最终状态和错误码。不得记录 skill 正文、任务 prompt、script/context 内容
-或 workspace 绝对路径。
+```bash
+scripts/run_tests.sh tests/cron/test_cron_execution_prompt.py tests/cron/test_scheduler.py -q
+```
 
 ## 验收标准
 
-- 默认 Cron 首条 user message 仅有用户任务和其后的中文 skill 名称 block。
-- 完整 skill、旧 wrapper、bridge、Cron hint、script/context 正文均不进入首条 user message。
-- Cron delivery / `[SILENT]` 在 ephemeral system context 中仍有效。
-- 每个声明 skill 在任何副作用工具或最终交付前都已成功通过 plan-aware `skill_view` 加载。
-- 缺失、内容变化或 scanner 拒绝均在副作用前失败，且不泄漏正文。
-- tool result 形式的 skill/runtime context 能被模型正常消费，Artifact settlement 与 workspace
-  identity 不变。
-- 普通 chat、legacy inline escape hatch、`no_agent=true` 和 `wakeAgent=false` 行为不变。
+- 首条 user message 保留第 5 层任务和动态数据，末尾有紧凑的 Skill 名称提示。
+- 完整 Skill、旧 wrapper、bridge 和 Cron delivery hint 不进入首条 user message。
+- Cron delivery / `[SILENT]` 与 V1 workspace 说明通过 ephemeral system context 有效。
+- Agent 未调用 `skill_view` 时不被 gate 或 finalizer 阻断；调用时复用已有工具语义。
+- 不新增 Cron 专用工具、Agent 状态、通用 tool dispatch 或 finalizer 改动。
+- workspace identity、Artifact settlement、`no_agent=True`、wake gate 与 provider fallback 保持不变。
