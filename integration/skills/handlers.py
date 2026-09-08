@@ -546,6 +546,9 @@ def _post_install_to_profiles(handler, parsed, body: dict) -> bool:
             results.append({"profile": profile_name, "ok": False, "error": str(exc)})
         except Exception as exc:
             results.append({"profile": profile_name, "ok": False, "error": str(exc)})
+    # Associating the skill to assistants re-enables every installed copy
+    # (including profiles where it was previously disabled)
+    skillhub.enable_skill_in_all_profiles(name, source="hub")
     return _respond(handler, {"ok": True, "results": results})
 
 
@@ -623,6 +626,11 @@ def _post_sync_profiles(handler, parsed, body: dict) -> bool:
                 results_uninstalled.append({"profile": profile_name, "ok": False, "error": result.get("error", "unknown")})
         except Exception as exc:
             results_uninstalled.append({"profile": profile_name, "ok": False, "error": str(exc)})
+    # Associating the skill to assistants re-enables every installed copy
+    # (including profiles where it was previously disabled); run after the
+    # uninstall loop so only surviving copies are touched
+    if to_install:
+        skillhub.enable_skill_in_all_profiles(name, source="custom" if is_custom else "hub")
     return _respond(handler, {
         "ok": True,
         "installed": results_installed,
@@ -680,6 +688,9 @@ def _post_batch_install(handler, parsed, body: dict) -> bool:
                 results.append({"name": name, "profile": profile_name, "ok": False, "error": str(exc)})
             except Exception as exc:
                 results.append({"name": name, "profile": profile_name, "ok": False, "error": str(exc)})
+        # Associating the skill to assistants re-enables every installed copy
+        # (including profiles where it was previously disabled)
+        skillhub.enable_skill_in_all_profiles(name, source="custom" if is_custom else "hub")
     return _respond(handler, {"ok": True, "results": results})
 
 

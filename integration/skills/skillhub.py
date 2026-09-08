@@ -1437,6 +1437,31 @@ def _ensure_skill_enabled(profile_name: str, skill_name: str) -> None:
         _log.debug("Could not ensure skill enabled for %s/%s: %s", profile_name, skill_name, exc)
 
 
+def enable_skill_in_all_profiles(name: str, source: str = "") -> list[str]:
+    """Re-enable a skill in every profile where a copy is installed.
+
+    ``source`` ("hub" or "custom") restricts to copies of that origin; ""
+    covers both. Used by the associate-to-assistant flows so that a skill
+    previously disabled in some profiles is enabled everywhere once the
+    user re-associates it.
+    """
+    try:
+        found = get_skill_installed_profiles(name, source=source)
+    except Exception:
+        return []
+    updated: list[str] = []
+    for entry in found.get("installed", []):
+        profile = str(entry.get("profile") or "").strip()
+        if not profile:
+            continue
+        try:
+            _ensure_skill_enabled(profile, name)
+            updated.append(profile)
+        except Exception as exc:
+            _log.debug("could not enable %s for %s: %s", name, profile, exc)
+    return updated
+
+
 def copy_custom_skill_to_profile(name: str, profile_name: str, category: str = "") -> dict:
     """Copy a custom skill from any profile to the target profile."""
     import shutil
