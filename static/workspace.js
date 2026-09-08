@@ -776,8 +776,9 @@ async function openInspectorReferencePath(path){
   if(row && row.preview) return openManifestPreview(row);
   const skillParts = _hermesSkillsPathParts(path);
   if(skillParts){
-    if(skillParts.filePath) return openSkillFilePreview(skillParts.skillName, skillParts.filePath);
-    return openSkillContentPreview(skillParts.skillName);
+    const rowProfile = row && row.profile;
+    if(skillParts.filePath) return openSkillFilePreview(skillParts.skillName, skillParts.filePath, rowProfile);
+    return openSkillContentPreview(skillParts.skillName, rowProfile);
   }
   await openManifestPreview(row || {path});
 }
@@ -829,12 +830,14 @@ async function openSkillContentPreview(skillName, profile){
   }
 }
 
-async function openSkillFilePreview(skillName, filePath){
+async function openSkillFilePreview(skillName, filePath, profile){
   if(!S.session || !skillName || !filePath) return;
   if(typeof ensureWorkspacePreviewVisible==='function') ensureWorkspacePreviewVisible();
   else if(typeof openWorkspacePanel==='function') openWorkspacePanel('preview');
   switchWorkspacePanelTab('files');
-  const url = `/api/skillhub/file?name=${encodeURIComponent(skillName)}&path=${encodeURIComponent(filePath)}`;
+  let url = `/api/skillhub/file?name=${encodeURIComponent(skillName)}&path=${encodeURIComponent(filePath)}`;
+  const profileName = String(profile || '').trim();
+  if(profileName) url += `&profile=${encodeURIComponent(profileName)}`;
   try{
     const data = await api(url);
     const content = data.content || data.body || '';
@@ -1097,8 +1100,9 @@ async function openArtifactPath(path){
   if(manifestRow && manifestRow.preview) return openManifestPreview(manifestRow);
   const skillParts = _hermesSkillsPathParts(path);
   if(skillParts){
-    if(skillParts.filePath) return openSkillFilePreview(skillParts.skillName, skillParts.filePath);
-    return openSkillContentPreview(skillParts.skillName);
+    const rowProfile = manifestRow && manifestRow.profile;
+    if(skillParts.filePath) return openSkillFilePreview(skillParts.skillName, skillParts.filePath, rowProfile);
+    return openSkillContentPreview(skillParts.skillName, rowProfile);
   }
   const rel = _toWorkspaceRelativePath(path);
   if(rel === null){

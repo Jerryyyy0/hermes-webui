@@ -388,7 +388,18 @@ Step 2: POST /api/skillhub/skill/detail
 | scope 值 | 行为 |
 |----------|------|
 | `custom` | 仅读取本地 `shared_skills_dir`，404 当缺失 |
-| `hub` | 仅从上游 SkillHub 获取 |
+| `hub` | 仅从上游 SkillHub 获取，不做本地回退 |
 | `auto`（默认） | 本地优先，本地不存在时回退到上游 |
+
+### profile + dir_name 定位参数
+
+`/api/skillhub/content`、`/api/skillhub/structure`、`/api/skillhub/file` 接口支持可选的 `profile` 和 `dir_name` 查询参数，用于精确定位目标副本：
+
+| 参数 | 说明 |
+|------|------|
+| `profile` | 目标 profile 名称（如 `default`、`researcher`） |
+| `dir_name` | 精确目录路径（与 `profile` 配合使用，用于消除同名副本歧义） |
+
+**行为**：当 `profile` 参数存在时，接口**仅**在该 profile 的技能目录内解析，不回退到其他 profile，也不回退到上游。用于跨 profile 同名副本场景（如自定义技能与市场安装的技能同名时），避免读取到错误的副本。
 
 **注意**：`GET /api/skillhub/detail` 接口不支持 scope 参数，始终从上游 SkillHub 获取。已安装和自定义技能的元数据通过 `GET /api/skillhub/file?path=detail.json` 从本地读取。

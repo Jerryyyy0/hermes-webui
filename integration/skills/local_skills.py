@@ -117,7 +117,7 @@ def collect_skill_zip_files(
     return files, total_bytes, None
 
 
-def prepare_skill_download(name: str, dir_name: str = "") -> dict:
+def prepare_skill_download(name: str, dir_name: str = "", profile: str = "") -> dict:
     """Resolve a local skill directory and collect files for zip download."""
     skill_name = str(name or "").strip()
     if not skill_name:
@@ -125,9 +125,16 @@ def prepare_skill_download(name: str, dir_name: str = "") -> dict:
     if is_system_skill(skill_name):
         return {"error": "Cannot download system skill", "status": 403}
 
-    skill_dir, _skills_root = _resolve_skill_dir_in_any_profile(skill_name, dir_name)
-    if not skill_dir or not skill_dir.is_dir():
-        return {"error": "Skill not found", "status": 404}
+    profile_key = str(profile or "").strip()
+    if profile_key:
+        skills_root = skills_dir_for_profile(profile_key)
+        skill_dir = _resolve_skill_dir(skills_root, skill_name, dir_name)
+        if not skill_dir or not skill_dir.is_dir():
+            return {"error": "Skill not found", "status": 404}
+    else:
+        skill_dir, skills_root = _resolve_skill_dir_in_any_profile(skill_name, dir_name)
+        if not skill_dir or not skill_dir.is_dir():
+            return {"error": "Skill not found", "status": 404}
 
     max_bytes = _skill_zip_max_bytes()
     max_files = _skill_zip_max_files()
@@ -703,8 +710,27 @@ def _structure_file_entries(skill_dir: Path, subdir: str, extensions: list[str])
     return [{"path": p} for p in sorted(paths)]
 
 
-def get_custom_doc(name: str) -> dict:
-    skill_dir, skill_md = _find_skill_in_any_profile(name)
+def _resolve_read_target(
+    name: str, profile: str, dir_name: str
+) -> tuple[Path | None, Path | None]:
+    """Resolve a skill copy for read APIs. Returns (skill_dir, skill_md).
+
+    With ``profile`` set, resolution is restricted to that profile's skills
+    dir (no cross-profile fallback); otherwise the legacy any-profile
+    default-first lookup applies.
+    """
+    profile_key = str(profile or "").strip()
+    if profile_key:
+        skills_dir = skills_dir_for_profile(profile_key)
+        skill_dir = _resolve_skill_dir(skills_dir, name, dir_name)
+        if not skill_dir or not skill_dir.is_dir():
+            return None, None
+        return skill_dir, find_skill_main_file(skill_dir)
+    return _find_skill_in_any_profile(name)
+
+
+def get_custom_doc(name: str, profile: str = "", dir_name: str = "") -> dict:
+    skill_dir, skill_md = _resolve_read_target(name, profile, dir_name)
     if not skill_md:
         return {"error": "Skill not found", "status": 404}
     return {
@@ -714,8 +740,8 @@ def get_custom_doc(name: str) -> dict:
     }
 
 
-def get_custom_structure(name: str) -> dict:
-    skill_dir, skill_md = _find_skill_in_any_profile(name)
+def get_custom_structure(name: str, profile: str = "", dir_name: str = "") -> dict:
+    skill_dir, skill_md = _resolve_read_target(name, profile, dir_name)
     if not skill_dir or not skill_md:
         return {"error": "Skill not found", "status": 404}
     return {
@@ -729,8 +755,10 @@ def get_custom_structure(name: str) -> dict:
     }
 
 
-def get_custom_file(name: str, file_path: str) -> dict:
-    skill_dir, skill_md = _find_skill_in_any_profile(name)
+def get_custom_file(
+    name: str, file_path: str, profile: str = "", dir_name: str = ""
+) -> dict:
+    skill_dir, skill_md = _resolve_read_target(name, profile, dir_name)
     if not skill_dir or not skill_md:
         return {"error": "Skill not found", "status": 404}
     target = (skill_dir / file_path).resolve()
@@ -1519,7 +1547,9 @@ def _resolve_skill_dir(skills_dir: Path, name: str, dir_name: str = "") -> Path 
     return skill_dir
 
 
-def edit_custom_skill(*, name: str, content: str, dir_name: str = "") -> dict:
+def edit_custom_skill(
+    *, name: str, content: str, dir_name: str = "", profile: str = ""
+) -> dict:
     """Update SKILL.md for an existing custom skill in shared_skills_dir."""
     skill_name = str(name or "").strip()
     if not skill_name:
@@ -1529,7 +1559,16 @@ def edit_custom_skill(*, name: str, content: str, dir_name: str = "") -> dict:
     if is_system_skill(skill_name):
         return {"error": "Cannot edit system skill", "status": 403}
 
-    skill_dir, skills_dir = _resolve_skill_dir_in_any_profile(skill_name, dir_name)
+    profile_key = str(profile or "").strip()
+    if profile_key:
+        skills_dir = skills_dir_for_profile(profile_key)
+        skill_dir = _resolve_skill_dir(skills_dir, skill_name, dir_name)
+        if not skill_dir or not skill_dir.is_dir():
+            return {"error": "Skill not found", "status": 404}
+    else:
+        skill_dir, skills_dir = _resolve_skill_dir_in_any_profile(skill_name, dir_name)
+        if not skill_dir or not skills_dir:
+            return {"error": "Skill not found", "status": 404}
     if not skill_dir or not skills_dir:
         return {"error": "Skill not found", "status": 404}
     if (skill_dir / ".hub_installed").is_file():
@@ -1605,13 +1644,20 @@ def _remove_skill_from_config_yaml(skill_name: str) -> None:
         _log.warning("Failed to remove skill from config.yaml: %s", exc)
 
 
-def delete_local_skill(name: str, dir_name: str = "") -> dict:
+def delete_local_skill(name: str, dir_name: str = "", profile: str = "") -> dict:
     """Remove a hub install or custom skill from any profile."""
     if is_system_skill(name):
         return {"error": "Cannot delete system skill", "status": 403}
-    skill_dir, skills_dir = _resolve_skill_dir_in_any_profile(name, dir_name)
-    if not skill_dir or not skills_dir:
-        return {"error": "Skill not found", "status": 404}
+    profile_key = str(profile or "").strip()
+    if profile_key:
+        skills_dir = skills_dir_for_profile(profile_key)
+        skill_dir = _resolve_skill_dir(skills_dir, name, dir_name)
+        if not skill_dir or not skill_dir.is_dir():
+            return {"error": "Skill not found", "status": 404}
+    else:
+        skill_dir, skills_dir = _resolve_skill_dir_in_any_profile(name, dir_name)
+        if not skill_dir or not skills_dir:
+            return {"error": "Skill not found", "status": 404}
     hub_installed = (skill_dir / ".hub_installed").is_file()
     skill_md = find_skill_main_file(skill_dir)
     logical_name = (

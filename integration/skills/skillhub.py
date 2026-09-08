@@ -1049,6 +1049,28 @@ def _install_fallback_from_doc_or_local(
     (target / "SKILL.md").write_text(text, encoding="utf-8")
 
 
+def _cross_source_install_warning(name: str, installing_profile: str) -> str:
+    """Warning when another profile already holds a same-name custom skill.
+
+    Hub installs that collide with a user-uploaded skill elsewhere are allowed
+    (each profile keeps at most one copy), but the two copies diverge —
+    independent metadata and SKILL.md — so the caller should surface it.
+    """
+    try:
+        found = get_skill_installed_profiles(name, source="custom")
+    except Exception:
+        return ""
+    for e in found.get("installed", []):
+        profile = str(e.get("profile") or "").strip()
+        if profile and profile != installing_profile:
+            display = str(e.get("display_name") or "").strip() or name
+            return (
+                f"助理「{profile}」已存在同名自定义技能「{display}」，"
+                "两个副本将各自独立维护"
+            )
+    return ""
+
+
 def install_skill(name: str, display_name: str = "", category: str = "") -> dict:
     skills_dir = shared_skills_dir()
     skills_dir.mkdir(parents=True, exist_ok=True)
@@ -1116,12 +1138,16 @@ def install_skill(name: str, display_name: str = "", category: str = "") -> dict
         add_names([name])
     except Exception as exc:
         _log.exception("failed to add hub skill to no_self_improve: %s", exc)
-    return {
+    result = {
         "ok": True,
         "name": name,
         "category": cat_seg or "",
         "dir_name": _skill_dir_rel_path(target, skills_dir),
     }
+    warning = _cross_source_install_warning(name, "default")
+    if warning:
+        result["warning"] = warning
+    return result
 
 
 def install_skill_to_profile(
@@ -1191,13 +1217,17 @@ def install_skill_to_profile(
         _log.exception("failed to add hub skill to no_self_improve: %s", exc)
     # Ensure skill is enabled in profile config
     _ensure_skill_enabled(profile_name, name)
-    return {
+    result = {
         "ok": True,
         "name": name,
         "profile": profile_name,
         "category": cat_seg or "",
         "dir_name": _skill_dir_rel_path(target, skills_dir),
     }
+    warning = _cross_source_install_warning(name, profile_name)
+    if warning:
+        result["warning"] = warning
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -1407,6 +1437,31 @@ def _ensure_skill_enabled(profile_name: str, skill_name: str) -> None:
         _log.debug("Could not ensure skill enabled for %s/%s: %s", profile_name, skill_name, exc)
 
 
+def enable_skill_in_all_profiles(name: str, source: str = "") -> list[str]:
+    """Re-enable a skill in every profile where a copy is installed.
+
+    ``source`` ("hub" or "custom") restricts to copies of that origin; ""
+    covers both. Used by the associate-to-assistant flows so that a skill
+    previously disabled in some profiles is enabled everywhere once the
+    user re-associates it.
+    """
+    try:
+        found = get_skill_installed_profiles(name, source=source)
+    except Exception:
+        return []
+    updated: list[str] = []
+    for entry in found.get("installed", []):
+        profile = str(entry.get("profile") or "").strip()
+        if not profile:
+            continue
+        try:
+            _ensure_skill_enabled(profile, name)
+            updated.append(profile)
+        except Exception as exc:
+            _log.debug("could not enable %s for %s: %s", name, profile, exc)
+    return updated
+
+
 def copy_custom_skill_to_profile(name: str, profile_name: str, category: str = "") -> dict:
     """Copy a custom skill from any profile to the target profile."""
     import shutil
@@ -1491,18 +1546,36 @@ def delete_skill_from_profile(name: str, profile_name: str, dir_name: str = "") 
     }
 
 
-def delete_skill_from_all_profiles(name: str, dir_name: str = "") -> dict:
-    """Delete a skill from all profiles."""
+def delete_skill_from_all_profiles(name: str, dir_name: str = "", source: str = "") -> dict:
+    """Delete a skill from all profiles.
+
+    ``source`` ("hub" or "custom") deletes only copies of that origin and
+    leaves copies of the other origin untouched.
+    """
     from api.profiles import list_profiles_api
 
+    source_key = str(source or "").strip().lower()
+    filtered = source_key in ("hub", "custom")
+    targets: dict[str, str] = {}
+    if filtered:
+        found = get_skill_installed_profiles(name, source=source_key)
+        targets = {
+            str(e.get("profile") or "").strip(): str(e.get("dir_name") or "").strip()
+            for e in found.get("installed", [])
+        }
     profiles = list_profiles_api()
     results = []
     for p in profiles:
         profile_name = str(p.get("name", "")).strip()
         if not profile_name:
             continue
+        entry_dir = dir_name
+        if filtered:
+            if profile_name not in targets:
+                continue
+            entry_dir = targets[profile_name] or dir_name
         try:
-            result = delete_skill_from_profile(name, profile_name, dir_name=dir_name)
+            result = delete_skill_from_profile(name, profile_name, dir_name=entry_dir)
             if result.get("ok"):
                 results.append({"profile": profile_name, "ok": True})
             elif result.get("status") == 404:
@@ -1511,28 +1584,53 @@ def delete_skill_from_all_profiles(name: str, dir_name: str = "") -> dict:
                 results.append({"profile": profile_name, "ok": False, "error": result.get("error", "unknown")})
         except Exception as exc:
             results.append({"profile": profile_name, "ok": False, "error": str(exc)})
-    # Clean up version tracking records (non-blocking)
+    # Clean up version tracking records (non-blocking), but only when no
+    # copy of the skill remains in any profile
     try:
-        from integration.skills.version_store import remove as version_store_remove
-        version_store_remove(name)
-    except Exception as exc:
-        _log.debug("version_store.remove failed for %s: %s", name, exc)
+        remaining = get_skill_installed_profiles(name).get("installed", [])
+    except Exception:
+        remaining = []
+    if not remaining:
+        try:
+            from integration.skills.version_store import remove as version_store_remove
+            version_store_remove(name)
+        except Exception as exc:
+            _log.debug("version_store.remove failed for %s: %s", name, exc)
+    else:
+        # delete_skill_from_profile removed the no-self-improve name; a
+        # surviving copy must keep that protection
+        try:
+            from integration.skills.no_self_improve import add_names
+            add_names([name])
+        except Exception as exc:
+            _log.debug("no_self_improve.add_names failed for %s: %s", name, exc)
     return {"ok": True, "results": results}
 
 
-def get_skill_installed_profiles(name: str) -> dict:
+def _read_install_name(skill_dir: Path) -> str:
+    sidecar = skill_dir / ".install_name"
+    if not sidecar.is_file():
+        return ""
+    try:
+        return sidecar.read_text(encoding="utf-8").strip()
+    except Exception:
+        return ""
+
+
+def get_skill_installed_profiles(name: str, source: str = "") -> dict:
     """Get all profiles that have a specific skill installed.
 
-    Returns a list of profiles with the skill's dir_name in each profile.
-    Checks both hub-installed skills and local custom skills.
+    Returns a list of profiles with the skill's dir_name, source ("hub" or
+    "custom") and display_name in each profile. Checks both hub-installed
+    skills and local custom skills. ``source`` filters to one origin.
     """
     from api.profiles import list_profiles_api
     from agent.skill_utils import iter_skill_index_files
     from tools.skills_tool import _EXCLUDED_SKILL_DIRS
 
+    source_filter = str(source or "").strip().lower()
     profiles = list_profiles_api()
     installed = []
-    seen_profiles: set[str] = set()
 
     for p in profiles:
         profile_name = str(p.get("name") or "").strip()
@@ -1543,19 +1641,23 @@ def get_skill_installed_profiles(name: str) -> dict:
             continue
 
         # Check hub-installed skills first
-        try:
-            index = _hub_installed_index(skills_dir)
-            if name in index:
-                installed.append({
-                    "profile": profile_name,
-                    "dir_name": index[name],
-                })
-                seen_profiles.add(profile_name)
-                continue
-        except Exception:
-            pass
+        if source_filter != "custom":
+            try:
+                index = _hub_installed_index(skills_dir)
+                if name in index:
+                    installed.append({
+                        "profile": profile_name,
+                        "dir_name": index[name],
+                        "source": "hub",
+                        "display_name": _read_install_name(skills_dir / index[name]),
+                    })
+                    continue
+            except Exception:
+                pass
 
         # Check local custom skills (SKILL.md files without .hub_installed)
+        if source_filter == "hub":
+            continue
         try:
             for skill_md in iter_skill_index_files(skills_dir, "SKILL.md"):
                 if any(part in _EXCLUDED_SKILL_DIRS for part in skill_md.parts):
@@ -1565,28 +1667,39 @@ def get_skill_installed_profiles(name: str) -> dict:
                     continue  # Already checked hub-installed
                 dir_name = _skill_dir_rel_path(skill_dir, skills_dir)
                 # Match by directory name or SKILL.md frontmatter name
+                frontmatter: dict = {}
                 if dir_name == name or skill_dir.name == name:
-                    installed.append({
-                        "profile": profile_name,
-                        "dir_name": dir_name,
-                    })
-                    seen_profiles.add(profile_name)
-                    break
-                # Also check frontmatter name
-                try:
-                    content = skill_md.read_text(encoding="utf-8")[:4000]
-                    from tools.skills_tool import _parse_frontmatter
-                    frontmatter, _ = _parse_frontmatter(content)
-                    skill_name = str(frontmatter.get("name", "") or "").strip()
-                    if skill_name == name:
-                        installed.append({
-                            "profile": profile_name,
-                            "dir_name": dir_name,
-                        })
-                        seen_profiles.add(profile_name)
-                        break
-                except Exception:
-                    continue
+                    pass
+                else:
+                    # Also check frontmatter name
+                    try:
+                        content = skill_md.read_text(encoding="utf-8")[:4000]
+                        from tools.skills_tool import _parse_frontmatter
+                        frontmatter, _ = _parse_frontmatter(content)
+                        skill_name = str(frontmatter.get("name", "") or "").strip()
+                        if skill_name != name:
+                            continue
+                    except Exception:
+                        continue
+                if not frontmatter:
+                    try:
+                        content = skill_md.read_text(encoding="utf-8")[:4000]
+                        from tools.skills_tool import _parse_frontmatter
+                        frontmatter, _ = _parse_frontmatter(content)
+                    except Exception:
+                        frontmatter = {}
+                detail = read_detail_json(skill_dir) or {}
+                installed.append({
+                    "profile": profile_name,
+                    "dir_name": dir_name,
+                    "source": "custom",
+                    "display_name": str(
+                        detail.get("display_name")
+                        or frontmatter.get("display_name")
+                        or ""
+                    ).strip(),
+                })
+                break
         except Exception:
             continue
 

@@ -115,7 +115,7 @@ def test_skillhub_download_route_without_skillhub_url():
                         "files": [],
                     }
                     assert try_handle_get(handler, parsed) is True
-                    prep.assert_called_once_with("my-skill", "")
+                    prep.assert_called_once_with("my-skill", "", profile="")
                     stream.assert_called_once()
 
 
@@ -179,40 +179,39 @@ def test_skillhub_content_auto_local_only_when_missing():
                     fetch_doc.assert_not_called()
 
 
-def test_skillhub_content_hub_scope_prefers_local():
+def test_skillhub_content_hub_scope_always_upstream():
+    """scope=hub now always fetches upstream, even when a local copy exists."""
     parsed = urlparse("/api/skillhub/content?name=local-skill&scope=hub")
     handler = MagicMock()
     with patch("integration.skills.handlers.skillhub_enabled", return_value=True):
-        with patch("integration.skills.handlers.local_skills.has_local_skill", return_value=True):
-            with patch("integration.skills.handlers.local_skills.get_custom_doc") as get_doc:
-                with patch("integration.skills.handlers.skillhub.fetch_doc") as fetch_doc:
-                    with patch("integration.skills.handlers.j", return_value=True):
-                        get_doc.return_value = {
-                            "name": "local-skill",
-                            "content": "# local",
-                            "linked_files": {},
-                        }
-                        assert try_handle_get(handler, parsed) is True
-                        get_doc.assert_called_once_with("local-skill")
-                        fetch_doc.assert_not_called()
+        with patch("integration.skills.handlers.local_skills.get_custom_doc") as get_doc:
+            with patch("integration.skills.handlers.skillhub.fetch_doc") as fetch_doc:
+                with patch("integration.skills.handlers.j", return_value=True):
+                    fetch_doc.return_value = {
+                        "name": "local-skill",
+                        "content": "# hub",
+                        "linked_files": {},
+                    }
+                    assert try_handle_get(handler, parsed) is True
+                    get_doc.assert_not_called()
+                    fetch_doc.assert_called_once_with("local-skill")
 
 
-def test_skillhub_content_hub_scope_falls_back_to_hub():
+def test_skillhub_content_hub_scope_upstream_only():
     parsed = urlparse("/api/skillhub/content?name=remote-only&scope=hub")
     handler = MagicMock()
     with patch("integration.skills.handlers.skillhub_enabled", return_value=True):
-        with patch("integration.skills.handlers.local_skills.has_local_skill", return_value=False):
-            with patch("integration.skills.handlers.local_skills.get_custom_doc") as get_doc:
-                with patch("integration.skills.handlers.skillhub.fetch_doc") as fetch_doc:
-                    with patch("integration.skills.handlers.j", return_value=True):
-                        fetch_doc.return_value = {
-                            "name": "remote-only",
-                            "content": "# hub",
-                            "linked_files": {},
-                        }
-                        assert try_handle_get(handler, parsed) is True
-                        get_doc.assert_not_called()
-                        fetch_doc.assert_called_once_with("remote-only")
+        with patch("integration.skills.handlers.local_skills.get_custom_doc") as get_doc:
+            with patch("integration.skills.handlers.skillhub.fetch_doc") as fetch_doc:
+                with patch("integration.skills.handlers.j", return_value=True):
+                    fetch_doc.return_value = {
+                        "name": "remote-only",
+                        "content": "# hub",
+                        "linked_files": {},
+                    }
+                    assert try_handle_get(handler, parsed) is True
+                    get_doc.assert_not_called()
+                    fetch_doc.assert_called_once_with("remote-only")
 
 
 def test_skillhub_re_extract_route():
@@ -313,3 +312,60 @@ def test_skillhub_re_extract_not_intercepted_when_disabled():
     with patch("integration.skills.handlers.integration_enabled", return_value=False):
         parsed = urlparse("/api/skillhub/re-extract")
         assert try_handle_post(handler, parsed, body) is False
+
+
+def test_install_to_profiles_reenables_all_hub_copies():
+    handler = MagicMock()
+    body = {"name": "my-skill", "category": "tools", "profiles": ["p1"]}
+    with patch("integration.skills.handlers.skillhub_enabled", return_value=True):
+        with patch("integration.skills.handlers.skillhub.install_skill_to_profile") as inst:
+            with patch("integration.skills.handlers.skillhub.enable_skill_in_all_profiles") as enable:
+                with patch("integration.skills.handlers.j", return_value=True):
+                    inst.return_value = {
+                        "ok": True, "name": "my-skill", "profile": "p1", "dir_name": "tools/my-skill",
+                    }
+                    parsed = urlparse("/api/skillhub/install-to-profiles")
+                    assert try_handle_post(handler, parsed, body) is True
+                    inst.assert_called_once()
+                    enable.assert_called_once_with("my-skill", source="hub")
+
+
+def test_sync_profiles_reenables_all_hub_copies():
+    handler = MagicMock()
+    body = {"name": "my-skill", "category": "tools", "install": ["p1"], "uninstall": ["p2"]}
+    with patch("integration.skills.handlers.skillhub_enabled", return_value=True):
+        with patch("integration.skills.handlers.skillhub.install_skill_to_profile") as inst:
+            with patch("integration.skills.handlers.skillhub.delete_skill_from_profile") as dele:
+                with patch("integration.skills.handlers.skillhub.enable_skill_in_all_profiles") as enable:
+                    with patch("integration.skills.handlers.j", return_value=True):
+                        inst.return_value = {"ok": True, "name": "my-skill", "profile": "p1"}
+                        dele.return_value = {"ok": True, "name": "my-skill", "profile": "p2"}
+                        parsed = urlparse("/api/skillhub/sync-profiles")
+                        assert try_handle_post(handler, parsed, body) is True
+                        enable.assert_called_once_with("my-skill", source="hub")
+
+
+def test_sync_profiles_skips_reenable_when_only_uninstalling():
+    handler = MagicMock()
+    body = {"name": "my-skill", "category": "tools", "install": [], "uninstall": ["p2"]}
+    with patch("integration.skills.handlers.skillhub_enabled", return_value=True):
+        with patch("integration.skills.handlers.skillhub.delete_skill_from_profile") as dele:
+            with patch("integration.skills.handlers.skillhub.enable_skill_in_all_profiles") as enable:
+                with patch("integration.skills.handlers.j", return_value=True):
+                    dele.return_value = {"ok": True, "name": "my-skill", "profile": "p2"}
+                    parsed = urlparse("/api/skillhub/sync-profiles")
+                    assert try_handle_post(handler, parsed, body) is True
+                    enable.assert_not_called()
+
+
+def test_batch_install_reenables_all_custom_copies():
+    handler = MagicMock()
+    body = {"skills": [{"name": "my-skill", "is_custom": True}], "profiles": ["p1"]}
+    with patch("integration.skills.handlers.skillhub_enabled", return_value=True):
+        with patch("integration.skills.handlers.skillhub.copy_custom_skill_to_profile") as cp:
+            with patch("integration.skills.handlers.skillhub.enable_skill_in_all_profiles") as enable:
+                with patch("integration.skills.handlers.j", return_value=True):
+                    cp.return_value = {"ok": True, "name": "my-skill", "profile": "p1"}
+                    parsed = urlparse("/api/skillhub/batch-install")
+                    assert try_handle_post(handler, parsed, body) is True
+                    enable.assert_called_once_with("my-skill", source="custom")

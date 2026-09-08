@@ -340,7 +340,8 @@ def _get_skillhub_download(handler, parsed) -> bool:
     if not name:
         return _respond_bad(handler, "name required", 400)
     dir_name = (qs.get("dir_name") or [""])[0]
-    result = local_skills.prepare_skill_download(name, dir_name)
+    profile = str((qs.get("profile") or [""])[0]).strip()
+    result = local_skills.prepare_skill_download(name, dir_name, profile=profile)
     if result.get("error"):
         status = int(result.get("status") or 400)
         if status == 413:
@@ -417,15 +418,25 @@ def _get_skillhub_detail(handler, parsed) -> bool:
         return _respond_bad(handler, str(exc), 502, exc_info=(type(exc), exc, exc.__traceback__))
 
 
+def _origin_params(qs: dict) -> tuple[str, str]:
+    """Precise copy addressing: (profile, dir_name) query params, if given."""
+    profile = str((qs.get("profile") or [""])[0]).strip()
+    dir_name = str((qs.get("dir_name") or [""])[0]).strip()
+    return profile, dir_name
+
+
 def _get_skillhub_content(handler, parsed) -> bool:
     qs = _qs(parsed)
     name = (qs.get("name") or [""])[0]
     if not name:
         return _respond_bad(handler, "name required", 400)
+    profile, dir_name = _origin_params(qs)
+    if profile:
+        return _local_custom_result(
+            handler, local_skills.get_custom_doc(name, profile=profile, dir_name=dir_name)
+        )
     scope = _skillhub_preview_scope(qs)
     if _preview_local_only(scope):
-        return _local_custom_result(handler, local_skills.get_custom_doc(name))
-    if local_skills.has_local_skill(name):
         return _local_custom_result(handler, local_skills.get_custom_doc(name))
     try:
         return _respond(handler, skillhub.fetch_doc(name))
@@ -438,10 +449,13 @@ def _get_skillhub_structure(handler, parsed) -> bool:
     name = (qs.get("name") or [""])[0]
     if not name:
         return _respond_bad(handler, "name required", 400)
+    profile, dir_name = _origin_params(qs)
+    if profile:
+        return _local_custom_result(
+            handler, local_skills.get_custom_structure(name, profile=profile, dir_name=dir_name)
+        )
     scope = _skillhub_preview_scope(qs)
     if _preview_local_only(scope):
-        return _local_custom_result(handler, local_skills.get_custom_structure(name))
-    if local_skills.has_local_skill(name):
         return _local_custom_result(handler, local_skills.get_custom_structure(name))
     try:
         return _respond(handler, skillhub.fetch_structure(name))
@@ -457,10 +471,14 @@ def _get_skillhub_file(handler, parsed) -> bool:
         return _respond_bad(handler, "name required", 400)
     if not file_path:
         return _respond_bad(handler, "path required", 400)
+    profile, dir_name = _origin_params(qs)
+    if profile:
+        return _local_custom_result(
+            handler,
+            local_skills.get_custom_file(name, file_path, profile=profile, dir_name=dir_name),
+        )
     scope = _skillhub_preview_scope(qs)
     if _preview_local_only(scope):
-        return _local_custom_result(handler, local_skills.get_custom_file(name, file_path))
-    if local_skills.has_local_skill(name):
         return _local_custom_result(handler, local_skills.get_custom_file(name, file_path))
     try:
         return _respond(handler, skillhub.fetch_file(name, file_path))
@@ -518,13 +536,19 @@ def _post_install_to_profiles(handler, parsed, body: dict) -> bool:
             if result.get("status") == 409:
                 results.append({"profile": profile_name, "ok": False, "error": result.get("error", "already installed")})
             elif result.get("ok"):
-                results.append({"profile": profile_name, "ok": True, "dir_name": result.get("dir_name", "")})
+                entry = {"profile": profile_name, "ok": True, "dir_name": result.get("dir_name", "")}
+                if result.get("warning"):
+                    entry["warning"] = result["warning"]
+                results.append(entry)
             else:
                 results.append({"profile": profile_name, "ok": False, "error": result.get("error", "unknown error")})
         except RuntimeError as exc:
             results.append({"profile": profile_name, "ok": False, "error": str(exc)})
         except Exception as exc:
             results.append({"profile": profile_name, "ok": False, "error": str(exc)})
+    # Associating the skill to assistants re-enables every installed copy
+    # (including profiles where it was previously disabled)
+    skillhub.enable_skill_in_all_profiles(name, source="hub")
     return _respond(handler, {"ok": True, "results": results})
 
 
@@ -533,8 +557,11 @@ def _post_delete_from_all_profiles(handler, parsed, body: dict) -> bool:
     if not name:
         return _respond_bad(handler, "name required", 400)
     dir_name = str(body.get("dir_name", "") or "").strip()
+    source = str(body.get("source", "") or "").strip().lower()
+    if source not in ("", "hub", "custom"):
+        return _respond_bad(handler, "source must be hub or custom", 400)
     try:
-        result = skillhub.delete_skill_from_all_profiles(name, dir_name=dir_name)
+        result = skillhub.delete_skill_from_all_profiles(name, dir_name=dir_name, source=source)
         return _respond(handler, result)
     except Exception as exc:
         return _respond_bad(handler, str(exc), 502)
@@ -576,7 +603,10 @@ def _post_sync_profiles(handler, parsed, body: dict) -> bool:
             if result.get("status") == 409:
                 results_installed.append({"profile": profile_name, "ok": True, "skipped": True})
             elif result.get("ok"):
-                results_installed.append({"profile": profile_name, "ok": True})
+                entry = {"profile": profile_name, "ok": True}
+                if result.get("warning"):
+                    entry["warning"] = result["warning"]
+                results_installed.append(entry)
             else:
                 results_installed.append({"profile": profile_name, "ok": False, "error": result.get("error", "unknown")})
         except Exception as exc:
@@ -596,6 +626,11 @@ def _post_sync_profiles(handler, parsed, body: dict) -> bool:
                 results_uninstalled.append({"profile": profile_name, "ok": False, "error": result.get("error", "unknown")})
         except Exception as exc:
             results_uninstalled.append({"profile": profile_name, "ok": False, "error": str(exc)})
+    # Associating the skill to assistants re-enables every installed copy
+    # (including profiles where it was previously disabled); run after the
+    # uninstall loop so only surviving copies are touched
+    if to_install:
+        skillhub.enable_skill_in_all_profiles(name, source="custom" if is_custom else "hub")
     return _respond(handler, {
         "ok": True,
         "installed": results_installed,
@@ -643,13 +678,19 @@ def _post_batch_install(handler, parsed, body: dict) -> bool:
                 if result.get("status") == 409:
                     results.append({"name": name, "profile": profile_name, "ok": True, "skipped": True})
                 elif result.get("ok"):
-                    results.append({"name": name, "profile": profile_name, "ok": True, "dir_name": result.get("dir_name", "")})
+                    entry = {"name": name, "profile": profile_name, "ok": True, "dir_name": result.get("dir_name", "")}
+                    if result.get("warning"):
+                        entry["warning"] = result["warning"]
+                    results.append(entry)
                 else:
                     results.append({"name": name, "profile": profile_name, "ok": False, "error": result.get("error", "unknown error")})
             except RuntimeError as exc:
                 results.append({"name": name, "profile": profile_name, "ok": False, "error": str(exc)})
             except Exception as exc:
                 results.append({"name": name, "profile": profile_name, "ok": False, "error": str(exc)})
+        # Associating the skill to assistants re-enables every installed copy
+        # (including profiles where it was previously disabled)
+        skillhub.enable_skill_in_all_profiles(name, source="custom" if is_custom else "hub")
     return _respond(handler, {"ok": True, "results": results})
 
 
@@ -666,8 +707,11 @@ def _post_batch_uninstall(handler, parsed, body: dict) -> bool:
         if not name:
             continue
         dir_name = str(skill_entry.get("dir_name", "") or "").strip()
+        source = str(skill_entry.get("source", "") or "").strip().lower()
+        if source not in ("", "hub", "custom"):
+            return _respond_bad(handler, "source must be hub or custom", 400)
         try:
-            result = skillhub.delete_skill_from_all_profiles(name, dir_name=dir_name)
+            result = skillhub.delete_skill_from_all_profiles(name, dir_name=dir_name, source=source)
             results.append({"name": name, "results": result.get("results", [])})
         except Exception as exc:
             results.append({"name": name, "results": [], "error": str(exc)})
@@ -682,10 +726,12 @@ def _post_skillhub_edit(handler, body: dict) -> bool:
     if content is None or (isinstance(content, str) and not content.strip()):
         return _respond_bad(handler, "缺少 content", 400)
     dir_name = str(body.get("dir_name", "") or "").strip()
+    profile = str(body.get("profile", "") or "").strip()
     result = local_skills.edit_custom_skill(
         name=name,
         content=str(content),
         dir_name=dir_name,
+        profile=profile,
     )
     status = int(result.get("status") or 0)
     if result.get("error"):
@@ -698,7 +744,8 @@ def _post_skillhub_delete(handler, body: dict) -> bool:
     if not name:
         return _respond_bad(handler, "name required", 400)
     dir_name = str(body.get("dir_name", "") or "").strip()
-    result = local_skills.delete_local_skill(name, dir_name)
+    profile = str(body.get("profile", "") or "").strip()
+    result = local_skills.delete_local_skill(name, dir_name, profile=profile)
     status = int(result.get("status") or 0)
     if status:
         return _respond_bad(handler, result.get("error", "error"), status)
@@ -773,9 +820,11 @@ def _post_skillhub_detail(handler, body: dict) -> bool:
         return _respond_bad(handler, "detail must be an object", 400)
     dir_name = str(body.get("dir_name", "") or "").strip()
 
-    # Get all profiles that have this skill installed
+    # Get all profiles that have this skill installed (custom copies only:
+    # a hub-installed copy in another profile is a separate skill and must
+    # not be overwritten with custom detail)
     try:
-        profiles_result = skillhub.get_skill_installed_profiles(name)
+        profiles_result = skillhub.get_skill_installed_profiles(name, source="custom")
         profiles = profiles_result.get("installed", [])
     except Exception as exc:
         import logging
@@ -844,8 +893,11 @@ def _get_skillhub_installed_profiles(handler, parsed) -> bool:
     name = (qs.get("name") or [""])[0]
     if not name:
         return _respond_bad(handler, "name required", 400)
+    source = str((qs.get("source") or [""])[0]).strip().lower()
+    if source not in ("", "hub", "custom"):
+        return _respond_bad(handler, "source must be hub or custom", 400)
     try:
-        result = skillhub.get_skill_installed_profiles(name)
+        result = skillhub.get_skill_installed_profiles(name, source=source)
         return _respond(handler, result)
     except Exception as exc:
         return _respond_bad(handler, str(exc), 502)
