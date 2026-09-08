@@ -29,6 +29,7 @@
   let _skillhubPageSize = 20;
   let _skillhubTotal = 0;
   let _currentSkillhubItem = null;
+  let _currentSkillhubOrigin = null; // {profile, dir_name} of the opened copy
   let _skillhubMode = 'empty'; // 'empty' | 'read' | 'edit'
   let _skillhubPreFormDetail = null;
   let _searchTimer = null;
@@ -700,23 +701,38 @@
     const isCustom = _skillhubScope === 'custom' || skill.custom === true;
     const actions = _skillhubReadActions(skill);
     const scopeParam = _skillhubPreviewScopeParam(skill);
+    // Resolve the precise local copy (profile + dir_name) for installed/custom
+    // items so requests don't fall into the default-profile-first lookup
+    _currentSkillhubOrigin = null;
+    let originParam = '';
+    const originSource = isCustom ? 'custom' : (skill && skill.installed ? 'hub' : '');
+    if (originSource) {
+      try {
+        const resp = await api(`/api/skillhub/installed-profiles?name=${encodeURIComponent(name)}&source=${originSource}`, { timeoutToast: false });
+        const first = (resp.installed || [])[0];
+        if (first && first.profile) {
+          _currentSkillhubOrigin = { profile: first.profile, dir_name: String(first.dir_name || '') };
+          originParam = `&profile=${encodeURIComponent(first.profile)}&dir_name=${encodeURIComponent(_currentSkillhubOrigin.dir_name)}`;
+        }
+      } catch (_) {}
+    }
     try {
       // Custom skills: always use local detail. Others: try upstream first, fall back to local.
       const detailPromise = isCustom
-        ? api(`/api/skillhub/file?name=${encodeURIComponent(name)}&path=.detail.json${scopeParam}`)
+        ? api(`/api/skillhub/file?name=${encodeURIComponent(name)}&path=.detail.json${scopeParam}${originParam}`)
             .then(resp => ({ source: 'local', data: resp }))
             .catch(() => null)
         : api(`/api/skillhub/detail?name=${encodeURIComponent(name)}`)
             .then(resp => ({ source: 'upstream', data: resp }))
             .catch(() => (skill && skill.installed)
-              ? api(`/api/skillhub/file?name=${encodeURIComponent(name)}&path=.detail.json${scopeParam}`)
+              ? api(`/api/skillhub/file?name=${encodeURIComponent(name)}&path=.detail.json${scopeParam}${originParam}`)
                   .then(resp => ({ source: 'local', data: resp }))
                   .catch(() => null)
               : null
             );
       const [doc, structure, detailResult] = await Promise.all([
-        api(`/api/skillhub/content?name=${encodeURIComponent(name)}${scopeParam}`),
-        api(`/api/skillhub/structure?name=${encodeURIComponent(name)}${scopeParam}`).catch(() => null),
+        api(`/api/skillhub/content?name=${encodeURIComponent(name)}${scopeParam}${originParam}`),
+        api(`/api/skillhub/structure?name=${encodeURIComponent(name)}${scopeParam}${originParam}`).catch(() => null),
         detailPromise,
       ]);
       let detailJson = null;
@@ -791,6 +807,10 @@
     const dirName = String(_currentSkillhubItem.dir_name || '').trim();
     const params = new URLSearchParams({ name });
     if (dirName) params.set('dir_name', dirName);
+    if (_currentSkillhubOrigin && _currentSkillhubOrigin.profile) {
+      params.set('profile', _currentSkillhubOrigin.profile);
+      if (_currentSkillhubOrigin.dir_name) params.set('dir_name', _currentSkillhubOrigin.dir_name);
+    }
     const url = new URL(`/api/skillhub/download?${params}`, document.baseURI || location.href).href;
     try {
       const res = await fetch(url, { method: 'GET', credentials: 'include' });
@@ -845,6 +865,7 @@
           name,
           dir_name: _currentSkillhubItem.dir_name || '',
           content,
+          profile: (_currentSkillhubOrigin && _currentSkillhubOrigin.profile) || '',
         }),
       });
       _skillhubData = null;
@@ -867,12 +888,18 @@
     }
   }
 
+  function _skillhubOriginParam() {
+    const origin = _currentSkillhubOrigin;
+    if (!origin || !origin.profile) return '';
+    return `&profile=${encodeURIComponent(origin.profile)}&dir_name=${encodeURIComponent(origin.dir_name || '')}`;
+  }
+
   async function openSkillHubFile(name, path) {
     const body = $('skillhubDetailBody');
     const scopeParam = _skillhubPreviewScopeParam(_currentSkillhubItem);
     try {
       const data = await api(
-        `/api/skillhub/file?name=${encodeURIComponent(name)}&path=${encodeURIComponent(path)}${scopeParam}`
+        `/api/skillhub/file?name=${encodeURIComponent(name)}&path=${encodeURIComponent(path)}${scopeParam}${_skillhubOriginParam()}`
       );
       const back = typeof t === 'function' ? t('skills_back_to').replace('{0}', name) : name;
       let html = `<p><a href="#" class="skillhub-back-doc" data-name="${esc(name)}">${esc(back)}</a></p>`;
@@ -931,6 +958,13 @@
         } else {
           const msg = typeof t === 'function' ? t('install_toast_partial') : 'Some installations failed';
           showToast(msg, 5000, 'error');
+        }
+        const seenWarnings = new Set();
+        for (const r of results) {
+          if (r.ok && r.warning && !seenWarnings.has(r.warning)) {
+            seenWarnings.add(r.warning);
+            showToast(r.warning, 6000);
+          }
         }
       }
     } catch (e) {
@@ -1098,6 +1132,7 @@
         body: JSON.stringify({
           name,
           dir_name: _currentSkillhubItem.dir_name || '',
+          source: _skillhubScope === 'custom' || _currentSkillhubItem.custom === true ? 'custom' : 'hub',
         }),
       });
       _skillhubData = null;
@@ -1125,7 +1160,7 @@
 
     let result;
     try {
-      result = await _showManageProfilesDialog(name, displayName);
+      result = await _showManageProfilesDialog(name, displayName, isCustom ? 'custom' : 'hub');
     } catch (_) {
       return; // user cancelled
     }
@@ -1159,21 +1194,29 @@
           const msg = typeof t === 'function' ? t('manage_profiles_partial') : 'Some changes failed';
           showToast(msg, 5000, 'error');
         }
+        const seenWarnings = new Set();
+        for (const r of installed) {
+          if (r.ok && r.warning && !seenWarnings.has(r.warning)) {
+            seenWarnings.add(r.warning);
+            showToast(r.warning, 6000);
+          }
+        }
       }
     } catch (e) {
       if (typeof showToast === 'function') showToast(e.message, 5000, 'error');
     }
   }
 
-  function _showManageProfilesDialog(skillName, displayName) {
+  function _showManageProfilesDialog(skillName, displayName, source) {
     return new Promise(async (resolve, reject) => {
       // Fetch profiles list and installed profiles in parallel
       let profiles = [];
       let installedProfiles = new Set();
+      const sourceParam = source ? `&source=${encodeURIComponent(source)}` : '';
       try {
         const [profilesResp, installedResp] = await Promise.all([
           api('/api/profiles'),
-          api(`/api/skillhub/installed-profiles?name=${encodeURIComponent(skillName)}`, { timeoutToast: false }),
+          api(`/api/skillhub/installed-profiles?name=${encodeURIComponent(skillName)}${sourceParam}`, { timeoutToast: false }),
         ]);
         profiles = profilesResp.profiles || [];
         const installed = installedResp.installed || [];
@@ -1846,6 +1889,7 @@
     const title = $('skillhubDetailTitle');
     _skillhubMode = 'empty';
     _skillhubPreFormDetail = null;
+    _currentSkillhubOrigin = null;
     if (title) title.textContent = '';
     if (body) {
       body.innerHTML = '';
@@ -2008,6 +2052,13 @@
           const msg = typeof t === 'function' ? t('batch_install_partial') || '{0} installed, {1} failed' : '{0} installed, {1} failed';
           showToast(msg.replace('{0}', ok).replace('{1}', fail), 5000, 'error');
         }
+        const seenWarnings = new Set();
+        for (const r of results) {
+          if (r.ok && r.warning && !seenWarnings.has(r.warning)) {
+            seenWarnings.add(r.warning);
+            showToast(r.warning, 6000);
+          }
+        }
       }
     } catch (e) {
       if (typeof showToast === 'function') showToast(e.message, 5000, 'error');
@@ -2021,7 +2072,7 @@
     for (const name of _selectedSkills) {
       const skill = data.find(s => s.name === name);
       if (!skill) continue;
-      skills.push({ name: skill.name, dir_name: skill.dir_name || '' });
+      skills.push({ name: skill.name, dir_name: skill.dir_name || '', source: skill.custom === true ? 'custom' : 'hub' });
     }
     if (skills.length === 0) return;
 

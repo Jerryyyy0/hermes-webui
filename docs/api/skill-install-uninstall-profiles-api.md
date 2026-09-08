@@ -53,6 +53,7 @@ Profile 与技能的关联是文件系统层面的：每个 profile 拥有独立
 | `results[].profile` | 目标 profile 名称 |
 | `results[].ok` | 是否安装成功 |
 | `results[].dir_name` | 安装后的相对路径（成功时） |
+| `results[].warning` | 跨来源同名警告（成功且其他助理已存在同名自定义技能时返回，不影响安装结果） |
 | `results[].error` | 失败原因（失败时） |
 
 **错误码**:
@@ -68,6 +69,7 @@ Profile 与技能的关联是文件系统层面的：每个 profile 拥有独立
 - 已存在的技能返回 409（`"Skill already installed"`），不影响其他 profile 的安装
 - 安装后自动从 profile 的 `config.yaml` 的 `skills.disabled` 列表中移除该技能（默认启用）
 - 同时写入 `.hub_installed`、`.install_name`、`.hub_catalog_name`、`detail.json` 等元数据
+- 若其他助理已存在同名自定义（用户上传）技能，成功项携带 `warning` 字段提示两个副本将各自独立维护（不阻断安装）
 
 ---
 
@@ -80,7 +82,8 @@ Profile 与技能的关联是文件系统层面的：每个 profile 拥有独立
 ```json
 {
   "name": "skill-name",
-  "dir_name": "category/skill-name"
+  "dir_name": "category/skill-name",
+  "source": "hub"
 }
 ```
 
@@ -88,6 +91,7 @@ Profile 与技能的关联是文件系统层面的：每个 profile 拥有独立
 |------|------|------|------|
 | `name` | string | 是 | 技能逻辑名 |
 | `dir_name` | string | 否 | 精确目录路径（可选，用于消除歧义） |
+| `source` | string | 否 | 来源过滤：`hub`（市场安装）/ `custom`（用户上传）。指定后只卸载该来源的副本，另一来源的同名副本保留；缺省卸载所有副本 |
 
 **成功响应** (200):
 
@@ -113,14 +117,14 @@ Profile 与技能的关联是文件系统层面的：每个 profile 拥有独立
 
 | 状态码 | 说明 |
 |--------|------|
-| 400 | `name` 为空 |
+| 400 | `name` 为空；`source` 取值非法 |
 | 403 | 系统技能不可删除 |
 | 502 | 内部错误 |
 
 **行为说明**:
 - 遍历所有 profile（通过 `list_profiles_api()` 获取）
 - 删除每个 profile 的 `skills/` 目录下对应技能文件夹
-- 清理 `no_self_improve` 锁定列表
+- 清理 `no_self_improve` 锁定列表（指定 `source` 且仍有另一来源副本残留时会保留锁定）
 - 清理各 profile 的 `config.yaml` 中 `skills.disabled` 列表
 - 不存在该技能的 profile 自动跳过，不报错
 
@@ -172,6 +176,7 @@ Profile 与技能的关联是文件系统层面的：每个 profile 拥有独立
 | `installed[].profile` | 安装操作的目标 profile |
 | `installed[].ok` | 是否成功 |
 | `installed[].skipped` | 已存在则跳过（`ok=true, skipped=true`） |
+| `installed[].warning` | 跨来源同名警告（市场技能安装成功且其他助理已存在同名自定义技能时返回，不阻断） |
 | `installed[].error` | 失败原因 |
 | `uninstalled[].profile` | 卸载操作的目标 profile |
 | `uninstalled[].ok` | 是否成功 |
@@ -325,6 +330,7 @@ Profile 与技能的关联是文件系统层面的：每个 profile 拥有独立
 | `results[].ok` | 是否成功 |
 | `results[].dir_name` | 安装后的相对路径（成功时） |
 | `results[].skipped` | 已存在则跳过（`ok=true, skipped=true`） |
+| `results[].warning` | 跨来源同名警告（市场技能安装成功且其他助理已存在同名自定义技能时返回，不阻断） |
 | `results[].error` | 失败原因（失败时） |
 
 **错误码**:
@@ -353,8 +359,8 @@ Profile 与技能的关联是文件系统层面的：每个 profile 拥有独立
 ```json
 {
   "skills": [
-    { "name": "skill-a", "dir_name": "devops/skill-a" },
-    { "name": "my-custom-skill" }
+    { "name": "skill-a", "dir_name": "devops/skill-a", "source": "hub" },
+    { "name": "my-custom-skill", "source": "custom" }
   ]
 }
 ```
@@ -364,6 +370,7 @@ Profile 与技能的关联是文件系统层面的：每个 profile 拥有独立
 | `skills` | object[] | 是 | 技能列表（非空） |
 | `skills[].name` | string | 是 | 技能逻辑名 |
 | `skills[].dir_name` | string | 否 | 精确目录路径（可选，用于消除歧义） |
+| `skills[].source` | string | 否 | 来源过滤：`hub`（市场安装）/ `custom`（用户上传）。指定后只卸载该来源的副本，另一来源的同名副本保留；缺省卸载所有副本 |
 
 **成功响应** (200):
 
@@ -404,7 +411,7 @@ Profile 与技能的关联是文件系统层面的：每个 profile 拥有独立
 
 | 状态码 | 说明 |
 |--------|------|
-| 400 | `skills` 为空或非数组 |
+| 400 | `skills` 为空或非数组；`source` 取值非法 |
 | 403 | 系统技能不可删除 |
 | 502 | 内部错误 |
 
