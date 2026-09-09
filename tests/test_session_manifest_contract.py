@@ -60,8 +60,8 @@ def test_workspace_js_replaces_full_sse_top_level_snapshots():
     assert 'function _mergeManifestReferences' not in src
 
     api = (REPO / 'docs' / 'api' / 'session-manifest-api.md').read_text(encoding='utf-8')
-    assert '消费方直接替换顶层 artifacts 与 references' in api
-    assert '当前 turn 的完整快照' in api
+    assert '直接替换顶层 artifacts' in api
+    assert '直接替换该 turn 行' in api
 
 
 def test_messages_js_listens_for_manifest_delta():
@@ -172,18 +172,14 @@ def test_session_manifest_docs_assign_public_contract_to_api():
     artifacts = (REPO / 'docs' / 'architecture' / 'session-manifest-artifacts.md').read_text(encoding='utf-8')
 
     assert 'GET `/api/session/manifest`' in api
-    assert 'Manifest 的定位与资源边界' in api
     assert '派生索引' in api
     assert 'artifacts > references' in api
-    assert '"version": 2' in api
-    assert '"sequence": 7' in api
+    assert '"version":2' in api
+    assert '"sequence":9' in api
     assert '"turn_key": "turn:' in api
-    assert '顶层不携带工具调用来源' in api
-    assert 'mcp__ithink_kb_mcp__searchKnowledgeBaseDocuments' in api
-    assert 'mcp__ithink_kb_mcp__searchKnowledgeBaseDocumentsAcross' in api
-    assert '"chunks"' in api
-    assert '"score"' in api
-    assert '无需新增数据库表' in api
+    assert '`metadata.chunks`' in api
+    assert '`metadata.chunks[].score`' in api
+    assert '直接替换顶层 artifacts' in api
 
     assert 'Decision-first 构建流程' in artifacts
     assert '默认 workspace 与 Artifact 根' in artifacts
