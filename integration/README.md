@@ -2,6 +2,16 @@
 
 Fork-specific features live here so upstream rebases stay predictable.
 
+Async inbox wakeups must pass `user_message_metadata` with `context_anchor` /
+`async_delegation_completion` to `start_session_turn`, including restored queued
+items. These markers persist through Agent and hide only the internal input,
+not the subsequent assistant/tool output or matching human-authored text.
+
+Async delegation delivery uses `async_delegation_turns/delivery_scope.py` to bind
+Agent claim/ACK/release and inbox readback to the origin session's Profile.
+The `api/process_event_utils.py` seam installs context-local scopes; it never
+changes process-wide `HERMES_HOME`.
+
 ## Enable
 
 ```bash
@@ -492,6 +502,19 @@ curl -sS -X POST 'http://127.0.0.1:8787/api/integration/notifications/read' \
 | POST | `/api/skills/save`, `/delete`, `/toggle` | Local CRUD |
 
 ### Async delegation (`integration/async_delegation_turns/handlers.py`)
+
+Completion 先持久化到 WebUI Session sidecar 的
+`async_delegation_origins[delegation_id].wakeup`，再 ACK Agent。`inbox.py` 的单进程
+scheduler 按 session 串行启动 local-Agent wakeup；启动 admission 将 core `pending_*`、
+stream generation 与 wakeup `running/stream_id` 合并到一次 `Session.save()`。启动恢复在
+Agent completion drain 之前扫描 sidecar：有 terminal run journal 的记录幂等结算，没有
+terminal 证据的 orphaned running 记录标为 `failed/server_restarted_during_wakeup`，保留 prompt
+用于诊断。ACK 待确认记录与普通 queued wakeup 共用 scheduler 重试，不依赖 Agent 重复投递。
+async worker 在 `server_turn_started` 发布前由启动闸门阻塞；完成时在 transcript、artifact
+与 terminal journal 全部持久化后发布可回放的 `async_turn_committed`，再结算 wakeup
+并删除 prompt。该机制复用 Agent upstream 已有的 `async_delegations` durable outbox，仅改变 WebUI
+sidecar 和进程内调度，不修改 Agent SQLite 表结构。Gateway/runner-local 首版保持
+`queued/backend_unsupported`，不会误入 local-Agent 启动路径。
 
 | Method | Path | Purpose |
 |--------|------|---------|

@@ -75,6 +75,81 @@ def test_handle_openapi_json_valid_json(mock_j, _mock_open):
     json.dumps(spec)
 
 
+def test_openapi_paths_are_all_nested_under_paths():
+    """Swagger UI can only resolve path items from the OpenAPI ``paths`` object."""
+    spec_path = Path(sh.__file__).with_name("openapi.json")
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+
+    root_path_items = [key for key in spec if key.startswith("/")]
+
+    assert root_path_items == []
+    assert "/api/auth/login" in spec["paths"]
+
+
+def test_openapi_routes_match_current_method_contracts():
+    """Keep documented routes aligned with the route dispatchers."""
+    spec = json.loads(Path(sh.__file__).with_name("openapi.json").read_text(encoding="utf-8"))
+    paths = spec["paths"]
+
+    for path, method in {
+        "/api/auth/passkeys": "post",
+        "/api/auth/passkey/options": "post",
+        "/api/auth/passkey/register/options": "post",
+        "/api/auth/passkey/delete": "post",
+        "/health": "get",
+        "/api/dashboard/config": "post",
+        "/api/providers": "post",
+        "/api/reasoning": "post",
+        "/api/session/delete": "post",
+        "/api/session/compression-recovery/start": "post",
+        "/api/share/create": "post",
+        "/api/share/revoke": "post",
+        "/api/sessions/{session_id}/events": "get",
+        "/api/kanban/boards/{slug}": "delete",
+        "/api/kanban/tasks/{task_id}": "patch",
+    }.items():
+        assert method in paths[path]
+
+    assert "delete" not in paths["/api/session/delete"]
+    assert "get" not in paths["/api/auth/passkey/delete"]
+    assert "/api/kanban/" not in paths
+    assert "/api/auth/passkey/login/options" not in paths
+
+
+def test_openapi_request_schemas_match_session_and_configuration_handlers():
+    """Document the body/query field names consumed by their handlers."""
+    spec = json.loads(Path(sh.__file__).with_name("openapi.json").read_text(encoding="utf-8"))
+    paths = spec["paths"]
+
+    def body_properties(path):
+        return paths[path]["post"]["requestBody"]["content"]["application/json"]["schema"]["properties"]
+
+    assert set(body_properties("/api/session/new")) == {
+        "profile", "project_id", "model", "model_provider", "prev_session_id", "workspace", "worktree",
+    }
+    assert set(body_properties("/api/session/draft")) == {"session_id", "text", "files"}
+    assert set(body_properties("/api/session/branch")) == {"session_id", "keep_count", "title"}
+    assert set(body_properties("/api/session/move")) == {"session_id", "project_id"}
+    assert set(body_properties("/api/session/import")) >= {"messages", "title", "workspace", "model"}
+    assert set(body_properties("/api/session/import_cli")) == {"session_id"}
+    assert set(body_properties("/api/personality/set")) == {"session_id", "name"}
+    assert set(body_properties("/api/projects/rename")) == {"project_id", "name", "color"}
+    assert set(body_properties("/api/projects/delete")) == {"project_id"}
+    assert set(body_properties("/api/rollback/restore")) == {"workspace", "checkpoint"}
+
+    assert "get" in paths["/api/session/draft"]
+    for path in {
+        "/api/session/usage",
+        "/api/session/yolo",
+        "/api/session/export",
+        "/api/session/lineage/report",
+        "/api/session/compress/status",
+        "/api/session/worktree/status",
+    }:
+        parameters = paths[path]["get"]["parameters"]
+        assert any(p["name"] == "session_id" and p["required"] for p in parameters)
+
+
 def test_knowledge_base_passthrough_response_schemas_match_proxy_contract():
     spec_path = Path(sh.__file__).with_name("openapi.json")
     spec = json.loads(spec_path.read_text(encoding="utf-8"))

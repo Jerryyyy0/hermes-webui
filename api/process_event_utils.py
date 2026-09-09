@@ -10,6 +10,7 @@ import time
 from typing import Any
 
 logger = logging.getLogger(__name__)
+from integration.async_delegation_turns.delivery_scope import origin_delivery_scope
 
 # Older Hermes Agent builds do not expose durable claim/complete/release APIs.
 # Keep their in-process compatibility dedupe bounded so long-lived WebUI
@@ -321,6 +322,7 @@ def async_delivery_retry_timer_count() -> int:
         return 1 if _ASYNC_DELIVERY_RETRY_TIMER is not None else 0
 
 
+@origin_delivery_scope
 def claim_async_delegation_delivery(
     evt: Any,
     consumer: str,
@@ -404,50 +406,93 @@ def _mark_legacy_async_delivery_complete(delegation_id: str) -> bool:
     return False
 
 
+@origin_delivery_scope
 def complete_async_delegation_delivery(
     evt: Any,
     claim: AsyncDelegationDeliveryClaim,
-) -> None:
+) -> str:
     """Complete a claim after WebUI has accepted the event for delivery."""
+    delegation_id = str(
+        getattr(claim, "delegation_id", "") or completion_delivery_id(evt) or ""
+    ).strip()
+    claim_id = str(getattr(claim, "claim_id", "") or "").strip()
     if claim.durable:
-        from tools.async_delegation import complete_event_delivery
+        try:
+            import importlib
+
+            async_delivery = importlib.import_module("tools.async_delegation")
+        except Exception:
+            async_delivery = None
 
         try:
-            complete_event_delivery(evt, claim.claim_id)
-            _cancel_async_delegation_claim_retry(claim.delegation_id)
-            return
+            direct = getattr(async_delivery, "complete_completion_delivery", None) if async_delivery else None
+            if callable(direct):
+                acknowledged = direct(delegation_id, claim_id)
+                if acknowledged is not True:
+                    # An idempotent retry can legitimately lose the claim
+                    # after a previous process committed delivery. Confirm
+                    # that durable state before declaring failure.
+                    try:
+                        durable = async_delivery.get_durable_delegation(delegation_id)
+                    except Exception:
+                        return "failed"
+                    if not isinstance(durable, dict) or durable.get("delivery_state") != "delivered":
+                        return "failed"
+            else:
+                complete_event_delivery = getattr(async_delivery, "complete_event_delivery")
+                complete_event_delivery(evt, claim_id)
+            _cancel_async_delegation_claim_retry(delegation_id)
+            try:
+                durable = async_delivery.get_durable_delegation(delegation_id)
+            except (AttributeError, ImportError):
+                return "failed"
+            except Exception:
+                logger.warning(
+                    "Durable async delegation ACK readback failed for %s",
+                    delegation_id,
+                    exc_info=True,
+                )
+                return "unknown"
+            if not isinstance(durable, dict):
+                return "unknown"
+            return "acknowledged" if durable.get("delivery_state") == "delivered" else "failed"
         except Exception:
             logger.warning(
                 "Durable async delegation completion ACK failed for %s; "
                 "trying compatibility marker",
-                claim.delegation_id,
+                delegation_id,
                 exc_info=True,
             )
-            if _mark_legacy_async_delivery_complete(claim.delegation_id):
-                _cancel_async_delegation_claim_retry(claim.delegation_id)
-                return
+            if _mark_legacy_async_delivery_complete(delegation_id):
+                _cancel_async_delegation_claim_retry(delegation_id)
+                return "unknown"
             raise
-    _mark_legacy_async_delivery_complete(claim.delegation_id)
+    return "unknown" if _mark_legacy_async_delivery_complete(delegation_id) else "failed"
 
 
+@origin_delivery_scope
 def release_async_delegation_delivery(
     evt: Any,
     claim: AsyncDelegationDeliveryClaim,
 ) -> None:
     """Release a failed claim so a later WebUI consumer can retry it."""
+    delegation_id = str(
+        getattr(claim, "delegation_id", "") or completion_delivery_id(evt) or ""
+    ).strip()
+    claim_id = str(getattr(claim, "claim_id", "") or "").strip()
     try:
         if claim.durable:
             from tools.async_delegation import release_event_delivery
 
-            release_event_delivery(evt, claim.claim_id)
+            release_event_delivery(evt, claim_id)
     except Exception:
         logger.warning(
             "Failed to release durable async delegation delivery for %s",
-            claim.delegation_id,
+            delegation_id,
             exc_info=True,
         )
     finally:
-        _release_bounded_local(claim.delegation_id)
+        _release_bounded_local(delegation_id)
 
 
 def legacy_async_delivery_dedupe_size() -> int:

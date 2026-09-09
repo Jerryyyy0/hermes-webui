@@ -12,6 +12,9 @@ from integration.agent_message_semantics.classifier import is_non_anchor_control
 logger = logging.getLogger(__name__)
 
 _UNSETTLED_WAKEUP_STATES = frozenset({"idle", "queued", "running"})
+_WAKEUP_ACK_PENDING = "agent_ack_pending"
+_WAKEUP_ACK_UNKNOWN = "agent_ack_unknown"
+_WAKEUP_MAX_START_ATTEMPTS = 5
 
 
 def normalize_async_delegation_status(value: Any) -> str:
@@ -150,6 +153,8 @@ def _canonical_record(record: dict[str, Any]) -> dict[str, Any]:
     if canonical.get("dispatched_at") is None and canonical.get("created_at") is not None:
         canonical["dispatched_at"] = canonical["created_at"]
     canonical.pop("created_at", None)
+    if canonical.get("wakeup") == {}:
+        canonical.pop("wakeup", None)
     return canonical
 
 
@@ -165,6 +170,350 @@ def _persist(
         for delegation_id, record in records.items()
     }
     _save(session)
+
+
+def _apply_records(
+    session: Any,
+    records: dict[str, dict[str, Any]],
+    *,
+    dispatch_goals: dict[str, list[str]] | None = None,
+) -> None:
+    """Apply sidecar records without saving.
+
+    Start admission uses this helper so the wakeup lifecycle and the core
+    pending fields can be committed by one caller-owned ``Session.save()``.
+    All other mutations should use ``_persist``.
+    """
+    _project_turns(session, records, dispatch_goals=dispatch_goals)
+    session.async_delegation_origins = {
+        delegation_id: _canonical_record(record)
+        for delegation_id, record in records.items()
+    }
+
+
+def _wakeup(record: dict[str, Any]) -> dict[str, Any]:
+    value = record.get("wakeup")
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def receive_completion(
+    session: Any,
+    delegation_id: str,
+    *,
+    prompt: str,
+    status: str = "completed",
+    child_task_summary: dict[str, int] | None = None,
+    ack_pending: bool = True,
+) -> dict[str, Any] | None:
+    """Persist a completion as a durable WebUI inbox item.
+
+    This is deliberately separate from ``mark_async_delegation_completion``:
+    the latter is retained for legacy callers that already own the wakeup
+    payload. New delivery writes the prompt before acknowledging Agent.
+    """
+    delegation_id = str(delegation_id or "").strip()
+    prompt = str(prompt or "").strip()
+    if not delegation_id or not prompt:
+        return None
+    records = _records(session)
+    record = records.get(delegation_id)
+    if not isinstance(record, dict):
+        return None
+    record = dict(record)
+    current_wakeup = _wakeup(record)
+    existing_prompt = str(current_wakeup.get("prompt") or "")
+    if existing_prompt and existing_prompt != prompt:
+        record["status"] = "failed"
+        record["wakeup_state"] = "failed"
+        current_wakeup["error_code"] = "completion_payload_conflict"
+        record["wakeup"] = current_wakeup
+        record["activity_version"] = _bump_activity_version(session)
+        records[delegation_id] = record
+        _persist(session, records)
+        logger.error(
+            "async_delegation_payload_conflict session_id=%s delegation_id=%s",
+            getattr(session, "session_id", ""),
+            delegation_id,
+        )
+        return dict(record)
+    # A terminal record is an idempotency fence.  Agent may replay the same
+    # completion after an ACK/restart; never resurrect a settled/failed wakeup
+    # into the executable queue.
+    if str(record.get("wakeup_state") or "") in {"settled", "failed"}:
+        return dict(record)
+    if str(record.get("cancel_state") or "none") in {"requested", "cancelled"}:
+        record["status"] = normalize_async_delegation_status(status)
+        record["wakeup_state"] = "settled"
+        record["cancel_state"] = "cancelled"
+        record["completed_at"] = record.get("completed_at") or time.time()
+        if child_task_summary is not None:
+            record["child_task_summary"] = dict(child_task_summary)
+        records[delegation_id] = record
+        _persist(session, records)
+        return dict(record)
+    record["status"] = normalize_async_delegation_status(status)
+    record["completed_at"] = record.get("completed_at") or time.time()
+    record["wakeup_state"] = "queued"
+    current_wakeup.setdefault("stream_id", None)
+    current_wakeup.setdefault("start_attempts", 0)
+    current_wakeup["prompt"] = existing_prompt or prompt
+    current_wakeup["error_code"] = _WAKEUP_ACK_PENDING if ack_pending else _WAKEUP_ACK_UNKNOWN
+    record["wakeup"] = current_wakeup
+    if child_task_summary is not None:
+        record["child_task_summary"] = dict(child_task_summary)
+    record["activity_version"] = _bump_activity_version(session)
+    records[delegation_id] = record
+    _persist(session, records)
+    logger.info(
+        "async_delegation_inbox_received session_id=%s delegation_id=%s wakeup_state=%s",
+        getattr(session, "session_id", ""),
+        delegation_id,
+        record.get("wakeup_state"),
+    )
+    return dict(record)
+
+
+def mark_completion_ack(
+    session: Any,
+    delegation_id: str,
+    *,
+    acknowledged: bool,
+    unknown: bool = False,
+) -> dict[str, Any] | None:
+    """Persist the Agent ACK/readback result without changing queue state."""
+    delegation_id = str(delegation_id or "").strip()
+    records = _records(session)
+    record = records.get(delegation_id)
+    if not isinstance(record, dict):
+        return None
+    record = dict(record)
+    wakeup = _wakeup(record)
+    wakeup["error_code"] = _WAKEUP_ACK_UNKNOWN if unknown else (None if acknowledged else _WAKEUP_ACK_PENDING)
+    record["wakeup"] = wakeup
+    records[delegation_id] = record
+    _persist(session, records)
+    logger.info(
+        "async_delegation_agent_ack_%s session_id=%s delegation_id=%s",
+        "unknown" if unknown else "acknowledged" if acknowledged else "failed",
+        getattr(session, "session_id", ""),
+        delegation_id,
+    )
+    return dict(record)
+
+
+def select_next_queued_wakeup(session: Any) -> tuple[str, dict[str, Any]] | None:
+    """Return the oldest executable queued item without mutating the session."""
+    candidates: list[tuple[float, str, dict[str, Any]]] = []
+    for delegation_id, raw in _records(session).items():
+        record = dict(raw)
+        if str(record.get("wakeup_state") or "idle") != "queued":
+            continue
+        if str(record.get("cancel_state") or "none") != "none":
+            continue
+        wakeup = _wakeup(record)
+        if not str(wakeup.get("prompt") or "").strip():
+            continue
+        if wakeup.get("error_code") == _WAKEUP_ACK_PENDING:
+            continue
+        try:
+            completed_at = float(record.get("completed_at") or 0)
+        except (TypeError, ValueError):
+            completed_at = 0.0
+        candidates.append((completed_at, delegation_id, record))
+    if not candidates:
+        return None
+    _, delegation_id, record = min(candidates, key=lambda item: (item[0], item[1]))
+    return delegation_id, record
+
+
+def validate_wakeup_start_locked(
+    session: Any,
+    delegation_id: str,
+    *,
+    turn_key: str,
+) -> dict[str, Any] | None:
+    """Validate an admission without mutating the cached Session object."""
+    record = _records(session).get(str(delegation_id or "").strip())
+    if not isinstance(record, dict):
+        return None
+    record = dict(record)
+    if str(record.get("wakeup_state") or "idle") != "queued":
+        return None
+    if str(record.get("cancel_state") or "none") != "none":
+        return None
+    if str(record.get("turn_key") or "").strip() != str(turn_key or "").strip():
+        return None
+    wakeup = _wakeup(record)
+    if not str(wakeup.get("prompt") or "").strip() or wakeup.get("error_code") == _WAKEUP_ACK_PENDING:
+        return None
+    return record
+
+
+def prepare_wakeup_start_locked(
+    session: Any,
+    delegation_id: str,
+    *,
+    stream_id: str,
+    turn_key: str,
+    generation: int,
+) -> dict[str, Any] | None:
+    """Mutate wakeup admission state; caller must perform the one Session.save()."""
+    delegation_id = str(delegation_id or "").strip()
+    records = _records(session)
+    record = validate_wakeup_start_locked(session, delegation_id, turn_key=turn_key)
+    if record is None:
+        return None
+    wakeup = _wakeup(record)
+    wakeup["stream_id"] = str(stream_id)
+    wakeup["start_attempts"] = max(0, int(wakeup.get("start_attempts") or 0)) + 1
+    wakeup["error_code"] = None
+    record["wakeup"] = wakeup
+    record["wakeup_state"] = "running"
+    record["activity_version"] = _bump_activity_version(session)
+    records[delegation_id] = record
+    _apply_records(session, records)
+    logger.info(
+        "async_delegation_wakeup_admitted session_id=%s delegation_id=%s stream_id=%s generation=%s",
+        getattr(session, "session_id", ""),
+        delegation_id,
+        stream_id,
+        generation,
+    )
+    return dict(record)
+
+
+def requeue_unstarted_wakeup(
+    session: Any,
+    delegation_id: str,
+    *,
+    stream_id: str,
+    generation: int,
+    error_code: str,
+    save: bool = True,
+) -> dict[str, Any] | None:
+    """Revert only the exact admission that failed before worker dispatch."""
+    records = _records(session)
+    delegation_id = str(delegation_id or "").strip()
+    record = records.get(delegation_id)
+    if not isinstance(record, dict):
+        return None
+    record = dict(record)
+    wakeup = _wakeup(record)
+    if (
+        str(record.get("wakeup_state") or "") != "running"
+        or str(wakeup.get("stream_id") or "") != str(stream_id)
+        or getattr(session, "active_stream_generation", None) != generation
+    ):
+        return None
+    wakeup["stream_id"] = None
+    attempts = max(0, int(wakeup.get("start_attempts") or 0))
+    exhausted = attempts >= _WAKEUP_MAX_START_ATTEMPTS
+    wakeup["error_code"] = (
+        "start_retry_exhausted" if exhausted else str(error_code or "start_failed")
+    )
+    record["wakeup"] = wakeup
+    record["wakeup_state"] = "failed" if exhausted else "queued"
+    if exhausted:
+        record["status"] = "failed"
+    record["activity_version"] = _bump_activity_version(session)
+    records[delegation_id] = record
+    if save:
+        _persist(session, records)
+    else:
+        _apply_records(session, records)
+    return dict(record)
+
+
+def record_retryable_wakeup_start_failure(
+    session: Any,
+    delegation_id: str,
+    *,
+    previous_attempts: int,
+    error_code: str,
+) -> dict[str, Any] | None:
+    """Count one retryable pre-dispatch failure without double-counting rollback."""
+    records = _records(session)
+    delegation_id = str(delegation_id or "").strip()
+    record = records.get(delegation_id)
+    if not isinstance(record, dict) or str(record.get("wakeup_state") or "") != "queued":
+        return None
+    record = dict(record)
+    wakeup = _wakeup(record)
+    current_attempts = max(0, int(wakeup.get("start_attempts") or 0))
+    attempts = max(current_attempts, max(0, int(previous_attempts)) + 1)
+    exhausted = attempts >= _WAKEUP_MAX_START_ATTEMPTS
+    wakeup["start_attempts"] = attempts
+    wakeup["error_code"] = "start_retry_exhausted" if exhausted else str(error_code)
+    record["wakeup"] = wakeup
+    record["wakeup_state"] = "failed" if exhausted else "queued"
+    if exhausted:
+        record["status"] = "failed"
+    record["activity_version"] = _bump_activity_version(session)
+    records[delegation_id] = record
+    _persist(session, records)
+    return dict(record)
+
+
+def settle_wakeup(
+    session: Any,
+    delegation_id: str,
+    *,
+    stream_id: str | None,
+    generation: int | None,
+    status: str = "completed",
+    cancel_state: str | None = None,
+    error_code: str | None = None,
+    clear_prompt: bool = True,
+) -> dict[str, Any] | None:
+    """Conditionally settle one wakeup after durable output finalization."""
+    records = _records(session)
+    delegation_id = str(delegation_id or "").strip()
+    record = records.get(delegation_id)
+    if not isinstance(record, dict):
+        return None
+    record = dict(record)
+    wakeup = _wakeup(record)
+    expected_stream = str(wakeup.get("stream_id") or "").strip()
+    if stream_id and expected_stream and expected_stream != str(stream_id):
+        return None
+    if generation is not None and getattr(session, "active_stream_generation", None) not in (None, generation):
+        return None
+    normalized = normalize_async_delegation_status(status)
+    record["status"] = normalized
+    record["wakeup_state"] = "failed" if error_code else "settled"
+    if cancel_state is not None:
+        record["cancel_state"] = str(cancel_state)
+    if error_code:
+        wakeup["error_code"] = str(error_code)
+    if clear_prompt and record["wakeup_state"] == "settled":
+        records[delegation_id] = {**record, "wakeup": {}}
+        # The wakeup owns the core pending projection for this logical turn.
+        # Clear it together with the settled sidecar so a completed run cannot
+        # leave stale async source/turn metadata behind on the next read.
+        if (
+            str(getattr(session, "pending_user_source", "") or "")
+            == "async_delegation_wakeup"
+            and str(getattr(session, "pending_turn_key", "") or "")
+            == str(record.get("turn_key") or "")
+        ):
+            session.pending_user_message = None
+            session.pending_attachments = []
+            session.pending_started_at = None
+            session.pending_user_source = None
+            session.pending_turn_key = None
+            session.pending_user_visible = False
+    else:
+        records[delegation_id] = {**record, "wakeup": wakeup}
+    _refresh_cancellation(session, records)
+    _persist(session, records)
+    logger.info(
+        "async_delegation_wakeup_%s session_id=%s delegation_id=%s stream_id=%s",
+        record["wakeup_state"],
+        getattr(session, "session_id", ""),
+        delegation_id,
+        stream_id or "",
+    )
+    return dict(records[delegation_id])
 
 
 def _refresh_cancellation(session: Any, records: dict[str, dict[str, Any]]) -> None:
@@ -245,6 +594,20 @@ def cancellation_delegation_ids(session: Any) -> set[str]:
     if not isinstance(cancellation, dict) or cancellation.get("state") != "cancelling":
         return set()
     return {str(item) for item in cancellation.get("delegation_ids") or []}
+
+
+def running_wakeup_stream_ids(session: Any, delegation_ids: set[str] | None = None) -> list[str]:
+    """Return exact parent wakeup streams covered by a cancellation barrier."""
+    wanted = delegation_ids if delegation_ids is not None else set(_records(session))
+    stream_ids: list[str] = []
+    for delegation_id, record in _records(session).items():
+        if delegation_id not in wanted or str(record.get("wakeup_state") or "") != "running":
+            continue
+        wakeup = _wakeup(record)
+        stream_id = str(wakeup.get("stream_id") or "").strip()
+        if stream_id and stream_id not in stream_ids:
+            stream_ids.append(stream_id)
+    return stream_ids
 
 
 def mark_async_delegation_unresolved(session: Any, delegation_id: str) -> None:
@@ -410,6 +773,7 @@ def mark_async_delegation_wakeup(
     *,
     wakeup_state: str,
     content: Any,
+    error_code: str | None = None,
 ) -> dict[str, Any] | None:
     """Advance the parent Agent continuation lifecycle for one delegation."""
     delegation_id = str(delegation_id or "").strip()
@@ -420,6 +784,10 @@ def mark_async_delegation_wakeup(
     record = dict(record)
     changed = record.get("wakeup_state") != wakeup_state
     record["wakeup_state"] = wakeup_state
+    if error_code is not None:
+        wakeup = _wakeup(record)
+        wakeup["error_code"] = str(error_code)
+        record["wakeup"] = wakeup
     if changed:
         record["activity_version"] = _bump_activity_version(session)
     else:

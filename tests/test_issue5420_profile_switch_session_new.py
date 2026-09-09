@@ -60,12 +60,16 @@ def test_session_new_succeeds_with_cross_profile_prev_session_id(monkeypatch):
         def compact(self):
             return {"session_id": self.session_id, "profile": self.profile}
 
+        def save(self):
+            pass
+
     def _new_session(**_kwargs):
         s = _Session()
         created["session"] = s
         return s
 
     monkeypatch.setattr(routes, "new_session", _new_session)
+    monkeypatch.setattr(routes, "_available_profile_names", lambda: {"default", "work"})
     monkeypatch.setattr(
         routes,
         "_session_id_visible_to_request_profile",
@@ -83,6 +87,37 @@ def test_session_new_succeeds_with_cross_profile_prev_session_id(monkeypatch):
     assert created["session"].profile == "work"
 
 
+def test_session_new_rejects_unknown_profile_before_creating_session(monkeypatch):
+    calls = {"new": 0}
+
+    class _Session:
+        session_id = "must-not-exist"
+        messages = []
+
+        def compact(self):
+            return {"session_id": self.session_id}
+
+        def save(self):
+            pass
+
+    def _new_session(**_kwargs):
+        calls["new"] += 1
+        return _Session()
+
+    monkeypatch.setattr(routes, "new_session", _new_session)
+    monkeypatch.setattr(
+        routes,
+        "_available_profile_names",
+        lambda: {"default", "research"},
+        raising=False,
+    )
+
+    cap = _post_session_new({"profile": "missing"}, monkeypatch)
+
+    assert cap["bad"] == ("Unknown profile: missing", 400)
+    assert calls["new"] == 0
+
+
 def test_session_new_still_commits_same_profile_prev_session_id(monkeypatch):
     class _Session:
         def __init__(self):
@@ -92,6 +127,9 @@ def test_session_new_still_commits_same_profile_prev_session_id(monkeypatch):
 
         def compact(self):
             return {"session_id": self.session_id}
+
+        def save(self):
+            pass
 
     monkeypatch.setattr(routes, "new_session", lambda **_k: _Session())
     monkeypatch.setattr(

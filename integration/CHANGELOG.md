@@ -6,6 +6,12 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ## [Unreleased]
 
+- 修复 inbox scheduler 启动异步 wakeup 时遗漏 completion 语义标记，导致数据库回读将内部 completion 展示为用户消息；沿用 Agent 现有语义持久化与 WebUI 显示过滤契约。
+
+- 修复 `turn_align=1` 在无 turn key 的 completion 行之后遗漏异步回复：分页按有效 turn 起点划分连续窗口，保留完整尾部，不修改 Manifest 归属。
+
+- 修复异步委派交接在跨 Profile 环境下访问错误数据库、持续 ACK 失败的问题；claim、ACK、release 与 inbox 回读按 originating session 固定 Hermes Home。
+
 ### Added
 
 - **Cron Hub 闲时时段元数据** — `POST /api/integration/crons/create` 与 `update` 支持保存 `idle_window`（`start_schedule` / `end_schedule`，复用 `once` 或 `cron` schedule 形状），Cron 查询统一返回该字段；它只作为任务扩展元数据，不影响 Hermes Agent 的自动或手动调度。
@@ -46,6 +52,8 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 - **本地复制安装时版本记录保留** — `_record_install_version` 现在容忍 `detail=None`（下架技能本地复制路径），仅追加 Profile 到 `installed_profiles` 而不覆盖已有版本数据；`record_install` 的 UPDATE 对 `local_version` 改用 COALESCE（和 `display_name` 一致），防止空字符串清空已有版本。
 
 - **下架技能升级返回友好错误** — `_do_upgrade` 在访问上游前检测已下架技能，直接抛出 `SkillUpgradeNotFoundError("该技能已从市场下架，无法升级")`，前端收到 404 而非原始 httpx 502 错误信息。
+
+- **异步委派 wakeup 重启恢复** — Agent completion 在 ACK 前先写入 WebUI Session sidecar；新增按 session 串行的 durable inbox scheduler、原子 stream admission、ACK 三态及独立重试、启动退避与启动时 orphan recovery。async worker 在发布 `server_turn_started` 前不会进入模型或工具执行；最终 transcript、artifact 和 terminal journal 完整持久化后发布 `async_turn_committed`，再清理 prompt。强制重启后，有 terminal journal 的 wakeup 幂等结算，无 terminal 证据的运行记录失败关闭并保留 prompt；不修改 Agent `async_delegations` 表结构。
 
 - **Cron follow-up error retention** — Cron 会话读取重协调会先用 `state.db` 补齐已持久化 WebUI user 消息缺失的时间戳，再划分执行前缀与后续对话，避免刷新时删除该 user 及其 assistant 错误消息。
 

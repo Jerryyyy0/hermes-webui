@@ -120,6 +120,37 @@ def test_assistant_role_compaction_summary_is_hidden_without_losing_real_turn():
     ]
 
 
+def test_async_wakeup_binds_exact_origin_even_after_newer_user_turns():
+    session = SimpleNamespace(
+        pending_user_source="async_delegation_wakeup",
+        messages=[
+            {"role": "user", "content": "dispatch", "_turn_key": "turn:8"},
+            {"role": "assistant", "content": "dispatched", "_turn_key": "turn:8"},
+            {"role": "user", "content": "newer question", "_turn_key": "turn:9"},
+            {"role": "assistant", "content": "newer answer", "_turn_key": "turn:9"},
+            {
+                "role": "assistant",
+                "content": "async result",
+                "_turn_key": "turn:8",
+                "_source": "async_delegation_wakeup",
+                "delegation_id": "deleg-1",
+            },
+        ],
+    )
+
+    binding = streaming._latest_user_turn_binding(
+        session,
+        "[ASYNC DELEGATION BATCH COMPLETE - deleg-1]",
+        "turn:8",
+    )
+
+    assert binding == {
+        "status": "valid",
+        "stage": "validated",
+        "actual_turn_key": "turn:8",
+    }
+
+
 @pytest.mark.parametrize("legacy_flag", LEGACY_INTERNAL_FLAGS)
 def test_all_legacy_internal_flags_remain_webui_compatible(legacy_flag):
     message = {"role": "user", "content": "legacy control", legacy_flag: True}

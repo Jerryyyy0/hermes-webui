@@ -472,3 +472,43 @@ def test_async_wakeup_fallback_anchor_is_hidden_when_agent_omits_user_row():
         "较早的回答",
         "后台任务最终回复",
     ]
+
+
+def test_context_only_merged_assistant_never_precedes_first_visible_user():
+    """Agent context normalization must not rewrite the display transcript head."""
+    from api.streaming import _merge_display_messages_after_agent_result
+
+    previous_display = [
+        {"role": "user", "content": "原始问题", "_turn_key": "turn:1"},
+        {"role": "assistant", "content": "回答一", "_turn_key": "turn:1"},
+        {"role": "assistant", "content": "回答二", "_turn_key": "turn:1"},
+    ]
+    previous_context = [
+        {"role": "assistant", "content": "回答一\n\n回答二"},
+        *previous_display,
+    ]
+    prompt = "[ASYNC DELEGATION BATCH COMPLETE - deleg-1]"
+    result = previous_context + [
+        {
+            "role": "user",
+            "content": prompt,
+            "_hermes_message_class": "context_anchor",
+            "_hermes_scaffold_kind": "async_delegation_completion",
+        },
+        {"role": "assistant", "content": "后台任务最终回复"},
+    ]
+
+    visible = _merge_display_messages_after_agent_result(
+        previous_display,
+        previous_context,
+        result,
+        prompt,
+        source="async_delegation_wakeup",
+        canonical_turn_key="turn:1",
+        async_delegation_id="deleg-1",
+    )
+
+    assert visible[0]["role"] == "user"
+    assert visible[0]["content"] == "原始问题"
+    assert not any(message.get("content") == "回答一\n\n回答二" for message in visible)
+    assert visible[-1]["content"] == "后台任务最终回复"

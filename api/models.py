@@ -1850,6 +1850,8 @@ class Session:
     def compact(self, include_runtime=False, active_stream_ids=None) -> dict:
         active_stream_ids = active_stream_ids if active_stream_ids is not None else set()
         has_pending_user_message = bool(self.pending_user_message)
+        from integration.async_delegation_turns import public_pending_state
+        pending_projection = public_pending_state(self)
         message_count = (
             self._metadata_message_count
             if self._metadata_message_count is not None
@@ -1919,8 +1921,7 @@ class Session:
             'cancel_state': self.cancel_state,
             'pending_next_turn_count': len(getattr(self, 'pending_next_turns', []) or []),
             'last_error_at': self.last_error_at,
-            'pending_user_message': self.pending_user_message,
-            'has_pending_user_message': has_pending_user_message,
+            **pending_projection,
             'is_cli_session': self.is_cli_session,
             'source_tag': self.source_tag,
             'workspace_state': self.workspace_state,
@@ -1944,6 +1945,11 @@ PROCESS_WAKEUP_PROVIDER_UNAVAILABLE_TYPES = frozenset({
 })
 PROCESS_WAKEUP_PAUSE_ERROR = 'process_wakeup_paused'
 _PROCESS_WAKEUP_PAUSE_VERSION = 1
+
+
+def is_server_wakeup_source(value) -> bool:
+    """Return whether a turn is an automatic server-owned wakeup lane."""
+    return str(value or '').strip() in {'process_wakeup', 'async_delegation_wakeup'}
 
 
 def _process_wakeup_pause_part(value) -> str:
@@ -3310,6 +3316,22 @@ def _apply_core_sync_or_error_marker(
     Must never raise — caller is responsible for exception handling.
     """
     sid = session.session_id
+    # Async wakeups carry their own durable provenance/prompt. Reconcile that
+    # record before generic stale repair clears pending fields, otherwise a
+    # restart window can silently discard the completion.
+    if getattr(session, "pending_user_source", None) == "async_delegation_wakeup":
+        try:
+            from integration.async_delegation_turns import reconcile_async_wakeup_before_stale_cleanup
+
+            if reconcile_async_wakeup_before_stale_cleanup(
+                session,
+                stream_id=stream_id_for_recheck,
+            ):
+                session.save(touch_updated_at=touch_updated_at)
+                return True
+        except Exception:
+            logger.debug("async wakeup stale reconciliation failed for %s", sid, exc_info=True)
+        return False
     # Bail if pending is unset — nothing to repair.
     if not session.pending_user_message:
         return False
@@ -3827,6 +3849,23 @@ def _sync_sidecar_from_state_db_if_newer(session) -> bool:
             prefer_context=True,
             state_messages=state_messages,
         )
+
+        if getattr(locked, 'pending_user_source', None) == 'async_delegation_wakeup':
+            try:
+                from integration.async_delegation_turns import reconcile_async_wakeup_before_stale_cleanup
+
+                if not reconcile_async_wakeup_before_stale_cleanup(
+                    locked,
+                    stream_id=locked_stream_id,
+                ):
+                    return False
+            except Exception:
+                logger.debug(
+                    "state.db newer-sidecar async wakeup reconciliation failed for %s",
+                    sid,
+                    exc_info=True,
+                )
+                return False
 
         # Mutate + persist the freshly-loaded, locked object. Because we hold the
         # lock and reloaded under it, this save cannot clobber a concurrent

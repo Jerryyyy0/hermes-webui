@@ -1126,7 +1126,7 @@ def _cron_jobs_for_api(jobs) -> list[dict]:
     return [_cron_job_for_api(job) for job in (jobs or [])]
 
 
-def _available_cron_profile_names() -> set[str]:
+def _available_profile_names() -> set[str]:
     from api.profiles import list_profiles_api
 
     names = {"default"}
@@ -1140,15 +1140,19 @@ def _available_cron_profile_names() -> set[str]:
     return names
 
 
-def _normalize_cron_profile_value(value) -> str | None:
+def _normalize_existing_profile_value(value) -> str | None:
     if value is None:
         return None
     profile = str(value).strip()
     if not profile:
         return None
-    if profile not in _available_cron_profile_names():
+    if profile not in _available_profile_names():
         raise ValueError(f"Unknown profile: {profile}")
     return profile
+
+
+def _normalize_cron_profile_value(value) -> str | None:
+    return _normalize_existing_profile_value(value)
 
 
 def _profile_home_for_cron_job(job: dict):
@@ -1730,6 +1734,16 @@ def _clear_stale_stream_state(session) -> bool:
     # case we must NOT clobber its session.active_stream_id.
     with _get_session_agent_lock(session.session_id):
         if getattr(session, "active_stream_id", None) != stream_id:
+            return False
+        if getattr(session, "pending_user_source", None) == "async_delegation_wakeup":
+            try:
+                from integration.async_delegation_turns import reconcile_async_wakeup_before_stale_cleanup
+
+                if reconcile_async_wakeup_before_stale_cleanup(session, stream_id=stream_id):
+                    session.save(touch_updated_at=False)
+                    return True
+            except Exception:
+                logger.debug("async wakeup stale reconciliation failed for %s", session.session_id, exc_info=True)
             return False
         if getattr(session, "pending_user_message", None):
             try:
@@ -7123,6 +7137,17 @@ def _turn_aligned_window_indices(source: list, limit: int) -> tuple[int, int]:
         start_idx = max(0, end_idx - limit)
         return start_idx, end_idx
 
+    # Manifest ranges omit unbound user rows; transport windows must not omit
+    # the following output too. Partition at accepted starts, keeping every
+    # intervening row and the complete tail without changing manifest ownership.
+    turns = [
+        {**turn, "end_msg_idx": (
+            int(turns[index + 1]["start_msg_idx"]) - 1
+            if index + 1 < len(turns) else len(source) - 1
+        )}
+        for index, turn in enumerate(turns)
+    ]
+
     last = turns[-1]
     last_start = int(last["start_msg_idx"])
     last_end = int(last["end_msg_idx"])
@@ -8174,6 +8199,7 @@ from api.models import (
     ensure_cron_project,
     is_cron_session,
     is_safe_session_id,
+    is_server_wakeup_source,
     PROCESS_WAKEUP_PAUSE_ERROR,
     clear_process_wakeup_pause,
     clear_process_wakeup_pause_if_model_changed,
@@ -8549,6 +8575,10 @@ _SIDEBAR_SESSION_RESPONSE_FIELDS = {
     "is_streaming",
     "active_stream_id",
     "has_pending_user_message",
+    "pending_user_message",
+    "pending_user_source",
+    "pending_turn_key",
+    "pending_user_visible",
     "pending_started_at",
     "default_hidden",
     "worktree_path",
@@ -10875,7 +10905,7 @@ def handle_get(handler, parsed) -> bool:
             if is_messaging_session:
                 cli_messages = get_cli_session_messages(sid)
             elif load_messages:
-                if msg_limit is not None:
+                if msg_limit is not None and not turn_align:
                     (
                         state_db_since_timestamp,
                         limited_sidecar_messages,
@@ -11050,17 +11080,18 @@ def handle_get(handler, parsed) -> bool:
                 )
             except TypeError:
                 compact_session = s.compact()
+            from integration.async_delegation_turns import public_pending_state
+            pending_projection = public_pending_state(s, include_attachments=load_messages)
             raw = compact_session | {
                 "messages": _truncated_msgs,
                 "message_count": _merged_message_count,
                 "tool_calls": _session_tool_calls,
                 "active_stream_id": getattr(s, "active_stream_id", None),
-                "pending_user_message": getattr(s, "pending_user_message", None),
-                "pending_attachments": getattr(s, "pending_attachments", []) if load_messages else [],
                 "pending_started_at": getattr(s, "pending_started_at", None),
                 "context_length": _persisted_cl,
                 "threshold_tokens": _threshold_tokens,
                 "last_prompt_tokens": getattr(s, "last_prompt_tokens", 0) or 0,
+                **pending_projection,
             }
             if original_stream_id:
                 try:
@@ -12696,6 +12727,10 @@ def handle_post(handler, parsed) -> bool:
             workspace = str(resolve_trusted_workspace(body.get("workspace"))) if body.get("workspace") else None
         except (TypeError, ValueError) as e:
             return bad(handler, str(e))
+        try:
+            profile = _normalize_existing_profile_value(body.get("profile"))
+        except ValueError as e:
+            return bad(handler, str(e))
         session_id = None
         workspace_mode = "external"
         worktree_info = None
@@ -12718,7 +12753,7 @@ def handle_post(handler, parsed) -> bool:
                 or str(raw_worktree).strip().lower() in {"1", "true", "yes", "on"}
             )
         else:
-            worktree_requested = _worktree_default_from_config(body.get("profile") or None)
+            worktree_requested = _worktree_default_from_config(profile)
         if worktree_requested:
             try:
                 from api.worktrees import create_worktree_for_workspace
@@ -12838,7 +12873,7 @@ def handle_post(handler, parsed) -> bool:
             workspace_mode=workspace_mode,
             model=model,
             model_provider=model_provider,
-            profile=body.get("profile") or None,
+            profile=profile,
             project_id=body.get("project_id") or None,
             worktree_info=worktree_info,
         )
@@ -13392,6 +13427,14 @@ def handle_post(handler, parsed) -> bool:
         delete_artifacts = body.get("delete_artifacts", False)
         if not isinstance(delete_artifacts, bool):
             return bad(handler, "delete_artifacts must be a boolean", 400)
+        # Stop a live worker before removing its sidecar.  Otherwise its final
+        # save can recreate pending/wakeup state after deletion.
+        try:
+            live_stream_id = getattr(get_session(sid, metadata_only=True), "active_stream_id", None)
+            if live_stream_id and cancel_stream(live_stream_id):
+                _wait_for_stream_worker_settled(live_stream_id)
+        except Exception:
+            logger.debug("Failed to stop live stream before deleting session %s", sid, exc_info=True)
         if delete_artifacts:
             try:
                 from integration.session_manifest.store import delete_session_artifact_files
@@ -13541,6 +13584,15 @@ def handle_post(handler, parsed) -> bool:
         except KeyError:
             return bad(handler, "Session not found", 404)
         sid = body["session_id"]
+        # Establish the cancel fence before truncating.  A worker that survives
+        # the clear must not append its old turn back into the emptied session.
+        try:
+            live_stream_id = getattr(s, "active_stream_id", None)
+            if live_stream_id and cancel_stream(live_stream_id):
+                _wait_for_stream_worker_settled(live_stream_id)
+                s = get_session(sid)
+        except Exception:
+            logger.debug("Failed to stop live stream before clearing session %s", sid, exc_info=True)
         with _get_session_agent_lock(sid):
             had_sidecar_messages = bool(s.messages or [])
             # Clear is a full truncate-to-empty: route through the SAME helper the
@@ -13592,6 +13644,22 @@ def handle_post(handler, parsed) -> bool:
             s.pending_started_at = None
             s.pending_user_source = None
             s.pending_turn_key = None
+            # Clearing a session is also a durable wakeup cancellation barrier;
+            # queued completions must not be restarted by the inbox sweep.
+            records = getattr(s, "async_delegation_origins", None)
+            if isinstance(records, dict):
+                for delegation_id, raw in list(records.items()):
+                    if not isinstance(raw, dict):
+                        continue
+                    if str(raw.get("wakeup_state") or "") not in {"queued", "running"}:
+                        continue
+                    updated = dict(raw)
+                    updated["status"] = "cancelled"
+                    updated["cancel_state"] = "cancelled"
+                    updated["wakeup_state"] = "settled"
+                    updated.pop("wakeup", None)
+                    records[delegation_id] = updated
+                s.async_delegation_origins = records
             s.clear_generation = uuid.uuid4().hex if had_sidecar_messages else None
             # Reset the title via the rename helper so clearing a manually-named
             # session also clears manual_title/llm_title_generated — otherwise the
@@ -15308,7 +15376,10 @@ def _handle_sessions_search(handler, parsed):
     from api.profiles import get_active_profile_name
     active_profile = get_active_profile_name()
     all_profiles = _all_profiles_query_flag(parsed)
-    sessions = all_sessions()
+    sessions = [
+        s for s in all_sessions()
+        if not is_cron_session(s.get("session_id"), s.get("source_tag"))
+    ]
     if not all_profiles:
         sessions = [
             s for s in sessions
@@ -18926,6 +18997,7 @@ def _prepare_chat_start_session_for_stream(
     turn_key: str = "",
     source: str = "webui",
     generation: int | None = None,
+    save: bool = True,
 ):
     """Persist chat-start state according to webui.session_save_mode.
 
@@ -18971,15 +19043,16 @@ def _prepare_chat_start_session_for_stream(
             turn_key=turn_key,
             source=source,
         )
-    s.save()
-    try:
-        from integration.config import integration_enabled
-        from integration.session_status.store import advance_read_until
+    if save:
+        s.save()
+        try:
+            from integration.config import integration_enabled
+            from integration.session_status.store import advance_read_until
 
-        if integration_enabled():
-            advance_read_until(s.profile, s.session_id, s.pending_started_at)
-    except Exception:
-        logger.debug("failed to advance chat-start read cursor", exc_info=True)
+            if integration_enabled():
+                advance_read_until(s.profile, s.session_id, s.pending_started_at)
+        except Exception:
+            logger.debug("failed to advance chat-start read cursor", exc_info=True)
 
 
 def _is_hidden_empty_session(s) -> bool:
@@ -19268,10 +19341,16 @@ def _start_chat_stream_for_session(
 
     session_lock = _get_session_agent_lock(s.session_id)
     stream_turn_key = ""
+    precreated_stream = None
     diag.stage("session_lock_wait") if diag else None
     while True:
         with session_lock:
             s = _reload_session_for_locked_start(s)
+            if source == "async_delegation_wakeup" and bool(getattr(s, "archived", False)):
+                return {
+                    "error": "会话已归档，暂不启动后台委派唤醒",
+                    "_status": 409,
+                }
             locked_stream_id = getattr(s, "active_stream_id", None)
             if locked_stream_id:
                 if _active_stream_blocks_chat_start(s, locked_stream_id):
@@ -19348,6 +19427,21 @@ def _start_chat_stream_for_session(
                 stream_id = uuid.uuid4().hex
                 diag.stage("save_pending_state") if diag else None
                 was_hidden_empty_session = _is_hidden_empty_session(s)
+                async_delegation_id = ""
+                if source == "async_delegation_wakeup" and isinstance(server_turn_metadata, dict):
+                    async_delegation_id = str(server_turn_metadata.get("delegation_id") or "").strip()
+                if async_delegation_id:
+                    from integration.async_delegation_turns import validate_wakeup_start_locked
+
+                    if validate_wakeup_start_locked(
+                        s,
+                        async_delegation_id,
+                        turn_key=prepared_turn_key,
+                    ) is None:
+                        return {
+                            "error": "后台委派唤醒状态已变化，请稍后重试",
+                            "_status": 409,
+                        }
                 _prepare_chat_start_session_for_stream(
                     s,
                     msg=msg,
@@ -19359,6 +19453,7 @@ def _start_chat_stream_for_session(
                     turn_key=prepared_turn_key,
                     source=source,
                     generation=int(getattr(s, "control_generation", 0) or 0) + 1,
+                    save=not bool(async_delegation_id),
                 )
                 stream_turn_key = str(getattr(s, "pending_turn_key", "") or "").strip()
                 if not stream_turn_key:
@@ -19371,6 +19466,33 @@ def _start_chat_stream_for_session(
                         "error": "定时任务会话轮次校验失败，暂时无法继续对话",
                         "_status": 409,
                     }
+                if async_delegation_id:
+                    from integration.async_delegation_turns import prepare_wakeup_start_locked
+
+                    admitted = prepare_wakeup_start_locked(
+                        s,
+                        async_delegation_id,
+                        stream_id=stream_id,
+                        turn_key=stream_turn_key,
+                        generation=int(getattr(s, "active_stream_generation", 0) or 0),
+                    )
+                    if admitted is None:
+                        # Validation and mutation run under the same session
+                        # lock, so reaching this branch indicates an invariant
+                        # violation rather than a normal cancellation race.
+                        raise RuntimeError("async wakeup admission changed under session lock")
+                    # Register the provisional channel before committing the
+                    # sidecar.  A concurrent cancel can then always observe
+                    # the exact stream/generation after admission succeeds.
+                    precreated_stream = create_stream_channel()
+                    with STREAMS_LOCK:
+                        STREAMS[stream_id] = precreated_stream
+                    try:
+                        s.save()
+                    except Exception:
+                        with STREAMS_LOCK:
+                            STREAMS.pop(stream_id, None)
+                        raise
                 break
         if needs_stale_cleanup:
             diag.stage("stale_stream_cleanup") if diag else None
@@ -19409,9 +19531,10 @@ def _start_chat_stream_for_session(
     if str(getattr(s, "workspace_mode", "") or "").strip().lower() != "managed":
         set_last_workspace(workspace)
     diag.stage("stream_registration") if diag else None
-    stream = create_stream_channel()
-    with STREAMS_LOCK:
-        STREAMS[stream_id] = stream
+    stream = precreated_stream or create_stream_channel()
+    if precreated_stream is None:
+        with STREAMS_LOCK:
+            STREAMS[stream_id] = stream
     _stream_diag_log_event(
         "webui.chat_start.stream_created",
         "已创建聊天流并写入初始状态，后续日志将通过 stream_id 关联。",
@@ -19443,14 +19566,39 @@ def _start_chat_stream_for_session(
     if backend_is_gateway:
         from api.gateway_chat import _mark_gateway_run_starting
         _mark_gateway_run_starting(stream_id)
+    worker_start_gate = threading.Event() if async_delegation_id else None
+
+    def _run_after_server_turn_started(*worker_args, **worker_call_kwargs):
+        # The thread may exist before the live-view frame, but model/tool work
+        # cannot begin until the route has published its attachable stream id.
+        worker_start_gate.wait()
+        return worker_target(*worker_args, **worker_call_kwargs)
+
     thr = threading.Thread(
-        target=worker_target,
+        target=_run_after_server_turn_started if worker_start_gate is not None else worker_target,
         args=(s.session_id, msg, model, workspace, stream_id, attachments),
         kwargs=worker_kwargs,
         daemon=True,
     )
     try:
-        thr.start()
+        try:
+            thr.start()
+            if async_delegation_id:
+                # The thread was accepted, admission is durable, and the gate
+                # above still prevents any token/tool output from racing this
+                # attach notification. start_session_turn retains its later
+                # compatibility fan-out; event_id dedupe makes it harmless.
+                from integration.async_delegation_turns import publish_server_turn_started
+
+                publish_server_turn_started(
+                    s,
+                    async_delegation_id,
+                    stream_id=stream_id,
+                    source=source,
+                )
+        finally:
+            if worker_start_gate is not None:
+                worker_start_gate.set()
     except Exception:
         if backend_is_gateway:
             try:
@@ -19460,6 +19608,32 @@ def _start_chat_stream_for_session(
                 _clear_gateway_run_starting(stream_id)
             except Exception:
                 logger.debug("Failed to record gateway run-start failure for stream %s", stream_id, exc_info=True)
+        if async_delegation_id:
+            try:
+                from integration.async_delegation_turns import requeue_unstarted_wakeup
+
+                with _get_session_agent_lock(s.session_id):
+                    latest = Session.load(s.session_id)
+                    if latest is not None:
+                        requeue_unstarted_wakeup(
+                            latest,
+                            async_delegation_id,
+                            stream_id=stream_id,
+                            generation=int(getattr(s, "active_stream_generation", 0) or 0),
+                            error_code="worker_dispatch_failed",
+                            save=False,
+                        )
+                        latest.active_stream_id = None
+                        latest.pending_user_message = None
+                        latest.pending_attachments = []
+                        latest.pending_started_at = None
+                        latest.pending_user_source = None
+                        latest.pending_turn_key = None
+                        latest.save()
+                with STREAMS_LOCK:
+                    STREAMS.pop(stream_id, None)
+            except Exception:
+                logger.warning("Failed to revert async wakeup admission %s", stream_id, exc_info=True)
         raise
     _stream_diag_log_event(
         "webui.chat_start.worker_dispatched",
@@ -19879,7 +20053,7 @@ def start_session_turn(
                     session_id,
                     exc_info=True,
                 )
-        if turn_source == "process_wakeup":
+        if turn_source == "process_wakeup" or is_server_wakeup_source(turn_source):
             _credential_state_changed = False
             try:
                 _credential_state_changed = process_wakeup_pause_credential_state_changed(s)
@@ -20005,7 +20179,15 @@ def start_session_turn(
     try:
         status = int((resp or {}).get("_status", 200) or 200)
         stream_id = (resp or {}).get("stream_id")
-        if status < 400 and stream_id:
+        delegation_id = (
+            str(server_turn_metadata.get("delegation_id") or "")
+            if isinstance(server_turn_metadata, dict)
+            else ""
+        )
+        # Async-delegation wakeups already published from the admission path
+        # while their worker was gated. Re-emitting here can race a very fast
+        # worker that has settled and make a client attach to a dead stream.
+        if status < 400 and stream_id and not delegation_id:
             from api.background_process import get_session_channel
 
             ch = get_session_channel(session_id)
@@ -20020,23 +20202,6 @@ def start_session_turn(
                         "origin_turn_key": server_turn_metadata.get("origin_turn_key"),
                     } if isinstance(server_turn_metadata, dict) else {}),
                 }
-                delegation_id = str(payload.get("delegation_id") or "")
-                if delegation_id:
-                    from integration.async_delegation_turns import (
-                        resolve_async_delegation_origin,
-                        task_event,
-                    )
-
-                    record = resolve_async_delegation_origin(s, delegation_id)
-                    if record is not None:
-                        payload = task_event(
-                            s,
-                            "server_turn_started",
-                            delegation_id,
-                            record,
-                            stream_id=str(stream_id),
-                            source=str(source or ""),
-                        )
                 ch.emit(
                     "server_turn_started",
                     payload,

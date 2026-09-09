@@ -42,7 +42,7 @@ from integration.session_manifest.manifest import (
     filter_existing_turn_artifact_paths,
     merge_manifest_delta,
     merge_live_manifest_delta_for_sse,
-    seed_live_manifest_references,
+    seed_live_manifest_snapshot,
     turn_artifacts_for_wire,
     _turn_message_slice,
 )
@@ -1943,14 +1943,29 @@ def test_merge_manifest_delta_is_idempotent_by_path():
     }]
 
 
-def test_sse_manifest_delta_references_are_a_full_live_snapshot():
+def test_sse_manifest_delta_top_level_collections_are_full_live_snapshots():
+    historical_artifact = {
+        'path': 'a-history.md',
+        'preview': 'file',
+        'source_tool': 'write_file',
+    }
+    first_artifact = {
+        'path': 'b-current.md',
+        'preview': 'file',
+        'source_tool': 'write_file',
+    }
+    later_artifact = {
+        'path': 'c-report.md',
+        'preview': 'file',
+        'source_tool': 'write_file',
+    }
     historical = _skill_reference('historical-skill', 'history-call')
     first = {
         'session_id': 'sid',
         'stream_id': 'stream1',
         'turn_key': 'turn:2',
         'sequence': 1,
-        'artifacts': [],
+        'artifacts': [first_artifact],
         'references': [_skill_reference('research-skill', 'first-call')],
     }
     repeated = {
@@ -1966,17 +1981,18 @@ def test_sse_manifest_delta_references_are_a_full_live_snapshot():
         'stream_id': 'stream1',
         'turn_key': 'turn:2',
         'sequence': 3,
-        'artifacts': [{'path': 'report.md', 'preview': 'file', 'source_tool': 'write_file'}],
+        'artifacts': [later_artifact],
         'references': [],
     }
 
     live, first_outbound = merge_live_manifest_delta_for_sse(
-        {'references': [historical]}, first,
+        {'artifacts': [historical_artifact], 'references': [historical]}, first,
     )
     live, repeated_outbound = merge_live_manifest_delta_for_sse(live, repeated)
     _live, artifact_outbound = merge_live_manifest_delta_for_sse(live, artifact_only)
 
     assert first_outbound['references'] == [historical, _skill_reference('research-skill', 'first-call')]
+    assert first_outbound['artifacts'] == [historical_artifact, first_artifact]
     assert repeated_outbound['references'] == [
         historical,
         {
@@ -1989,28 +2005,49 @@ def test_sse_manifest_delta_references_are_a_full_live_snapshot():
         },
     ]
     assert artifact_outbound['references'] == repeated_outbound['references']
+    assert repeated_outbound['artifacts'] == [historical_artifact, first_artifact]
+    assert artifact_outbound['artifacts'] == [historical_artifact, first_artifact, later_artifact]
+    full_turn_references = [{
+        'kind': 'skill',
+        'source': [
+            {'tool': 'skill_view', 'tid': 'first-call'},
+            {'tool': 'skill_view', 'tid': 'second-call'},
+        ],
+        'metadata': {'path': 'research-skill'},
+    }]
+    assert first_outbound['turns'] == [{
+        'turn_key': 'turn:2',
+        'artifacts': [first_artifact],
+        'references': [_skill_reference('research-skill', 'first-call')],
+    }]
     assert repeated_outbound['turns'] == [{
         'turn_key': 'turn:2',
-        'artifacts': [],
-        'references': [_skill_reference('research-skill', 'second-call')],
+        'artifacts': [first_artifact],
+        'references': full_turn_references,
     }]
     assert artifact_outbound['turns'] == [{
         'turn_key': 'turn:2',
-        'artifacts': [{'path': 'report.md', 'preview': 'file', 'source_tool': 'write_file'}],
-        'references': [],
+        'artifacts': [first_artifact, later_artifact],
+        'references': full_turn_references,
     }]
 
 
-def test_seed_live_manifest_references_uses_existing_manifest(monkeypatch):
+def test_seed_live_manifest_snapshot_uses_existing_manifest(monkeypatch):
+    expected_artifacts = [{
+        'path': 'existing.md',
+        'preview': 'file',
+        'source_tool': 'write_file',
+    }]
     expected = [_skill_reference('historical-skill', 'history-call')]
     monkeypatch.setattr(
         'integration.session_manifest.manifest.build_session_manifest',
-        lambda _session: {'references': expected},
+        lambda _session: {'artifacts': expected_artifacts, 'references': expected},
     )
 
-    seeded = seed_live_manifest_references(object())
+    seeded = seed_live_manifest_snapshot(object())
 
-    assert seeded == {'references': expected}
+    assert seeded == {'artifacts': expected_artifacts, 'references': expected}
+    assert seeded['artifacts'] is not expected_artifacts
     assert seeded['references'] is not expected
 
 

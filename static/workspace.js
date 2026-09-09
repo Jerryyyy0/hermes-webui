@@ -401,118 +401,6 @@ function _cloneManifestValue(value){
   catch(_){return value;}
 }
 
-function _mergeManifestRows(existing, incoming){
-  const byPath = new Map();
-  const add = (row) => {
-    if(!row||typeof row!=='object') return;
-    const path = String(row.path||'').trim();
-    const preview = String(row.preview||'').trim();
-    const source_tool = String(row.source_tool||'').trim();
-    if(!path || (preview !== 'file' && preview !== 'skill') || !source_tool) return;
-    const merged = {path, preview, source_tool};
-    const profile = String(row.profile||'').trim();
-    if(profile) merged.profile = profile;
-    const key = `${profile}\u0000${path}`;
-    byPath.set(key, merged);
-  };
-  (existing||[]).forEach(add);
-  (incoming||[]).forEach(add);
-  return [...byPath.values()].sort((a,b)=>{
-    const ap = String(a.profile||'');
-    const bp = String(b.profile||'');
-    return ap===bp ? String(a.path||'').localeCompare(String(b.path||'')) : ap.localeCompare(bp);
-  });
-}
-
-function _normalizeManifestReference(row){
-  if(!row||typeof row!=='object') return null;
-  const kind = String(row.kind||'').trim();
-  const metadata = row.metadata && typeof row.metadata==='object' ? row.metadata : {};
-  const source = Array.isArray(row.source) ? row.source : [];
-  const cleanSources = [];
-  const seenSources = new Set();
-  source.forEach(item=>{
-    if(!item||typeof item!=='object') return;
-    const tool = String(item.tool||'').trim();
-    const tid = String(item.tid||'').trim();
-    const key = `${tool}\u0000${tid}`;
-    if(tool&&!seenSources.has(key)){
-      cleanSources.push({tool, tid});
-      seenSources.add(key);
-    }
-  });
-  if(kind==='skill'){
-    const path = String(metadata.path||'').trim();
-    if(!path||!cleanSources.length) return null;
-    const out = {kind:'skill', source:cleanSources, metadata:{path}};
-    if(row.status==='expired') out.status='expired';
-    return out;
-  }
-  if(kind==='knowledge_base_document'){
-    const kbName = String(metadata.kbName||'').trim();
-    const fileName = String(metadata.fileName||'').trim();
-    const chunks = [];
-    const chunksByContent = new Set();
-    (Array.isArray(metadata.chunks)?metadata.chunks:[]).forEach(rawChunk=>{
-      if(!rawChunk||typeof rawChunk!=='object') return;
-      const pageContent = rawChunk.page_content;
-      if(typeof pageContent!=='string'||!pageContent||chunksByContent.has(pageContent)) return;
-      const chunk = {page_content:pageContent, score:''};
-      if(typeof rawChunk.score==='number'&&Number.isFinite(rawChunk.score)) chunk.score=rawChunk.score;
-      chunks.push(chunk);
-      chunksByContent.add(pageContent);
-    });
-    if(!kbName||!fileName||!cleanSources.length||!chunks.length) return null;
-    return {kind:'knowledge_base_document', source:cleanSources, metadata:{kbName, fileName, chunks}};
-  }
-  return null;
-}
-
-function _referenceIdentity(row){
-  if(!row) return '';
-  if(row.kind==='skill') return `skill\u0000${row.metadata.path}`;
-  if(row.kind==='knowledge_base_document') return `knowledge_base_document\u0000${row.metadata.kbName}\u0000${row.metadata.fileName}`;
-  return '';
-}
-
-function _mergeManifestReferences(existing, incoming){
-  const byKey = new Map();
-  const add = row => {
-    const normalized = _normalizeManifestReference(row);
-    if(!normalized) return;
-    const key = _referenceIdentity(normalized);
-    const current = byKey.get(key);
-    if(!current){
-      byKey.set(key, normalized);
-      return;
-    }
-    const sourceKeys = new Set(current.source.map(item=>`${item.tool}\u0000${item.tid}`));
-    normalized.source.forEach(item=>{
-      const sourceKey = `${item.tool}\u0000${item.tid}`;
-      if(!sourceKeys.has(sourceKey)){
-        current.source.push(item);
-        sourceKeys.add(sourceKey);
-      }
-    });
-    if(current.kind==='knowledge_base_document'){
-      const chunksByContent = new Map(current.metadata.chunks.map(chunk=>[chunk.page_content, chunk]));
-      normalized.metadata.chunks.forEach(chunk=>{
-        const existingChunk = chunksByContent.get(chunk.page_content);
-        if(!existingChunk){
-          current.metadata.chunks.push(chunk);
-          chunksByContent.set(chunk.page_content, chunk);
-        }else if(existingChunk.score===''&&chunk.score!==''){
-          existingChunk.score = chunk.score;
-        }
-      });
-    }
-    if(normalized.status==='expired') current.status='expired';
-  };
-  (existing||[]).forEach(add);
-  (incoming||[]).forEach(add);
-  return [...byKey.values()].sort((a,b)=>_referenceIdentity(a).localeCompare(_referenceIdentity(b)));
-}
-
 function _normalizeDeltaTurnKey(delta){
   const key = String(delta && delta.turn_key || '').trim();
   return key.startsWith('turn:') ? key : '';
@@ -525,21 +413,20 @@ function _turnKeySortValue(turnKey){
   return Number.isInteger(idx) ? idx : 1000000000;
 }
 
-function _mergeManifestTurns(existingTurns, incomingTurns){
+function _replaceManifestTurns(existingTurns, incomingTurns){
   const byKey = new Map();
-  const add = (turn) => {
+  const replace = (turn) => {
     if(!turn||typeof turn!=='object') return;
     const key = String(turn.turn_key||'').trim();
     if(!key) return;
-    const current = byKey.get(key) || {turn_key:key, artifacts:[], references:[]};
     byKey.set(key, {
       turn_key: key,
-      artifacts: _mergeManifestRows(current.artifacts, turn.artifacts),
-      references: _mergeManifestReferences(current.references, turn.references),
+      artifacts: _cloneManifestValue(Array.isArray(turn.artifacts) ? turn.artifacts : []),
+      references: _cloneManifestValue(Array.isArray(turn.references) ? turn.references : []),
     });
   };
-  (existingTurns||[]).forEach(add);
-  (incomingTurns||[]).forEach(add);
+  (existingTurns||[]).forEach(replace);
+  (incomingTurns||[]).forEach(replace);
   return [...byKey.values()].sort((a,b)=>{
     const ai = _turnKeySortValue(a.turn_key);
     const bi = _turnKeySortValue(b.turn_key);
@@ -567,17 +454,13 @@ function applySessionManifestDelta(delta){
   }
   const turnKey = _normalizeDeltaTurnKey(delta);
   S._lastManifestDeltaTurnKey = turnKey;
-  const incomingTurns = Array.isArray(delta.turns) ? delta.turns : (turnKey ? [{
-    turn_key: turnKey,
-    artifacts: delta.artifacts || [],
-    references: delta.references || [],
-  }] : []);
+  const incomingTurns = Array.isArray(delta.turns) ? delta.turns : [];
   if(delta.todos && Array.isArray(delta.todos.items)){
     _sessionManifest.todos = {items: _cloneManifestValue(delta.todos.items)};
   }
-  _sessionManifest.artifacts = _mergeManifestRows(_sessionManifest.artifacts, delta.artifacts);
+  if(Array.isArray(delta.artifacts)) _sessionManifest.artifacts = _cloneManifestValue(delta.artifacts);
   if(Array.isArray(delta.references)) _sessionManifest.references = _cloneManifestValue(delta.references);
-  _sessionManifest.turns = _mergeManifestTurns(_sessionManifest.turns, incomingTurns);
+  _sessionManifest.turns = _replaceManifestTurns(_sessionManifest.turns, incomingTurns);
   _sessionManifest.live = delta.stream_id ? {stream_id: delta.stream_id, source:'sse'} : _sessionManifest.live;
   renderSessionInspector();
   return true;

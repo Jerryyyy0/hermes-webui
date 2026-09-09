@@ -10350,6 +10350,7 @@ function _pendingCurrentTailUserMessage(messages){
 }
 
 function getPendingSessionMessage(session, messagesOverride=null){
+  if(session?.pending_user_visible===false||session?.pending_user_source==='async_delegation_wakeup') return null;
   const text=String(session?.pending_user_message||'').trim();
   if(!text) return null;
   const attachments=Array.isArray(session?.pending_attachments)?session.pending_attachments.filter(Boolean):[];

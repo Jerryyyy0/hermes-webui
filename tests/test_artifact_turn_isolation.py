@@ -107,6 +107,41 @@ def test_settlement_dedupes_stream_and_transcript_evidence_by_stronger_source(tm
     ]
 
 
+def test_async_wakeup_tail_artifact_belongs_to_origin_turn(tmp_path):
+    from integration.session_manifest.manifest import extract_turn_artifact_entries_for_manifest
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    artifact = workspace / "async-report.html"
+    artifact.write_text("<html></html>", encoding="utf-8")
+    session = Session(
+        session_id="async-artifact-origin",
+        workspace=str(workspace),
+        messages=[
+            {"role": "user", "content": "dispatch", "_turn_key": "turn:8"},
+            {"role": "assistant", "content": "dispatched", "_turn_key": "turn:8"},
+            {"role": "user", "content": "newer question", "_turn_key": "turn:9"},
+            {"role": "assistant", "content": "newer answer", "_turn_key": "turn:9"},
+            {
+                "role": "assistant",
+                "content": f"MEDIA:{artifact}",
+                "_turn_key": "turn:8",
+                "_source": "async_delegation_wakeup",
+                "delegation_id": "deleg-1",
+            },
+        ],
+    )
+
+    assert extract_turn_artifact_entries_for_manifest(session, "turn:8") == [
+        {
+            "path": "async-report.html",
+            "source_tool": "media",
+            "preview": "file",
+        }
+    ]
+    assert extract_turn_artifact_entries_for_manifest(session, "turn:9") == []
+
+
 def test_completed_settlement_drops_stream_artifact_removed_before_turn_end(tmp_path, monkeypatch):
     from api import streaming
     from integration.session_manifest.manifest import build_session_manifest
