@@ -84,9 +84,9 @@ Session `session.json` 中。不新增数据库表、sidecar 或独立 Citation 
 
 `integration/session_manifest/manifest.py` 将 completed ToolEvent 交给解析器，但 live delta 会过滤
 知识库 candidates；`GET /api/session/manifest` 只从自洽的最终 message Citation/evidence
-生成 references wire。该模块还在 stream 起始处以持久化 Manifest reference 为基线，并在出站前生成
-完整、已去重的顶层 `references` 快照；`api/streaming.py` 与 `api/gateway_chat.py` 仅保留该共享投影的
-调用、hook、保存和出站过滤接缝，不解析 MCP JSON；前端直接替换该快照，不重复解析或合并。
+生成 references wire。该模块还在 stream 起始处以持久化 Manifest 为基线，并在出站前生成完整、已去重的
+顶层 `artifacts` 与 `references` 快照；`api/streaming.py` 与 `api/gateway_chat.py` 仅保留该共享投影的
+调用、hook、保存和出站过滤接缝，不解析 MCP JSON；前端直接替换两个快照，不重复解析或合并。
 
 公开字段、SSE 帧和生命周期只在 [Session Manifest HTTP/SSE 契约](api/session-manifest-api.md)
 维护；本节只记录 Fork 接缝与实现边界。

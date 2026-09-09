@@ -7484,8 +7484,8 @@ def _run_agent_streaming(
         s = get_session(session_id)
         if async_delegation_id:
             _async_wakeup_generation = getattr(s, 'active_stream_generation', None)
-        from integration.session_manifest.manifest import seed_live_manifest_references
-        _live_manifest_seed = seed_live_manifest_references(s)
+        from integration.session_manifest.manifest import seed_live_manifest_snapshot
+        _live_manifest_seed = seed_live_manifest_snapshot(s)
         with STREAMS_LOCK:
             STREAM_LIVE_MANIFEST[stream_id] = _live_manifest_seed
         _turn_pending_source = getattr(s, 'pending_user_source', None) or 'webui'

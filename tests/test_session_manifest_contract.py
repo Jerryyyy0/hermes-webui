@@ -43,20 +43,25 @@ def test_workspace_js_fetches_manifest():
     assert 'api/media?path=' not in src
     assert "_previewSource = _isManifestAbsolutePath(path) ? 'manifest-external' : 'workspace';" in src
     assert 'key.startsWith(\'turn:\')' in src
-    assert 'function _mergeManifestReferences' in src
-    assert "kind==='knowledge_base_document'" in src
-    assert 'metadata.chunks' in src
 
 
-def test_workspace_js_replaces_full_sse_reference_snapshots():
+def test_workspace_js_replaces_full_sse_top_level_snapshots():
     src = (REPO / 'static' / 'workspace.js').read_text(encoding='utf-8')
     apply_delta = src.split('function applySessionManifestDelta(delta){', 1)[1].split('\nfunction getTurnArtifacts', 1)[0]
 
+    assert 'if(Array.isArray(delta.artifacts)) _sessionManifest.artifacts = _cloneManifestValue(delta.artifacts);' in apply_delta
     assert 'if(Array.isArray(delta.references)) _sessionManifest.references = _cloneManifestValue(delta.references);' in apply_delta
+    assert '_mergeManifestRows(_sessionManifest.artifacts, delta.artifacts)' not in apply_delta
     assert '_mergeManifestReferences(_sessionManifest.references, delta.references)' not in apply_delta
+    assert 'artifacts: delta.artifacts || []' not in apply_delta
+    assert '_sessionManifest.turns = _replaceManifestTurns(_sessionManifest.turns, incomingTurns);' in apply_delta
+    assert '_sessionManifest.turns = _mergeManifestTurns(_sessionManifest.turns, incomingTurns);' not in apply_delta
+    assert 'function _mergeManifestRows' not in src
+    assert 'function _mergeManifestReferences' not in src
 
     api = (REPO / 'docs' / 'api' / 'session-manifest-api.md').read_text(encoding='utf-8')
-    assert '消费方直接替换顶层 references' in api
+    assert '消费方直接替换顶层 artifacts 与 references' in api
+    assert '当前 turn 的完整快照' in api
 
 
 def test_messages_js_listens_for_manifest_delta():

@@ -3164,14 +3164,20 @@ def merge_manifest_delta(base: dict[str, Any] | None, delta: dict[str, Any] | No
     return base_manifest
 
 
-def seed_live_manifest_references(session: Any) -> dict[str, list[dict]]:
-    """Seed a stream with the session's persisted public reference snapshot."""
+def seed_live_manifest_snapshot(session: Any) -> dict[str, list[dict]]:
+    """Seed a stream with persisted public artifact and reference snapshots."""
     try:
         manifest = build_session_manifest(session)
-        references = manifest.get('references') if isinstance(manifest, dict) else []
-        return {'references': copy.deepcopy(references)} if isinstance(references, list) else {}
+        if not isinstance(manifest, dict):
+            return {}
+        snapshot = {
+            collection: copy.deepcopy(manifest.get(collection) or [])
+            for collection in ('artifacts', 'references')
+            if isinstance(manifest.get(collection), list)
+        }
+        return snapshot
     except Exception:
-        logger.debug('failed to seed live manifest references', exc_info=True)
+        logger.debug('failed to seed live manifest snapshot', exc_info=True)
         return {}
 
 
@@ -3181,7 +3187,7 @@ def merge_live_manifest_delta_for_sse(
     *,
     scope: str = 'active_stream',
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Merge a live delta, snapshot top-level references, and retain its turn delta."""
+    """Merge a live delta, then snapshot top-level and current-turn collections."""
     outbound = copy.deepcopy(delta or {})
     turn_references = copy.deepcopy(outbound.get('references') or [])
     if not isinstance(outbound.get('turns'), list) and outbound.get('turn_key'):
@@ -3191,7 +3197,18 @@ def merge_live_manifest_delta_for_sse(
             'references': turn_references,
         }]
     live_manifest = merge_manifest_delta(base, outbound, scope=scope)
+    outbound['artifacts'] = copy.deepcopy(live_manifest.get('artifacts') or [])
     outbound['references'] = copy.deepcopy(live_manifest.get('references') or [])
+    turn_key = str(outbound.get('turn_key') or '').strip()
+    if turn_key:
+        current_turn = next(
+            (
+                turn for turn in live_manifest.get('turns') or []
+                if isinstance(turn, dict) and str(turn.get('turn_key') or '').strip() == turn_key
+            ),
+            None,
+        )
+        outbound['turns'] = [copy.deepcopy(current_turn)] if current_turn else []
     return live_manifest, outbound
 
 

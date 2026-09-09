@@ -404,19 +404,23 @@ Orphan artifact 仍保留在顶层 `artifacts`，但不进入正常 `turns[]`。
 | `turn_key` | stream 启动时确定；前端不得从 `stream_id` 推断 |
 | `sequence` | 单 stream 内单调递增 |
 | `todos` | 可选；SSE 可额外含 `mode: "replace_latest"` |
-| `artifacts` | 可选；本次变化的增量，row schema 与 GET 相同 |
+| `artifacts` | 当前 session 在该 stream 内的完整、已去重快照；row schema 与 GET 相同，消费方直接替换顶层 artifacts |
 | `references` | 当前 session 在该 stream 内的完整、已去重快照；row schema 与 GET 相同，消费方直接替换顶层 references |
-| `turns` | 当前 `turn_key` 的局部增量；其 `references` 仅包含本次工具事件产生的引用，绝不是顶层快照 |
+| `turns` | 当前 `turn_key` 的完整、已去重快照；其 artifacts/references 仅表示该轮归属，不包含其它轮次 |
 
 `todos`、`artifacts`、`references` 均为空时不发送 delta。
 
 每条 delta 至少包含 `version`、`session_id`、`stream_id`、`turn_key`、`sequence`，再携带本次
-有变化的 `todos` 或 `artifacts`，以及当前 stream 的完整 `references` 快照。stream 建立时该快照
-以已持久化 Manifest 的 references 为基线；每次成功 `skill_view` 会在服务端完成去重、source 合并后
-更新快照。顶层不携带工具调用来源；引用来源只在 `references[].source[]` 中表达。
+有变化的 `todos`，当前 turn 的完整快照，以及当前 stream 的完整 `artifacts` 与 `references` 快照。stream
+建立时顶层快照以已持久化 Manifest 为基线；每次成功工具成果或 `skill_view` 都会在服务端完成去重、
+必要的 source 合并后更新顶层与当前 turn 快照。顶层不携带工具调用来源；引用来源只在
+`references[].source[]` 中表达。
 
-顶层 `references` 与 `turns[].references` 有意使用不同的范围：前者是 session 快照，后者仅保留
-当前 turn 的增量归属。消费方若只展示 session references，只需按 `stream_id:sequence` 去重后替换顶层字段。
+消费方直接替换顶层 artifacts 与 references，并按 `turn_key` 直接替换当前 `turns[]` 行；不要根据
+此前 SSE payload 自行合并资源。
+
+顶层 `artifacts`/`references` 与 `turns[]` 有意使用不同的范围：前者是 session 快照，后者是当前
+turn 的完整快照。消费方按 `stream_id:sequence` 去重后，直接替换两个顶层字段和该 `turn_key` 的行。
 
 ### Todo delta
 
@@ -443,14 +447,16 @@ data: {"version":2,"session_id":"abc123","stream_id":"stream-xyz","turn_key":"tu
 
 `searchKnowledgeBaseDocuments` 和 `searchKnowledgeBaseDocumentsAcross` 成功完成时只在服务端
 创建当前 stream 的 Citation candidates。此时模型尚未证明最终采用了哪些 chunk，因此
-`manifest_delta.references[]`、`turns[].references[]` 和 `STREAM_LIVE_MANIFEST` 都必须过滤
-`knowledge_base_document`。最终 assistant message 原子保存后，客户端通过
+本次检索产生的候选不得加入 `manifest_delta.references[]`、`turns[].references[]` 或
+`STREAM_LIVE_MANIFEST`；已在 stream 开始前持久化的知识库 reference 仍可保留在顶层完整快照中。
+最终 assistant message 原子保存后，客户端通过
 `GET /api/session/manifest` 获得实际采用的 document/chunk。
 
 ### Turn reconcile 成果 delta
 
-turn reconcile 仅补充 artifacts；它的 `turns[]` 仅含当前 `turn_key` 的局部 artifacts，
-references 固定为空。顶层 `references` 仍为完整快照，因而可包含本 stream 先前的 Skill 引用。
+turn reconcile 会补充当前 turn 的 artifacts；它出站的 `turns[]` 是当前 `turn_key` 的完整快照，
+会保留该 turn 先前已发现的 artifacts/references。顶层 `artifacts`/`references` 仍为完整快照，
+因而可包含历史或本 stream 先前产生的条目。
 
 ```text
 event: manifest_delta
@@ -475,8 +481,8 @@ SSE 是乐观派生状态，不写入 transcript，不进入模型上下文，�
 | --- | --- |
 | Session artifacts | 按 profile + canonical path 去重 |
 | Session references | Skill 按 canonical skill path；知识库文档按稳定 `id` 合并 |
-| SSE 顶层 references | 服务端以已持久化 references 为基线合并本 stream 的 Skill 引用后发送完整快照；消费方按 `stream_id:sequence` 去重后直接替换，不自行合并 |
-| Turn artifacts/references | 按 `turn_key` 合并；artifact 按 path，reference 按其身份键去重 |
+| SSE 顶层 artifacts/references | 服务端以已持久化 Manifest 为基线，合并当前 stream 条目后发送完整、已去重快照；消费方按 `stream_id:sequence` 去重后直接替换，不自行合并 |
+| SSE 当前 turn artifacts/references | 服务端按 `turn_key` 合并、去重后发送当前 turn 的完整快照；消费方直接替换该 turn 行 |
 | 知识库文档 | 仅合并已提交 Citation；同 `id` 文档合并 `source[]`，chunk 按 `metadata.chunks[].id` 合并并保留首次有效 score |
 | Skills | 同技能 artifact 优先于 skill reference |
 | Todos | 当前轮按 `id` 合并；出站前过滤无展示内容项 |
@@ -488,7 +494,7 @@ SSE 是乐观派生状态，不写入 transcript，不进入模型上下文，�
 
 | 阶段 | Inspector | 聊天区 chips |
 | --- | --- | --- |
-| 流式进行中 | 合并 todos/artifacts/turns，并直接替换顶层 `references` 快照 | 不展示 |
+| 流式进行中 | 替换 todos、当前 turn 行，以及顶层 `artifacts` 与 `references` 快照 | 不展示 |
 | 本轮 `done` 后 | `GET /api/session/manifest` 覆盖 SSE | 使用 `manifest.turns[].artifacts` 刷新 |
 | 切换/打开会话 | 拉取 GET manifest | 按 GET 结果渲染 |
 | 离开会话 | 清空前端 manifest cache | 清理当前会话绑定 |
@@ -501,7 +507,7 @@ SSE 是乐观派生状态，不写入 transcript，不进入模型上下文，�
 | --- | --- |
 | `refresh()` | 拉取 GET manifest |
 | `clear()` | 清空缓存 |
-| `applyDelta(delta)` | 按 sequence 幂等处理 SSE delta；直接替换顶层 references 快照，并合并其它增量字段 |
+| `applyDelta(delta)` | 按 sequence 幂等处理 SSE delta；直接替换 todos、顶层 artifacts/references 快照及当前 turn 行 |
 | `getTurnArtifacts(turnKey)` | 获取某轮 artifacts |
 | `openManifestPreview(item)` | 非 expired 条目按 `preview` 分发 |
 | `isManifestPreviewable(item)` | 排除 expired，并检查 `file`/`skill` |

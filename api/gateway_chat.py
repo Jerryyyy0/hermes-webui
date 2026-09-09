@@ -1040,8 +1040,8 @@ def _run_gateway_chat_streaming(
     usage = {"input_tokens": 0, "output_tokens": 0, "estimated_cost": 0}
     try:
         s = get_session(session_id)
-        from integration.session_manifest.manifest import seed_live_manifest_references
-        live_manifest_seed = seed_live_manifest_references(s)
+        from integration.session_manifest.manifest import seed_live_manifest_snapshot
+        live_manifest_seed = seed_live_manifest_snapshot(s)
         with STREAMS_LOCK:
             STREAM_LIVE_MANIFEST[stream_id] = live_manifest_seed
         from api.config import get_config  # imported lazily to avoid config-cycle churn
