@@ -3426,8 +3426,7 @@
           }
         }
       }
-    }
-  },
+    },
 
   "/api/auth/login": {
       "post": {
@@ -5704,8 +5703,8 @@
         },
         "responses": { "200": { "description": "恢复成功" } }
       }
-    },
-
+    }
+  },
   "components": {
     "schemas": {
       "SessionStatusResponse": {

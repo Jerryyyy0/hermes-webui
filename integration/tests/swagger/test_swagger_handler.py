@@ -75,6 +75,17 @@ def test_handle_openapi_json_valid_json(mock_j, _mock_open):
     json.dumps(spec)
 
 
+def test_openapi_paths_are_all_nested_under_paths():
+    """Swagger UI can only resolve path items from the OpenAPI ``paths`` object."""
+    spec_path = Path(sh.__file__).with_name("openapi.json")
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+
+    root_path_items = [key for key in spec if key.startswith("/")]
+
+    assert root_path_items == []
+    assert "/api/auth/login" in spec["paths"]
+
+
 def test_knowledge_base_passthrough_response_schemas_match_proxy_contract():
     spec_path = Path(sh.__file__).with_name("openapi.json")
     spec = json.loads(spec_path.read_text(encoding="utf-8"))
