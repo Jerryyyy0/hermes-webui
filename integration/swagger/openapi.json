@@ -25,6 +25,7 @@
     { "name": "Rollback",    "description": "回滚" },
     { "name": "Health",      "description": "健康检查" },
     { "name": "System",      "description": "系统与工具" },
+    { "name": "Kanban",      "description": "Kanban 看板、任务与事件" },
     { "name": "SkillHub",    "description": "SkillHub 远程技能市场代理（需 HERMES_INTEGRATION=1；市场类接口另需 SKILLHUB_URL）。安装/卸载/custom 读写均使用 shared_skills_dir（{HERMES_HOME}/skills，与 WebUI profile 无关）。" },
     { "name": "SkillPublish", "description": "技能发布申请（上架/下架，需 HERMES_INTEGRATION=1）。申请单数据存于 STATE_DIR/session_manifest.db；提交时打包临时 zip 调上游 SkillHub（auto_approve=false）；审核事件在通知/详情查询时增量拉取并回写状态。" },
     { "name": "IntegrationCrons", "description": "跨 Profile 定时任务（需 HERMES_INTEGRATION=1）。列表/轮询用 GET /api/crons?all_profiles=1；创建用一个 profile 同时作为存储与执行 Profile；编辑/运行/删除/读取历史均用 profile 定位任务。" },
@@ -62,45 +63,15 @@
         "responses": { "200": { "description": "系统健康信息" } }
       }
     },
-    "/api/health": {
+    "/health": {
       "get": {
         "tags": ["Health"],
-        "summary": "服务器心跳",
-        "responses": {
-          "200": {
-            "description": "ok",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "ok": { "type": "boolean" },
-                    "job_id": { "type": "string" },
-                    "history_cleanup": {
-                      "type": "object",
-                      "properties": {
-                        "ok": { "type": "boolean" },
-                        "deleted": { "type": "boolean" },
-                        "job_id": { "type": "string" },
-                        "owner_profiles": { "type": "array", "items": { "type": "string" } },
-                        "state_db_profiles": { "type": "array", "items": { "type": "string" } },
-                        "deleted_session_ids": { "type": "array", "items": { "type": "string" } },
-                        "deleted_sidecars": { "type": "array", "items": { "type": "string" } },
-                        "deleted_profiles": { "type": "array", "items": { "type": "string" } },
-                        "deleted_output_dirs": { "type": "array", "items": { "type": "string" } },
-                        "deleted_output_files": { "type": "integer" }
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          },
-          "404": { "description": "not found" }
-        }
+        "summary": "服务器健康检查",
+        "description": "默认返回轻量健康状态；传 `deep=1` 时执行附加运行时检查。",
+        "parameters": [{ "name": "deep", "in": "query", "schema": { "type": "string", "enum": ["1"] } }],
+        "responses": { "200": { "description": "健康状态" } }
       }
     },
-
     "/api/models": {
       "get": {
         "tags": ["Models"],
@@ -127,12 +98,22 @@
         "tags": ["Models"],
         "summary": "获取 Provider 列表",
         "responses": { "200": { "description": "Provider 列表" } }
+      },
+      "post": {
+        "tags": ["Models"],
+        "summary": "设置 Provider API Key",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["provider"], "properties": { "provider": { "type": "string" }, "api_key": { "type": "string", "nullable": true } } } } } },
+        "responses": { "200": { "description": "设置结果" } }
       }
     },
     "/api/provider/quota": {
       "get": {
         "tags": ["Models"],
         "summary": "获取当前 Provider 配额",
+        "parameters": [
+          { "name": "provider", "in": "query", "schema": { "type": "string" }, "description": "可选 Provider；省略时查询当前 Provider" },
+          { "name": "refresh", "in": "query", "schema": { "type": "boolean", "default": false }, "description": "是否刷新缓存" }
+        ],
         "responses": { "200": { "description": "配额信息" } }
       }
     },
@@ -140,6 +121,10 @@
       "get": {
         "tags": ["Models"],
         "summary": "获取费用历史",
+        "parameters": [
+          { "name": "provider", "in": "query", "schema": { "type": "string" }, "description": "可选 Provider；省略时查询当前 Provider" },
+          { "name": "days", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 365, "default": 7 }, "description": "统计天数" }
+        ],
         "responses": { "200": { "description": "费用历史列表" } }
       }
     },
@@ -164,7 +149,18 @@
       "get": {
         "tags": ["Settings"],
         "summary": "获取推理模式配置",
+        "parameters": [
+          { "name": "model", "in": "query", "schema": { "type": "string" }, "description": "可选模型" },
+          { "name": "provider", "in": "query", "schema": { "type": "string" }, "description": "可选 Provider" },
+          { "name": "base_url", "in": "query", "schema": { "type": "string" }, "description": "可选 Provider 基础 URL" }
+        ],
         "responses": { "200": { "description": "推理配置" } }
+      },
+      "post": {
+        "tags": ["Settings"],
+        "summary": "更新推理模式配置",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "properties": { "display": { "type": "string", "enum": ["show", "hide", "on", "off"] }, "effort": { "type": "string" } } } } } },
+        "responses": { "200": { "description": "更新结果" } }
       }
     },
     "/api/onboarding/status": {
@@ -292,20 +288,16 @@
       "get": {
         "tags": ["Session"],
         "summary": "获取当前会话详情",
+        "parameters": [
+          { "name": "session_id", "in": "query", "required": true, "schema": { "type": "string" }, "description": "会话 ID" },
+          { "name": "messages", "in": "query", "schema": { "type": "boolean", "default": true }, "description": "是否加载消息；false 时仅返回元数据" },
+          { "name": "resolve_model", "in": "query", "schema": { "type": "boolean" }, "description": "是否解析模型信息；默认随 messages 参数变化" },
+          { "name": "msg_limit", "in": "query", "schema": { "type": "integer", "minimum": 1 }, "description": "返回末尾消息条数" },
+          { "name": "msg_before", "in": "query", "schema": { "type": "integer", "minimum": 0 }, "description": "消息分页的结束下标" },
+          { "name": "expand_renderable", "in": "query", "schema": { "type": "boolean" }, "description": "按可渲染消息行扩展初始窗口" },
+          { "name": "turn_align", "in": "query", "schema": { "type": "boolean" }, "description": "将 msg_limit 窗口对齐到完整用户轮次" }
+        ],
         "responses": { "200": { "description": "会话对象" } }
-      },
-      "post": {
-        "tags": ["Session"],
-        "summary": "创建新会话",
-        "requestBody": {
-          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/GenericObject" } } }
-        },
-        "responses": { "200": { "description": "新会话信息" } }
-      },
-      "delete": {
-        "tags": ["Session"],
-        "summary": "删除会话",
-        "responses": { "200": { "description": "删除结果" } }
       }
     },
     "/api/session/status": {
@@ -339,6 +331,7 @@
       "get": {
         "tags": ["Session"],
         "summary": "获取会话 token 用量",
+        "parameters": [{ "name": "session_id", "in": "query", "required": true, "schema": { "type": "string" }, "description": "会话 ID" }],
         "responses": { "200": { "description": "用量信息" } }
       }
     },
@@ -346,13 +339,21 @@
       "get": {
         "tags": ["Session"],
         "summary": "获取 YOLO 模式状态",
+        "parameters": [{ "name": "session_id", "in": "query", "required": true, "schema": { "type": "string" }, "description": "会话 ID" }],
         "responses": { "200": { "description": "YOLO 状态" } }
+      },
+      "post": {
+        "tags": ["Session"],
+        "summary": "设置 YOLO 模式",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["session_id"], "properties": { "session_id": { "type": "string" }, "enabled": { "type": "boolean", "default": true } } } } } },
+        "responses": { "200": { "description": "设置结果" } }
       }
     },
     "/api/session/export": {
       "get": {
         "tags": ["Session"],
         "summary": "导出会话数据",
+        "parameters": [{ "name": "session_id", "in": "query", "required": true, "schema": { "type": "string" }, "description": "会话 ID" }],
         "responses": { "200": { "description": "会话导出文件" } }
       }
     },
@@ -360,6 +361,7 @@
       "get": {
         "tags": ["Session"],
         "summary": "获取会话谱系报告",
+        "parameters": [{ "name": "session_id", "in": "query", "required": true, "schema": { "type": "string" }, "description": "会话 ID" }],
         "responses": { "200": { "description": "谱系报告" } }
       }
     },
@@ -374,6 +376,7 @@
       "get": {
         "tags": ["Session"],
         "summary": "获取会话压缩状态",
+        "parameters": [{ "name": "session_id", "in": "query", "required": true, "schema": { "type": "string" }, "description": "会话 ID" }],
         "responses": { "200": { "description": "压缩状态" } }
       }
     },
@@ -381,6 +384,7 @@
       "get": {
         "tags": ["Session"],
         "summary": "获取 worktree 状态",
+        "parameters": [{ "name": "session_id", "in": "query", "required": true, "schema": { "type": "string" }, "description": "会话 ID" }],
         "responses": { "200": { "description": "worktree 状态" } }
       }
     },
@@ -405,6 +409,7 @@
       "get": {
         "tags": ["Session"],
         "summary": "获取后台任务状态",
+        "parameters": [{ "name": "session_id", "in": "query", "required": true, "schema": { "type": "string" }, "description": "会话 ID" }],
         "responses": { "200": { "description": "后台任务状态" } }
       }
     },
@@ -417,26 +422,6 @@
         "responses": {
           "200": { "description": "SSE 事件流", "content": { "text/event-stream": { "schema": { "type": "string" } } } }
         }
-      },
-      "post": {
-        "tags": ["Chat"],
-        "summary": "发送聊天消息",
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "message": { "type": "string", "description": "用户消息内容" },
-                  "session_id": { "type": "string" }
-                },
-                "required": ["message"]
-              }
-            }
-          }
-        },
-        "responses": { "200": { "description": "发送结果" } }
       }
     },
     "/api/chat/stream/status": {
@@ -450,11 +435,10 @@
       "get": {
         "tags": ["Chat"],
         "summary": "取消当前聊天流",
-        "responses": { "200": { "description": "取消结果" } }
-      },
-      "post": {
-        "tags": ["Chat"],
-        "summary": "取消当前聊天流（POST）",
+        "parameters": [
+          { "name": "stream_id", "in": "query", "required": true, "schema": { "type": "string" }, "description": "要取消的流 ID" },
+          { "name": "profile", "in": "query", "schema": { "type": "string" }, "description": "可选 Profile；仅在未携带 Profile cookie 时生效" }
+        ],
         "responses": { "200": { "description": "取消结果" } }
       }
     },
@@ -485,7 +469,7 @@
         "tags": ["Workspace"],
         "summary": "工作区路径建议",
         "parameters": [
-          { "name": "q", "in": "query", "schema": { "type": "string" }, "description": "路径前缀" }
+          { "name": "prefix", "in": "query", "schema": { "type": "string" }, "description": "路径前缀" }
         ],
         "responses": { "200": { "description": "建议路径列表" } }
       }
@@ -508,23 +492,6 @@
           { "name": "path", "in": "query", "required": true, "schema": { "type": "string" } }
         ],
         "responses": { "200": { "description": "文件内容" } }
-      },
-      "post": {
-        "tags": ["Workspace"],
-        "summary": "写入文件内容",
-        "requestBody": {
-          "required": true,
-          "content": { "application/json": { "schema": { "type": "object", "properties": { "path": { "type": "string" }, "content": { "type": "string" } } } } }
-        },
-        "responses": { "200": { "description": "写入结果" } }
-      },
-      "delete": {
-        "tags": ["Workspace"],
-        "summary": "删除文件",
-        "parameters": [
-          { "name": "path", "in": "query", "required": true, "schema": { "type": "string" } }
-        ],
-        "responses": { "200": { "description": "删除结果" } }
       }
     },
     "/api/file/raw": {
@@ -1998,6 +1965,10 @@
       "get": {
         "tags": ["Skills"],
         "summary": "获取 Skills 列表",
+        "parameters": [
+          { "name": "category", "in": "query", "schema": { "type": "string" }, "description": "可选技能分类" },
+          { "name": "profile", "in": "query", "schema": { "type": "string" }, "description": "可选 Profile；从该 Profile 的技能目录读取" }
+        ],
         "responses": { "200": { "description": "Skills 列表" } }
       }
     },
@@ -2006,7 +1977,9 @@
         "tags": ["Skills"],
         "summary": "获取 Skill 内容",
         "parameters": [
-          { "name": "name", "in": "query", "required": true, "schema": { "type": "string" } }
+          { "name": "name", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "file", "in": "query", "schema": { "type": "string" }, "description": "可选技能内文件相对路径；省略时返回 SKILL.md" },
+          { "name": "profile", "in": "query", "schema": { "type": "string" }, "description": "可选 Profile" }
         ],
         "responses": { "200": { "description": "Skill 内容" } }
       }
@@ -2017,15 +1990,6 @@
         "tags": ["Memory"],
         "summary": "获取记忆内容",
         "responses": { "200": { "description": "记忆数据" } }
-      },
-      "post": {
-        "tags": ["Memory"],
-        "summary": "写入记忆",
-        "requestBody": {
-          "required": true,
-          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/GenericObject" } } }
-        },
-        "responses": { "200": { "description": "写入结果" } }
       }
     },
 
@@ -2044,15 +2008,6 @@
             }
           }
         }
-      },
-      "post": {
-        "tags": ["Profiles"],
-        "summary": "创建 Profile",
-        "requestBody": {
-          "required": true,
-          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/GenericObject" } } }
-        },
-        "responses": { "200": { "description": "创建结果" } }
       }
     },
     "/api/profile/active": {
@@ -2452,6 +2407,7 @@
       "get": {
         "tags": ["Rollback"],
         "summary": "获取回滚点列表",
+        "parameters": [{ "name": "workspace", "in": "query", "required": true, "schema": { "type": "string" }, "description": "工作区路径" }],
         "responses": { "200": { "description": "回滚点列表" } }
       }
     },
@@ -2460,23 +2416,12 @@
         "tags": ["Rollback"],
         "summary": "获取回滚 diff",
         "parameters": [
-          { "name": "id", "in": "query", "required": true, "schema": { "type": "string" } }
+          { "name": "workspace", "in": "query", "required": true, "schema": { "type": "string" }, "description": "工作区路径" },
+          { "name": "checkpoint", "in": "query", "required": true, "schema": { "type": "string" }, "description": "回滚点 ID" }
         ],
         "responses": { "200": { "description": "diff 内容" } }
       }
     },
-    "/api/rollback/apply": {
-      "post": {
-        "tags": ["Rollback"],
-        "summary": "执行回滚",
-        "requestBody": {
-          "required": true,
-          "content": { "application/json": { "schema": { "type": "object", "properties": { "id": { "type": "string" } }, "required": ["id"] } } }
-        },
-        "responses": { "200": { "description": "回滚结果" } }
-      }
-    },
-
     "/api/logs": {
       "get": {
         "tags": ["System"],
@@ -2495,6 +2440,12 @@
       "get": {
         "tags": ["System"],
         "summary": "检查更新",
+        "responses": { "200": { "description": "更新信息" } }
+      },
+      "post": {
+        "tags": ["System"],
+        "summary": "检查更新（可强制刷新）",
+        "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "force": { "type": "boolean" }, "channel": { "type": "string", "enum": ["stable", "experimental"] } } } } } },
         "responses": { "200": { "description": "更新信息" } }
       }
     },
@@ -2524,6 +2475,12 @@
         "tags": ["System"],
         "summary": "获取 Dashboard 配置",
         "responses": { "200": { "description": "Dashboard 配置" } }
+      },
+      "post": {
+        "tags": ["System"],
+        "summary": "保存 Dashboard 配置",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/GenericObject" } } } },
+        "responses": { "200": { "description": "保存结果" } }
       }
     },
     "/api/gateway/status": {
@@ -3428,11 +3385,11 @@
       }
     },
 
-  "/api/auth/login": {
+    "/api/auth/login": {
       "post": {
         "tags": ["Auth"],
-        "summary": "密码/Passkey 登录",
-        "description": "密码认证或 Passkey 断言登录。依赖 enabled_auth 配置决定允许的认证方式。",
+        "summary": "密码登录",
+        "description": "使用密码创建登录会话。Passkey 登录请调用 `/api/auth/passkey/login`。",
         "requestBody": {
           "required": true,
           "content": {
@@ -3440,10 +3397,9 @@
               "schema": {
                 "type": "object",
                 "properties": {
-                  "password": { "type": "string", "description": "密码（密码认证时必填）" },
-                  "passkey_id": { "type": "string", "description": "Passkey ID（Passkey 认证时必填）" },
-                  "passkey_response": { "type": "object", "description": "Passkey 断言响应（Passkey 认证时必填）" }
-                }
+                  "password": { "type": "string", "description": "登录密码" }
+                },
+                "required": ["password"]
               }
             }
           }
@@ -3465,7 +3421,7 @@
       }
     },
     "/api/auth/passkeys": {
-      "get": {
+      "post": {
         "tags": ["Auth"],
         "summary": "获取已注册的 Passkey 列表",
         "responses": {
@@ -3474,7 +3430,7 @@
       }
     },
     "/api/auth/passkey/register/options": {
-      "get": {
+      "post": {
         "tags": ["Auth"],
         "summary": "获取 Passkey 注册挑战",
         "description": "返回 WebAuthn 注册挑战（creation options），用于前端创建凭据。",
@@ -3509,17 +3465,7 @@
       }
     },
     "/api/auth/passkey/options": {
-      "get": {
-        "tags": ["Auth"],
-        "summary": "获取 Passkey 登录挑战（旧路径，兼容用）",
-        "description": "返回 WebAuthn 断言挑战（assertion options），用于前端进行 Passkey 登录。新代码应使用 /api/auth/passkey/login/options。",
-        "responses": {
-          "200": { "description": "PublicKeyCredentialRequestOptions" }
-        }
-      }
-    },
-    "/api/auth/passkey/login/options": {
-      "get": {
+      "post": {
         "tags": ["Auth"],
         "summary": "获取 Passkey 登录挑战",
         "description": "返回 WebAuthn 断言挑战（assertion options），用于前端进行 Passkey 登录。",
@@ -3554,7 +3500,7 @@
       }
     },
     "/api/auth/passkey/delete": {
-      "delete": {
+      "post": {
         "tags": ["Auth"],
         "summary": "删除 Passkey",
         "description": "删除指定 ID 的 Passkey 凭据。",
@@ -3565,9 +3511,9 @@
               "schema": {
                 "type": "object",
                 "properties": {
-                  "passkey_id": { "type": "string", "description": "要删除的 Passkey ID" }
+                  "id": { "type": "string", "description": "要删除的 Passkey ID" }
                 },
-                "required": ["passkey_id"]
+                "required": ["id"]
               }
             }
           }
@@ -3659,7 +3605,8 @@
               "schema": {
                 "type": "object",
                 "properties": {
-                  "session_id": { "type": "string" }
+                  "session_id": { "type": "string" },
+                  "archived": { "type": "boolean", "default": true, "description": "true 归档；false 取消归档" }
                 },
                 "required": ["session_id"]
               }
@@ -3672,8 +3619,8 @@
     "/api/session/move": {
       "post": {
         "tags": ["Session"],
-        "summary": "移动会话到其他 Profile",
-        "description": "将会话（及关联的附件和 sidecar 文件）移动到指定目标 Profile。",
+        "summary": "设置会话所属项目",
+        "description": "将会话关联到当前 Profile 下的指定项目；`project_id` 为 null 或省略时取消项目关联。",
         "requestBody": {
           "required": true,
           "content": {
@@ -3682,19 +3629,17 @@
                 "type": "object",
                 "properties": {
                   "session_id": { "type": "string", "description": "会话 ID" },
-                  "target_profile": { "type": "string", "description": "目标 Profile 名称" },
-                  "move_attachments": { "type": "boolean", "default": true },
-                  "move_sidecar": { "type": "boolean", "default": true }
+                  "project_id": { "type": "string", "nullable": true, "description": "目标项目 ID；null 或省略时取消关联" }
                 },
-                "required": ["session_id", "target_profile"]
+                "required": ["session_id"]
               }
             }
           }
         },
         "responses": {
-          "200": { "description": "移动成功" },
+          "200": { "description": "项目关联更新成功" },
           "400": { "description": "参数错误" },
-          "404": { "description": "会话或目标 Profile 不存在" }
+          "404": { "description": "会话或目标项目不存在" }
         }
       }
     },
@@ -3710,7 +3655,10 @@
                 "type": "object",
                 "properties": {
                   "profile": { "type": "string", "description": "可选，Profile 名称" },
-                  "project": { "type": "string", "description": "可选，项目名称" },
+                  "project_id": { "type": "string", "description": "可选，项目 ID" },
+                  "model": { "type": "string", "description": "可选，模型名称" },
+                  "model_provider": { "type": "string", "description": "可选，模型 Provider" },
+                  "prev_session_id": { "type": "string", "description": "可选，前序会话 ID，用于会话衔接" },
                   "workspace": { "type": "string", "description": "可选，显式工作区。省略时创建会话专属目录；与 worktree: true 同时传入时作为 worktree 源目录。" },
                   "worktree": { "type": "boolean", "description": "可选，创建 Git worktree 会话；优先于 managed workspace 分配。" }
                 }
@@ -3722,10 +3670,10 @@
       }
     },
     "/api/session/delete": {
-      "delete": {
+      "post": {
         "tags": ["Session"],
         "summary": "删除会话",
-        "description": "删除指定会话，可选的清理附件和输出文件。",
+        "description": "删除指定会话。会话附件、运行记录和 manifest 记录会被清理；`delete_artifacts` 控制是否删除 manifest 所有的成果文件。",
         "requestBody": {
           "required": true,
           "content": {
@@ -3734,7 +3682,7 @@
                 "type": "object",
                 "properties": {
                   "session_id": { "type": "string" },
-                  "cleanup_attachments": { "type": "boolean", "default": true }
+                  "delete_artifacts": { "type": "boolean", "default": false, "description": "是否删除 manifest 所有的成果文件" }
                 },
                 "required": ["session_id"]
               }
@@ -3777,7 +3725,8 @@
               "schema": {
                 "type": "object",
                 "properties": {
-                  "session_id": { "type": "string" }
+                  "session_id": { "type": "string" },
+                  "prefer_latest": { "type": "boolean", "default": false, "description": "是否优先基于最新消息生成标题" }
                 },
                 "required": ["session_id"]
               }
@@ -3791,17 +3740,14 @@
       "post": {
         "tags": ["Session"],
         "summary": "复制会话",
-        "description": "基于现有会话创建副本，可选择性复制消息。",
+        "description": "基于现有会话创建副本，始终复制消息及会话配置。",
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
               "schema": {
                 "type": "object",
-                "properties": {
-                  "session_id": { "type": "string" },
-                  "copy_messages": { "type": "boolean", "default": true }
-                },
+                "properties": { "session_id": { "type": "string" } },
                 "required": ["session_id"]
               }
             }
@@ -3811,6 +3757,12 @@
       }
     },
     "/api/session/draft": {
+      "get": {
+        "tags": ["Session"],
+        "summary": "读取会话草稿",
+        "parameters": [{ "name": "session_id", "in": "query", "required": true, "schema": { "type": "string" }, "description": "会话 ID" }],
+        "responses": { "200": { "description": "当前草稿" } }
+      },
       "post": {
         "tags": ["Session"],
         "summary": "保存草稿消息",
@@ -3823,9 +3775,10 @@
                 "type": "object",
                 "properties": {
                   "session_id": { "type": "string" },
-                  "content": { "type": "string", "description": "草稿内容" }
+                  "text": { "type": "string", "description": "草稿文本；省略则保留既有文本" },
+                  "files": { "type": "array", "items": {}, "description": "草稿附件引用；省略则保留既有附件" }
                 },
-                "required": ["session_id", "content"]
+                "required": ["session_id"]
               }
             }
           }
@@ -3837,7 +3790,7 @@
       "post": {
         "tags": ["Session"],
         "summary": "更新会话配置",
-        "description": "更新会话元数据（model、provider、project 等）。",
+        "description": "更新会话工作区或模型配置。",
         "requestBody": {
           "required": true,
           "content": {
@@ -3846,9 +3799,9 @@
                 "type": "object",
                 "properties": {
                   "session_id": { "type": "string" },
+                  "workspace": { "type": "string", "description": "目标工作区" },
                   "model": { "type": "string" },
-                  "provider": { "type": "string" },
-                  "project": { "type": "string" }
+                  "model_provider": { "type": "string" }
                 },
                 "required": ["session_id"]
               }
@@ -3884,7 +3837,7 @@
       "post": {
         "tags": ["Session"],
         "summary": "截断会话消息",
-        "description": "将会话截断到指定条数，删除较早的消息。",
+        "description": "仅保留会话最早的指定条数消息，删除后续消息。",
         "requestBody": {
           "required": true,
           "content": {
@@ -3893,9 +3846,9 @@
                 "type": "object",
                 "properties": {
                   "session_id": { "type": "string" },
-                  "keep_messages": { "type": "integer", "description": "保留的最新消息条数" }
+                  "keep_count": { "type": "integer", "minimum": 0, "description": "保留的起始消息条数" }
                 },
-                "required": ["session_id", "keep_messages"]
+                "required": ["session_id", "keep_count"]
               }
             }
           }
@@ -3907,7 +3860,7 @@
       "post": {
         "tags": ["Session"],
         "summary": "分支会话",
-        "description": "在指定消息处创建分支，生成新会话。",
+        "description": "从会话消息前缀创建分支；未传 `keep_count` 时复制全部消息。",
         "requestBody": {
           "required": true,
           "content": {
@@ -3916,9 +3869,10 @@
                 "type": "object",
                 "properties": {
                   "session_id": { "type": "string" },
-                  "message_id": { "type": "string", "description": "分支点消息 ID" }
+                  "keep_count": { "type": "integer", "minimum": 0, "description": "复制的起始消息条数" },
+                  "title": { "type": "string", "description": "可选的新会话标题" }
                 },
-                "required": ["session_id", "message_id"]
+                "required": ["session_id"]
               }
             }
           }
@@ -3932,13 +3886,17 @@
         "summary": "压缩会话（手动触发）",
         "description": "手动触发当前会话压缩，减少上下文窗口。",
         "requestBody": {
+          "required": true,
           "content": {
             "application/json": {
               "schema": {
                 "type": "object",
                 "properties": {
-                  "session_id": { "type": "string" }
-                }
+                  "session_id": { "type": "string" },
+                  "focus_topic": { "type": "string", "description": "可选，压缩时聚焦的主题；`topic` 为兼容别名" },
+                  "topic": { "type": "string", "description": "focus_topic 的兼容别名" }
+                },
+                "required": ["session_id"]
               }
             }
           }
@@ -3952,13 +3910,17 @@
         "summary": "启动会话压缩任务",
         "description": "在后台线程启动异步压缩，返回压缩状态。",
         "requestBody": {
+          "required": true,
           "content": {
             "application/json": {
               "schema": {
                 "type": "object",
                 "properties": {
-                  "session_id": { "type": "string" }
-                }
+                  "session_id": { "type": "string" },
+                  "focus_topic": { "type": "string", "description": "可选，压缩时聚焦的主题；`topic` 为兼容别名" },
+                  "topic": { "type": "string", "description": "focus_topic 的兼容别名" }
+                },
+                "required": ["session_id"]
               }
             }
           }
@@ -4086,7 +4048,8 @@
               "schema": {
                 "type": "object",
                 "properties": {
-                  "session_id": { "type": "string" }
+                  "session_id": { "type": "string" },
+                  "force": { "type": "boolean", "default": false, "description": "是否强制移除存在未提交变更的 worktree" }
                 },
                 "required": ["session_id"]
               }
@@ -4100,29 +4063,15 @@
       "post": {
         "tags": ["Session"],
         "summary": "安全修复会话恢复数据",
-        "description": "尝试修复损坏的会话恢复状态，不破坏现有数据。",
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "session_id": { "type": "string" }
-                },
-                "required": ["session_id"]
-              }
-            }
-          }
-        },
+        "description": "扫描并尝试修复全局会话恢复状态，不读取请求体。",
         "responses": { "200": { "description": "修复结果" } }
       }
     },
     "/api/session/toolsets": {
       "post": {
         "tags": ["Session"],
-        "summary": "获取会话可用工具集",
-        "description": "返回当前会话可用的 MCP 工具和系统工具列表。",
+        "summary": "设置会话工具集覆盖",
+        "description": "限制会话可用工具集；传 null 可清除覆盖并恢复默认配置。",
         "requestBody": {
           "required": true,
           "content": {
@@ -4130,14 +4079,15 @@
               "schema": {
                 "type": "object",
                 "properties": {
-                  "session_id": { "type": "string" }
+                  "session_id": { "type": "string" },
+                  "toolsets": { "type": "array", "nullable": true, "minItems": 1, "items": { "type": "string", "minLength": 1 }, "description": "工具集名称列表；null 表示清除覆盖" }
                 },
                 "required": ["session_id"]
               }
             }
           }
         },
-        "responses": { "200": { "description": "工具集列表" } }
+        "responses": { "200": { "description": "更新后的工具集覆盖" } }
       }
     },
     "/api/session/manifest": {
@@ -4155,7 +4105,7 @@
       "post": {
         "tags": ["Session"],
         "summary": "导入会话（JSON 格式）",
-        "description": "从 JSON 数据导入会话到当前 Profile。",
+        "description": "从会话导出的 JSON 对象导入。请求体本身是会话数据，必须包含 messages 数组。",
         "requestBody": {
           "required": true,
           "content": {
@@ -4163,10 +4113,14 @@
               "schema": {
                 "type": "object",
                 "properties": {
-                  "session_data": { "type": "object", "description": "会话 JSON 数据" },
-                  "profile": { "type": "string", "description": "目标 Profile" }
+                  "messages": { "type": "array", "description": "会话消息数组" },
+                  "title": { "type": "string", "description": "可选标题，默认 Imported session" },
+                  "workspace": { "type": "string", "description": "可选工作区" },
+                  "model": { "type": "string", "description": "可选模型" },
+                  "tool_calls": { "type": "array", "description": "可选工具调用记录" },
+                  "pinned": { "type": "boolean", "default": false }
                 },
-                "required": ["session_data"]
+                "required": ["messages"]
               }
             }
           }
@@ -4178,7 +4132,7 @@
       "post": {
         "tags": ["Session"],
         "summary": "导入 CLI 会话",
-        "description": "从 CLI 导出的会话数据导入为 WebUI 会话。",
+        "description": "按 CLI 会话 ID 从本地 CLI 状态导入或刷新会话。",
         "requestBody": {
           "required": true,
           "content": {
@@ -4186,10 +4140,9 @@
               "schema": {
                 "type": "object",
                 "properties": {
-                  "session_data": { "type": "object" },
-                  "profile": { "type": "string" }
+                  "session_id": { "type": "string", "description": "CLI 会话 ID" }
                 },
-                "required": ["session_data"]
+                "required": ["session_id"]
               }
             }
           }
@@ -4902,7 +4855,7 @@
     },
 
     "/api/skills/delete": {
-      "delete": {
+      "post": {
         "tags": ["Skills"],
         "summary": "删除技能",
         "requestBody": {
@@ -5004,7 +4957,7 @@
     "/api/model/set": {
       "post": {
         "tags": ["Models"],
-        "summary": "设置当前模型",
+        "summary": "设置主模型或辅助模型",
         "requestBody": {
           "required": true,
           "content": {
@@ -5012,10 +4965,12 @@
               "schema": {
                 "type": "object",
                 "properties": {
+                  "scope": { "type": "string", "enum": ["main", "auxiliary"], "description": "设置范围" },
+                  "task": { "type": "string", "description": "辅助模型任务名；scope=auxiliary 时使用" },
                   "model": { "type": "string" },
                   "provider": { "type": "string" }
                 },
-                "required": ["model"]
+                "required": ["scope", "model"]
               }
             }
           }
@@ -5028,14 +4983,22 @@
         "tags": ["Models"],
         "summary": "刷新模型列表",
         "description": "强制重新加载可用模型列表（清除缓存）。",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "type": "object", "properties": { "provider": { "type": "string", "description": "Provider 名称" } }, "required": ["provider"] } } }
+        },
         "responses": { "200": { "description": "刷新结果" } }
       }
     },
     "/api/default-model": {
       "post": {
         "tags": ["Models"],
-        "summary": "获取默认模型",
-        "description": "返回当前 Profile 的默认模型配置。",
+        "summary": "设置默认模型",
+        "description": "更新当前 Profile 的默认模型配置。",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "type": "object", "properties": { "model": { "type": "string", "description": "默认模型" } }, "required": ["model"] } } }
+        },
         "responses": { "200": { "description": "默认模型信息" } }
       }
     },
@@ -5073,9 +5036,10 @@
               "schema": {
                 "type": "object",
                 "properties": {
-                  "personality": { "type": "string", "description": "人格名称" }
+                  "session_id": { "type": "string", "description": "会话 ID" },
+                  "name": { "type": "string", "description": "人格名称；空字符串表示清除人格" }
                 },
-                "required": ["personality"]
+                "required": ["session_id", "name"]
               }
             }
           }
@@ -5096,8 +5060,12 @@
                 "type": "object",
                 "properties": {
                   "name": { "type": "string", "description": "Profile 名称" },
-                  "model": { "type": "string" },
-                  "provider": { "type": "string" }
+                  "clone_from": { "type": "string", "description": "可选，克隆来源 Profile" },
+                  "clone_config": { "type": "boolean", "default": false, "description": "是否克隆来源配置" },
+                  "base_url": { "type": "string", "format": "uri", "description": "可选 Provider 基础 URL" },
+                  "api_key": { "type": "string", "format": "password", "description": "可选 Provider API 密钥" },
+                  "default_model": { "type": "string", "description": "可选默认模型" },
+                  "model_provider": { "type": "string", "description": "可选默认模型 Provider" }
                 },
                 "required": ["name"]
               }
@@ -5108,7 +5076,7 @@
       }
     },
     "/api/profile/delete": {
-      "delete": {
+      "post": {
         "tags": ["Profiles"],
         "summary": "删除 Profile",
         "requestBody": {
@@ -5161,7 +5129,9 @@
               "schema": {
                 "type": "object",
                 "properties": {
-                  "name": { "type": "string", "description": "项目名称" }
+                  "name": { "type": "string", "description": "项目名称" },
+                  "color": { "type": "string", "description": "可选十六进制颜色" },
+                  "profile": { "type": "string", "description": "可选 Profile；省略时使用当前活跃 Profile" }
                 },
                 "required": ["name"]
               }
@@ -5182,10 +5152,11 @@
               "schema": {
                 "type": "object",
                 "properties": {
-                  "old_name": { "type": "string" },
-                  "new_name": { "type": "string" }
+                  "project_id": { "type": "string", "description": "项目 ID" },
+                  "name": { "type": "string", "description": "新项目名称" },
+                  "color": { "type": "string", "description": "可选十六进制颜色" }
                 },
-                "required": ["old_name", "new_name"]
+                "required": ["project_id", "name"]
               }
             }
           }
@@ -5194,7 +5165,7 @@
       }
     },
     "/api/projects/delete": {
-      "delete": {
+      "post": {
         "tags": ["Session"],
         "summary": "删除项目",
         "requestBody": {
@@ -5204,9 +5175,9 @@
               "schema": {
                 "type": "object",
                 "properties": {
-                  "name": { "type": "string" }
+                  "project_id": { "type": "string", "description": "项目 ID" }
                 },
-                "required": ["name"]
+                "required": ["project_id"]
               }
             }
           }
@@ -5440,6 +5411,10 @@
         "tags": ["System"],
         "summary": "应用更新",
         "description": "下载并应用最新更新。",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "type": "object", "properties": { "target": { "type": "string", "enum": ["webui", "agent"] }, "channel": { "type": "string", "enum": ["stable", "experimental"] } }, "required": ["target"] } } }
+        },
         "responses": { "200": { "description": "更新结果" } }
       }
     },
@@ -5448,14 +5423,21 @@
         "tags": ["System"],
         "summary": "强制更新",
         "description": "强制执行更新检查并应用。",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "type": "object", "properties": { "target": { "type": "string", "enum": ["webui", "agent"] }, "channel": { "type": "string", "enum": ["stable", "experimental"] } }, "required": ["target"] } } }
+        },
         "responses": { "200": { "description": "更新结果" } }
       }
     },
     "/api/updates/summary": {
-      "get": {
+      "post": {
         "tags": ["System"],
-        "summary": "获取更新摘要",
-        "description": "返回当前版本和可用更新信息。",
+        "summary": "生成更新摘要",
+        "description": "基于提交的更新信息生成摘要。",
+        "requestBody": {
+          "content": { "application/json": { "schema": { "type": "object", "properties": { "target": { "type": "string", "enum": ["webui", "agent"], "description": "可选更新目标" }, "updates": { "type": "object", "description": "可选更新信息；省略时使用空对象" } } } } }
+        },
         "responses": { "200": { "description": "更新摘要" } }
       }
     },
@@ -5472,9 +5454,10 @@
               "schema": {
                 "type": "object",
                 "properties": {
-                  "id": { "type": "string", "description": "回滚点 ID" }
+                  "workspace": { "type": "string", "description": "工作区路径" },
+                  "checkpoint": { "type": "string", "description": "回滚点 ID" }
                 },
-                "required": ["id"]
+                "required": ["workspace", "checkpoint"]
               }
             }
           }
@@ -5555,32 +5538,6 @@
         "responses": { "200": { "description": "Wiki 状态" } }
       }
     },
-    "/api/kanban/": {
-      "get": {
-        "tags": ["System"],
-        "summary": "获取 Kanban 看板数据",
-        "description": "返回看板视图的列和卡片数据。",
-        "responses": { "200": { "description": "看板数据" } }
-      },
-      "post": {
-        "tags": ["System"],
-        "summary": "更新 Kanban 看板",
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "columns": { "type": "array", "description": "看板列数据" }
-                }
-              }
-            }
-          }
-        },
-        "responses": { "200": { "description": "更新结果" } }
-      }
-    },
     "/api/project-os/dashboard": {
       "get": {
         "tags": ["System"],
@@ -5621,11 +5578,12 @@
         "tags": ["Settings"],
         "summary": "轮询 OAuth 认证状态",
         "description": "获取 OAuth 认证流程的当前状态和结果。",
+        "parameters": [{ "name": "flow_id", "in": "query", "required": true, "schema": { "type": "string" }, "description": "OAuth 流程 ID" }],
         "responses": { "200": { "description": "OAuth 状态" } }
       }
     },
     "/api/approval/inject_test": {
-      "post": {
+      "get": {
         "tags": ["Approval"],
         "summary": "注入测试审批请求",
         "description": "（开发/测试用）向审批队列注入一条测试请求。",
@@ -5633,7 +5591,7 @@
       }
     },
     "/api/clarify/inject_test": {
-      "post": {
+      "get": {
         "tags": ["Clarify"],
         "summary": "注入测试澄清请求",
         "description": "（开发/测试用）向澄清队列注入一条测试请求。",
@@ -5703,6 +5661,234 @@
         },
         "responses": { "200": { "description": "恢复成功" } }
       }
+    },
+    "/api/openapi.json": {
+      "get": {
+        "tags": ["System"],
+        "summary": "获取 OpenAPI 规范",
+        "description": "返回当前服务动态注入 servers 字段后的 OpenAPI 3.0 JSON。",
+        "responses": { "200": { "description": "OpenAPI JSON" } }
+      }
+    },
+    "/api/profile/skills": {
+      "get": {
+        "tags": ["Profiles"],
+        "summary": "获取指定 Profile 的 Skills",
+        "parameters": [{ "name": "name", "in": "query", "required": true, "schema": { "type": "string" }, "description": "Profile 名称" }],
+        "responses": { "200": { "description": "Skills 列表" }, "404": { "description": "Profile 不存在" } }
+      }
+    },
+    "/api/prompts": {
+      "post": {
+        "tags": ["Settings"],
+        "summary": "保存常用提示词",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["text"], "properties": { "text": { "type": "string", "maxLength": 8000 }, "label": { "type": "string" } } } } } },
+        "responses": { "200": { "description": "保存后的提示词" } }
+      }
+    },
+    "/api/session/compression-recovery/start": {
+      "post": {
+        "tags": ["Session"],
+        "summary": "启动会话压缩恢复",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["session_id"], "properties": { "session_id": { "type": "string" } } } } } },
+        "responses": { "200": { "description": "恢复任务状态" } }
+      }
+    },
+    "/api/share/create": {
+      "post": {
+        "tags": ["Session"],
+        "summary": "创建或刷新公开分享链接",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["session_id"], "properties": { "session_id": { "type": "string" } } } } } },
+        "responses": { "200": { "description": "分享链接与脱敏会话快照" }, "404": { "description": "会话不存在" } }
+      }
+    },
+    "/api/share/revoke": {
+      "post": {
+        "tags": ["Session"],
+        "summary": "撤销公开分享链接",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["session_id"], "properties": { "session_id": { "type": "string" } } } } } },
+        "responses": { "200": { "description": "撤销后的脱敏会话快照" }, "404": { "description": "会话不存在" } }
+      }
+    },
+    "/api/share/{token}": {
+      "get": {
+        "tags": ["Session"],
+        "summary": "读取公开分享快照",
+        "parameters": [{ "name": "token", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "公开会话快照" }, "404": { "description": "分享链接不存在或已失效" } }
+      }
+    },
+    "/api/updates/clear_lock": {
+      "post": {
+        "tags": ["System"],
+        "summary": "诊断更新锁文件",
+        "description": "返回更新锁冲突的诊断和人工恢复指引；不会删除服务器上的锁文件。",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["target"], "properties": { "target": { "type": "string", "enum": ["webui", "agent"] } } } } } },
+        "responses": { "200": { "description": "锁文件诊断结果" } }
+      }
+    },
+    "/api/sessions/{session_id}/events": {
+      "get": {
+        "tags": ["Session"],
+        "summary": "获取单个会话的 SSE 事件流",
+        "description": "长连接，返回 text/event-stream；可使用 Last-Event-ID 或 after_event_id 续传。",
+        "parameters": [{ "name": "session_id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "SSE 事件流", "content": { "text/event-stream": { "schema": { "type": "string" } } } } }
+      }
+    },
+    "/api/integration/common_tasks": {
+      "get": {
+        "tags": ["Profiles"],
+        "summary": "获取 Profile 常用任务",
+        "description": "需要 HERMES_INTEGRATION=1。",
+        "parameters": [{ "name": "profile", "in": "query", "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "常用任务列表" } }
+      }
+    },
+    "/api/skillhub/installed-profiles": {
+      "get": {
+        "tags": ["Skills"],
+        "summary": "查询 Skill 已安装的 Profiles",
+        "parameters": [{ "name": "name", "in": "query", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "Profile 列表" } }
+      }
+    },
+    "/api/skillhub/extract": {
+      "post": {
+        "tags": ["Skills"],
+        "summary": "从压缩包提取 Skill 元数据",
+        "requestBody": { "required": true, "content": { "multipart/form-data": { "schema": { "type": "object", "required": ["file"], "properties": { "file": { "type": "string", "format": "binary" } } } } } },
+        "responses": { "200": { "description": "提取结果" } }
+      }
+    },
+    "/api/skillhub/skill/ai-meta": {
+      "post": {
+        "tags": ["Skills"],
+        "summary": "生成 Skill AI 元数据",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/GenericObject" } } } },
+        "responses": { "200": { "description": "元数据" } }
+      }
+    },
+    "/api/skillhub/skill/detail": {
+      "post": {
+        "tags": ["Skills"],
+        "summary": "保存 Skill 详情",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/GenericObject" } } } },
+        "responses": { "200": { "description": "保存结果" } }
+      }
+    },
+    "/api/skillhub/re-extract": {
+      "post": {
+        "tags": ["Skills"],
+        "summary": "重新提取 Skill 元数据",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/GenericObject" } } } },
+        "responses": { "200": { "description": "提取结果" } }
+      }
+    },
+    "/api/skillhub/install-to-profiles": {
+      "post": {
+        "tags": ["Skills"],
+        "summary": "将 Skill 安装到指定 Profiles",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/GenericObject" } } } },
+        "responses": { "200": { "description": "安装结果" } }
+      }
+    },
+    "/api/skillhub/delete-from-all-profiles": {
+      "post": {
+        "tags": ["Skills"],
+        "summary": "从所有 Profiles 删除 Skill",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/GenericObject" } } } },
+        "responses": { "200": { "description": "删除结果" } }
+      }
+    },
+    "/api/skillhub/sync-profiles": {
+      "post": {
+        "tags": ["Skills"],
+        "summary": "同步 Skill 到 Profiles",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/GenericObject" } } } },
+        "responses": { "200": { "description": "同步结果" } }
+      }
+    },
+    "/api/skillhub/batch-install": {
+      "post": {
+        "tags": ["Skills"],
+        "summary": "批量安装 Skills",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/GenericObject" } } } },
+        "responses": { "200": { "description": "安装结果" } }
+      }
+    },
+    "/api/skillhub/batch-uninstall": {
+      "post": {
+        "tags": ["Skills"],
+        "summary": "批量卸载 Skills",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/GenericObject" } } } },
+        "responses": { "200": { "description": "卸载结果" } }
+      }
+    },
+    "/api/kanban/boards": {
+      "get": { "tags": ["Kanban"], "summary": "列出看板", "responses": { "200": { "description": "看板列表" } } },
+      "post": { "tags": ["Kanban"], "summary": "创建看板", "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["slug"], "properties": { "slug": { "type": "string" }, "name": { "type": "string" }, "description": { "type": "string" }, "icon": { "type": "string" }, "color": { "type": "string" }, "switch": { "type": "boolean" } } } } } }, "responses": { "200": { "description": "新建看板" } } }
+    },
+    "/api/kanban/boards/{slug}": {
+      "patch": { "tags": ["Kanban"], "summary": "更新看板元数据", "parameters": [{ "name": "slug", "in": "path", "required": true, "schema": { "type": "string" } }], "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object" } } } }, "responses": { "200": { "description": "更新后的看板" } } },
+      "delete": { "tags": ["Kanban"], "summary": "归档或删除看板", "parameters": [{ "name": "slug", "in": "path", "required": true, "schema": { "type": "string" } }, { "name": "delete", "in": "query", "schema": { "type": "string", "enum": ["1"] }, "description": "传 1 时永久删除；省略时归档" }], "responses": { "200": { "description": "删除或归档结果" } } }
+    },
+    "/api/kanban/boards/{slug}/switch": {
+      "post": { "tags": ["Kanban"], "summary": "切换当前看板", "parameters": [{ "name": "slug", "in": "path", "required": true, "schema": { "type": "string" } }], "responses": { "200": { "description": "当前看板" } } }
+    },
+    "/api/kanban/board": {
+      "get": { "tags": ["Kanban"], "summary": "获取当前看板", "responses": { "200": { "description": "当前看板" } } }
+    },
+    "/api/kanban/config": {
+      "get": { "tags": ["Kanban"], "summary": "获取看板配置", "parameters": [{ "name": "board", "in": "query", "schema": { "type": "string" } }], "responses": { "200": { "description": "看板配置" } } },
+      "patch": { "tags": ["Kanban"], "summary": "更新看板配置", "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object" } } } }, "responses": { "200": { "description": "更新后的配置" } } }
+    },
+    "/api/kanban/stats": {
+      "get": { "tags": ["Kanban"], "summary": "获取看板统计", "parameters": [{ "name": "board", "in": "query", "schema": { "type": "string" } }], "responses": { "200": { "description": "看板统计" } } }
+    },
+    "/api/kanban/assignees": {
+      "get": { "tags": ["Kanban"], "summary": "获取负责人列表", "parameters": [{ "name": "board", "in": "query", "schema": { "type": "string" } }], "responses": { "200": { "description": "负责人列表" } } }
+    },
+    "/api/kanban/events": {
+      "get": { "tags": ["Kanban"], "summary": "获取看板事件", "parameters": [{ "name": "board", "in": "query", "schema": { "type": "string" } }], "responses": { "200": { "description": "事件列表" } } }
+    },
+    "/api/kanban/events/stream": {
+      "get": { "tags": ["Kanban"], "summary": "订阅看板 SSE 事件", "description": "长连接，返回 text/event-stream。", "responses": { "200": { "description": "SSE 事件流", "content": { "text/event-stream": { "schema": { "type": "string" } } } } } }
+    },
+    "/api/kanban/dispatch": {
+      "post": { "tags": ["Kanban"], "summary": "派发看板任务", "parameters": [{ "name": "board", "in": "query", "schema": { "type": "string" } }], "requestBody": { "content": { "application/json": { "schema": { "type": "object" } } } }, "responses": { "200": { "description": "派发结果" } } }
+    },
+    "/api/kanban/tasks": {
+      "post": { "tags": ["Kanban"], "summary": "创建任务", "parameters": [{ "name": "board", "in": "query", "schema": { "type": "string" } }], "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object" } } } }, "responses": { "200": { "description": "新建任务" } } }
+    },
+    "/api/kanban/tasks/bulk": {
+      "post": { "tags": ["Kanban"], "summary": "批量更新任务", "parameters": [{ "name": "board", "in": "query", "schema": { "type": "string" } }], "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object" } } } }, "responses": { "200": { "description": "批量更新结果" } } }
+    },
+    "/api/kanban/tasks/{task_id}": {
+      "get": { "tags": ["Kanban"], "summary": "获取任务详情", "parameters": [{ "name": "task_id", "in": "path", "required": true, "schema": { "type": "string" } }, { "name": "board", "in": "query", "schema": { "type": "string" } }], "responses": { "200": { "description": "任务详情" }, "404": { "description": "任务不存在" } } },
+      "patch": { "tags": ["Kanban"], "summary": "更新任务", "parameters": [{ "name": "task_id", "in": "path", "required": true, "schema": { "type": "string" } }, { "name": "board", "in": "query", "schema": { "type": "string" } }], "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object" } } } }, "responses": { "200": { "description": "更新后的任务" } } }
+    },
+    "/api/kanban/tasks/{task_id}/log": {
+      "get": { "tags": ["Kanban"], "summary": "获取任务日志", "parameters": [{ "name": "task_id", "in": "path", "required": true, "schema": { "type": "string" } }], "responses": { "200": { "description": "任务日志" }, "404": { "description": "任务不存在" } } }
+    },
+    "/api/kanban/tasks/{task_id}/comments": {
+      "post": { "tags": ["Kanban"], "summary": "添加任务评论", "parameters": [{ "name": "task_id", "in": "path", "required": true, "schema": { "type": "string" } }, { "name": "board", "in": "query", "schema": { "type": "string" } }], "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object" } } } }, "responses": { "200": { "description": "评论结果" } } }
+    },
+    "/api/kanban/tasks/{task_id}/block": {
+      "post": { "tags": ["Kanban"], "summary": "阻塞任务", "parameters": [{ "name": "task_id", "in": "path", "required": true, "schema": { "type": "string" } }], "requestBody": { "content": { "application/json": { "schema": { "type": "object" } } } }, "responses": { "200": { "description": "任务状态" } } }
+    },
+    "/api/kanban/tasks/{task_id}/unblock": {
+      "post": { "tags": ["Kanban"], "summary": "解除任务阻塞", "parameters": [{ "name": "task_id", "in": "path", "required": true, "schema": { "type": "string" } }], "requestBody": { "content": { "application/json": { "schema": { "type": "object" } } } }, "responses": { "200": { "description": "任务状态" } } }
+    },
+    "/api/kanban/tasks/{task_id}/patch": {
+      "post": { "tags": ["Kanban"], "summary": "部分更新任务", "parameters": [{ "name": "task_id", "in": "path", "required": true, "schema": { "type": "string" } }], "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object" } } } }, "responses": { "200": { "description": "更新后的任务" } } }
+    },
+    "/api/kanban/links": {
+      "post": { "tags": ["Kanban"], "summary": "关联任务", "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object" } } } }, "responses": { "200": { "description": "关联结果" } } },
+      "delete": { "tags": ["Kanban"], "summary": "解除任务关联", "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object" } } } }, "responses": { "200": { "description": "解除结果" } } }
+    },
+    "/api/kanban/links/delete": {
+      "post": { "tags": ["Kanban"], "summary": "解除任务关联（兼容路径）", "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object" } } } }, "responses": { "200": { "description": "解除结果" } } }
     }
   },
   "components": {
