@@ -60,6 +60,9 @@ def test_session_new_succeeds_with_cross_profile_prev_session_id(monkeypatch):
         def compact(self):
             return {"session_id": self.session_id, "profile": self.profile}
 
+        def save(self):
+            pass
+
     def _new_session(**_kwargs):
         s = _Session()
         created["session"] = s
@@ -124,6 +127,9 @@ def test_session_new_still_commits_same_profile_prev_session_id(monkeypatch):
 
         def compact(self):
             return {"session_id": self.session_id}
+
+        def save(self):
+            pass
 
     monkeypatch.setattr(routes, "new_session", lambda **_k: _Session())
     monkeypatch.setattr(
