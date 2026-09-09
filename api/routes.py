@@ -15308,7 +15308,10 @@ def _handle_sessions_search(handler, parsed):
     from api.profiles import get_active_profile_name
     active_profile = get_active_profile_name()
     all_profiles = _all_profiles_query_flag(parsed)
-    sessions = all_sessions()
+    sessions = [
+        s for s in all_sessions()
+        if not is_cron_session(s.get("session_id"), s.get("source_tag"))
+    ]
     if not all_profiles:
         sessions = [
             s for s in sessions
