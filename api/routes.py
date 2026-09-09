@@ -1140,6 +1140,9 @@ def _available_profile_names() -> set[str]:
     return names
 
 
+_available_cron_profile_names = _available_profile_names
+
+
 def _normalize_existing_profile_value(value) -> str | None:
     if value is None:
         return None
