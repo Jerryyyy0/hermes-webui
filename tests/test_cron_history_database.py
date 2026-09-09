@@ -133,6 +133,44 @@ def test_history_reads_legacy_job_session_from_owner_profile(monkeypatch, tmp_pa
     assert run["output_filename"] == output.name
 
 
+def test_history_reads_profile_bound_job_session(monkeypatch, tmp_path):
+    default_home = tmp_path / "default"
+    profile_home = default_home / "profiles" / "abc"
+    job_id = "39c23c0be177"
+    session_id = f"cron_{job_id}_20260908_161604_9a1f01be"
+    _make_state_db(
+        profile_home / "state.db",
+        [(session_id, "GPT 模型进展速报", "cron", 100.0, 112.0, "cron_error", "model", 23, 0, 1)],
+    )
+
+    import cron.jobs
+    import api.routes
+
+    monkeypatch.setattr(cron.jobs, "OUTPUT_DIR", profile_home / "cron" / "output")
+    monkeypatch.setattr(
+        cron.jobs,
+        "get_job",
+        lambda value: {"id": value, "name": "GPT 模型进展速报", "profile": "abc"},
+    )
+    monkeypatch.setattr("api.profiles._DEFAULT_HERMES_HOME", default_home)
+    monkeypatch.setattr("api.profiles.list_profiles_api", lambda: [{"name": "abc"}])
+    monkeypatch.setattr(
+        "integration.crons.session_bridge.materialize_cron_session_run",
+        lambda *_args, **_kwargs: session_id,
+    )
+    _install_json_capture(monkeypatch)
+
+    handler = _Handler()
+    api.routes._handle_cron_history(
+        handler,
+        SimpleNamespace(query=f"job_id={job_id}&profile=abc&limit=50"),
+    )
+
+    assert handler.status == 200
+    assert handler.payload["total"] == 1
+    assert handler.payload["runs"][0]["session_id"] == session_id
+
+
 def test_history_keeps_database_only_and_artifact_only_runs(monkeypatch, tmp_path):
     home = tmp_path / "abc"
     job_id = "one-shot"
