@@ -14,6 +14,7 @@ _EVENT_ID_KINDS = {
     "background_task_status": "status",
     "bg_task_complete": "complete",
     "server_turn_started": "run-started",
+    "async_turn_committed": "turn-committed",
     "background_task_unresolved": "unresolved",
 }
 
@@ -101,6 +102,25 @@ def snapshot_event(session: Any) -> dict[str, Any]:
             "tasks": tasks,
         },
     }
+
+
+def committed_event(
+    session: Any,
+    delegation_id: str,
+    record: dict[str, Any] | None,
+    *,
+    stream_id: str,
+    message_count: int,
+) -> dict[str, Any]:
+    """Announce that one wakeup's visible transcript is durably committed."""
+    return task_event(
+        session,
+        "async_turn_committed",
+        delegation_id,
+        record,
+        stream_id=str(stream_id),
+        message_count=max(0, _as_int(message_count)),
+    )
 
 
 def unresolved_event(session: Any, delegation_id: str) -> dict[str, Any]:

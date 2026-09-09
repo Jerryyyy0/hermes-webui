@@ -833,6 +833,14 @@ def main() -> None:
         log_warning(f'[!!] WARNING: Gateway watcher failed to start: {e}')
 
     try:
+        from integration.async_delegation_turns import inbox as async_delegation_inbox
+        recovered = async_delegation_inbox.recover()
+        if async_delegation_inbox.start():
+            log_info(f'[ok] async delegation inbox scheduler started ({recovered} queued session(s))')
+    except Exception as e:
+        log_warning(f'[!!] WARNING: async delegation inbox scheduler failed to start: {e}')
+
+    try:
         from api.background_process import start_drain_thread
         if start_drain_thread():
             log_info('[ok] bg_task_complete drain thread started')
@@ -977,6 +985,11 @@ def main() -> None:
             stop_drain_thread()
         except Exception:
             logger.debug("Failed to stop bg_task_complete drain thread during shutdown", exc_info=True)
+        try:
+            from integration.async_delegation_turns import inbox as async_delegation_inbox
+            async_delegation_inbox.stop()
+        except Exception:
+            logger.debug("Failed to stop async delegation inbox scheduler during shutdown", exc_info=True)
         try:
             from api.background_process import stop_session_channel_reaper
             stop_session_channel_reaper()

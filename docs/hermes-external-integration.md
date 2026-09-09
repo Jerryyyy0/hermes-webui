@@ -5,6 +5,15 @@
 
 ## Runtime configuration
 
+`api/routes.py::_turn_aligned_window_indices` 只复用 Manifest 的 turn 起点；
+分页结束位置使用下一有效起点或完整消息尾部，不能直接使用可能留有未绑定行间隙的
+Manifest end index，否则会遗漏异步 completion 后的 assistant/tool 消息。
+
+异步交接接缝：`api/process_event_utils.py` 的 claim、ACK、release 使用
+`integration/async_delegation_turns/delivery_scope.py`，根据 origin session sidecar
+解析 Profile，以 context-local Hermes Home 固定数据库；inbox 回读使用相同作用域。
+作用域退出（含异常）恢复原上下文，不修改进程环境变量。
+
 `integration/env_config/` 提供只读的 `GET /api/integration/config`。接口只返回白名单
 环境变量 `BROWSER_PREVIEW_URL` 的当前进程值，不枚举其它环境变量；
 `api/routes.py` 仅保留 GET handler 的薄委派。该接口仅在 `HERMES_INTEGRATION=1`
@@ -45,15 +54,22 @@ Cron 专属路径解析、policy 判断、清理逻辑和 UI 状态不得复制�
 
 ## Async Delegation
 
-`integration/async_delegation_turns/` 负责后台 delegation 的归属 sidecar、每轮 user
-message 状态投影、取消屏障与会话 SSE 生命周期信封。允许修改的上游接缝如下：
+`integration/async_delegation_turns/` 负责后台 delegation 的归属 sidecar、durable wakeup
+inbox、每轮 user message 状态投影、取消屏障与会话 SSE 生命周期信封。完整 prompt 保存在
+`async_delegation_origins[delegation_id].wakeup`；Agent ACK 只在该 sidecar 保存成功后发生。
+此实现不修改 Agent upstream 的 `async_delegations` SQLite 表结构。允许修改的上游接缝如下：
 
-- `api/models.py`：持久化 `async_delegation_cancellation`。
+- `api/models.py`：持久化 `async_delegation_cancellation`，并在 generic stale repair 前调用
+  integration recovery hook。
 - `api/streaming.py`：在 chat stream 内写入派发归属并发送唯一的
-  `background_task_dispatched` 通知。
-- `api/background_process.py`：处理 completion、取消屏障、未解析终态与 wakeup 抑制。
-- `api/routes.py`：委派取消 HTTP handler，并使按 session SSE 在保留 run-journal
-  行为的同时发送首个后台任务快照。
+  `background_task_dispatched` 通知；最终 transcript、artifact 与 terminal journal 保存后，
+  向 run journal 和 session SSE 发布 `async_turn_committed`，再结算 wakeup。
+- `api/background_process.py`：先接管 completion 到 sidecar，再处理 Agent ACK、取消屏障、
+  未解析终态与 scheduler 通知。
+- `api/routes.py`：委派取消 HTTP handler、stale cleanup hook，以及 session lock 内一次保存的
+  wakeup admission；async worker 等待 `server_turn_started` 发布后才执行；按 session SSE
+  仍保留 run-journal 行为并发送首个后台任务快照。
+- `server.py`：sidecar 恢复完成后先恢复/启动 inbox scheduler，再启动 Agent completion drain。
 
 HTTP handler、状态变更和事件构造必须留在 `integration/async_delegation_turns/`，不得在
 这些上游接缝中复制业务逻辑。

@@ -63,6 +63,7 @@ from api.models import (
     _recovered_model_context_projection,
     _evict_sessions_over_cap,
     clear_process_wakeup_pause,
+    is_server_wakeup_source,
     get_state_db_session_messages,
     reconcile_message_timestamps,
     record_process_wakeup_provider_unavailable_pause,
@@ -1567,10 +1568,11 @@ def _latest_user_turn_binding(session, msg_text: str, turn_key: str) -> dict[str
     # An async-delegation wakeup carries completion prose as a hidden model
     # anchor.  Its content is intentionally not the originating human prompt,
     # so only the explicit origin turn key is a valid binding proof.
-    expected_text = "" if (
+    async_wakeup = (
         str(getattr(session, "pending_user_source", "") or "").strip()
         == "async_delegation_wakeup"
-    ) else _normalize_user_text(msg_text)
+    )
+    expected_text = "" if async_wakeup else _normalize_user_text(msg_text)
     for message in reversed(getattr(session, 'messages', None) or []):
         if not isinstance(message, dict) or message.get('role') != 'user':
             continue
@@ -1580,6 +1582,11 @@ def _latest_user_turn_binding(session, msg_text: str, turn_key: str) -> dict[str
             log_control_message("turn_binding_skip", message)
             continue
         actual = str(message.get('_turn_key') or '').strip()
+        if async_wakeup and actual != expected:
+            # A delayed completion may target an older logical turn after the
+            # user has already continued chatting. Its explicit provenance is
+            # authoritative; newer real user turns are not a conflict.
+            continue
         if not actual:
             return {'status': 'failed', 'stage': 'missing_key', 'actual_turn_key': ''}
         if actual != expected:
@@ -5711,6 +5718,25 @@ def _merge_display_messages_after_agent_result(
             # hasn't already been inserted.
             _context_inserted = set()
             _cursor = 0
+
+            def _leading_gap_is_displayable(start, end):
+                """A visible history prefix must start at a real user boundary.
+
+                Hermes Agent may normalize adjacent assistant rows into one
+                context-only assistant before the first retained user.  That
+                provider-facing repair is not a missing UI turn and must never
+                be projected ahead of the transcript's visible backbone.
+                """
+                for _candidate in previous_context[start:end]:
+                    if (
+                        not isinstance(_candidate, dict)
+                        or _is_context_compression_marker(_candidate)
+                        or _is_compressed_context_tool_result_summary_message(_candidate)
+                    ):
+                        continue
+                    return _candidate.get('role') == 'user'
+                return False
+
             for _display_idx, _dmsg in enumerate(previous_display):
                 _dkey = _message_identity(_dmsg)
                 if _dkey is not None:
@@ -5718,7 +5744,14 @@ def _merge_display_messages_after_agent_result(
                     while _j < len(context_keys) and context_keys[_j] != _dkey:
                         _j += 1
                     if _j < len(context_keys):
-                        for _k in range(_cursor, _j):
+                        _gap_start = _cursor
+                        if (
+                            _display_idx == 0
+                            and _cursor == 0
+                            and not _leading_gap_is_displayable(_cursor, _j)
+                        ):
+                            _gap_start = _j
+                        for _k in range(_gap_start, _j):
                             _ckey = context_keys[_k]
                             _cmsg = previous_context[_k]
                             if (
@@ -5735,7 +5768,14 @@ def _merge_display_messages_after_agent_result(
                         _message_identity(_future_dmsg) in context_keys[_cursor:]
                         for _future_dmsg in previous_display[_display_idx + 1:]
                     ):
-                        for _k in range(_cursor, len(context_keys)):
+                        _gap_start = _cursor
+                        if (
+                            _display_idx == 0
+                            and _cursor == 0
+                            and not _leading_gap_is_displayable(_cursor, len(context_keys))
+                        ):
+                            _gap_start = len(context_keys)
+                        for _k in range(_gap_start, len(context_keys)):
                             _ckey = context_keys[_k]
                             _cmsg = previous_context[_k]
                             if (
@@ -7425,6 +7465,9 @@ def _run_agent_streaming(
     _kb_registry = None
     _kb_hook = None
     _citation_settlement_id = ''
+    _async_wakeup_generation = None
+    _async_wakeup_terminal_journal_persisted = False
+    _async_wakeup_finalized = False
     _profile_context_started = _stream_diag_monotonic_ms()
     try:
         # Register this stream with the global streaming meter and start the 1 Hz
@@ -7439,6 +7482,8 @@ def _run_agent_streaming(
         # in the outer finally next to _clear_thread_env().
         _turn_session_identity_tokens = _set_turn_session_identity(session_id)
         s = get_session(session_id)
+        if async_delegation_id:
+            _async_wakeup_generation = getattr(s, 'active_stream_generation', None)
         from integration.session_manifest.manifest import seed_live_manifest_references
         _live_manifest_seed = seed_live_manifest_references(s)
         with STREAMS_LOCK:
@@ -9811,7 +9856,7 @@ def _run_agent_streaming(
                             _classification,
                         )
                         _err_type = _classification['type']
-                        if _turn_pending_source == 'process_wakeup':
+                        if _turn_pending_source == 'process_wakeup' or is_server_wakeup_source(_turn_pending_source):
                             _recorded_pause = record_process_wakeup_provider_unavailable_pause(
                                 s,
                                 classification=_err_type,
@@ -10433,6 +10478,8 @@ def _run_agent_streaming(
                                 ),
                             },
                         )
+                        if async_delegation_id:
+                            _async_wakeup_terminal_journal_persisted = True
                     except Exception:
                         logger.debug("Failed to append completed turn journal event", exc_info=True)
                 if not ephemeral:
@@ -10802,6 +10849,55 @@ def _run_agent_streaming(
                 meter_stats.setdefault('tps_available', False)
                 meter_stats.setdefault('estimated', False)
                 put('metering', meter_stats)
+            if (
+                async_delegation_id
+                and _success_writeback_committed
+                and _artifact_decision.get('status') == 'persisted'
+                and _async_wakeup_terminal_journal_persisted
+            ):
+                try:
+                    from api.background_process import (
+                        emit_async_delegation_status,
+                        emit_session_channel_event,
+                    )
+                    from integration.async_delegation_turns import commit_wakeup_after_outputs
+
+                    def _publish_async_turn_committed(_event):
+                        # The physical run journal provides Last-Event-ID replay;
+                        # the session channel covers tabs between foreground runs.
+                        put('async_turn_committed', _event)
+                        emit_session_channel_event(
+                            session_id,
+                            'async_turn_committed',
+                            _event,
+                        )
+
+                    with _get_session_agent_lock(session_id):
+                        _settled_record = commit_wakeup_after_outputs(
+                            s,
+                            async_delegation_id,
+                            stream_id=stream_id,
+                            generation=_async_wakeup_generation,
+                            publish=_publish_async_turn_committed,
+                        )
+                    if _settled_record is not None:
+                        _async_wakeup_finalized = True
+                        emit_async_delegation_status(
+                            session_id,
+                            async_delegation_id,
+                            _settled_record,
+                            status=str(_settled_record.get('status') or 'completed'),
+                            wakeup_state='settled',
+                            content='',
+                        )
+                except Exception:
+                    # The outer cleanup records finalization_failed while
+                    # retaining the durable prompt for restart/manual recovery.
+                    logger.warning(
+                        "Failed to commit async delegation wakeup %s after durable outputs",
+                        async_delegation_id,
+                        exc_info=True,
+                    )
             try:
                 _log_stream_writeback_timings(
                     getattr(s, 'session_id', session_id),
@@ -10892,7 +10988,10 @@ def _run_agent_streaming(
                 with _lock_ctx:
                     if (
                         not ephemeral
-                        and _turn_pending_source == 'process_wakeup'
+                        and (
+                            _turn_pending_source == 'process_wakeup'
+                            or is_server_wakeup_source(_turn_pending_source)
+                        )
                         and _exc_is_credential_pool_empty
                     ):
                         record_process_wakeup_provider_unavailable_pause(
@@ -11053,7 +11152,7 @@ def _run_agent_streaming(
             _lock_ctx = _agent_lock if _agent_lock is not None else contextlib.nullcontext()
             with _lock_ctx:
                 if not ephemeral and not _stream_writeback_is_current(s, stream_id):
-                    if _turn_pending_source == 'process_wakeup':
+                    if _turn_pending_source == 'process_wakeup' or is_server_wakeup_source(_turn_pending_source):
                         _pause = record_process_wakeup_provider_unavailable_pause(
                             s,
                             classification=_exc_type,
@@ -11077,7 +11176,7 @@ def _run_agent_streaming(
                     )
                     return
 
-                if _turn_pending_source == 'process_wakeup':
+                if _turn_pending_source == 'process_wakeup' or is_server_wakeup_source(_turn_pending_source):
                     _recorded_pause = record_process_wakeup_provider_unavailable_pause(
                         s,
                         classification=_exc_type,
@@ -11206,17 +11305,35 @@ def _run_agent_streaming(
                     _status = "error"
             except Exception:
                 pass
-        if async_delegation_id:
+        if async_delegation_id and not _async_wakeup_finalized and s is not None:
             try:
-                from integration.async_delegation_turns import mark_async_delegation_wakeup
+                from integration.async_delegation_turns import settle_wakeup
                 from integration.async_delegation_turns import resolve_async_delegation_origin
                 from api.background_process import emit_async_delegation_status
+                _fallback_error_code = None
+                _clear_wakeup_prompt = False
+                if _status == "cancelled":
+                    _fallback_status = "cancelled"
+                    _fallback_wakeup_state = "settled"
+                    _clear_wakeup_prompt = True
+                else:
+                    _fallback_status = "failed"
+                    _fallback_wakeup_state = "failed"
+                    _fallback_error_code = (
+                        "finalization_failed"
+                        if _success_writeback_committed
+                        else "wakeup_run_failed"
+                    )
                 with _get_session_agent_lock(session_id):
-                    record = mark_async_delegation_wakeup(
+                    record = settle_wakeup(
                         s,
                         async_delegation_id,
-                        wakeup_state="failed" if _status == "error" else "settled",
-                        content=msg_text,
+                        stream_id=stream_id,
+                        generation=_async_wakeup_generation,
+                        status=_fallback_status,
+                        cancel_state="cancelled" if _status == "cancelled" else None,
+                        error_code=_fallback_error_code,
+                        clear_prompt=_clear_wakeup_prompt,
                     )
                     if record is None:
                         record = resolve_async_delegation_origin(
@@ -11226,9 +11343,9 @@ def _run_agent_streaming(
                     session_id,
                     async_delegation_id,
                     record,
-                    status="failed" if _status == "error" else "completed",
-                    wakeup_state="failed" if _status == "error" else "settled",
-                    content=msg_text,
+                    status=_fallback_status,
+                    wakeup_state=_fallback_wakeup_state,
+                    content='',
                 )
             except Exception:
                 logger.debug(
@@ -11302,6 +11419,19 @@ def _run_agent_streaming(
             except Exception:
                 logger.debug(
                     "Failed to drain queued chat turn after stream %s teardown",
+                    stream_id,
+                    exc_info=True,
+                )
+        if async_delegation_id:
+            try:
+                from integration.async_delegation_turns import inbox
+
+                # Admission must run after ACTIVE_RUNS teardown. A notification
+                # is only a candidate hint; the scheduler rechecks all guards.
+                inbox.notify(session_id)
+            except Exception:
+                logger.debug(
+                    "Failed to notify async delegation inbox after stream %s teardown",
                     stream_id,
                     exc_info=True,
                 )

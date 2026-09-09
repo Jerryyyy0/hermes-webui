@@ -335,10 +335,22 @@ def _assistant_message_indices_for_turn(messages: list, turn_key: str) -> list[i
     key = str(turn_key or '').strip()
     if not key.startswith('turn:'):
         return []
-    try:
-        user_idx = int(key.split(':', 1)[1])
-    except (TypeError, ValueError):
-        return []
+    user_idx = next(
+        (
+            idx for idx, message in enumerate(messages or [])
+            if isinstance(message, dict)
+            and message.get('role') == 'user'
+            and str(message.get('_turn_key') or '').strip() == key
+        ),
+        None,
+    )
+    if user_idx is None:
+        # Compatibility for legacy unkeyed transcripts where turn:N denoted
+        # the user message index rather than a stable logical key.
+        try:
+            user_idx = int(key.split(':', 1)[1])
+        except (TypeError, ValueError):
+            return []
     if user_idx < 0 or user_idx >= len(messages or []):
         return []
     end_idx = len(messages) - 1
@@ -347,10 +359,19 @@ def _assistant_message_indices_for_turn(messages: list, turn_key: str) -> list[i
         if isinstance(message, dict) and message.get('role') == 'user':
             end_idx = idx - 1
             break
-    return [
+    contiguous = [
         idx for idx in range(user_idx, end_idx + 1)
-        if isinstance(messages[idx], dict) and messages[idx].get('role') == 'assistant'
+        if isinstance(messages[idx], dict)
+        and messages[idx].get('role') == 'assistant'
+        and str(messages[idx].get('_turn_key') or '').strip() in {'', key}
     ]
+    explicit = [
+        idx for idx, message in enumerate(messages or [])
+        if isinstance(message, dict)
+        and message.get('role') == 'assistant'
+        and str(message.get('_turn_key') or '').strip() == key
+    ]
+    return sorted(set(contiguous + explicit))
 
 
 def _collect_media_artifact_events(messages: list, workspace: Path, *, turn_key: str = '') -> list[ToolEvent]:
@@ -2169,7 +2190,7 @@ def extract_turn_artifact_entries_for_manifest(
     key = str(turn_key or '').strip()
     if not messages or not key:
         return []
-    turn_slice = _turn_message_slice(messages, key)
+    turn_slice = _artifact_messages_for_turn(messages, key)
     if not turn_slice:
         return []
     turn_bounds = next(
@@ -2190,7 +2211,7 @@ def extract_turn_artifact_entries_for_manifest(
         current_key = str(turn.get('turn_key') or '').strip()
         if not current_key:
             continue
-        current_messages = _turn_message_slice(messages, current_key)
+        current_messages = _artifact_messages_for_turn(messages, current_key)
         current_entries = _extract_turn_artifact_entries(
             current_messages,
             all_tool_calls,
@@ -2225,6 +2246,43 @@ def _turn_message_slice(messages: list, turn_key: str) -> list:
             end = int(turn.get('end_msg_idx', len(messages or []) - 1))
             return list(messages[start:end + 1])
     return []
+
+
+def _artifact_messages_for_turn(messages: list, turn_key: str) -> list:
+    """Return contiguous rows plus non-contiguous rows with explicit ownership.
+
+    Async delegation replies are appended at the visible timeline tail but keep
+    their origin ``_turn_key``. They must be included with that origin and
+    excluded from the newer contiguous user span they happen to follow.
+    """
+    key = str(turn_key or '').strip()
+    turn = _turn_record_for_key(messages, key)
+    if turn is None:
+        return []
+    start = int(turn.get('start_msg_idx', 0))
+    end = int(turn.get('end_msg_idx', len(messages or []) - 1))
+    selected = []
+    selected_indices = set()
+    for idx in range(start, end + 1):
+        message = messages[idx]
+        explicit_key = (
+            str(message.get('_turn_key') or '').strip()
+            if isinstance(message, dict)
+            else ''
+        )
+        if explicit_key and explicit_key != key:
+            continue
+        selected.append(message)
+        selected_indices.add(idx)
+    for idx, message in enumerate(messages or []):
+        if idx in selected_indices or not isinstance(message, dict):
+            continue
+        if message.get('role') not in {'assistant', 'tool'}:
+            continue
+        if str(message.get('_turn_key') or '').strip() != key:
+            continue
+        selected.append(message)
+    return selected
 
 
 def _records_by_path(rows: list[dict] | None) -> dict[str, dict]:

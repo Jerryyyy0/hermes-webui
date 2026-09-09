@@ -48,7 +48,9 @@ def test_cancel_post_snapshots_then_returns_accepted(monkeypatch):
     monkeypatch.setattr(
         handlers,
         "_interrupt_in_background",
-        lambda session_id, delegation_ids: interrupts.append((session_id, delegation_ids)),
+        lambda session_id, delegation_ids, wakeup_stream_ids: interrupts.append(
+            (session_id, delegation_ids, wakeup_stream_ids)
+        ),
     )
 
     class _Thread:
@@ -77,7 +79,7 @@ def test_cancel_post_snapshots_then_returns_accepted(monkeypatch):
             "settled_at": None,
         },
     }
-    assert interrupts == [("session-1", ["deleg-1"])]
+    assert interrupts == [("session-1", ["deleg-1"], [])]
 
 
 def test_cancel_get_reads_status_without_starting_an_interrupt(monkeypatch):

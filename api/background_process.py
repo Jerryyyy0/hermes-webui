@@ -1295,7 +1295,9 @@ def _process_async_delegation_event(
         from integration.async_delegation_turns import (
             cancellation_delegation_ids,
             mark_async_delegation_completion,
+            mark_completion_ack,
             normalize_async_delegation_status,
+            receive_completion,
             resolve_async_delegation_origin,
         )
 
@@ -1336,27 +1338,28 @@ def _process_async_delegation_event(
         child_task_summary = _async_delegation_child_task_summary(evt, origin)
         cancellation_matched = False
         cancellation_record = None
-        with _get_session_agent_lock(session_id):
-            # Read the durable barrier while holding the same lock used by the
-            # cancel endpoint. A completion racing with cancellation must
-            # settle under that barrier, never start a new wakeup turn.
-            session = get_session(session_id)
-            if delegation_id in cancellation_delegation_ids(session):
-                cancellation_matched = True
-                completion_status = _cancellation_completion_status(
-                    completion_status,
-                    child_task_summary,
-                )
-                cancel_state = "cancelled" if completion_status == "cancelled" else "requested"
-                cancellation_record = mark_async_delegation_completion(
-                    session,
-                    delegation_id,
-                    wakeup_state="settled",
-                    content="",
-                    status=completion_status,
-                    child_task_summary=child_task_summary,
-                    cancel_state=cancel_state,
-                )
+        if not legacy_originless_route:
+            with _get_session_agent_lock(session_id):
+                # Read the durable barrier while holding the same lock used by the
+                # cancel endpoint. A completion racing with cancellation must
+                # settle under that barrier, never start a new wakeup turn.
+                session = get_session(session_id)
+                if delegation_id in cancellation_delegation_ids(session):
+                    cancellation_matched = True
+                    completion_status = _cancellation_completion_status(
+                        completion_status,
+                        child_task_summary,
+                    )
+                    cancel_state = "cancelled" if completion_status == "cancelled" else "requested"
+                    cancellation_record = mark_async_delegation_completion(
+                        session,
+                        delegation_id,
+                        wakeup_state="settled",
+                        content="",
+                        status=completion_status,
+                        child_task_summary=child_task_summary,
+                        cancel_state=cancel_state,
+                    )
         if cancellation_matched:
             _emit_async_delegation_status(
                 session_id,
@@ -1373,15 +1376,42 @@ def _process_async_delegation_event(
         if not wakeup_prompt:
             raise RuntimeError("async delegation completion could not be formatted")
 
-        # Do not persist async results in the process-local deferred list. If a
-        # foreground turn owns the session, release the durable claim and retry
-        # from the shared queue; the core record therefore remains restart-safe.
-        if _session_has_active_turn(session_id):
+        # Compatibility for pre-sidecar/test consumers that do not have a
+        # WebUI session record. Real WebUI sessions always use the durable
+        # inbox path below.
+        # Older callers (and non-durable Agent integrations) provide a minimal
+        # claim object without delegation/claim identifiers. Keep their
+        # process-local delivery path intact; durable WebUI claims always carry
+        # these fields and use the sidecar inbox below.
+        if not hasattr(claim, "delegation_id"):
+            legacy_originless_route = True
+        if legacy_originless_route:
+            if _session_has_active_turn(session_id):
+                with _get_session_agent_lock(session_id):
+                    record = mark_async_delegation_completion(
+                        session,
+                        delegation_id,
+                        wakeup_state="queued",
+                        content=wakeup_prompt,
+                        status=completion_status,
+                        child_task_summary=child_task_summary,
+                    )
+                _emit_async_delegation_status(
+                    session_id,
+                    delegation_id,
+                    record or origin,
+                    status=completion_status,
+                    wakeup_state="queued",
+                    content=wakeup_prompt,
+                )
+                release_async_delegation_delivery(evt, claim)
+                _requeue_async_delegation_event(process_registry, evt, claim=claim)
+                return
             with _get_session_agent_lock(session_id):
                 record = mark_async_delegation_completion(
                     session,
                     delegation_id,
-                    wakeup_state="queued",
+                    wakeup_state="running",
                     content=wakeup_prompt,
                     status=completion_status,
                     child_task_summary=child_task_summary,
@@ -1391,53 +1421,105 @@ def _process_async_delegation_event(
                 delegation_id,
                 record or origin,
                 status=completion_status,
-                wakeup_state="queued",
-                content=wakeup_prompt,
-            )
-            release_async_delegation_delivery(evt, claim)
-            _requeue_async_delegation_event(process_registry, evt, claim=claim)
-            return
-
-        with _get_session_agent_lock(session_id):
-            record = mark_async_delegation_completion(
-                session,
-                delegation_id,
                 wakeup_state="running",
                 content=wakeup_prompt,
+            )
+            try:
+                _start_async_delegation_wakeup_turn(
+                    session_id,
+                    wakeup_prompt,
+                    delegation_id=delegation_id,
+                    evt=evt,
+                    claim=claim,
+                    process_registry=process_registry,
+                    origin_turn_key=origin_turn_key,
+                )
+            except TypeError as exc:
+                if "origin_turn_key" not in str(exc):
+                    raise
+                _start_async_delegation_wakeup_turn(
+                    session_id,
+                    wakeup_prompt,
+                    delegation_id=delegation_id,
+                    evt=evt,
+                    claim=claim,
+                    process_registry=process_registry,
+                )
+            return
+
+        # Persist the complete wakeup inbox before acknowledging Agent. This
+        # is the durable ownership cutover: after this point the Agent row may
+        # be delivered and WebUI recovery must rely on the session sidecar.
+        with _get_session_agent_lock(session_id):
+            session = get_session(session_id)
+            record = receive_completion(
+                session,
+                delegation_id,
+                prompt=wakeup_prompt,
                 status=completion_status,
                 child_task_summary=child_task_summary,
+                ack_pending=True,
             )
+        if record is None:
+            raise RuntimeError("async delegation origin disappeared before inbox save")
+
+        ack_state = complete_async_delegation_delivery(evt, claim)
+        with _get_session_agent_lock(session_id):
+            session = get_session(session_id)
+            record = mark_completion_ack(
+                session,
+                delegation_id,
+                acknowledged=ack_state == "acknowledged",
+                unknown=ack_state == "unknown",
+            ) or record
+        if ack_state == "failed":
+            release_async_delegation_delivery(evt, claim)
+            _requeue_async_delegation_event(process_registry, evt, claim=claim)
+            # Agent may not redeliver immediately (or at all after its own
+            # retry bookkeeping). Keep ACK readback in the durable inbox
+            # scheduler so this completion cannot remain pending forever.
+            try:
+                from integration.async_delegation_turns import inbox
+
+                inbox.notify(session_id, delay=5.0)
+            except Exception:
+                logger.warning(
+                    "async delegation ACK retry scheduler unavailable for session %s",
+                    session_id,
+                    exc_info=True,
+                )
+            return
+
+        persisted_wakeup_state = str(record.get("wakeup_state") or "queued")
+        persisted_status = str(record.get("status") or completion_status)
+        if persisted_wakeup_state != "queued":
+            _emit_async_delegation_status(
+                session_id,
+                delegation_id,
+                record or origin,
+                status=persisted_status,
+                wakeup_state=persisted_wakeup_state,
+                content="",
+            )
+            return
+
         _emit_async_delegation_status(
             session_id,
             delegation_id,
             record or origin,
             status=completion_status,
-            wakeup_state="running",
+            wakeup_state="queued",
             content=wakeup_prompt,
         )
-
         try:
-            _start_async_delegation_wakeup_turn(
+            from integration.async_delegation_turns import inbox
+
+            inbox.notify(session_id)
+        except Exception:
+            logger.warning(
+                "async delegation inbox scheduler unavailable for session %s",
                 session_id,
-                wakeup_prompt,
-                delegation_id=delegation_id,
-                evt=evt,
-                claim=claim,
-                process_registry=process_registry,
-                origin_turn_key=origin_turn_key,
-            )
-        except TypeError as exc:
-            # Keep focused legacy integrations/test doubles callable while
-            # the production helper receives the explicit origin key.
-            if "origin_turn_key" not in str(exc):
-                raise
-            _start_async_delegation_wakeup_turn(
-                session_id,
-                wakeup_prompt,
-                delegation_id=delegation_id,
-                evt=evt,
-                claim=claim,
-                process_registry=process_registry,
+                exc_info=True,
             )
     except Exception:
         release_async_delegation_delivery(evt, claim)

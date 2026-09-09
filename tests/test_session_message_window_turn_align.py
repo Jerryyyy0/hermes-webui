@@ -1,6 +1,20 @@
 from api.routes import _message_window_for_display, _turn_aligned_window_indices
 
 
+def test_unkeyed_completion_cannot_cut_off_async_tail():
+    messages = [
+        {"role": "user", "content": "dispatch", "_turn_key": "turn:1"},
+        {"role": "assistant", "content": "waiting"},
+        {"role": "user", "content": "completion without semantic metadata"},
+        {"role": "assistant", "content": "async result", "_turn_key": "turn:1",
+         "_source": "async_delegation_wakeup", "delegation_id": "deleg-test"},
+    ]
+    for limit in (1, 50):
+        window, offset = _message_window_for_display(messages, msg_limit=limit, turn_align=True)
+        assert offset == 0
+        assert window == messages
+
+
 def _build_turn(user_content, assistant_content, tool_count=0):
     messages = [
         {"role": "user", "content": user_content},

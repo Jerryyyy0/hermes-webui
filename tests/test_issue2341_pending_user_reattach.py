@@ -72,6 +72,8 @@ def test_pending_user_message_dedup_checks_current_message_array():
         "Pending-message merge must still suppress duplicates when the current "
         "tail user row already matches pending_user_message"
     )
+    assert "pending_user_visible===false" in helper
+    assert "pending_user_source==='async_delegation_wakeup'" in helper
     assert "[...messages].reverse().find" not in helper, (
         "Pending-message dedup must not reverse-scan historical user rows"
     )

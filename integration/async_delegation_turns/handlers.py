@@ -10,7 +10,11 @@ from api.models import get_session
 from api.config import _get_session_agent_lock
 from api.profiles import profile_override_for_request
 
-from .state import begin_async_delegation_cancellation, cancellation_status
+from .state import (
+    begin_async_delegation_cancellation,
+    cancellation_status,
+    running_wakeup_stream_ids,
+)
 
 
 _CANCEL_PATH = "/api/sessions/background_tasks/cancel"
@@ -41,7 +45,18 @@ def _session_or_error(handler, session_id: str, *, profile_override: str | None 
     return session
 
 
-def _interrupt_in_background(session_id: str, delegation_ids: list[str]) -> None:
+def _interrupt_in_background(
+    session_id: str,
+    delegation_ids: list[str],
+    wakeup_stream_ids: list[str],
+) -> None:
+    try:
+        from api.streaming import cancel_stream
+
+        for stream_id in wakeup_stream_ids:
+            cancel_stream(stream_id)
+    except Exception:
+        pass
     try:
         from tools.async_delegation import interrupt_delegations
 
@@ -87,6 +102,10 @@ def try_handle_post(handler, parsed, body) -> bool:
     try:
         with _get_session_agent_lock(session_id):
             cancellation = begin_async_delegation_cancellation(session)
+            wakeup_streams = running_wakeup_stream_ids(
+                session,
+                set(cancellation.get("delegation_ids") or []),
+            )
     except Exception:
         bad(handler, "取消状态暂时无法保存", status=500)
         return True
@@ -100,7 +119,7 @@ def try_handle_post(handler, parsed, body) -> bool:
     # not wait for child processes; their normal completion events close it.
     threading.Thread(
         target=_interrupt_in_background,
-        args=(session_id, list(cancellation["delegation_ids"])),
+        args=(session_id, list(cancellation["delegation_ids"]), wakeup_streams),
         name=f"hermes-webui-cancel-{session_id[:8]}",
         daemon=True,
     ).start()

@@ -4,6 +4,7 @@
 - **作者：** @wzq
 - **创建日期：** 2026-08-06
 - **关联契约：** [WebUI Run State Consistency Contract](webui-run-state-consistency-contract.md)、[Session Manifest HTTP/SSE 契约](../api/session-manifest-api.md)
+- **后续修复方案：** [异步任务重启与 Wakeup 持久化止血修复方案](../fix/异步任务重启与wakeup持久化止血修复方案.md)
 
 ## 问题
 
@@ -329,6 +330,13 @@ Agent、Provider 和 hidden completion anchor 构造的消息副本必须移除�
 前端收到 `server_turn_started` 后复用现有 `attachLiveStream(stream_id)` 连接，接收后台
 assistant token、tool、MEDIA 和终态事件，并把可见内容追加到当前时间线尾部。前端不再为
 该 wakeup 发送第二次 `/api/chat/start`；这样既不会重复启动，也不会产生并发 stream。
+启动路由在 async worker 前使用闸门保证该事件先于任何 token/tool 输出。
+
+当 transcript/context/tool calls、Manifest artifact/MEDIA/References 和 terminal journal 均已持久化后，
+后端向该物理 stream 的 run journal 与 session SSE 同时发布
+`async_turn_committed`，再将 sidecar wakeup 结算为 `settled` 并删除 durable prompt。因此流
+重连可从 run journal 回放终态，而在发布与结算之间强杀时，重启恢复只重跑幂等
+finalizer，不再执行模型或工具。
 
 若浏览器未连接，后端仍可完成 server-side wakeup；浏览器重新打开或 SSE 重连时，通过
 已持久化的 session/run 状态恢复 `server_turn_started` 或相应的 stream replay。若用户在
