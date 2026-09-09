@@ -17646,6 +17646,7 @@ def _handle_file_read(handler, parsed):
 def _handle_approval_pending(handler, parsed):
     sid = parse_qs(parsed.query).get("session_id", [""])[0]
     with _lock:
+        reconcile_gateway_pending_mirror_locked(sid)
         queue = _pending.get(sid)
         # Support both the new list format and a legacy single-dict value.
         if isinstance(queue, list):
