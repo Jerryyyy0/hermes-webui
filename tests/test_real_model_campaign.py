@@ -156,13 +156,12 @@ def test_custom_prompt_pool_keeps_the_requested_file_types_in_one_message():
     assert all(f".{suffix}" in pool[0].prompt for suffix in ("doc", "docx", "xls", "xlsx", "ppt", "pptx", "csv"))
 
 
-def test_custom_prompt_requires_its_actual_file_format():
+def test_custom_prompt_is_sent_without_campaign_wrapper():
     question = load_custom_prompt_pool()[0]
 
     prompt, expected = build_history_prompt(question, 1, "nonce-1", custom_campaign=True)
 
-    assert ".doc、.docx、.xls、.xlsx、.ppt、.pptx 和 .csv" in prompt
-    assert "不要以 Markdown、纯文本或回复摘要代替" in prompt
+    assert prompt == question.prompt
     assert expected == ""
 
 
@@ -873,6 +872,93 @@ class _FakeStreamConnection:
         self.closed = True
 
 
+class _AsyncDelegationApi(_CancelFlowApi):
+    """Campaign API fixture for a parent run followed by one wakeup run."""
+
+    def __init__(self, workspace):
+        super().__init__(stream_events=[], workspace=workspace)
+        self.trace = []
+
+    def request(self, method, path, body=None, timeout=20):
+        self.trace.append(f"request:{path}")
+        if path.startswith("/api/session?session_id="):
+            return {"session": {"messages": [
+                {"role": "user", "content": "生成报告", "_turn_key": "turn:1"},
+            ]}}
+        if path.startswith("/api/session/manifest"):
+            return {"manifest": {
+                "turns": [{"turn_key": "turn:1", "artifacts": [{"path": "report.csv"}]}],
+                "diagnostics": {"orphan_turn_keys": []},
+            }}
+        return super().request(method, path, body, timeout)
+
+    def events(self, stream_id):
+        self.trace.append(f"chat:{stream_id}")
+        if stream_id == "stream-1":
+            yield "background_task_dispatched", {
+                "payload": {
+                    "delegation_id": "deleg-1",
+                    "status": "running",
+                    "wakeup_state": "idle",
+                },
+            }
+            yield "done", {}
+            return
+        assert stream_id == "wakeup-1"
+        yield "token", {"text": "后台任务汇总"}
+        yield "done", {}
+
+    def session_events(self, session_id):
+        self.trace.append(f"session:{session_id}")
+        yield "background_tasks_snapshot", {
+            "payload": {"tasks": [{
+                "delegation_id": "deleg-1",
+                "status": "running",
+                "wakeup_state": "idle",
+            }]},
+        }
+        yield "background_task_status", {
+            "payload": {
+                "delegation_id": "deleg-1",
+                "status": "completed",
+                "wakeup_state": "queued",
+            },
+        }
+        yield "server_turn_started", {
+            "payload": {
+                "delegation_id": "deleg-1",
+                "stream_id": "wakeup-1",
+                "status": "completed",
+                "wakeup_state": "running",
+            },
+        }
+        yield "background_task_status", {
+            "payload": {
+                "delegation_id": "deleg-1",
+                "status": "completed",
+                "wakeup_state": "settled",
+            },
+        }
+        yield "background_tasks_idle", {"payload": {}}
+
+
+def test_round_waits_for_dispatched_async_delegation_before_alignment(tmp_path):
+    artifact = tmp_path / "report.csv"
+    artifact.write_text("id,value\n1,ok\n", encoding="utf-8")
+    api = _AsyncDelegationApi(tmp_path)
+    question = HistoryPrompt("source", "title", "生成报告", 1, "turn:1", 1, 1, ())
+
+    row = _run_round(api, "sid-1", tmp_path, question, "camp-1", 1, None)
+
+    assert row["alignment_failures"] == []
+    assert row["background_delegations"]["deleg-1"]["wakeup_state"] == "settled"
+    assert row["background_delegations"]["deleg-1"]["wakeup_stream_id"] == "wakeup-1"
+    assert api.trace.index("session:sid-1") < api.trace.index("chat:wakeup-1")
+    assert api.trace.index("chat:wakeup-1") < next(
+        index for index, value in enumerate(api.trace) if value.startswith("request:/api/session/manifest")
+    )
+
+
 def test_immediate_cancel_uses_known_ready_state_then_polls_next_round_readiness(tmp_path, monkeypatch):
     monkeypatch.setattr("scripts.real_model_campaign.time.sleep", lambda _seconds: None)
     api = _CancelFlowApi(stream_events=[("token", {"text": "should-not-see"}), ("done", {})])
@@ -905,6 +991,37 @@ def test_immediate_cancel_uses_known_ready_state_then_polls_next_round_readiness
     assert status_after, "status poll must follow successful cancel"
     assert row["ready_for_next_start"] is True
     assert "token" not in {event["event"] for event in row["events"]}
+
+
+def test_round_sends_original_custom_message_without_formatting(tmp_path, monkeypatch):
+    monkeypatch.setattr("scripts.real_model_campaign.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr("scripts.real_model_campaign.uuid.uuid4", lambda: type("U", (), {"hex": "nonce-marker"})())
+    api = _CancelFlowApi(stream_events=[])
+    question = HistoryPrompt(
+        "custom-message-01",
+        "custom-message-01",
+        "请处理 {用户原始占位符} 并创建报告。",
+        1,
+        "custom-message-01:1",
+        0,
+        0,
+        (),
+    )
+
+    _run_round(
+        api,
+        "sid-1",
+        tmp_path,
+        question,
+        "camp-1",
+        1,
+        "immediate_after_start",
+        start_ready=True,
+        custom_campaign=True,
+    )
+
+    start = next(body for _method, path, body in api.calls if path == "/api/chat/start")
+    assert start["message"] == question.prompt
 
 
 def test_cancel_verify_reuses_post_cancel_readiness_for_next_start(tmp_path, monkeypatch):
@@ -1013,11 +1130,11 @@ def test_resolve_batch_specs_cancel_verify_is_first_session_when_enabled():
     assert resolve_batch_specs(1, 5, cancel_verify_session=True)[0]["kind"] == "cancel_verify"
 
 
-def test_history_prompt_wraps_nonce_and_turn_path():
+def test_history_prompt_is_sent_without_campaign_wrapper():
     question = HistoryPrompt(
         source_session_id="abc123",
         title="demo",
-        prompt="给我一个可视化分析报告html",
+        prompt="给我一个包含 {原始占位符} 的可视化分析报告html",
         turn=1,
         turn_key="turn:0",
         n_tools=8,
@@ -1025,9 +1142,34 @@ def test_history_prompt_wraps_nonce_and_turn_path():
         artifact_paths=("report.html",),
     )
     prompt, path = build_history_prompt(question, 3, "nonce-3")
-    assert "给我一个可视化分析报告html" in prompt
-    assert "NONCE=nonce-3" in prompt
-    assert path.endswith("turn-03/delivery.md")
+    assert prompt == question.prompt
+    assert path == ""
+
+
+def test_alignment_uses_recorded_turn_key_when_prompt_has_no_nonce(tmp_path):
+    artifact = tmp_path / "report.csv"
+    artifact.write_text("id,value\n1,ok\n", encoding="utf-8")
+    session = {
+        "messages": [
+            {"role": "user", "content": "原始消息", "_turn_key": "turn:1"},
+            {"role": "user", "content": "原始消息", "_turn_key": "turn:2"},
+        ],
+    }
+    manifest = {
+        "turns": [{"turn_key": "turn:2", "artifacts": [{"path": "report.csv"}]}],
+        "diagnostics": {"orphan_turn_keys": []},
+    }
+
+    failures, observations, hashes = evaluate_alignment(
+        session,
+        manifest,
+        {"nonce": "not-in-the-original-message", "turn_key": "turn:2"},
+        tmp_path,
+    )
+
+    assert failures == []
+    assert observations == []
+    assert set(hashes) == {"report.csv"}
 
 
 def test_model_campaign_prompt_uses_progressive_business_files_without_delivery_wrapper():

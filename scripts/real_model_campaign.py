@@ -49,6 +49,7 @@ if str(ROOT) not in sys.path:
 DEFAULT_BASE_URL = "http://127.0.0.1:8787"
 ROUND_TIMEOUT = 180
 SETTLE_TIMEOUT = 30
+ASYNC_DELEGATION_TIMEOUT = 900
 # Database prompts must come from sufficiently involved turns. Count each
 # recorded tool-call event; provider/tool-call IDs are not a deduplication key.
 MIN_TOOLS = 10
@@ -771,29 +772,10 @@ NONCE={nonce}"""
         # artifact the manifest attributes to this turn.
         return prompt, ""
 
-    if custom_campaign:
-        prompt = f"""{question.prompt}
-
-请在工作区创建上述指定格式的真实文件，不要以 Markdown、纯文本或回复摘要代替。
-完成后简要说明实际创建或修改的文件。
-CAMPAIGN_ID={{campaign_id}}
-SESSION_ID={{session_id}}
-TURN={turn}
-NONCE={nonce}"""
-        return prompt, ""
-
-    artifact = f"deliverables/turn-{turn:02d}/delivery.md"
-    prompt = f"""{question.prompt}
-
-请基于上述真实历史需求完成本轮工作，并在工作区创建或修改实际文件（不要只描述结果）。
-优先把面向用户的主要交付写到 `{artifact}`；若需求明确要求 html/md/docx 等其它路径，也可额外生成。
-主要交付文件中必须包含以下标记行：
-CAMPAIGN_ID={{campaign_id}}
-SESSION_ID={{session_id}}
-TURN={turn}
-NONCE={nonce}
-完成后简要说明实际创建或修改的文件。"""
-    return prompt, artifact
+    # Custom and historical scenarios must exercise the original user request
+    # verbatim. Campaign IDs, turn numbers, output paths, and nonces are test
+    # bookkeeping, not user-facing prompt content.
+    return question.prompt, ""
 
 
 def pick_history_prompt(pool: list[HistoryPrompt], rng: random.Random, used: set[str] | None = None) -> HistoryPrompt:
@@ -1082,17 +1064,35 @@ class Api:
         request = urllib.request.Request(self.base_url + "/api/chat/stream?stream_id=" + urllib.parse.quote(stream_id))
         return urllib.request.urlopen(request, timeout=ROUND_TIMEOUT)
 
+    def open_session_event_stream(self, session_id: str):
+        request = urllib.request.Request(
+            self.base_url + "/api/sessions/" + urllib.parse.quote(session_id) + "/events"
+        )
+        return urllib.request.urlopen(request, timeout=ASYNC_DELEGATION_TIMEOUT)
+
+    @staticmethod
+    def _parse_events(response):
+        event, data = "message", []
+        for raw in response:
+            line = raw.decode(errors="replace").strip()
+            if not line and data:
+                try:
+                    yield event, json.loads("\n".join(data))
+                except json.JSONDecodeError:
+                    yield event, {"raw": "\n".join(data)}
+                event, data = "message", []
+            elif line.startswith("event:"):
+                event = line[6:].strip()
+            elif line.startswith("data:"):
+                data.append(line[5:].strip())
+
     def events(self, stream_id: str):
         with self.open_event_stream(stream_id) as response:
-            event, data = "message", []
-            for raw in response:
-                line = raw.decode(errors="replace").strip()
-                if not line and data:
-                    try: yield event, json.loads("\n".join(data))
-                    except json.JSONDecodeError: yield event, {"raw": "\n".join(data)}
-                    event, data = "message", []
-                elif line.startswith("event:"): event = line[6:].strip()
-                elif line.startswith("data:"): data.append(line[5:].strip())
+            yield from self._parse_events(response)
+
+    def session_events(self, session_id: str):
+        with self.open_session_event_stream(session_id) as response:
+            yield from self._parse_events(response)
 
 
 def _message_text(message: dict) -> str:
@@ -1120,6 +1120,19 @@ def _turn_key(session: dict, nonce: str) -> str:
     if len(rows) != 1:
         return ""
     return str(rows[0].get("_turn_key") or "")
+
+
+def _turn_key_for_original_prompt(session: dict, prompt: str) -> str:
+    """Return the newest persisted user turn whose content is the raw prompt."""
+    rows = [
+        message for message in session.get("messages", [])
+        if isinstance(message, dict)
+        and message.get("role") == "user"
+        and _message_text(message) == prompt
+    ]
+    if not rows:
+        return ""
+    return str(rows[-1].get("_turn_key") or "")
 
 
 def _artifacts(manifest: dict, turn_key: str) -> dict[str, dict]:
@@ -1182,7 +1195,7 @@ def _is_primary_delivery(path: str) -> bool:
 
 def evaluate_alignment(session: dict, manifest: dict, ledger: dict, workspace: Path) -> tuple[list[dict], list[dict], dict[str, str]]:
     failures, observations, hashes = [], [], {}
-    actual_key = _turn_key(session, ledger["nonce"])
+    actual_key = str(ledger.get("turn_key") or "") or _turn_key(session, ledger["nonce"])
     if not actual_key:
         return failures, [{"code": "TURN_KEY_UNAVAILABLE"}], hashes
     ledger["turn_key"] = actual_key
@@ -1247,6 +1260,99 @@ def _settle(api: Api, session_id: str) -> tuple[dict, dict]:
     return readiness, session
 
 
+def _background_event_payload(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    nested = payload.get("payload")
+    return dict(nested) if isinstance(nested, dict) else dict(payload)
+
+
+def _record_background_delegation(row: dict, payload: Any) -> str:
+    details = _background_event_payload(payload)
+    delegation_id = str(details.get("delegation_id") or "").strip()
+    if not delegation_id:
+        return ""
+    tasks = row.setdefault("background_delegations", {})
+    task = dict(tasks.get(delegation_id) or {})
+    for key in ("status", "wakeup_state", "cancel_state", "origin_turn_key", "child_task_count"):
+        if key in details:
+            task[key] = details[key]
+    tasks[delegation_id] = task
+    return delegation_id
+
+
+def _background_delegations_settled(row: dict, delegation_ids: set[str]) -> bool:
+    tasks = row.get("background_delegations") or {}
+    return bool(delegation_ids) and all(
+        str((tasks.get(delegation_id) or {}).get("wakeup_state") or "") in {"settled", "failed"}
+        for delegation_id in delegation_ids
+    )
+
+
+def _await_background_delegations(api: Api, session_id: str, row: dict) -> None:
+    """Wait for this round's delegated work and every resulting wakeup stream."""
+    delegation_ids = set((row.get("background_delegations") or {}).keys())
+    if not delegation_ids:
+        return
+    deadline = time.monotonic() + ASYNC_DELEGATION_TIMEOUT
+    row["background_events"] = []
+    row["background_wakeup_events"] = []
+    try:
+        for event, payload in api.session_events(session_id):
+            row["background_events"].append({"event": event, "payload": payload})
+            details = _background_event_payload(payload)
+            if event == "background_tasks_snapshot":
+                active_ids = set()
+                for task in details.get("tasks") or []:
+                    delegation_id = _record_background_delegation(row, task)
+                    if delegation_id:
+                        active_ids.add(delegation_id)
+                if not delegation_ids.intersection(active_ids):
+                    for delegation_id in delegation_ids:
+                        task = row["background_delegations"].setdefault(delegation_id, {})
+                        task["wakeup_state"] = "settled"
+                    return
+            elif event == "background_task_unresolved":
+                delegation_id = _record_background_delegation(row, details)
+                if delegation_id in delegation_ids:
+                    row["observations"].append({"code": "ASYNC_DELEGATION_UNRESOLVED", "delegation_id": delegation_id})
+                    row["alignment_failures"].append({"code": "ASYNC_DELEGATION_UNRESOLVED", "delegation_id": delegation_id})
+                    return
+            elif event in {"background_task_status", "bg_task_complete", "server_turn_started"}:
+                delegation_id = _record_background_delegation(row, details)
+                if event == "server_turn_started" and delegation_id in delegation_ids:
+                    stream_id = str(details.get("stream_id") or "").strip()
+                    task = row["background_delegations"][delegation_id]
+                    if stream_id and task.get("wakeup_stream_id") != stream_id:
+                        task["wakeup_stream_id"] = stream_id
+                        for wakeup_event, wakeup_payload in api.events(stream_id):
+                            row["background_wakeup_events"].append({
+                                "delegation_id": delegation_id,
+                                "event": wakeup_event,
+                                "payload": wakeup_payload,
+                            })
+                            if wakeup_event in {"apperror", "error"}:
+                                row["observations"].append({
+                                    "code": "ASYNC_WAKEUP_STREAM_ERROR",
+                                    "delegation_id": delegation_id,
+                                })
+                                row["alignment_failures"].append({
+                                    "code": "ASYNC_WAKEUP_STREAM_ERROR",
+                                    "delegation_id": delegation_id,
+                                })
+                                return
+                            if wakeup_event in {"done", "cancel", "stream_end"}:
+                                break
+            if event == "background_tasks_idle" or _background_delegations_settled(row, delegation_ids):
+                return
+            if time.monotonic() >= deadline:
+                break
+    except (OSError, TimeoutError, urllib.error.URLError):
+        pass
+    row["observations"].append({"code": "ASYNC_DELEGATION_WAIT_TIMEOUT"})
+    row["alignment_failures"].append({"code": "ASYNC_DELEGATION_WAIT_TIMEOUT"})
+
+
 def _cancel_accepted(payload: dict | None) -> bool:
     return isinstance(payload, dict) and payload.get("ok") is True and payload.get("cancelled") is True
 
@@ -1289,7 +1395,8 @@ def _run_round(
         model_campaign=model_campaign,
         custom_campaign=custom_campaign,
     )
-    prompt = prompt.format(campaign_id=campaign_id, session_id=session_id)
+    if model_campaign:
+        prompt = prompt.format(campaign_id=campaign_id, session_id=session_id)
     row: dict[str, Any] = {
         "turn": turn,
         "nonce": nonce,
@@ -1300,6 +1407,7 @@ def _run_round(
         "cancel_trigger": trigger,
         "cancel_only": cancel_only,
         "events": [],
+        "background_delegations": {},
         "observations": [],
         "alignment_failures": [],
         "auto_approve": {"yolo": None, "drains": []},
@@ -1344,6 +1452,8 @@ def _run_round(
         try:
             for event, payload in api.events(row["stream_id"]):
                 row["events"].append({"event": event, "payload": payload})
+                if event == "background_task_dispatched":
+                    _record_background_delegation(row, payload)
                 # Drain only when the stream signals a blocking prompt; avoid
                 # polling /api/approval|clarify/pending on every tool/meter tick.
                 if event in {"approval", "clarify"}:
@@ -1392,6 +1502,7 @@ def _run_round(
     drained = drain_blocking_prompts(api, session_id)
     if drained["approvals"] or drained["clarifies"]:
         row["auto_approve"]["drains"].append({"event": "post_stream", **drained})
+    _await_background_delegations(api, session_id, row)
     readiness_after_stream, settled = _settle(api, session_id)
     row["readiness_after_stream"] = readiness_after_stream
     row["ready_for_next_start"] = readiness_after_stream.get("can_start_chat") is True
@@ -1400,7 +1511,11 @@ def _run_round(
         row["alignment_failures"].append({"code": "SESSION_NOT_READY_AFTER_STREAM"})
         return row
     session = settled.get("session", {})
-    row["turn_key"] = _turn_key(session, nonce)
+    row["turn_key"] = (
+        _turn_key(session, nonce)
+        if model_campaign
+        else _turn_key_for_original_prompt(session, prompt)
+    )
     if cancel_only:
         # Cancel-verify batch only scores cancel/readiness, not artifact alignment.
         row["artifact_hashes"] = {}
