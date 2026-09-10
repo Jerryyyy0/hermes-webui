@@ -1799,14 +1799,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
     parser.add_argument(
         "--model",
-        default="grok-4.6",
+        # default="grok-4.6",
         help="Model ID to resolve through the active profile's config.yaml (default: model.default)",
     )
     parser.add_argument("--seed", type=int, default=None, help="RNG seed for reproducible history prompt sampling")
     parser.add_argument(
         "--prompt-source",
         choices=("custom", "database", "model"),
-        default="model",
+        default="database",
         help="custom: built-in custom messages; database: sample history prompts; model: generate multi-turn file scenarios",
     )
     parser.add_argument(
