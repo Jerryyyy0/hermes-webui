@@ -142,13 +142,15 @@ start a server. Start WebUI normally, verify `/health` has no active streams,
 then run it manually:
 
 ```bash
-python scripts/real_model_campaign.py --sessions 10 --turns 15
+python scripts/real_model_campaign.py --sessions 1 --turns 1
 # optional: reproducible history sampling
 python scripts/real_model_campaign.py --sessions 1 --turns 5 --seed 42
 # default is first-turn only; replay/mixed remain optional
 python scripts/real_model_campaign.py --sessions 1 --turns 5 --context-mode first
 # use the configured model to generate a multi-turn file-delivery scenario instead of sampling history
 python scripts/real_model_campaign.py --sessions 1 --turns 3 --prompt-source model
+# use a specific model; its provider and endpoint are resolved from the active config.yaml
+python scripts/real_model_campaign.py --sessions 1 --turns 3 --model provider/model-id
 # optional bool: first session is cancel-only (every turn cancels; trigger chosen randomly)
 python scripts/real_model_campaign.py --sessions 2 --turns 5 --cancel-verify true --seed 42
 # campaign sessions may run while other WebUI sessions are actively running
@@ -157,25 +159,37 @@ python scripts/real_model_campaign.py --sessions 1 --turns 5 --prompt-source mod
 python scripts/real_model_campaign.py --cleanup
 ```
 
-The campaign runs one stream at a time and uses the configured default model.
+The campaign runs one stream at a time and uses the configured default model
+unless `--model MODEL_ID` is supplied. An explicit model is resolved with the
+active profile's `config.yaml` provider/custom-provider configuration and is
+sent when the campaign creates or imports a session. In `--prompt-source model`
+mode, the same resolved route generates the test scenarios.
 It permits other active WebUI streams or runs by default; `--allow-concurrent`
 remains accepted for compatibility.
 `--prompt-source` controls where trial questions come from:
 
+- `custom` (default) — uses the user-maintained `CUSTOM_MESSAGES` list in
+  `scripts/real_model_campaign.py`. The initial list contains one message that
+  asks for one random `.doc`, `.docx`, `.xls`, `.xlsx`, `.ppt`, `.pptx`, and
+  `.csv` file. Add or replace complete messages in that list to maintain the
+  custom group; the campaign randomly samples a message for each turn.
 - `database` — samples historical WebUI sessions under
   `HERMES_WEBUI_STATE_DIR` with stable write-sourced delivery artifacts
   (`session_manifest.db` + transcript write/patch tools; cron/campaign noise excluded).
   A candidate turn must contain at least 10 recorded tool calls, counted as
   events without deduplicating tool-call IDs, at least one write call, and a
   write-sourced delivery Artifact for that turn.
-- `model` (default) — directly calls the configured default model (the same
+- `model` — directly calls the configured default model (the same
   auxiliary call path as assistant bubbles) for a JSON string array of business
   scenarios; it does not create a generator session. It prioritizes the current
   profile's full `model` route, including custom endpoint, credential, and API
   mode. If one model response is short or repeats a scenario, it requests only
   the remaining unique scenarios for up to three total attempts; an exhausted
   retry budget fails with per-attempt counts rather than silently using a fixed
-  prompt pool. One scenario is reused across all turns in its campaign session.
+  prompt pool. Scenario generation allows up to 180 seconds per auxiliary call;
+  Qwen routes also disable thinking so the required JSON array is returned in
+  `content` rather than only in a reasoning field. One scenario is reused across
+  all turns in each model session.
   This mode supports only `--context-mode first` and requires `--turns >= 3`.
 
 Model-mode turns are progressive: the first three request a source CSV, a
@@ -186,8 +200,10 @@ task but are not exact-path assertions: the campaign accepts any real file
 Artifact that the Session Manifest attributes to the current turn. A normal
 (non-cancel) turn with no Manifest file Artifact is an alignment failure and
 makes the campaign exit non-zero. Intentionally cancelled normal turns skip
-Artifact alignment but retain their cancellation observations. Provider/SSE
-failures are recorded as
+Artifact alignment but retain their cancellation observations. Model mode also
+creates one separate custom session first, before the model scenario sessions.
+That session runs one sampled prompt from the built-in `CUSTOM_MESSAGES` group
+instead of sharing a model session's transcript. Provider/SSE failures are recorded as
 safe `MODEL_STREAM_ERROR` observations. Skill Artifacts are valid Manifest
 records but do not need to exist in the session workspace; they do not by
 themselves satisfy the campaign's required file delivery. It does not validate
