@@ -6,6 +6,8 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ## [Unreleased]
 
+- 修复 Session Manifest 顶层累计 Artifact 快照被错误绑定到当前 turn 的跨轮污染；结算现只读取精确匹配的 `turns[]`，normal/error/cancel 均合并 durable transcript，并提供带 dry-run、一致性备份、原子替换及写后校验的单会话污染修复工具。
+
 - 修复 inbox scheduler 启动异步 wakeup 时遗漏 completion 语义标记，导致数据库回读将内部 completion 展示为用户消息；沿用 Agent 现有语义持久化与 WebUI 显示过滤契约。
 
 - 修复 `turn_align=1` 在无 turn key 的 completion 行之后遗漏异步回复：分页按有效 turn 起点划分连续窗口，保留完整尾部，不修改 Manifest 归属。

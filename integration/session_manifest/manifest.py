@@ -984,6 +984,14 @@ def _collect_turn_artifact_entries_from_events(
     """Extract file and skill artifact entries from scoped tool/prose events."""
     entries: list[dict[str, str]] = []
     seen: set[str] = set()
+    read_evidence_keys = {
+        key
+        for event in events
+        if event.name in ARTIFACT_EXCLUSION_READ_TOOLS and _tool_event_succeeded(event)
+        for path in _paths_from_args(event.args, workspace)
+        for key in [_canonical_manifest_file_key(path, workspace)]
+        if key
+    }
 
     def add_file(path: str, source_tool: str) -> None:
         if not path or path in seen:
@@ -1033,6 +1041,11 @@ def _collect_turn_artifact_entries_from_events(
             continue
         if ev.name in (MEDIA_ARTIFACT_SOURCE, ASSISTANT_PROSE_ARTIFACT_SOURCE):
             for raw_path in _paths_from_args(ev.args, workspace):
+                if (
+                    ev.name == ASSISTANT_PROSE_ARTIFACT_SOURCE
+                    and _canonical_manifest_file_key(raw_path, workspace) in read_evidence_keys
+                ):
+                    continue
                 add_file(raw_path, ev.name)
     return entries
 

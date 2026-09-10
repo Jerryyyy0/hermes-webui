@@ -461,6 +461,9 @@ updated_at:     1787460613.456
 `expired`。内容修改或同名普通文件替换则继续预览当前版本；系统不会创建快照或比对摘要。
 
 搜索命中、目录列表、只读工具、workspace 全量扫描、相似字段和跨字段补全均不产生 artifact。
+同一 turn 内，成功 read 工具的输入路径会压制末条 assistant prose 对同一路径的重复提名；后续成功
+mutation 仍可把该路径提升为本轮 Artifact。这样 read→说明不会把输入误报为成果，而 read→edit 仍保留
+真实产出。
 
 ### 5.5 源文件与 record 的生命周期
 
@@ -494,6 +497,11 @@ final assistant 已进入 s.messages
 ```
 
 先保存 transcript，确保 artifact/empty decision 不会先于其证据 durable。无成果时写 empty decision；提取或 store 写入失败会作为可观测的持久化失败处理，不能被伪装为 empty decision 或已完成 turn。
+
+`STREAM_LIVE_MANIFEST[stream_id].artifacts` 是面向 SSE 的会话级累计快照，不能用于判定当前 turn
+归属。结算只能读取 `turns[]` 中 `turn_key` 精确匹配的 Artifact；找不到匹配 turn 时，live 证据是未知，
+不能把顶层历史行默认绑定到待结算 key。normal、error 与 cancel 都会再合并已持久化 transcript 的同轮
+证据，以恢复“工具已成功并写入 transcript，但 live delta 在中断前未发布”的成果。
 
 首次结算会将合并后的 stream 和 transcript 证据统一通过存在性与预览 gate 后再写入 store。因此同一轮内已经删除、改名或变得不可预览的候选不会形成 artifact record；若无其它候选，该 turn 写 empty decision，避免后续 read-repair 从已失效证据回填。该 gate 不解析或推断重命名目标，例如 `mv old.jpg new.png` 不会自动把 `new.png` 登记为成果。
 
@@ -537,6 +545,19 @@ empty decision 表示“该 root 下的该 turn 已结算且没有可持久化 A
 
 `rebind_manifest_turn_records()` 只接受明确 old key → new key 映射。它不根据相邻编号、文本相似度或时间戳
 猜测归属，也不会移动 workspace 或外部源文件。
+
+`repair_contaminated_manifest_session()` 用于已经发生跨 turn 污染的单会话重建。它要求完整 transcript、
+稳定 `_turn_key`、会话自有 lineage、精确 profile 与逻辑 workspace root；默认 dry-run，并拒绝未知 turn、
+共享 lineage 或并发变化。`--apply` 会先用 SQLite backup API 创建一致性备份，再在一个事务中只替换该
+会话范围的 Artifact rows，最后按完整 row identity 复核；它不会删除或改写成果文件。
+
+```bash
+python3 scripts/repair_contaminated_manifest_session.py --session-id <session_id>
+python3 scripts/repair_contaminated_manifest_session.py --session-id <session_id> --apply
+```
+
+应用前必须先部署包含归属修复的服务版本并确认目标会话没有活跃 stream，否则旧进程仍可能再次写入污染
+记录。预演输出应人工核对每轮 `kept`、`added`、`removed` 后再应用。
 
 ### 6.4 Legacy `session.turn_artifacts`
 
@@ -603,6 +624,7 @@ Manifest store 的第二份权威数据。
 | `upsert_manifest_records`                  | 普通 store upsert                                 |
 | `replace_manifest_turn_records`            | 原子替换单 turn decision                             |
 | `repair_empty_manifest_turns`              | 显式维护时的 empty-only read-repair                   |
+| `repair_contaminated_manifest_session`     | 完整 transcript 驱动的单会话污染重建与备份                   |
 | `backfill_missing_manifest_records`        | 显式维护时、当前逻辑 root 的 lineage 无 decision 的 backfill |
 | `_row_to_wire` / `_rows_to_wire`           | Wire 与 expired projection                       |
 | `_persist_turn_artifact_paths`             | Turn 完成持久化                                      |
@@ -634,6 +656,7 @@ SQLite decision，`repair.py` 只承载显式维护操作。三者是唯一 Mani
   tests/test_session_manifest_replay.py \
   tests/test_session_manifest_artifact_persistence.py \
   tests/test_artifact_turn_isolation.py \
+  tests/test_contaminated_manifest_repair.py \
   integration/tests/session_manifest/test_external_references.py \
   integration/tests/workspace/test_handlers.py -q
 ```
