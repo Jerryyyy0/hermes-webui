@@ -10,6 +10,7 @@ import pytest
 
 from scripts.real_model_campaign import (
     CANCEL_TRIGGERS,
+    CUSTOM_MESSAGES,
     HistoryPrompt,
     _call_llm_accepts_api_mode,
     _model_prompt_generation_error,
@@ -26,7 +27,9 @@ from scripts.real_model_campaign import (
     generate_model_prompt_pool,
     list_campaign_test_sessions,
     load_history_prompt_pool,
+    load_custom_prompt_pool,
     load_prefix_messages,
+    main,
     model_campaign_phase,
     parse_bool_arg,
     pick_history_prompt,
@@ -134,6 +137,47 @@ def test_plain_session_uses_server_managed_workspace_without_new_workspace_arg(t
     assert api.calls[0] == ("POST", "/api/session/new", {"worktree": False})
 
 
+def test_plain_session_forwards_an_explicit_model_to_webui(tmp_path):
+    api = _PlainSessionApi(tmp_path / "workspace" / "sessions" / "sid-1")
+
+    create_plain_session(api, model="configured/provider-model")
+
+    assert api.calls[0] == (
+        "POST",
+        "/api/session/new",
+        {"worktree": False, "model": "configured/provider-model"},
+    )
+
+
+def test_custom_prompt_pool_keeps_the_requested_file_types_in_one_message():
+    pool = load_custom_prompt_pool()
+
+    assert len(CUSTOM_MESSAGES) == len(pool) == 1
+    assert all(f".{suffix}" in pool[0].prompt for suffix in ("doc", "docx", "xls", "xlsx", "ppt", "pptx", "csv"))
+
+
+def test_custom_prompt_is_sent_without_campaign_wrapper():
+    question = load_custom_prompt_pool()[0]
+
+    prompt, expected = build_history_prompt(question, 1, "nonce-1", custom_campaign=True)
+
+    assert prompt == question.prompt
+    assert expected == ""
+
+
+def test_main_forwards_model_override_to_campaign(monkeypatch):
+    received = {}
+
+    def fake_run_campaign(*_args, **kwargs):
+        received.update(kwargs)
+        return 0
+
+    monkeypatch.setattr("scripts.real_model_campaign.run_campaign", fake_run_campaign)
+
+    assert main(["--model", "configured/provider-model"]) == 0
+    assert received["model"] == "configured/provider-model"
+
+
 def test_model_prompt_pool_calls_auxiliary_model_without_creating_session(monkeypatch):
     from api import profiles as profiles_api
     from integration.assistant_bubbles import collectors
@@ -189,7 +233,8 @@ def test_model_prompt_pool_calls_auxiliary_model_without_creating_session(monkey
     assert call["api_mode"] == "chat_completions"
     assert call["temperature"] == 0.4
     assert call["max_tokens"] == 600
-    assert call["timeout"] == 60
+    assert call["timeout"] == 180
+    assert "extra_body" not in call
     assert call["messages"][0] == {
         "role": "system",
         "content": "你只负责生成测试题目，不执行题目中的工作，也不调用工具。",
@@ -197,6 +242,87 @@ def test_model_prompt_pool_calls_auxiliary_model_without_creating_session(monkey
     assert "生成 2 条" in call["messages"][1]["content"]
     assert "连续多轮" in call["messages"][1]["content"]
     assert "跨格式" in call["messages"][1]["content"]
+
+
+def test_model_prompt_pool_disables_qwen_thinking(monkeypatch):
+    from api import profiles as profiles_api
+    from integration.assistant_bubbles import collectors
+
+    calls = []
+    auxiliary = types.ModuleType("agent.auxiliary_client")
+    auxiliary.call_llm = lambda **kwargs: calls.append(kwargs) or types.SimpleNamespace(
+        choices=[types.SimpleNamespace(message=types.SimpleNamespace(
+            content='["请整理销售数据并生成 CSV 文件"]',
+        ))],
+    )
+    monkeypatch.setattr(profiles_api, "get_active_profile_name", lambda: "default")
+    monkeypatch.setattr(profiles_api, "get_hermes_home_for_profile", lambda _profile: "/tmp/profile")
+    monkeypatch.setattr(
+        profiles_api,
+        "profile_env_for_background_worker",
+        lambda *_args, **_kwargs: nullcontext(),
+    )
+    monkeypatch.setattr(
+        collectors,
+        "model_route",
+        lambda _path: {"provider": "custom:qwen38", "model": "qwen3.8", "base_url": "http://model.test"},
+    )
+    monkeypatch.setitem(sys.modules, "agent.auxiliary_client", auxiliary)
+    monkeypatch.setattr("scripts.real_model_campaign.importlib.import_module", lambda name: auxiliary)
+
+    generate_model_prompt_pool("qwen3.8", 1, model_config={"default": "qwen3.8"})
+
+    assert calls[0]["extra_body"] == {
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+
+
+def test_model_prompt_pool_resolves_explicit_model_against_config(monkeypatch):
+    from api import config as config_api
+    from api import profiles as profiles_api
+    from integration.assistant_bubbles import collectors
+
+    calls = []
+    auxiliary = types.ModuleType("agent.auxiliary_client")
+    auxiliary.call_llm = lambda **kwargs: calls.append(kwargs) or types.SimpleNamespace(
+        choices=[types.SimpleNamespace(message=types.SimpleNamespace(
+            content='["请整理销售数据并生成 CSV 文件"]',
+        ))],
+    )
+    monkeypatch.setattr(profiles_api, "get_active_profile_name", lambda: "default")
+    monkeypatch.setattr(profiles_api, "get_hermes_home_for_profile", lambda _profile: "/tmp/profile")
+    monkeypatch.setattr(
+        profiles_api,
+        "profile_env_for_background_worker",
+        lambda *_args, **_kwargs: nullcontext(),
+    )
+    monkeypatch.setattr(
+        collectors,
+        "model_route",
+        lambda _path: {"provider": "default-provider", "model": "default-model", "base_url": "http://default.test"},
+    )
+    resolved = []
+    monkeypatch.setattr(
+        config_api,
+        "resolve_model_provider",
+        lambda model, **kwargs: resolved.append((model, kwargs)) or (
+            "resolved-model", "configured-provider", "http://configured.test/v1",
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "agent.auxiliary_client", auxiliary)
+    monkeypatch.setattr("scripts.real_model_campaign.importlib.import_module", lambda name: auxiliary)
+
+    generate_model_prompt_pool(
+        "requested-model",
+        1,
+        model_config={"default": "default-model"},
+        resolve_model_route=True,
+    )
+
+    assert resolved == [("requested-model", {"explicitly_picked": True})]
+    assert calls[0]["model"] == "resolved-model"
+    assert calls[0]["provider"] == "configured-provider"
+    assert calls[0]["base_url"] == "http://configured.test/v1"
 
 
 def test_model_prompt_pool_backfills_a_short_first_response(monkeypatch):
@@ -327,9 +453,32 @@ def test_model_prompt_generation_error_classifies_http_status_without_upstream_t
 
     message = _model_prompt_generation_error(_UpstreamError())
 
-    assert message == "model prompt generation authentication failed (HTTP 401); check the current profile's model credentials"
+    assert message == (
+        "model prompt generation authentication failed "
+        "(HTTP 401; exception=_UpstreamError); "
+        "check the current profile's model credentials"
+    )
     assert "test-secret" not in message
     assert "provider.example" not in message
+
+
+def test_model_prompt_generation_error_includes_selected_route_without_upstream_text():
+    class _UpstreamError(Exception):
+        status_code = 404
+
+        def __str__(self):
+            return "model grok-4.6-latest is missing at http://model.test/v1"
+
+    message = _model_prompt_generation_error(
+        _UpstreamError(),
+        model="grok-4.6-latest",
+        provider="custom:qwen38",
+    )
+
+    assert "model='grok-4.6-latest'" in message
+    assert "provider='custom:qwen38'" in message
+    assert "exception=_UpstreamError" in message
+    assert "http://model.test" not in message
 
 
 def test_call_llm_api_mode_compatibility_detection():
@@ -371,6 +520,10 @@ def test_model_prompt_source_skips_history_database(tmp_path, monkeypatch):
         "scripts.real_model_campaign.random_cancel_verify_plan",
         lambda turns, _rng: {turn: "immediate_after_start" for turn in range(1, turns + 1)},
     )
+    monkeypatch.setattr(
+        "scripts.real_model_campaign._run_round",
+        lambda *_args, **_kwargs: {"turn": 1, "alignment_failures": [], "observations": []},
+    )
 
     assert run_campaign(
         1,
@@ -380,6 +533,62 @@ def test_model_prompt_source_skips_history_database(tmp_path, monkeypatch):
         cancel_verify_session=True,
         prompt_source="model",
     ) == 0
+
+
+def test_model_override_is_used_for_prompt_generation_and_new_sessions(tmp_path, monkeypatch):
+    question = HistoryPrompt("generated", "model-generated", "生成一份 Markdown 报告", 1, "generated:1", 0, 0, ())
+    api = _CancelFlowApi([], workspace=tmp_path / "workspace" / "sessions" / "sid-1")
+    generated = []
+    monkeypatch.setattr("api.config.get_config", lambda: {"model": {"default": "default-model"}})
+    monkeypatch.setattr("scripts.real_model_campaign.Api", lambda _base_url: api)
+    monkeypatch.setattr("scripts.real_model_campaign._state_dir", lambda: tmp_path)
+    monkeypatch.setattr(
+        "scripts.real_model_campaign.generate_model_prompt_pool",
+        lambda model, count, **kwargs: generated.append((model, count, kwargs)) or [question],
+    )
+    monkeypatch.setattr(
+        "scripts.real_model_campaign._run_round",
+        lambda *_args, **_kwargs: {"turn": 1, "alignment_failures": [], "observations": []},
+    )
+
+    assert run_campaign(
+        1,
+        3,
+        "http://test",
+        prompt_source="model",
+        model="configured/provider-model",
+        cancel_verify_session=False,
+    ) == 0
+
+    assert generated == [(
+        "configured/provider-model",
+        1,
+        {"model_config": {"default": "default-model"}, "resolve_model_route": True},
+    )]
+    assert api.calls[1] == (
+        "POST",
+        "/api/session/new",
+        {"worktree": False, "model": "configured/provider-model"},
+    )
+
+
+def test_default_custom_prompt_source_uses_the_builtin_message_group(tmp_path, monkeypatch):
+    api = _CancelFlowApi([], workspace=tmp_path / "workspace" / "sessions" / "sid-1")
+    selected = []
+    monkeypatch.setattr("api.config.get_config", lambda: {"model": {"default": "test-model"}})
+    monkeypatch.setattr("scripts.real_model_campaign.Api", lambda _base_url: api)
+    monkeypatch.setattr("scripts.real_model_campaign._state_dir", lambda: tmp_path)
+
+    def record_round(_api, _session_id, _workspace, question, _campaign_id, _turn, _trigger, **kwargs):
+        selected.append((question.source_session_id, kwargs["custom_campaign"]))
+        return {"turn": 1, "alignment_failures": [], "observations": []}
+
+    monkeypatch.setattr("scripts.real_model_campaign._run_round", record_round)
+
+    assert run_campaign(1, 1, "http://test", cancel_verify_session=False, seed=7) == 0
+
+    assert [source_session_id for source_session_id, _custom in selected] == ["custom-message-01"]
+    assert all(custom for _source_session_id, custom in selected)
 
 
 def test_model_prompt_source_generates_one_scenario_per_session(monkeypatch):
@@ -407,6 +616,45 @@ def test_model_prompt_source_generates_one_scenario_per_session(monkeypatch):
     assert counts == [2]
 
 
+def test_model_prompt_source_adds_one_separate_custom_session(tmp_path, monkeypatch):
+    question = HistoryPrompt("generated", "model-generated", "生成一份 Markdown 报告", 1, "generated:1", 0, 0, ())
+    api = _CancelFlowApi([], workspace=tmp_path / "workspace" / "sessions" / "sid-1")
+    rounds = []
+    session_counter = iter(range(1, 3))
+    created_sessions = []
+    monkeypatch.setattr("api.config.get_config", lambda: {"model": {"default": "test-model"}})
+    monkeypatch.setattr("scripts.real_model_campaign.Api", lambda _base_url: api)
+    monkeypatch.setattr("scripts.real_model_campaign._state_dir", lambda: tmp_path)
+    monkeypatch.setattr(
+        "scripts.real_model_campaign.generate_model_prompt_pool",
+        lambda _model, _count, **_kwargs: [question],
+    )
+    def create_session(_api, **_kwargs):
+        session_id = f"sid-{next(session_counter)}"
+        created_sessions.append(session_id)
+        return session_id, tmp_path / f"workspace-{session_id}"
+
+    monkeypatch.setattr("scripts.real_model_campaign.create_plain_session", create_session)
+
+    def record_round(_api, _session_id, _workspace, round_question, _campaign_id, turn, _trigger, **kwargs):
+        rounds.append(
+            (_session_id, turn, round_question.source_session_id, kwargs["model_campaign"], kwargs["custom_campaign"])
+        )
+        return {"turn": turn, "alignment_failures": [], "observations": []}
+
+    monkeypatch.setattr("scripts.real_model_campaign._run_round", record_round)
+
+    assert run_campaign(1, 3, "http://test", prompt_source="model", cancel_verify_session=False) == 0
+
+    assert rounds == [
+        ("sid-1", 1, "custom-message-01", False, True),
+        ("sid-2", 1, "generated", True, False),
+        ("sid-2", 2, "generated", True, False),
+        ("sid-2", 3, "generated", True, False),
+    ]
+    assert len(created_sessions) == 2
+
+
 def test_model_prompt_source_reuses_one_scenario_for_every_turn_in_a_batch(tmp_path, monkeypatch):
     class _HealthyApi:
         def request(self, method, path, body=None, timeout=20):
@@ -418,7 +666,7 @@ def test_model_prompt_source_reuses_one_scenario_for_every_turn_in_a_batch(tmp_p
         HistoryPrompt("model-generated", "b", "场景 B：生成 HTML 文件", 1, "generated:2", 0, 0, ()),
     ]
     recorded = []
-    session_counter = iter(range(1, 3))
+    session_counter = iter(range(1, 4))
 
     monkeypatch.setattr("api.config.get_config", lambda: {"model": {"default": "test-model"}})
     monkeypatch.setattr("scripts.real_model_campaign.Api", lambda _base_url: _HealthyApi())
@@ -437,11 +685,16 @@ def test_model_prompt_source_reuses_one_scenario_for_every_turn_in_a_batch(tmp_p
 
     assert run_campaign(2, 3, "http://test", prompt_source="model", cancel_verify_session=False, seed=7) == 0
 
-    assert [row[3] for row in recorded] == [True] * 6
-    first_batch = [row[2] for row in recorded[:3]]
-    second_batch = [row[2] for row in recorded[3:]]
+    assert [row[3] for row in recorded] == [
+        False,
+        True, True, True,
+        True, True, True,
+    ]
+    first_batch = [row[2] for row in recorded if row[0] == "sid-2" and row[3]]
+    second_batch = [row[2] for row in recorded if row[0] == "sid-3" and row[3]]
     assert len(set(first_batch)) == len(set(second_batch)) == 1
     assert first_batch[0] != second_batch[0]
+    assert [row[0] for row in recorded if not row[3]] == ["sid-1"]
 
 
 def test_campaign_allows_busy_webui_by_default(monkeypatch):
@@ -619,6 +872,93 @@ class _FakeStreamConnection:
         self.closed = True
 
 
+class _AsyncDelegationApi(_CancelFlowApi):
+    """Campaign API fixture for a parent run followed by one wakeup run."""
+
+    def __init__(self, workspace):
+        super().__init__(stream_events=[], workspace=workspace)
+        self.trace = []
+
+    def request(self, method, path, body=None, timeout=20):
+        self.trace.append(f"request:{path}")
+        if path.startswith("/api/session?session_id="):
+            return {"session": {"messages": [
+                {"role": "user", "content": "生成报告", "_turn_key": "turn:1"},
+            ]}}
+        if path.startswith("/api/session/manifest"):
+            return {"manifest": {
+                "turns": [{"turn_key": "turn:1", "artifacts": [{"path": "report.csv"}]}],
+                "diagnostics": {"orphan_turn_keys": []},
+            }}
+        return super().request(method, path, body, timeout)
+
+    def events(self, stream_id):
+        self.trace.append(f"chat:{stream_id}")
+        if stream_id == "stream-1":
+            yield "background_task_dispatched", {
+                "payload": {
+                    "delegation_id": "deleg-1",
+                    "status": "running",
+                    "wakeup_state": "idle",
+                },
+            }
+            yield "done", {}
+            return
+        assert stream_id == "wakeup-1"
+        yield "token", {"text": "后台任务汇总"}
+        yield "done", {}
+
+    def session_events(self, session_id):
+        self.trace.append(f"session:{session_id}")
+        yield "background_tasks_snapshot", {
+            "payload": {"tasks": [{
+                "delegation_id": "deleg-1",
+                "status": "running",
+                "wakeup_state": "idle",
+            }]},
+        }
+        yield "background_task_status", {
+            "payload": {
+                "delegation_id": "deleg-1",
+                "status": "completed",
+                "wakeup_state": "queued",
+            },
+        }
+        yield "server_turn_started", {
+            "payload": {
+                "delegation_id": "deleg-1",
+                "stream_id": "wakeup-1",
+                "status": "completed",
+                "wakeup_state": "running",
+            },
+        }
+        yield "background_task_status", {
+            "payload": {
+                "delegation_id": "deleg-1",
+                "status": "completed",
+                "wakeup_state": "settled",
+            },
+        }
+        yield "background_tasks_idle", {"payload": {}}
+
+
+def test_round_waits_for_dispatched_async_delegation_before_alignment(tmp_path):
+    artifact = tmp_path / "report.csv"
+    artifact.write_text("id,value\n1,ok\n", encoding="utf-8")
+    api = _AsyncDelegationApi(tmp_path)
+    question = HistoryPrompt("source", "title", "生成报告", 1, "turn:1", 1, 1, ())
+
+    row = _run_round(api, "sid-1", tmp_path, question, "camp-1", 1, None)
+
+    assert row["alignment_failures"] == []
+    assert row["background_delegations"]["deleg-1"]["wakeup_state"] == "settled"
+    assert row["background_delegations"]["deleg-1"]["wakeup_stream_id"] == "wakeup-1"
+    assert api.trace.index("session:sid-1") < api.trace.index("chat:wakeup-1")
+    assert api.trace.index("chat:wakeup-1") < next(
+        index for index, value in enumerate(api.trace) if value.startswith("request:/api/session/manifest")
+    )
+
+
 def test_immediate_cancel_uses_known_ready_state_then_polls_next_round_readiness(tmp_path, monkeypatch):
     monkeypatch.setattr("scripts.real_model_campaign.time.sleep", lambda _seconds: None)
     api = _CancelFlowApi(stream_events=[("token", {"text": "should-not-see"}), ("done", {})])
@@ -651,6 +991,37 @@ def test_immediate_cancel_uses_known_ready_state_then_polls_next_round_readiness
     assert status_after, "status poll must follow successful cancel"
     assert row["ready_for_next_start"] is True
     assert "token" not in {event["event"] for event in row["events"]}
+
+
+def test_round_sends_original_custom_message_without_formatting(tmp_path, monkeypatch):
+    monkeypatch.setattr("scripts.real_model_campaign.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr("scripts.real_model_campaign.uuid.uuid4", lambda: type("U", (), {"hex": "nonce-marker"})())
+    api = _CancelFlowApi(stream_events=[])
+    question = HistoryPrompt(
+        "custom-message-01",
+        "custom-message-01",
+        "请处理 {用户原始占位符} 并创建报告。",
+        1,
+        "custom-message-01:1",
+        0,
+        0,
+        (),
+    )
+
+    _run_round(
+        api,
+        "sid-1",
+        tmp_path,
+        question,
+        "camp-1",
+        1,
+        "immediate_after_start",
+        start_ready=True,
+        custom_campaign=True,
+    )
+
+    start = next(body for _method, path, body in api.calls if path == "/api/chat/start")
+    assert start["message"] == question.prompt
 
 
 def test_cancel_verify_reuses_post_cancel_readiness_for_next_start(tmp_path, monkeypatch):
@@ -759,11 +1130,11 @@ def test_resolve_batch_specs_cancel_verify_is_first_session_when_enabled():
     assert resolve_batch_specs(1, 5, cancel_verify_session=True)[0]["kind"] == "cancel_verify"
 
 
-def test_history_prompt_wraps_nonce_and_turn_path():
+def test_history_prompt_is_sent_without_campaign_wrapper():
     question = HistoryPrompt(
         source_session_id="abc123",
         title="demo",
-        prompt="给我一个可视化分析报告html",
+        prompt="给我一个包含 {原始占位符} 的可视化分析报告html",
         turn=1,
         turn_key="turn:0",
         n_tools=8,
@@ -771,9 +1142,34 @@ def test_history_prompt_wraps_nonce_and_turn_path():
         artifact_paths=("report.html",),
     )
     prompt, path = build_history_prompt(question, 3, "nonce-3")
-    assert "给我一个可视化分析报告html" in prompt
-    assert "NONCE=nonce-3" in prompt
-    assert path.endswith("turn-03/delivery.md")
+    assert prompt == question.prompt
+    assert path == ""
+
+
+def test_alignment_uses_recorded_turn_key_when_prompt_has_no_nonce(tmp_path):
+    artifact = tmp_path / "report.csv"
+    artifact.write_text("id,value\n1,ok\n", encoding="utf-8")
+    session = {
+        "messages": [
+            {"role": "user", "content": "原始消息", "_turn_key": "turn:1"},
+            {"role": "user", "content": "原始消息", "_turn_key": "turn:2"},
+        ],
+    }
+    manifest = {
+        "turns": [{"turn_key": "turn:2", "artifacts": [{"path": "report.csv"}]}],
+        "diagnostics": {"orphan_turn_keys": []},
+    }
+
+    failures, observations, hashes = evaluate_alignment(
+        session,
+        manifest,
+        {"nonce": "not-in-the-original-message", "turn_key": "turn:2"},
+        tmp_path,
+    )
+
+    assert failures == []
+    assert observations == []
+    assert set(hashes) == {"report.csv"}
 
 
 def test_model_campaign_prompt_uses_progressive_business_files_without_delivery_wrapper():

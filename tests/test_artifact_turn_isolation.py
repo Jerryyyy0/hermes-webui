@@ -38,7 +38,14 @@ def test_stream_owned_tool_evidence_settles_bound_turn_before_transcript_merge(t
             "source_tool": "write_file",
             "preview": "file",
         }],
-        "turns": [],
+        "turns": [{
+            "turn_key": "turn:7",
+            "artifacts": [{
+                "path": "yijing_pro.html",
+                "source_tool": "write_file",
+                "preview": "file",
+            }],
+        }],
     }
 
     result = streaming._persist_turn_artifact_paths(
@@ -92,7 +99,14 @@ def test_settlement_dedupes_stream_and_transcript_evidence_by_stronger_source(tm
             "source_tool": "media",
             "preview": "file",
         }],
-        "turns": [],
+        "turns": [{
+            "turn_key": "turn:1",
+            "artifacts": [{
+                "path": "report.html",
+                "source_tool": "media",
+                "preview": "file",
+            }],
+        }],
     }
 
     result = streaming._persist_turn_artifact_paths(
@@ -104,6 +118,175 @@ def test_settlement_dedupes_stream_and_transcript_evidence_by_stronger_source(tm
     assert result["status"] == "persisted"
     assert [(row["path"], row["source_tool"]) for row in load_manifest_records(session)] == [
         ("report.html", "write_file"),
+    ]
+
+
+def test_settlement_does_not_attribute_seeded_session_artifacts_to_current_turn(tmp_path, monkeypatch):
+    from api import streaming
+    from integration.session_manifest.store import load_manifest_records
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    historical = workspace / "historical.md"
+    historical.write_text("old", encoding="utf-8")
+    current = workspace / "current.md"
+    current.write_text("new", encoding="utf-8")
+    session = Session(
+        session_id="artifact-session-snapshot-isolation",
+        workspace=str(workspace),
+        profile="ops",
+        active_stream_id="stream-current",
+        messages=[
+            {"role": "user", "content": "current turn", "_turn_key": "turn:2"},
+            {"role": "assistant", "content": "done"},
+        ],
+    )
+    monkeypatch.setattr("integration.session_manifest.store.STATE_DIR", tmp_path / "state")
+    monkeypatch.setitem(streaming.STREAM_LIVE_MANIFEST, "stream-current", {
+        "artifacts": [{
+            "path": "historical.md",
+            "source_tool": "write_file",
+            "preview": "file",
+        }],
+        "turns": [{
+            "turn_key": "turn:2",
+            "artifacts": [{
+                "path": "current.md",
+                "source_tool": "write_file",
+                "preview": "file",
+            }],
+            "references": [],
+        }],
+    })
+
+    result = streaming._persist_turn_artifact_paths(
+        session,
+        "turn:2",
+        stream_id="stream-current",
+        terminal_reason="completed",
+    )
+
+    assert result["status"] == "persisted"
+    assert [(row["turn_key"], row["path"]) for row in load_manifest_records(session)] == [
+        ("turn:2", "current.md"),
+    ]
+
+
+def test_cancelled_settlement_recovers_completed_durable_tool_when_live_turn_is_missing(tmp_path, monkeypatch):
+    from api import streaming
+    from integration.session_manifest.store import load_manifest_records
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    historical = workspace / "historical.md"
+    historical.write_text("old", encoding="utf-8")
+    current = workspace / "cancelled-result.html"
+    current.write_text("<html></html>", encoding="utf-8")
+    session = Session(
+        session_id="artifact-cancelled-durable-recovery",
+        workspace=str(workspace),
+        profile="ops",
+        active_stream_id="stream-cancelled",
+        messages=[
+            {"role": "user", "content": "create", "_turn_key": "turn:6"},
+            {"role": "assistant", "content": ""},
+            {"role": "assistant", "content": "任务已取消。"},
+        ],
+        tool_calls=[{
+            "name": "write_file",
+            "args": {"path": "cancelled-result.html"},
+            "assistant_msg_idx": 1,
+            "tid": "write-before-cancel",
+            "done": True,
+            "snippet": '{"bytes_written": 13}',
+        }],
+    )
+    monkeypatch.setattr("integration.session_manifest.store.STATE_DIR", tmp_path / "state")
+    monkeypatch.setitem(streaming.STREAM_LIVE_MANIFEST, "stream-cancelled", {
+        "artifacts": [{
+            "path": "historical.md",
+            "source_tool": "write_file",
+            "preview": "file",
+        }],
+        "references": [],
+    })
+
+    result = streaming._persist_turn_artifact_paths(
+        session,
+        "turn:6",
+        stream_id="stream-cancelled",
+        terminal_reason="cancelled",
+    )
+
+    assert result == {
+        "status": "persisted",
+        "decision": "artifacts",
+        "turn_key": "turn:6",
+        "artifact_count": 1,
+    }
+    assert [(row["turn_key"], row["path"]) for row in load_manifest_records(session)] == [
+        ("turn:6", "cancelled-result.html"),
+    ]
+
+
+def test_settlement_does_not_promote_same_turn_read_input_from_final_prose(tmp_path, monkeypatch):
+    from api import streaming
+    from integration.session_manifest.store import load_manifest_records
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source = workspace / "source.csv"
+    source.write_text("id\n1\n", encoding="utf-8")
+    report = workspace / "analysis.md"
+    report.write_text("# analysis", encoding="utf-8")
+    session = Session(
+        session_id="artifact-read-evidence-settlement",
+        workspace=str(workspace),
+        profile="ops",
+        messages=[
+            {"role": "user", "content": "analyze", "_turn_key": "turn:2"},
+            {
+                "role": "assistant",
+                "tool_calls": [{
+                    "id": "read-source",
+                    "function": {
+                        "name": "read_file",
+                        "arguments": '{"path":"source.csv"}',
+                    },
+                }],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "read-source",
+                "name": "read_file",
+                "content": "id\n1\n",
+            },
+            {
+                "role": "assistant",
+                "tool_calls": [{
+                    "id": "write-report",
+                    "function": {
+                        "name": "write_file",
+                        "arguments": '{"path":"analysis.md"}',
+                    },
+                }],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "write-report",
+                "name": "write_file",
+                "content": '{"bytes_written": 10}',
+            },
+            {"role": "assistant", "content": "Created `analysis.md` from `source.csv`."},
+        ],
+    )
+    monkeypatch.setattr("integration.session_manifest.store.STATE_DIR", tmp_path / "state")
+
+    result = streaming._persist_turn_artifact_paths(session, "turn:2")
+
+    assert result["status"] == "persisted"
+    assert [(row["path"], row["source_tool"]) for row in load_manifest_records(session)] == [
+        ("analysis.md", "write_file"),
     ]
 
 
@@ -173,7 +356,14 @@ def test_completed_settlement_drops_stream_artifact_removed_before_turn_end(tmp_
             "source_tool": "terminal",
             "preview": "file",
         }],
-        "turns": [],
+        "turns": [{
+            "turn_key": "turn:1",
+            "artifacts": [{
+                "path": "preview-cover.jpg",
+                "source_tool": "terminal",
+                "preview": "file",
+            }],
+        }],
     }
 
     result = streaming._persist_turn_artifact_paths(
@@ -214,7 +404,14 @@ def test_cancelled_settlement_does_not_persist_removed_stream_artifact(tmp_path,
             "source_tool": "terminal",
             "preview": "file",
         }],
-        "turns": [],
+        "turns": [{
+            "turn_key": "turn:7",
+            "artifacts": [{
+                "path": "preview-cover.jpg",
+                "source_tool": "terminal",
+                "preview": "file",
+            }],
+        }],
     }
 
     result = streaming._persist_turn_artifact_paths(
@@ -367,7 +564,14 @@ def test_final_assistant_existing_file_augments_live_stream_evidence(tmp_path, m
             "source_tool": "write_file",
             "preview": "file",
         }],
-        "turns": [],
+        "turns": [{
+            "turn_key": "turn:1",
+            "artifacts": [{
+                "path": "summary.html",
+                "source_tool": "write_file",
+                "preview": "file",
+            }],
+        }],
     }
 
     result = streaming._persist_turn_artifact_paths(
@@ -556,7 +760,14 @@ def test_passive_compression_rotation_keeps_canonical_turn_artifact_alignment(tm
             "source_tool": "write_file",
             "preview": "file",
         }],
-        "turns": [],
+        "turns": [{
+            "turn_key": "turn:6",
+            "artifacts": [{
+                "path": "recolor.py",
+                "source_tool": "write_file",
+                "preview": "file",
+            }],
+        }],
     })
 
     settlement = streaming._persist_turn_artifact_paths(

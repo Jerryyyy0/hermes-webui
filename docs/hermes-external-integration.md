@@ -88,5 +88,10 @@ Session `session.json` 中。不新增数据库表、sidecar 或独立 Citation 
 顶层 `artifacts` 与 `references` 快照；`api/streaming.py` 与 `api/gateway_chat.py` 仅保留该共享投影的
 调用、hook、保存和出站过滤接缝，不解析 MCP JSON；前端直接替换两个快照，不重复解析或合并。
 
+顶层 `artifacts` 是会话级累计 SSE 快照，不携带当前 turn 所有权。流结束结算只允许读取
+`turns[]` 中 `turn_key` 精确匹配的行，并在 normal/error/cancel 路径合并 durable transcript 的同轮
+证据。历史污染重建由 `integration/session_manifest/repair.py` 的显式维护入口负责；GET 与 SSE 均不触发
+自动修复。
+
 公开字段、SSE 帧和生命周期只在 [Session Manifest HTTP/SSE 契约](api/session-manifest-api.md)
 维护；本节只记录 Fork 接缝与实现边界。

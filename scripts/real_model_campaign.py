@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Manual real-model E2E campaign for multi-turn artifact alignment.
 
-Trial questions come either from historical WebUI sessions with stable
-write-sourced delivery artifacts, or from the configured model.
+Trial questions come from the built-in custom message group, historical WebUI
+sessions with stable write-sourced delivery artifacts, or the configured model.
 
 Default ``--context-mode first``: only opening-turn prompts, one continuous
 plain session per batch (no transcript import / mid-turn replay).
@@ -49,17 +49,24 @@ if str(ROOT) not in sys.path:
 DEFAULT_BASE_URL = "http://127.0.0.1:8787"
 ROUND_TIMEOUT = 180
 SETTLE_TIMEOUT = 30
+ASYNC_DELEGATION_TIMEOUT = 900
 # Database prompts must come from sufficiently involved turns. Count each
 # recorded tool-call event; provider/tool-call IDs are not a deduplication key.
 MIN_TOOLS = 10
 PREFIX_TOOL_CONTENT_LIMIT = 12000
 ContextMode = Literal["mixed", "first", "replay"]
-PromptSource = Literal["database", "model"]
+PromptSource = Literal["custom", "database", "model"]
 WRITE_TOOLS = frozenset({"write_file", "patch", "edit_file", "create_file", "apply_patch", "str_replace"})
 DELIVERY_SUFFIXES = frozenset({
     ".md", ".html", ".htm", ".docx", ".doc", ".pptx", ".xlsx", ".csv", ".pdf",
     ".py", ".json", ".yaml", ".yml", ".txt",
 })
+
+
+CUSTOM_MESSAGES: tuple[str, ...] = (
+    "请在工作区随机生成 .doc、.docx、.xls、.xlsx、.ppt、.pptx 和 .csv 文件，每种格式各一个。"
+    "文件应有合理且不同的业务内容；不要只回复说明，也不要用 Markdown、纯文本或其他格式代替。",
+)
 
 
 @dataclass(frozen=True)
@@ -322,6 +329,23 @@ def load_history_prompt_pool(state_dir: Path | None = None) -> list[HistoryPromp
     return pool
 
 
+def load_custom_prompt_pool() -> list[HistoryPrompt]:
+    """Return the built-in, user-maintained custom message group."""
+    return [
+        HistoryPrompt(
+            source_session_id=f"custom-message-{index:02d}",
+            title=f"custom-message-{index:02d}",
+            prompt=prompt,
+            turn=1,
+            turn_key=f"custom-message-{index:02d}:1",
+            n_tools=0,
+            n_write_tools=0,
+            artifact_paths=(),
+        )
+        for index, prompt in enumerate(CUSTOM_MESSAGES, start=1)
+    ]
+
+
 def pool_for_context_mode(pool: list[HistoryPrompt], mode: ContextMode) -> list[HistoryPrompt]:
     if mode == "first":
         return [item for item in pool if not item.needs_prefix_replay]
@@ -515,9 +539,15 @@ def create_plain_session(
     api: Api,
     *,
     title_prefix: str = "campaign-first",
+    model: str | None = None,
 ) -> tuple[str, Path | None]:
     """Create a campaign session in the server-managed workspace."""
-    created = api.request("POST", "/api/session/new", {"worktree": False})
+    body: dict[str, Any] = {"worktree": False}
+    if model:
+        # Let the WebUI resolve this explicit choice through the active
+        # profile's config.yaml provider/custom-provider configuration.
+        body["model"] = model
+    created = api.request("POST", "/api/session/new", body)
     session = created.get("session", {}) if isinstance(created, dict) else {}
     session_id = str(session.get("session_id") or "")
     workspace_text = str(session.get("workspace") or "").strip()
@@ -725,6 +755,7 @@ def build_history_prompt(
     nonce: str,
     *,
     model_campaign: bool = False,
+    custom_campaign: bool = False,
 ) -> tuple[str, str]:
     if model_campaign:
         _target, phase = model_campaign_phase(turn)
@@ -741,18 +772,10 @@ NONCE={nonce}"""
         # artifact the manifest attributes to this turn.
         return prompt, ""
 
-    artifact = f"deliverables/turn-{turn:02d}/delivery.md"
-    prompt = f"""{question.prompt}
-
-请基于上述真实历史需求完成本轮工作，并在工作区创建或修改实际文件（不要只描述结果）。
-优先把面向用户的主要交付写到 `{artifact}`；若需求明确要求 html/md/docx 等其它路径，也可额外生成。
-主要交付文件中必须包含以下标记行：
-CAMPAIGN_ID={{campaign_id}}
-SESSION_ID={{session_id}}
-TURN={turn}
-NONCE={nonce}
-完成后简要说明实际创建或修改的文件。"""
-    return prompt, artifact
+    # Custom and historical scenarios must exercise the original user request
+    # verbatim. Campaign IDs, turn numbers, output paths, and nonces are test
+    # bookkeeping, not user-facing prompt content.
+    return question.prompt, ""
 
 
 def pick_history_prompt(pool: list[HistoryPrompt], rng: random.Random, used: set[str] | None = None) -> HistoryPrompt:
@@ -766,6 +789,7 @@ def pick_history_prompt(pool: list[HistoryPrompt], rng: random.Random, used: set
 
 
 _MODEL_PROMPT_GENERATION_ATTEMPTS = 3
+_MODEL_PROMPT_GENERATION_TIMEOUT = 180
 
 
 _MODEL_PROMPT_GENERATION_REQUEST = """你是 Hermes WebUI 的 E2E 测试题目设计器。
@@ -811,8 +835,22 @@ def _generated_prompt_texts(response_text: str) -> list[str]:
     raise RuntimeError("model prompt generator returned no valid JSON prompt array")
 
 
-def _model_prompt_generation_error(exc: Exception) -> str:
+def _model_prompt_generation_error(
+    exc: Exception,
+    *,
+    model: str | None = None,
+    provider: str | None = None,
+) -> str:
     """Summarize an auxiliary-call failure without exposing upstream details."""
+    # Model/provider are user-selected route identifiers, not credentials.
+    # Including them makes the common "wrong model on a custom endpoint"
+    # failure immediately actionable while still hiding response bodies and URLs.
+    route = "".join(
+        f"; {label}={value!r}"
+        for label, value in (("model", model), ("provider", provider))
+        if value
+    )
+    exception_name = type(exc).__name__
     if isinstance(exc, ModuleNotFoundError):
         return "Hermes Agent auxiliary runtime unavailable; check HERMES_WEBUI_AGENT_DIR and its dependencies"
     status = getattr(exc, "status_code", None)
@@ -820,14 +858,26 @@ def _model_prompt_generation_error(exc: Exception) -> str:
         status = getattr(getattr(exc, "response", None), "status_code", None)
     if status in {401, 403}:
         return (
-            f"model prompt generation authentication failed (HTTP {status}); "
+            "model prompt generation authentication failed "
+            f"(HTTP {status}{route}; exception={exception_name}); "
             "check the current profile's model credentials"
         )
     if status == 404:
-        return "model prompt generation endpoint or model was not found (HTTP 404); check the current profile's model route"
+        return (
+            "model prompt generation endpoint or model was not found "
+            f"(HTTP 404{route}; exception={exception_name}); "
+            "check the current profile's model route"
+        )
     if isinstance(status, int):
-        return f"model prompt generation failed with HTTP {status}; check the current profile's model route"
-    return "model prompt generation failed; check the current profile's model endpoint and credentials"
+        return (
+            f"model prompt generation failed with HTTP {status}{route} "
+            f"(exception={exception_name}); check the current profile's model route"
+        )
+    return (
+        "model prompt generation failed "
+        f"(exception={exception_name}{route}); "
+        "check the current profile's model endpoint and credentials"
+    )
 
 
 def _call_llm_accepts_api_mode(call_llm: Any) -> bool:
@@ -842,16 +892,28 @@ def _call_llm_accepts_api_mode(call_llm: Any) -> bool:
     )
 
 
+def _model_prompt_generation_extra_body(
+    provider: str | None,
+    model: str | None,
+) -> dict[str, Any] | None:
+    """Disable Qwen reasoning so its JSON response is emitted as content."""
+    route = " ".join(part.lower() for part in (provider, model) if part)
+    if "qwen" in route:
+        return {"chat_template_kwargs": {"enable_thinking": False}}
+    return None
+
+
 def generate_model_prompt_pool(
     model: str,
     count: int,
     *,
     model_config: dict[str, Any] | str | None = None,
+    resolve_model_route: bool = False,
 ) -> list[HistoryPrompt]:
     """Collect a bounded, unique model-generated scenario pool for a campaign."""
     requested = max(1, count)
     try:
-        from api.config import _AGENT_DIR
+        from api.config import _AGENT_DIR, resolve_custom_provider_connection, resolve_model_provider
         from api.profiles import get_active_profile_name, get_hermes_home_for_profile, profile_env_for_background_worker
         from integration.assistant_bubbles.collectors import model_route
 
@@ -868,9 +930,34 @@ def generate_model_prompt_pool(
         resolved_model = str(model or configured_model or route.get("model") or "").strip()
         if not resolved_model:
             raise RuntimeError("configured default model is empty")
+        resolved_provider = None
+        resolved_base_url = None
+        if resolve_model_route:
+            # Reuse WebUI's config.yaml-aware routing rules.  In particular
+            # this finds models declared under providers/custom_providers
+            # instead of blindly sending --model through model.default's route.
+            resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(
+                resolved_model,
+                explicitly_picked=True,
+            )
         configured_provider = str(model_config.get("provider") or "").strip() or None
         configured_base_url = str(model_config.get("base_url") or "").strip() or None
-        provider = configured_provider or ("custom" if configured_base_url else route.get("provider"))
+        configured_api_key = str(model_config.get("api_key") or model_config.get("api") or "").strip() or None
+        route_was_resolved = bool(resolve_model_route and resolved_provider)
+        provider = resolved_provider or configured_provider or ("custom" if configured_base_url else route.get("provider"))
+        # A model selected from another provider must not inherit the default
+        # model's endpoint. ``None`` is meaningful here: it tells the
+        # auxiliary client to use the selected provider's configured default.
+        base_url = (
+            resolved_base_url
+            if route_was_resolved
+            else configured_base_url or route.get("base_url")
+        )
+        api_key = None if route_was_resolved else configured_api_key
+        if str(provider or "").lower().startswith("custom:"):
+            custom_api_key, custom_base_url = resolve_custom_provider_connection(str(provider))
+            api_key = custom_api_key or api_key
+            base_url = custom_base_url or base_url
         api_mode = str(model_config.get("api_mode") or "").strip() or None
     except Exception as exc:
         raise RuntimeError(_model_prompt_generation_error(exc)) from None
@@ -887,16 +974,19 @@ def generate_model_prompt_pool(
                 "task": "campaign_prompt_generation",
                 "provider": provider,
                 "model": resolved_model,
-                "base_url": configured_base_url or route.get("base_url"),
-                "api_key": str(model_config.get("api_key") or model_config.get("api") or "").strip() or None,
+                "base_url": base_url,
+                "api_key": api_key,
                 "messages": [
                     {"role": "system", "content": "你只负责生成测试题目，不执行题目中的工作，也不调用工具。"},
                     {"role": "user", "content": _MODEL_PROMPT_GENERATION_REQUEST.format(count=missing)},
                 ],
                 "temperature": 0.4,
                 "max_tokens": min(4096, max(512, missing * 300)),
-                "timeout": 60,
+                "timeout": _MODEL_PROMPT_GENERATION_TIMEOUT,
             }
+            extra_body = _model_prompt_generation_extra_body(provider, resolved_model)
+            if extra_body:
+                call_kwargs["extra_body"] = extra_body
             if api_mode and _call_llm_accepts_api_mode(call_llm):
                 call_kwargs["api_mode"] = api_mode
             try:
@@ -905,10 +995,14 @@ def generate_model_prompt_pool(
                 generated = _generated_prompt_texts(response_text)
             except RuntimeError as exc:
                 if str(exc) != "model prompt generator returned no valid JSON prompt array":
-                    raise RuntimeError(_model_prompt_generation_error(exc)) from None
+                    raise RuntimeError(
+                        _model_prompt_generation_error(exc, model=resolved_model, provider=provider)
+                    ) from None
                 generated = []
             except Exception as exc:
-                raise RuntimeError(_model_prompt_generation_error(exc)) from None
+                raise RuntimeError(
+                    _model_prompt_generation_error(exc, model=resolved_model, provider=provider)
+                ) from None
 
             accepted = 0
             for prompt in generated:
@@ -970,17 +1064,35 @@ class Api:
         request = urllib.request.Request(self.base_url + "/api/chat/stream?stream_id=" + urllib.parse.quote(stream_id))
         return urllib.request.urlopen(request, timeout=ROUND_TIMEOUT)
 
+    def open_session_event_stream(self, session_id: str):
+        request = urllib.request.Request(
+            self.base_url + "/api/sessions/" + urllib.parse.quote(session_id) + "/events"
+        )
+        return urllib.request.urlopen(request, timeout=ASYNC_DELEGATION_TIMEOUT)
+
+    @staticmethod
+    def _parse_events(response):
+        event, data = "message", []
+        for raw in response:
+            line = raw.decode(errors="replace").strip()
+            if not line and data:
+                try:
+                    yield event, json.loads("\n".join(data))
+                except json.JSONDecodeError:
+                    yield event, {"raw": "\n".join(data)}
+                event, data = "message", []
+            elif line.startswith("event:"):
+                event = line[6:].strip()
+            elif line.startswith("data:"):
+                data.append(line[5:].strip())
+
     def events(self, stream_id: str):
         with self.open_event_stream(stream_id) as response:
-            event, data = "message", []
-            for raw in response:
-                line = raw.decode(errors="replace").strip()
-                if not line and data:
-                    try: yield event, json.loads("\n".join(data))
-                    except json.JSONDecodeError: yield event, {"raw": "\n".join(data)}
-                    event, data = "message", []
-                elif line.startswith("event:"): event = line[6:].strip()
-                elif line.startswith("data:"): data.append(line[5:].strip())
+            yield from self._parse_events(response)
+
+    def session_events(self, session_id: str):
+        with self.open_session_event_stream(session_id) as response:
+            yield from self._parse_events(response)
 
 
 def _message_text(message: dict) -> str:
@@ -1008,6 +1120,19 @@ def _turn_key(session: dict, nonce: str) -> str:
     if len(rows) != 1:
         return ""
     return str(rows[0].get("_turn_key") or "")
+
+
+def _turn_key_for_original_prompt(session: dict, prompt: str) -> str:
+    """Return the newest persisted user turn whose content is the raw prompt."""
+    rows = [
+        message for message in session.get("messages", [])
+        if isinstance(message, dict)
+        and message.get("role") == "user"
+        and _message_text(message) == prompt
+    ]
+    if not rows:
+        return ""
+    return str(rows[-1].get("_turn_key") or "")
 
 
 def _artifacts(manifest: dict, turn_key: str) -> dict[str, dict]:
@@ -1070,7 +1195,7 @@ def _is_primary_delivery(path: str) -> bool:
 
 def evaluate_alignment(session: dict, manifest: dict, ledger: dict, workspace: Path) -> tuple[list[dict], list[dict], dict[str, str]]:
     failures, observations, hashes = [], [], {}
-    actual_key = _turn_key(session, ledger["nonce"])
+    actual_key = str(ledger.get("turn_key") or "") or _turn_key(session, ledger["nonce"])
     if not actual_key:
         return failures, [{"code": "TURN_KEY_UNAVAILABLE"}], hashes
     ledger["turn_key"] = actual_key
@@ -1135,6 +1260,99 @@ def _settle(api: Api, session_id: str) -> tuple[dict, dict]:
     return readiness, session
 
 
+def _background_event_payload(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    nested = payload.get("payload")
+    return dict(nested) if isinstance(nested, dict) else dict(payload)
+
+
+def _record_background_delegation(row: dict, payload: Any) -> str:
+    details = _background_event_payload(payload)
+    delegation_id = str(details.get("delegation_id") or "").strip()
+    if not delegation_id:
+        return ""
+    tasks = row.setdefault("background_delegations", {})
+    task = dict(tasks.get(delegation_id) or {})
+    for key in ("status", "wakeup_state", "cancel_state", "origin_turn_key", "child_task_count"):
+        if key in details:
+            task[key] = details[key]
+    tasks[delegation_id] = task
+    return delegation_id
+
+
+def _background_delegations_settled(row: dict, delegation_ids: set[str]) -> bool:
+    tasks = row.get("background_delegations") or {}
+    return bool(delegation_ids) and all(
+        str((tasks.get(delegation_id) or {}).get("wakeup_state") or "") in {"settled", "failed"}
+        for delegation_id in delegation_ids
+    )
+
+
+def _await_background_delegations(api: Api, session_id: str, row: dict) -> None:
+    """Wait for this round's delegated work and every resulting wakeup stream."""
+    delegation_ids = set((row.get("background_delegations") or {}).keys())
+    if not delegation_ids:
+        return
+    deadline = time.monotonic() + ASYNC_DELEGATION_TIMEOUT
+    row["background_events"] = []
+    row["background_wakeup_events"] = []
+    try:
+        for event, payload in api.session_events(session_id):
+            row["background_events"].append({"event": event, "payload": payload})
+            details = _background_event_payload(payload)
+            if event == "background_tasks_snapshot":
+                active_ids = set()
+                for task in details.get("tasks") or []:
+                    delegation_id = _record_background_delegation(row, task)
+                    if delegation_id:
+                        active_ids.add(delegation_id)
+                if not delegation_ids.intersection(active_ids):
+                    for delegation_id in delegation_ids:
+                        task = row["background_delegations"].setdefault(delegation_id, {})
+                        task["wakeup_state"] = "settled"
+                    return
+            elif event == "background_task_unresolved":
+                delegation_id = _record_background_delegation(row, details)
+                if delegation_id in delegation_ids:
+                    row["observations"].append({"code": "ASYNC_DELEGATION_UNRESOLVED", "delegation_id": delegation_id})
+                    row["alignment_failures"].append({"code": "ASYNC_DELEGATION_UNRESOLVED", "delegation_id": delegation_id})
+                    return
+            elif event in {"background_task_status", "bg_task_complete", "server_turn_started"}:
+                delegation_id = _record_background_delegation(row, details)
+                if event == "server_turn_started" and delegation_id in delegation_ids:
+                    stream_id = str(details.get("stream_id") or "").strip()
+                    task = row["background_delegations"][delegation_id]
+                    if stream_id and task.get("wakeup_stream_id") != stream_id:
+                        task["wakeup_stream_id"] = stream_id
+                        for wakeup_event, wakeup_payload in api.events(stream_id):
+                            row["background_wakeup_events"].append({
+                                "delegation_id": delegation_id,
+                                "event": wakeup_event,
+                                "payload": wakeup_payload,
+                            })
+                            if wakeup_event in {"apperror", "error"}:
+                                row["observations"].append({
+                                    "code": "ASYNC_WAKEUP_STREAM_ERROR",
+                                    "delegation_id": delegation_id,
+                                })
+                                row["alignment_failures"].append({
+                                    "code": "ASYNC_WAKEUP_STREAM_ERROR",
+                                    "delegation_id": delegation_id,
+                                })
+                                return
+                            if wakeup_event in {"done", "cancel", "stream_end"}:
+                                break
+            if event == "background_tasks_idle" or _background_delegations_settled(row, delegation_ids):
+                return
+            if time.monotonic() >= deadline:
+                break
+    except (OSError, TimeoutError, urllib.error.URLError):
+        pass
+    row["observations"].append({"code": "ASYNC_DELEGATION_WAIT_TIMEOUT"})
+    row["alignment_failures"].append({"code": "ASYNC_DELEGATION_WAIT_TIMEOUT"})
+
+
 def _cancel_accepted(payload: dict | None) -> bool:
     return isinstance(payload, dict) and payload.get("ok") is True and payload.get("cancelled") is True
 
@@ -1167,20 +1385,29 @@ def _run_round(
     start_ready: bool = False,
     cancel_only: bool = False,
     model_campaign: bool = False,
+    custom_campaign: bool = False,
 ) -> dict:
     nonce = uuid.uuid4().hex
-    prompt, expected = build_history_prompt(question, turn, nonce, model_campaign=model_campaign)
-    prompt = prompt.format(campaign_id=campaign_id, session_id=session_id)
+    prompt, expected = build_history_prompt(
+        question,
+        turn,
+        nonce,
+        model_campaign=model_campaign,
+        custom_campaign=custom_campaign,
+    )
+    if model_campaign:
+        prompt = prompt.format(campaign_id=campaign_id, session_id=session_id)
     row: dict[str, Any] = {
         "turn": turn,
         "nonce": nonce,
         "prompt": prompt,
         "history_prompt": asdict(question),
         "expected_artifact_path": expected,
-        "planned_artifact_path": model_campaign_phase(turn)[0] if model_campaign else "",
+        "planned_artifact_path": model_campaign_phase(turn)[0] if model_campaign and not custom_campaign else "",
         "cancel_trigger": trigger,
         "cancel_only": cancel_only,
         "events": [],
+        "background_delegations": {},
         "observations": [],
         "alignment_failures": [],
         "auto_approve": {"yolo": None, "drains": []},
@@ -1225,6 +1452,8 @@ def _run_round(
         try:
             for event, payload in api.events(row["stream_id"]):
                 row["events"].append({"event": event, "payload": payload})
+                if event == "background_task_dispatched":
+                    _record_background_delegation(row, payload)
                 # Drain only when the stream signals a blocking prompt; avoid
                 # polling /api/approval|clarify/pending on every tool/meter tick.
                 if event in {"approval", "clarify"}:
@@ -1273,6 +1502,7 @@ def _run_round(
     drained = drain_blocking_prompts(api, session_id)
     if drained["approvals"] or drained["clarifies"]:
         row["auto_approve"]["drains"].append({"event": "post_stream", **drained})
+    _await_background_delegations(api, session_id, row)
     readiness_after_stream, settled = _settle(api, session_id)
     row["readiness_after_stream"] = readiness_after_stream
     row["ready_for_next_start"] = readiness_after_stream.get("can_start_chat") is True
@@ -1281,7 +1511,11 @@ def _run_round(
         row["alignment_failures"].append({"code": "SESSION_NOT_READY_AFTER_STREAM"})
         return row
     session = settled.get("session", {})
-    row["turn_key"] = _turn_key(session, nonce)
+    row["turn_key"] = (
+        _turn_key(session, nonce)
+        if model_campaign
+        else _turn_key_for_original_prompt(session, prompt)
+    )
     if cancel_only:
         # Cancel-verify batch only scores cancel/readiness, not artifact alignment.
         row["artifact_hashes"] = {}
@@ -1307,8 +1541,9 @@ def run_campaign(
     base_url: str,
     seed: int | None = None,
     context_mode: ContextMode = "first",
-    prompt_source: PromptSource = "database",
+    prompt_source: PromptSource = "custom",
     *,
+    model: str | None = None,
     cancel_verify_session: bool = False,
     allow_concurrent: bool = True,
 ) -> int:
@@ -1324,13 +1559,21 @@ def run_campaign(
 
         config = get_config()
         model_config = config.get("model") if isinstance(config, dict) else {}
-        model = ((model_config or {}).get("default")) if isinstance(model_config, dict) else model_config
+        configured_model = ((model_config or {}).get("default")) if isinstance(model_config, dict) else model_config
     except Exception as exc:
         raise RuntimeError("cannot read config.yaml default model") from exc
-    if not model: raise RuntimeError("config.yaml model.default is required")
+    selected_model = str(model or configured_model or "").strip()
+    if not selected_model:
+        raise RuntimeError("--model is required when config.yaml model.default is empty")
+    session_model = selected_model if model else None
 
     state_dir = _state_dir()
-    if prompt_source == "database":
+    if prompt_source == "custom":
+        if context_mode != "first":
+            raise RuntimeError("prompt_source='custom' supports only context_mode='first'")
+        pool = load_custom_prompt_pool()
+        first_n, replay_n = len(pool), 0
+    elif prompt_source == "database":
         print(f"scanning history prompts from {state_dir}/sessions + session_manifest.db …", flush=True)
         full_pool = load_history_prompt_pool(state_dir)
         pool = pool_for_context_mode(full_pool, context_mode)
@@ -1346,11 +1589,12 @@ def run_campaign(
     elif prompt_source == "model":
         if context_mode != "first":
             raise RuntimeError("prompt_source='model' supports only context_mode='first'")
-        print(f"generating {session_count} multi-turn file scenarios with {model!r} …", flush=True)
+        print(f"generating {session_count} multi-turn file scenarios with {selected_model!r} …", flush=True)
         pool = generate_model_prompt_pool(
-            model,
+            selected_model,
             session_count,
             model_config=model_config,
+            resolve_model_route=bool(model),
         )
         if not pool:
             raise RuntimeError("model prompt generator returned no file-generation prompts")
@@ -1361,12 +1605,31 @@ def run_campaign(
     batch_specs = resolve_batch_specs(
         session_count, turns, cancel_verify_session=cancel_verify_session, rng=rng,
     )
+    custom_pool: list[HistoryPrompt] = []
+    if prompt_source == "model":
+        custom_pool = load_custom_prompt_pool()
+        if not custom_pool:
+            raise RuntimeError("prompt_source='model' requires CUSTOM_MESSAGES to be non-empty")
+        for model_spec in batch_specs:
+            model_spec["batch_index"] = int(model_spec["batch_index"]) + 1
+        batch_specs.insert(0, {
+            "batch_index": 1,
+            "kind": "custom",
+            "cancel_plan": {},
+            "round_count": 1,
+        })
     print(
         f"prompt pool ready: {len(pool)} prompts "
         f"(source={prompt_source}, first_turn={first_n}, replay={replay_n}, "
         f"mode={context_mode}, seed={seed!r})",
         flush=True,
     )
+    if custom_pool:
+        print(
+            f"custom session ready: {len(custom_pool)} prompts "
+            f"(one new session with one sampled prompt)",
+            flush=True,
+        )
     if any(spec["kind"] == "cancel_verify" for spec in batch_specs):
         print(
             f"cancel-verify enabled: first session cancel-only with random triggers "
@@ -1377,11 +1640,15 @@ def run_campaign(
     root = state_dir / "e2e_campaigns" / campaign_id; root.mkdir(parents=True, exist_ok=False)
     summary = {
         "campaign_id": campaign_id,
-        "model": model,
+        "model": selected_model,
         "base_url": base_url,
         "seed": seed,
         "context_mode": context_mode,
         "prompt_source": prompt_source,
+        "model_sessions": session_count if prompt_source == "model" else 0,
+        "model_rounds": turns if prompt_source == "model" else 0,
+        "custom_sessions": 1 if prompt_source == "model" else 0,
+        "custom_rounds": 1 if prompt_source == "model" else 0,
         "history_pool_size": len(pool),
         "history_pool_first_turn": first_n,
         "history_pool_replay": replay_n,
@@ -1411,23 +1678,31 @@ def run_campaign(
             "rounds": [],
             "session_ids": [],
         }
-        batch_question = pick_history_prompt(pool, rng, used) if prompt_source == "model" else None
+        batch_question = (
+            pick_history_prompt(pool, rng, used)
+            if prompt_source == "model" and batch_kind != "custom"
+            else None
+        )
+        if batch_kind == "custom":
+            batch_question = pick_history_prompt(custom_pool, rng, used)
         if batch_question is not None:
             report["scenario"] = asdict(batch_question)
-        for turn in range(1, turns + 1):
+        total_rounds = int(spec.get("round_count", turns))
+        for turn in range(1, total_rounds + 1):
             question = batch_question or pick_history_prompt(pool, rng, used)
             if question.needs_prefix_replay:
                 workspace = batch_root / f"replay-turn-{turn:02d}"
                 seed_workspace(workspace)
                 session_id, replay_meta, workspace = create_replay_session(
-                    api, state_dir, workspace, question, model,
+                    api, state_dir, workspace, question, selected_model,
                 )
                 if workspace is not None and replay_meta.get("fallback"):
                     seed_workspace(workspace)
                 strategy = "replay_prefix"
             else:
                 if not plain_session_id:
-                    plain_session_id, plain_workspace = create_plain_session(api)
+                    create_kwargs = {"model": session_model} if session_model else {}
+                    plain_session_id, plain_workspace = create_plain_session(api, **create_kwargs)
                     if plain_workspace is not None:
                         seed_workspace(plain_workspace)
                     plain_session_ready = bool(plain_session_id and plain_workspace)
@@ -1440,7 +1715,7 @@ def run_campaign(
             trigger = cancel_plan.get(turn)
             print(
                 f"batch {batch_index}/{total_batches} kind={batch_kind} "
-                f"trial {turn}/{turns}: strategy={strategy} "
+                f"trial {turn}/{total_rounds}: strategy={strategy} "
                 f"cancel={trigger or '-'} hist_sid={question.source_session_id} "
                 f"hist_turn={question.turn} tools={question.n_tools} title={question.title!r}",
                 flush=True,
@@ -1470,7 +1745,8 @@ def run_campaign(
                     and plain_session_ready
                 ),
                 cancel_only=(batch_kind == "cancel_verify"),
-                model_campaign=(prompt_source == "model"),
+                model_campaign=(batch_kind != "custom" and prompt_source == "model"),
+                custom_campaign=(prompt_source == "custom" or batch_kind == "custom"),
             )
             if batch_kind == "cancel_verify" and session_id == plain_session_id:
                 plain_session_ready = round_row.get("ready_for_next_start") is True
@@ -1481,7 +1757,11 @@ def run_campaign(
         issues = [issue for row in report["rounds"] for issue in row.get("alignment_failures") or []]
         report["alignment_status"] = "FAIL" if issues else ("PASS" if report["rounds"] else "INDETERMINATE")
         primary = report["session_ids"][0] if report["session_ids"] else "uncreated"
-        kind_suffix = "-cancel-verify" if batch_kind == "cancel_verify" else ""
+        kind_suffix = ""
+        if batch_kind == "cancel_verify":
+            kind_suffix = "-cancel-verify"
+        elif batch_kind == "custom":
+            kind_suffix = "-custom"
         name = f"{campaign_id}-batch-{batch_index:02d}{kind_suffix}-{primary}.json"
         (root / name).write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
         summary["batches"].append({
@@ -1517,12 +1797,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--sessions", type=int, default=5, help="Number of campaign batches")
     parser.add_argument("--turns", type=int, default=15, help="Trials per batch")
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
+    parser.add_argument(
+        "--model",
+        # default="grok-4.6",
+        help="Model ID to resolve through the active profile's config.yaml (default: model.default)",
+    )
     parser.add_argument("--seed", type=int, default=None, help="RNG seed for reproducible history prompt sampling")
     parser.add_argument(
         "--prompt-source",
-        choices=("database", "model"),
-        default="model",
-        help="database: sample history prompts; model: generate multi-turn file scenarios with the configured model",
+        choices=("custom", "database", "model"),
+        default="database",
+        help="custom: built-in custom messages; database: sample history prompts; model: generate multi-turn file scenarios",
     )
     parser.add_argument(
         "--context-mode",
@@ -1566,6 +1851,7 @@ def main(argv: list[str] | None = None) -> int:
         seed=args.seed,
         context_mode=args.context_mode,
         prompt_source=args.prompt_source,
+        model=args.model,
         cancel_verify_session=args.cancel_verify,
         allow_concurrent=args.allow_concurrent,
     )

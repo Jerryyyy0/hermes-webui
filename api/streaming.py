@@ -1611,13 +1611,16 @@ def _stream_artifact_evidence(stream_id: str, turn_key: str) -> list[dict] | Non
         live = STREAM_LIVE_MANIFEST.get(stream)
         if not isinstance(live, dict):
             return None
-        rows = list(live.get('artifacts') or [])
+        rows = None
         for turn in live.get('turns') or []:
             if isinstance(turn, dict) and str(turn.get('turn_key') or '').strip() == key:
-                rows.extend(turn.get('artifacts') or [])
+                rows = list(turn.get('artifacts') or [])
+                break
+    if rows is None:
+        return None
     deduped = {}
     for row in rows:
-        if not isinstance(row, dict) or str(row.get('turn_key') or key).strip() != key:
+        if not isinstance(row, dict):
             continue
         path = str(row.get('path') or '').strip()
         if path:
@@ -1742,10 +1745,8 @@ def _persist_turn_artifact_paths(
 
     evidence_entries = _stream_artifact_evidence(stream, _turn_key) if stream else None
     _entries = list(evidence_entries or [])
-    needs_transcript_reconcile = evidence_entries is None or str(terminal_reason or '').strip() == 'completed'
-    if needs_transcript_reconcile:
-        if not getattr(s, 'messages', None):
-            return finish({'status': 'pending', 'stage': 'transcript_unavailable', 'turn_key': _turn_key, 'artifact_count': 0})
+    transcript_messages = getattr(s, 'messages', None)
+    if transcript_messages:
         try:
             transcript_entries = extract_turn_artifact_entries_for_manifest(s, _turn_key)
         except Exception:
@@ -1756,14 +1757,15 @@ def _persist_turn_artifact_paths(
                 exc_info=True,
             )
             return finish({'status': 'failed', 'stage': 'extract', 'turn_key': _turn_key, 'artifact_count': 0})
-        # A final assistant reply is durable same-turn evidence.  Retain both
-        # sources here; the canonical-path merge below chooses the stronger
-        # provenance instead of making the earlier stream event win merely by
-        # arrival order.
+        # Durable same-turn evidence is merged on every terminal path. This is
+        # required for a completed tool result that reached the transcript but
+        # whose optimistic live delta was interrupted before publication.
         _entries.extend(
             entry for entry in transcript_entries
             if isinstance(entry, dict) and str(entry.get('path') or '').strip()
         )
+    elif evidence_entries is None or str(terminal_reason or '').strip() == 'completed':
+        return finish({'status': 'pending', 'stage': 'transcript_unavailable', 'turn_key': _turn_key, 'artifact_count': 0})
 
     try:
         workspace = artifact_workspace_root_for_session(s)

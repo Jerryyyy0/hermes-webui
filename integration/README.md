@@ -577,6 +577,7 @@ Response includes global `stats`: `{ hub, installed, not_installed, custom }` ac
 | `assets/profile-logos/` | Logo preset PNGs + manifest |
 | `agent_message_semantics/` | Hermes Agent 内部脚手架与 model-only context anchor 的兼容分类、一问一答显示投影和无正文 DEBUG 审计；`api/streaming.py` / `integration/session_manifest/manifest.py` 只保留薄调用 |
 | `async_delegation_turns/` | 后台委派的 sidecar 归属、每轮状态投影、取消屏障、持久化活动版本与统一 SSE 生命周期事件信封；`api/streaming.py`、`api/background_process.py`、`api/routes.py` 仅保留发射与 transport 接缝 |
+| `session_manifest/` | Session Manifest 候选提取、SQLite decision 与显式维护修复；顶层 live Artifact 是累计快照，turn 结算只读取 `turns[]` 的精确 key，并在所有终态合并 durable transcript |
 | `assets/hermes_skillhub.js` | SkillHub sidebar panel |
 | `assets/hermes_profiles.js` | Profiles panel enrich |
 | `swagger/openapi.json` | Integration API 规范（`GET /api/openapi.json` 动态 `servers`） |

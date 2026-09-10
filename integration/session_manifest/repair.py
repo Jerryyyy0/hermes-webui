@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
+from collections import Counter
 from contextlib import closing
 from pathlib import Path
 from typing import Any
@@ -295,6 +296,301 @@ def repair_incomplete_manifest_turn(
             'added_records': added,
         }
     return {**report, 'status': 'applied', 'dry_run': False, 'added_records': added}
+
+
+def _session_scope_rows(
+    conn: sqlite3.Connection,
+    *,
+    session_id: str,
+    profile: str,
+    effective_root: str,
+) -> list[dict[str, Any]]:
+    """Load one session/profile/logical-root scope without crossing root aliases."""
+    from integration.session_manifest import store
+
+    rows = conn.execute(
+        """
+        SELECT session_id, lineage_key, profile, workspace_root, turn_key, record_kind,
+               path, preview, source_tool, created_at, updated_at
+        FROM session_manifest_records
+        WHERE session_id = ? AND profile = ? AND record_kind = ?
+        ORDER BY turn_key, path
+        """,
+        (session_id, profile, store.ARTIFACT_RECORD_KIND),
+    ).fetchall()
+    return [
+        dict(row)
+        for row in rows
+        if store._effective_workspace_root_text(row['workspace_root']) == effective_root
+    ]
+
+
+def _repair_row_signature(row: dict[str, Any]) -> tuple[str, str, str, str]:
+    return (
+        str(row.get('turn_key') or '').strip(),
+        str(row.get('path') or '').strip(),
+        str(row.get('preview') or 'file').strip() or 'file',
+        str(row.get('source_tool') or 'assistant_prose').strip() or 'assistant_prose',
+    )
+
+
+def repair_contaminated_manifest_session(
+    session,
+    *,
+    apply: bool = False,
+    db_path: Path | str | None = None,
+    backup_path: Path | str | None = None,
+) -> dict[str, Any]:
+    """Dry-run or atomically rebuild one self-owned session's turn decisions.
+
+    This maintenance operation is intentionally stricter than ordinary turn
+    settlement. It requires a complete transcript with stable user turn keys,
+    refuses shared lineages, and replaces only the exact session/profile/logical
+    workspace-root scope. Existing empty markers are retained only for turns
+    whose corrected transcript still has no Artifact evidence.
+    """
+    from integration.session_manifest import store
+    from integration.session_manifest.manifest import (
+        _message_turns,
+        extract_turn_artifact_entries_for_manifest,
+    )
+
+    session_id = str(getattr(session, 'session_id', '') or '').strip()
+    lineage_key = store.resolve_manifest_lineage_key(session)
+    profile = str(getattr(session, 'profile', '') or '').strip()
+    report: dict[str, Any] = {
+        'status': 'invalid_session',
+        'dry_run': not apply,
+        'session_id': session_id,
+        'lineage_key': lineage_key,
+        'profile': profile,
+        'turns': [],
+        'summary': {'kept': 0, 'added': 0, 'removed': 0},
+    }
+    if not session_id:
+        return report
+    if bool(getattr(session, '_messages_truncated', False)):
+        return {**report, 'status': 'transcript_incomplete'}
+    if lineage_key != session_id:
+        return {**report, 'status': 'shared_lineage_unsupported'}
+
+    messages = list(getattr(session, 'messages', None) or [])
+    turns = _message_turns(messages)
+    if not turns:
+        return {**report, 'status': 'turns_unavailable'}
+    missing_keys = [
+        int(turn.get('user_msg_idx'))
+        for turn in turns
+        if not str(messages[int(turn.get('user_msg_idx'))].get('_turn_key') or '').strip()
+    ]
+    if missing_keys:
+        return {**report, 'status': 'unstable_turn_keys', 'message_indices': missing_keys}
+
+    try:
+        raw_root = store._workspace_root_for_session(session)
+        effective_root = store._effective_workspace_root_text(raw_root)
+    except (OSError, RuntimeError, ValueError):
+        return {**report, 'status': 'workspace_unavailable'}
+    if not effective_root:
+        return {**report, 'status': 'workspace_unavailable'}
+    report['workspace_root'] = effective_root
+
+    path = Path(db_path or store.STATE_DIR / store.DB_FILENAME).expanduser().resolve()
+    if not path.is_file():
+        return {**report, 'status': 'database_not_found', 'db_path': str(path)}
+    report['db_path'] = str(path)
+
+    expected_by_turn: dict[str, list[dict[str, str]]] = {}
+    try:
+        for turn in turns:
+            turn_key = str(turn.get('turn_key') or '').strip()
+            expected_by_turn[turn_key] = _dedupe_artifact_entries(
+                extract_turn_artifact_entries_for_manifest(session, turn_key)
+            )
+    except Exception:
+        return {**report, 'status': 'extract_failed'}
+
+    with closing(sqlite3.connect(str(path))) as conn:
+        conn.row_factory = sqlite3.Row
+        current_rows = _session_scope_rows(
+            conn,
+            session_id=session_id,
+            profile=profile,
+            effective_root=effective_root,
+        )
+        shared_rows = conn.execute(
+            """
+            SELECT session_id, workspace_root
+            FROM session_manifest_records
+            WHERE lineage_key = ? AND profile = ? AND record_kind = ? AND session_id != ?
+            """,
+            (lineage_key, profile, store.ARTIFACT_RECORD_KIND, session_id),
+        ).fetchall()
+        if any(
+            store._effective_workspace_root_text(row['workspace_root']) == effective_root
+            for row in shared_rows
+        ):
+            return {**report, 'status': 'shared_lineage_records'}
+
+    if not current_rows:
+        return {**report, 'status': 'no_records'}
+    valid_turn_keys = set(expected_by_turn)
+    unexpected_turn_keys = sorted({
+        str(row.get('turn_key') or '').strip()
+        for row in current_rows
+        if str(row.get('turn_key') or '').strip() not in valid_turn_keys
+    })
+    if unexpected_turn_keys:
+        return {
+            **report,
+            'status': 'unexpected_turn_keys',
+            'unexpected_turn_keys': unexpected_turn_keys,
+        }
+    if any(str(row.get('lineage_key') or '').strip() != lineage_key for row in current_rows):
+        return {**report, 'status': 'identity_conflict'}
+
+    current_by_turn: dict[str, list[dict[str, Any]]] = {}
+    for row in current_rows:
+        current_by_turn.setdefault(str(row.get('turn_key') or '').strip(), []).append(row)
+
+    replacement_by_turn: dict[str, list[dict[str, str]]] = {}
+    for turn_key in expected_by_turn:
+        expected = expected_by_turn[turn_key]
+        if expected:
+            replacement_by_turn[turn_key] = expected
+            continue
+        # Preserve an already-established empty decision, but never infer a
+        # new one while removing contaminated non-empty rows.
+        if any(str(row.get('path') or '').strip() == '' for row in current_by_turn.get(turn_key, [])):
+            replacement_by_turn[turn_key] = [{
+                'path': '',
+                'preview': 'file',
+                'source_tool': 'assistant_prose',
+            }]
+        else:
+            replacement_by_turn[turn_key] = []
+
+    replacement_rows = [
+        {'turn_key': turn_key, **entry}
+        for turn_key, entries in replacement_by_turn.items()
+        for entry in entries
+    ]
+    current_signatures = Counter(_repair_row_signature(row) for row in current_rows)
+    replacement_signatures = Counter(_repair_row_signature(row) for row in replacement_rows)
+    for turn_key in expected_by_turn:
+        current = Counter(_repair_row_signature(row) for row in current_by_turn.get(turn_key, []))
+        replacement = Counter(
+            _repair_row_signature({'turn_key': turn_key, **entry})
+            for entry in replacement_by_turn[turn_key]
+        )
+        kept = sorted((current & replacement).elements())
+        added = sorted((replacement - current).elements())
+        removed = sorted((current - replacement).elements())
+        report['turns'].append({
+            'turn_key': turn_key,
+            'kept': [row[1] for row in kept],
+            'added': [row[1] for row in added],
+            'removed': [row[1] for row in removed],
+        })
+        report['summary']['kept'] += len(kept)
+        report['summary']['added'] += len(added)
+        report['summary']['removed'] += len(removed)
+
+    if current_signatures == replacement_signatures:
+        return {**report, 'status': 'no_change'}
+    if not apply:
+        return {**report, 'status': 'dry_run'}
+
+    backup = Path(backup_path).expanduser().resolve() if backup_path else path.with_name(
+        f'{path.name}.backup-{time.strftime("%Y%m%d-%H%M%S")}-{time.time_ns()}'
+    )
+    backup.parent.mkdir(parents=True, exist_ok=True)
+    if backup.exists():
+        return {**report, 'status': 'backup_exists', 'backup_path': str(backup)}
+
+    baseline = sorted(_repair_row_signature(row) for row in current_rows)
+    created_at_by_identity = {
+        (str(row.get('turn_key') or '').strip(), str(row.get('path') or '').strip()): float(row.get('created_at') or 0.0)
+        for row in current_rows
+    }
+    source = sqlite3.connect(str(path))
+    source.row_factory = sqlite3.Row
+    try:
+        with closing(sqlite3.connect(str(backup))) as destination:
+            source.backup(destination)
+        source.execute('BEGIN IMMEDIATE')
+        latest_rows = _session_scope_rows(
+            source,
+            session_id=session_id,
+            profile=profile,
+            effective_root=effective_root,
+        )
+        if sorted(_repair_row_signature(row) for row in latest_rows) != baseline:
+            source.rollback()
+            backup.unlink(missing_ok=True)
+            return {**report, 'status': 'concurrent_change'}
+
+        roots = sorted({str(row.get('workspace_root') or '') for row in latest_rows})
+        for stored_root in roots:
+            source.execute(
+                """
+                DELETE FROM session_manifest_records
+                WHERE session_id = ? AND profile = ? AND workspace_root = ? AND record_kind = ?
+                """,
+                (session_id, profile, stored_root, store.ARTIFACT_RECORD_KIND),
+            )
+        now = time.time()
+        for row in replacement_rows:
+            normalized = store._normalize_record(
+                session,
+                str(row.get('turn_key') or ''),
+                row,
+                store.ARTIFACT_RECORD_KIND,
+            )
+            if normalized is None:
+                raise sqlite3.IntegrityError('manifest replacement normalization failed')
+            source.execute(
+                """
+                INSERT INTO session_manifest_records (
+                  session_id, lineage_key, profile, workspace_root, turn_key, record_kind,
+                  path, preview, source_tool, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    normalized['session_id'], normalized['lineage_key'], normalized['profile'],
+                    normalized['workspace_root'], normalized['turn_key'], normalized['record_kind'],
+                    normalized['path'], normalized['preview'], normalized['source_tool'],
+                    created_at_by_identity.get((normalized['turn_key'], normalized['path']), now), now,
+                ),
+            )
+        source.commit()
+    except (sqlite3.Error, OSError, ValueError):
+        source.rollback()
+        return {**report, 'status': 'store_failed', 'backup_path': str(backup)}
+    finally:
+        source.close()
+
+    with closing(sqlite3.connect(str(path))) as conn:
+        conn.row_factory = sqlite3.Row
+        verified_rows = _session_scope_rows(
+            conn,
+            session_id=session_id,
+            profile=profile,
+            effective_root=effective_root,
+        )
+    if Counter(_repair_row_signature(row) for row in verified_rows) != replacement_signatures:
+        return {
+            **report,
+            'status': 'applied_verification_failed',
+            'dry_run': False,
+            'backup_path': str(backup),
+        }
+    return {
+        **report,
+        'status': 'applied',
+        'dry_run': False,
+        'backup_path': str(backup),
+    }
 
 
 def rebind_manifest_turn_records(
