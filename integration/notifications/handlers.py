@@ -8,6 +8,7 @@ state is owned by the respective downstream/upstream service.
 """
 
 import logging
+from typing import Any
 from urllib.parse import parse_qs
 
 from api.helpers import j
@@ -59,11 +60,17 @@ def _sync_skill_publish(account: str, uuid: str = "") -> None:
 
 
 def _fetch_skill_publish_events(
-    *, account: str, uuid: str = "", read_type: str, limit: int
-) -> list[dict]:
-    """Pull the upstream event stream for display (live, never persisted)."""
+    *, account: str, uuid: str = "", read_type: str, limit: int,
+    before_id: int = 0,
+) -> tuple[list[dict], int]:
+    """Pull the upstream event stream for display (live, never persisted).
+
+    Returns ``(normalized_events, min_id)`` where ``min_id`` is the smallest
+    upstream event ID in the response (0 when empty) — used as ``before_id``
+    for the next page.
+    """
     if not skill_publish_enabled() or not account:
-        return []
+        return [], 0
     ext_id = uuid or account
     try:
         from integration.config import skill_publish_platform
@@ -73,7 +80,7 @@ def _fetch_skill_publish_events(
 
         seen_ids = None
         if read_type == "all":
-            seen_events = fetch_external_notifications(
+            seen_events, _ = fetch_external_notifications(
                 platform=skill_publish_platform(),
                 external_user_id=ext_id,
                 limit=limit,
@@ -84,9 +91,10 @@ def _fetch_skill_publish_events(
                 for e in seen_events
                 if e.get("id") is not None
             }
-        events = fetch_external_notifications(
+        events, min_id = fetch_external_notifications(
             platform=skill_publish_platform(),
             external_user_id=ext_id,
+            before_id=before_id,
             limit=limit,
             read_type=read_type,
         )
@@ -95,13 +103,13 @@ def _fetch_skill_publish_events(
                 e, read_type=read_type, seen_ids=seen_ids
             )
             for e in events
-        ]
+        ], min_id
     except Exception as exc:
         logger.exception(
             "notifications: skill_publish fetch failed account=%s error=%s",
             account, exc,
         )
-        return []
+        return [], 0
 
 
 def _fetch_skill_publish_summary(
@@ -118,7 +126,7 @@ def _fetch_skill_publish_summary(
             fetch_external_notifications,
         )
 
-        events = fetch_external_notifications(
+        events, _min_id = fetch_external_notifications(
             platform=skill_publish_platform(),
             external_user_id=ext_id,
             read_type=read_type,
@@ -365,10 +373,20 @@ def try_handle_get(handler, parsed) -> bool:
         )
         action_status_filter = (params.get("action_status", [None])[0] or "").strip() or None
 
+        before_id_str = params.get("before_id", [None])[0]
+        before_id = 0
+        if before_id_str:
+            try:
+                before_id = int(before_id_str)
+            except ValueError:
+                before_id = 0
+
         _sync_skill_publish(account, uuid=uuid)
-        items = _fetch_skill_publish_events(
-            account=account, uuid=uuid, read_type=read_type, limit=limit + 1
+        sp_items, sp_min_id = _fetch_skill_publish_events(
+            account=account, uuid=uuid, read_type=read_type,
+            limit=limit + 1, before_id=before_id,
         )
+        items = list(sp_items)
         items.extend(_fetch_kb_messages(
             account=account,
             uuid=uuid,
@@ -380,10 +398,12 @@ def try_handle_get(handler, parsed) -> bool:
         items = filter_by_action_status(items, action_status_filter)
         items, next_cursor = _paginate_items(items, limit, cursor)
 
-        j(handler, {
+        resp: dict[str, Any] = {
             "items": items,
             "next_cursor": next_cursor,
-        })
+            "next_before_id": sp_min_id if sp_min_id else None,
+        }
+        j(handler, resp)
         return True
 
     if path == "/api/integration/notifications/summary":

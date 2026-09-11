@@ -3241,6 +3241,12 @@
             "in": "query",
             "description": "游标分页，使用上次返回的 next_cursor（首次请求不传）",
             "schema": { "type": "number", "format": "float" }
+          },
+          {
+            "name": "before_id",
+            "in": "query",
+            "description": "skill_publish 事件翻页游标，使用上次返回的 next_before_id（首次请求不传）；传入后上游只返回 id < before_id 的事件",
+            "schema": { "type": "integer" }
           }
         ],
         "responses": {
@@ -3259,7 +3265,12 @@
                       "type": "number",
                       "format": "float",
                       "nullable": true,
-                      "description": "下一页游标，null 表示没有更多数据"
+                      "description": "下一页游标（KB 消息时间戳），null 表示没有更多 KB 数据"
+                    },
+                    "next_before_id": {
+                      "type": "integer",
+                      "nullable": true,
+                      "description": "skill_publish 事件下一页游标（上游事件最小 ID），null 表示没有更多 skill_publish 数据；传入下次请求的 before_id 参数即可翻页"
                     }
                   },
                   "required": ["items", "next_cursor"]

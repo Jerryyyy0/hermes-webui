@@ -49,7 +49,7 @@ def _event(event_id=10, scene="1", result="1", application_id="up-1",
 
 
 def _run(events, account="acct-a", db=None):
-    with patch.object(sync, "fetch_external_notifications", return_value=events):
+    with patch.object(sync, "fetch_external_notifications", return_value=(events, 0)):
         with patch.object(sync, "_platform", return_value="test-platform"):
             return sync.sync_notifications_for_account(account, db_path=db)
 
@@ -167,7 +167,7 @@ def test_since_id_uses_max_audit_event_id(db):
     app = _make_pending_app(db)
     store.update_application(app["id"], fields={"audit_event_id": 7}, db_path=db)
     with patch.object(
-        sync, "fetch_external_notifications", return_value=[]
+        sync, "fetch_external_notifications", return_value=([], 0)
     ) as mock_fetch:
         with patch.object(sync, "_platform", return_value="p"):
             sync.sync_notifications_for_account("acct-a", db_path=db)
@@ -202,7 +202,7 @@ def test_admin_online_event_scene4(db):
 def test_sync_application_if_pending_refreshes(db):
     app = _make_pending_app(db)
     with patch.object(
-        sync, "fetch_external_notifications", return_value=[_event()]
+        sync, "fetch_external_notifications", return_value=([_event()], 0)
     ):
         with patch.object(sync, "_platform", return_value="p"):
             refreshed = sync.sync_application_if_pending(app, db_path=db)

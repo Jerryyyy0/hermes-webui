@@ -169,16 +169,19 @@ def test_fetch_external_notifications_parses_b3():
                 {"id": 5, "scene": "1", "result": "1"},
                 {"id": 6, "scene": "2", "result": "0"},
                 "garbage",
-            ]
+            ],
+            "minId": 5,
+            "maxId": 6,
         }),
         capture=captured,
     )
     with patch.object(client, "skillhub_url", return_value="http://hub.test"):
         with patch.object(client, "_client", return_value=fake):
-            events = fetch_external_notifications(
+            events, min_id = fetch_external_notifications(
                 platform="p", external_user_id="u", since_id=4, limit=50,
             )
     assert events == [{"id": 5, "scene": "1", "result": "1"}, {"id": 6, "scene": "2", "result": "0"}]
+    assert min_id == 5
     method, url, kwargs = captured[0]
     assert method == "GET"
     assert url == "http://hub.test/api/external/notifications"
@@ -196,10 +199,12 @@ def test_fetch_external_notifications_forwards_read_type():
     )
     with patch.object(client, "skillhub_url", return_value="http://hub.test"):
         with patch.object(client, "_client", return_value=fake):
-            fetch_external_notifications(
+            events, min_id = fetch_external_notifications(
                 platform="p", external_user_id="u", read_type="unread",
             )
     assert captured[0][2]["params"]["readType"] == "unread"
+    assert events == []
+    assert min_id == 0
 
 
 def test_mark_external_notifications_read_posts_ids():
@@ -242,9 +247,44 @@ def test_fetch_external_notifications_missing_list_returns_empty():
     fake = _fake_client(response=_FakeResponse(payload={"notifications": None}))
     with patch.object(client, "skillhub_url", return_value="http://hub.test"):
         with patch.object(client, "_client", return_value=fake):
-            assert fetch_external_notifications(
+            events, min_id = fetch_external_notifications(
                 platform="p", external_user_id="u"
-            ) == []
+            )
+    assert events == []
+    assert min_id == 0
+
+
+def test_fetch_external_notifications_forwards_before_id():
+    captured = []
+    fake = _fake_client(
+        response=_FakeResponse(payload={
+            "notifications": [{"id": 3}],
+            "minId": 3,
+        }),
+        capture=captured,
+    )
+    with patch.object(client, "skillhub_url", return_value="http://hub.test"):
+        with patch.object(client, "_client", return_value=fake):
+            events, min_id = fetch_external_notifications(
+                platform="p", external_user_id="u", before_id=10, limit=20,
+            )
+    assert events == [{"id": 3}]
+    assert min_id == 3
+    assert captured[0][2]["params"]["beforeId"] == 10
+
+
+def test_fetch_external_notifications_omits_before_id_when_zero():
+    captured = []
+    fake = _fake_client(
+        response=_FakeResponse(payload={"notifications": []}),
+        capture=captured,
+    )
+    with patch.object(client, "skillhub_url", return_value="http://hub.test"):
+        with patch.object(client, "_client", return_value=fake):
+            fetch_external_notifications(
+                platform="p", external_user_id="u", before_id=0,
+            )
+    assert "beforeId" not in captured[0][2]["params"]
 
 
 def test_non_json_response_raises_upstream():

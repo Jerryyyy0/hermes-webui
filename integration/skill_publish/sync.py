@@ -55,7 +55,7 @@ def sync_notifications_for_account(
         return 0
     ext_id = external_user_id or account
     try:
-        events = fetch_external_notifications(
+        events, _min_id = fetch_external_notifications(
             platform=_platform(),
             external_user_id=ext_id,
             since_id=_last_event_id(account, db_path),
@@ -85,7 +85,7 @@ def sync_application_if_pending(
     account = app.get("submitter_account") or ""
     ext_id = app.get("external_user_id") or app.get("submitter_uuid") or ""
     try:
-        events = fetch_external_notifications(
+        events, _min_id = fetch_external_notifications(
             platform=_platform(),
             external_user_id=ext_id,
             since_id=int(app.get("audit_event_id") or 0),

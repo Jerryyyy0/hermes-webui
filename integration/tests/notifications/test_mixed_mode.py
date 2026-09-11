@@ -59,7 +59,7 @@ def _patch_sp(events_by_read_type, mark_read=None):
     """
 
     def fake_fetch(**kwargs):
-        return events_by_read_type.get(kwargs.get("read_type", "all"), [])
+        return events_by_read_type.get(kwargs.get("read_type", "all"), []), 0
 
     fetch_patch = patch(
         "integration.skill_publish.client.fetch_external_notifications",
