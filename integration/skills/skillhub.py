@@ -1139,12 +1139,12 @@ def install_skill(name: str, display_name: str = "", category: str = "") -> dict
     if existing_dir is not None:
         rel_path = _skill_dir_rel_path(existing_dir, skills_dir)
         return {
-            "error": f"Skill already installed at '{rel_path}'",
+            "error": f"该技能已安装在 '{rel_path}'",
             "status": 409,
         }
 
     if find_skill_main_file(target) or (target / ".hub_installed").is_file():
-        return {"error": "Skill already installed", "status": 409}
+        return {"error": "该技能已安装", "status": 409}
 
     label = (display_name or name).strip()
     try:
@@ -1220,12 +1220,12 @@ def install_skill_to_profile(
     if existing_dir is not None:
         rel_path = _skill_dir_rel_path(existing_dir, skills_dir)
         return {
-            "error": f"Skill already installed at '{rel_path}'",
+            "error": f"该技能已安装在 '{rel_path}'",
             "status": 409,
         }
 
     if find_skill_main_file(target) or (target / ".hub_installed").is_file():
-        return {"error": "Skill already installed", "status": 409}
+        return {"error": "该技能已安装", "status": 409}
 
     label = (display_name or name).strip()
     try:
@@ -1543,7 +1543,7 @@ def copy_custom_skill_to_profile(name: str, profile_name: str, category: str = "
     # Check if already exists
     if target.exists():
         rel_path = _skill_dir_rel_path(target, skills_dir)
-        return {"error": f"Skill already installed at '{rel_path}'", "status": 409}
+        return {"error": f"该技能已安装在 '{rel_path}'", "status": 409}
 
     # Copy the entire skill directory
     try:

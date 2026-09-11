@@ -537,14 +537,14 @@ def _post_install_to_profiles(handler, parsed, body: dict) -> bool:
                 name, profile_name, display_name=display_name, category=category
             )
             if result.get("status") == 409:
-                results.append({"profile": profile_name, "ok": False, "error": result.get("error", "already installed")})
+                results.append({"profile": profile_name, "ok": False, "error": result.get("error", "该技能已安装")})
             elif result.get("ok"):
                 entry = {"profile": profile_name, "ok": True, "dir_name": result.get("dir_name", "")}
                 if result.get("warning"):
                     entry["warning"] = result["warning"]
                 results.append(entry)
             else:
-                results.append({"profile": profile_name, "ok": False, "error": result.get("error", "unknown error")})
+                results.append({"profile": profile_name, "ok": False, "error": result.get("error", "未知错误")})
         except RuntimeError as exc:
             results.append({"profile": profile_name, "ok": False, "error": str(exc)})
         except Exception as exc:
