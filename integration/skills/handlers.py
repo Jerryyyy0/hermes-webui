@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from urllib.parse import parse_qs
 
@@ -16,6 +17,8 @@ from integration.skills.sort_utils import (
     normalize_sort,
 )
 from integration.skills.utils import stream_zip_to_handler
+
+_log = logging.getLogger(__name__)
 
 # Test injection point (set via monkeypatch in tests, like skill_publish handlers)
 _DB_PATH = None
@@ -1017,28 +1020,235 @@ def _post_skillhub_upgrade(handler, body) -> bool:
 
 
 def _get_skillhub_skill_versions(handler, parsed) -> bool:
-    """GET /api/skillhub/skill-versions?name=xxx — version history from upstream."""
+    """GET /api/skillhub/skill-versions?name=xxx&profile=yyy — version history.
+
+    Source is auto-detected:
+    - ``hub``: skill installed from SkillHub (has .hub_installed marker) →
+      version history comes from upstream SkillHub API, plus local install
+      version info.
+    - ``custom``: user-uploaded custom skill (no .hub_installed) →
+      version history comes from the local publish application DB
+      (approved submissions + application form snapshots).
+    """
     from integration.skills.version_store import get as vs_get
 
     qs = _qs(parsed)
-    name = (qs.get("name") or [""])[0]
+    name = (qs.get("name") or [""])[0].strip()
     if not name:
         return _respond_bad(handler, "name required", 400)
+    profile = (qs.get("profile") or [""])[0].strip()
+    scope = (qs.get("scope") or [""])[0].strip().lower()
+    if scope and scope not in ("hub", "custom"):
+        return _respond_bad(handler, "scope must be hub or custom", 400)
     db = _DB_PATH
 
     try:
-        versions = skillhub.fetch_version_history(name)
-        row = vs_get(name, db_path=db)
-        current_version = str(row.get("local_version") or "") if row else ""
-        latest_version = str(row.get("upstream_version") or "") if row else ""
-
-        return _respond(handler, {
-            "ok": True,
-            "name": name,
-            "current_version": current_version,
-            "latest_version": latest_version,
-            "delisted": skillhub.is_delisted_installed(name),
-            "versions": versions,
-        })
+        source = _detect_skill_source(name, profile, scope_filter=scope)
+        if source == "hub":
+            return _respond(handler, _hub_versions_payload(name, db))
+        if source == "custom":
+            return _respond(handler, _custom_versions_payload(name, profile))
+        # Not installed locally — but a skill that is on sale in the market
+        # still has a version history worth showing (detail page reached via
+        # the catalog rather than via "my installed skills").
+        if scope != "custom" and _in_hub_catalog(name):
+            return _respond(handler, _hub_versions_payload(name, db))
+        return _respond_bad(handler, f"skill '{name}' not found", 404)
     except Exception as exc:
+        _log.debug("skill-versions failed for %s: %s", name, exc)
         return _respond_bad(handler, str(exc), 502)
+
+
+def _in_hub_catalog(name: str) -> bool:
+    """True when *name* exists in the upstream SkillHub catalog.
+
+    Independent of the local install state — used as a fallback so skills
+    that are on sale but not installed still resolve to the ``hub`` source.
+    """
+    try:
+        return name in skillhub._hub_names_from_skills(
+            skillhub.fetch_all_hub_skills(category=None)
+        )
+    except Exception as exc:
+        _log.debug("hub catalog lookup failed for %s: %s", name, exc)
+        return False
+
+
+def _detect_skill_source(
+    name: str, profile: str, *, scope_filter: str = ""
+) -> str:
+    """Return ``"hub"`` / ``"custom"`` / ``""`` for *name*.
+
+    ``scope_filter``: ``"hub"`` / ``"custom"`` / ``""`` (default).
+    When set, only consider that origin — e.g. ``scope_filter="custom"``
+    returns ``"custom"`` only if a custom copy exists (hub markers are
+    ignored), and ``""`` otherwise. Useful when the caller already knows
+    which scope the request came from (e.g. custom skill detail page) and
+    wants to avoid same-name cross-origin ambiguity.
+
+    Resolution order:
+    1. If ``profile`` is given, look up the skill inside *that profile only*.
+       Hub marker wins over custom when both exist in the same profile
+       (only when ``scope_filter`` is empty).
+    2. If no profile specified, or the skill isn't present in that profile,
+       fall back to scanning across all profiles.
+
+    The per-profile check matters when two profiles each have a same-named
+    skill of different origin — e.g. profile A has a hub-installed copy and
+    profile B has a user-uploaded custom copy. In that case each profile's
+    version history should come from its own source.
+    """
+    from integration.skills.paths import skills_dir_for_profile
+
+    sf = str(scope_filter or "").strip().lower()
+    want_hub = sf in ("", "hub")
+    want_custom = sf in ("", "custom")
+
+    def _source_in_dir(skills_dir) -> str:
+        if not skills_dir.exists():
+            return ""
+        # Hub marker — reliable, exact name match via index
+        if want_hub:
+            hub_index = skillhub._hub_installed_index(skills_dir)
+            if name in hub_index:
+                return "hub"
+        # Custom — look for a SKILL.md in this skills_dir matching the name
+        if not want_custom:
+            return ""
+        try:
+            from agent.skill_utils import iter_skill_index_files
+            from tools.skills_tool import (
+                _EXCLUDED_SKILL_DIRS,
+                _parse_frontmatter,
+            )
+        except Exception:
+            return ""
+        for skill_md in iter_skill_index_files(skills_dir, "SKILL.md"):
+            if any(part in _EXCLUDED_SKILL_DIRS for part in skill_md.parts):
+                continue
+            skill_dir = skill_md.parent
+            if skill_dir.name == name:
+                return "custom"
+            try:
+                fm, _ = _parse_frontmatter(
+                    skill_md.read_text(encoding="utf-8")[:4000]
+                )
+                if fm.get("name") == name:
+                    return "custom"
+            except Exception:
+                continue
+        return ""
+
+    if profile:
+        try:
+            s = _source_in_dir(skills_dir_for_profile(profile))
+            if s:
+                return s
+        except Exception:
+            pass
+
+    # Fallback: cross-profile scan
+    if want_hub:
+        try:
+            all_installs = skillhub._hub_installed_profiles_all()
+            if name in all_installs and all_installs[name]:
+                return "hub"
+        except Exception:
+            pass
+    if want_custom:
+        skill_dir, _ = local_skills._find_skill_in_any_profile(name)
+        if skill_dir and skill_dir.is_dir() and not (skill_dir / ".hub_installed").is_file():
+            return "custom"
+    return ""
+
+
+def _hub_versions_payload(name: str, db) -> dict:
+    from integration.skills.version_store import get as vs_get
+
+    versions = skillhub.fetch_version_history(name)
+    row = vs_get(name, db_path=db)
+    current_version = str(row.get("local_version") or "") if row else ""
+    latest_version = str(row.get("upstream_version") or "") if row else ""
+    return {
+        "ok": True,
+        "name": name,
+        "source": "hub",
+        "published": True,
+        "current_version": current_version,
+        "latest_version": latest_version,
+        "delisted": skillhub.is_delisted_installed(name),
+        "versions": versions,
+    }
+
+
+def _custom_versions_payload(name: str, profile: str) -> dict:
+    """Build version history for a custom skill from the publish application DB."""
+    import json as _json
+
+    from integration.skill_publish import store as publish_store
+    from integration.skill_publish.handlers import _DB_PATH as publish_db
+
+    latest = publish_store.get_latest_version(name, db_path=publish_db)
+    entries = publish_store.list_merged_versions(name, db_path=publish_db)
+
+    def _normalize_log_entry(entry):
+        if not isinstance(entry, dict):
+            return entry
+        out = dict(entry)
+        if "changeLog" in out and "change_log" not in out:
+            out["change_log"] = out.pop("changeLog")
+        return out
+
+    def _parse_change_logs(raw):
+        if isinstance(raw, list):
+            return [_normalize_log_entry(e) for e in raw]
+        if not raw:
+            return []
+        try:
+            val = _json.loads(str(raw))
+            if isinstance(val, list):
+                return [_normalize_log_entry(e) for e in val]
+            return []
+        except (ValueError, TypeError):
+            return []
+
+    # list_merged_versions returns oldest-first; reverse to match hub order (newest first)
+    ordered = list(reversed(entries))
+
+    def _fmt_datetime(ts):
+        """Format a unix timestamp as 'yyyy-MM-dd HH:mm:ss' (matches hub format)."""
+        if not ts:
+            return ""
+        try:
+            import datetime
+            return datetime.datetime.fromtimestamp(float(ts)).strftime("%Y-%m-%d %H:%M:%S")
+        except (ValueError, TypeError, OSError):
+            return ""
+
+    versions = [
+        {
+            "version": a.get("version") or "",
+            "published_at": _fmt_datetime(a.get("audited_at")),
+            "change_logs": _parse_change_logs(a.get("change_logs")),
+            # Custom-only fields (supplementary; shared fields above match hub format)
+            "status": a.get("status") or "",
+            "application_type": a.get("application_type") or "",
+            "submitted_at": a.get("submitted_at") or 0,
+            "audited_at": a.get("audited_at") or 0,
+            "audit_comment": a.get("audit_comment") or "",
+            "application_id": a.get("id") or "",
+        }
+        for a in ordered
+    ]
+    has_published = bool(latest and latest.get("version"))
+    return {
+        "ok": True,
+        "name": name,
+        "source": "custom",
+        "published": has_published,
+        "current_version": (latest or {}).get("version") or "",
+        "latest_version": (latest or {}).get("version") or "",
+        "next_version": "1.0.0" if not has_published else "",
+        "delisted": False,
+        "versions": versions,
+    }

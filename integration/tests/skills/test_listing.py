@@ -54,13 +54,29 @@ def test_list_skillhub_skills_hub_scope_envelope():
 
 
 def test_list_skillhub_skills_hub_all_category():
-    with patch("integration.skills.listing.skillhub.build_hub_catalog_context", return_value=_fake_ctx()):
+    with patch("integration.skills.listing.skillhub.build_hub_catalog_context", return_value=_fake_ctx()) as build_ctx:
         with patch("integration.skills.listing.skillhub.compute_scope_stats_from", return_value=_STATS):
             with patch("integration.skills.listing.local_skills.scan_custom_skills_global", return_value=[]):
                 with patch("integration.skills.listing.skillhub.list_hub_catalog_paged_from") as paged:
                     paged.return_value = ([], 0)
-                    listing.list_skillhub_skills(category="")
+                    listing.list_skillhub_skills(category="", profile="researcher")
                     assert paged.call_args.kwargs["category"] == ""
+                    build_ctx.assert_called_once_with(profile="researcher")
+
+
+def test_list_skillhub_skills_passes_profile_to_build_context_for_all_scopes():
+    for scope in ("hub", "installed", "not_installed", "custom", "local_all"):
+        with patch("integration.skills.listing.skillhub.build_hub_catalog_context", return_value=_fake_ctx()) as build_ctx:
+            with patch("integration.skills.listing.skillhub.compute_scope_stats_from", return_value=_STATS):
+                with patch("integration.skills.listing.local_skills.scan_custom_skills_global", return_value=[]):
+                    with patch("integration.skills.listing.skillhub.list_hub_catalog_paged_from") as paged:
+                        paged.return_value = ([], 0)
+                    with patch("integration.skills.listing.local_skills.list_custom_skills") as custom_list:
+                        custom_list.return_value = {"skills": [], "total": 0}
+                    with patch("integration.skills.listing._local_all_skills_for_profile") as la:
+                        la.return_value = ([], [])
+                        listing.list_skillhub_skills(scope=scope, profile="alice")
+                        build_ctx.assert_called_once_with(profile="alice")
 
 
 def test_list_skillhub_skills_installed_scope():

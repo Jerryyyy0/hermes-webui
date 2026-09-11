@@ -14,7 +14,7 @@ from urllib.parse import parse_qs
 
 from api.helpers import bad, j
 from integration.config import skill_publish_enabled
-from integration.skill_publish import client, store, zip_pack
+from integration.skill_publish import client, store, validate, zip_pack
 from integration.skill_publish.client import (
     SkillHubConflictError,
     SkillHubUpstreamError,
@@ -71,6 +71,8 @@ def try_handle_get(handler, parsed) -> bool:
         return _get_my_published(handler, qs)
     if path == "/api/skillhub/publish/skill-versions":
         return _get_skill_versions(handler, qs)
+    if path == "/api/skillhub/publish/validate":
+        return _get_validate(handler, qs)
     match = _VERSIONS_RE.match(path)
     if match:
         return _get_application_versions(handler, qs, match.group(1))
@@ -160,6 +162,24 @@ def _sync_pending_applications() -> None:
                 pass  # Sync failure should not block listing
     except Exception:
         pass  # Sync failure should not block listing
+
+
+def _get_validate(handler, qs: dict[str, str]) -> bool:
+    skill_name = (qs.get("skill_name") or "").strip()
+    if not skill_name:
+        return _respond_bad(handler, "缺少 skill_name 参数", 400)
+    skill_dir = validate.resolve_skill_dir(skill_name)
+    if skill_dir is None:
+        return _respond_bad(handler, "本地技能不存在，请先上传技能后再申请发布", 404)
+    issues = validate.validate_skill_package(skill_name, skill_dir)
+    return _respond(
+        handler,
+        {
+            "skill_name": skill_name,
+            "valid": not any(i.get("severity") == "error" for i in issues),
+            "issues": issues,
+        },
+    )
 
 
 def _get_detail(handler, qs: dict[str, str], app_id: str) -> bool:
@@ -532,6 +552,22 @@ def _post_submit(handler, app_id: str, body: dict) -> bool:
 
     update_fields: dict[str, Any] = {"version": version}
     if app_type == ApplicationType.PUBLISH:
+        skill_dir = validate.resolve_skill_dir(app["skill_name"])
+        if skill_dir is None:
+            return _respond_bad(handler, "本地技能不存在，请先上传技能后再申请发布", 404)
+        # Gate on the same package-format rules the validate endpoint
+        # reports, so non-compliant skills never reach upstream.
+        errors = [
+            i for i in validate.validate_skill_package(app["skill_name"], skill_dir)
+            if i.get("severity") == "error"
+        ]
+        if errors:
+            j(
+                handler,
+                {"error": "技能文件格式不合规，请调整后再提交", "issues": errors},
+                status=400,
+            )
+            return True
         snapshot = _read_local_skill_snapshot(app["skill_name"])
         if snapshot is None:
             return _respond_bad(handler, "本地技能不存在，请先上传技能后再申请发布", 404)
@@ -540,9 +576,7 @@ def _post_submit(handler, app_id: str, body: dict) -> bool:
     tmp_zip: Path | None = None
     try:
         if app_type == ApplicationType.PUBLISH:
-            skill_dir, _ = _find_skill_safe(app["skill_name"])
-            if not skill_dir:
-                return _respond_bad(handler, "本地技能不存在，请先上传技能后再申请发布", 404)
+            assert skill_dir is not None
             tmp_zip = zip_pack.create_temp_zip_path()
             zip_pack.build_skill_zip(skill_dir, tmp_zip)
 
@@ -654,13 +688,6 @@ def _post_submit(handler, app_id: str, body: dict) -> bool:
     finally:
         if tmp_zip is not None:
             zip_pack.safe_unlink(tmp_zip)
-
-
-def _find_skill_safe(skill_name: str) -> tuple[Path | None, Any]:
-    from integration.skills.local_skills import _find_skill_in_any_profile
-
-    skill_dir, skill_md = _find_skill_in_any_profile(skill_name)
-    return skill_dir, skill_md
 
 
 def _platform() -> str:

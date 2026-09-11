@@ -435,29 +435,46 @@ def _disabled_skill_names() -> set[str]:
     try:
         from tools.skills_tool import _get_disabled_skill_names
 
-        return _get_disabled_skill_names()
+        names = _get_disabled_skill_names()
+        _log.debug(
+            "_disabled_skill_names (process-level): %d names (HERMES_HOME=%s)",
+            len(names),
+            __import__("os").environ.get("HERMES_HOME", ""),
+        )
+        return names
     except Exception:
         return set()
 
 
 def _disabled_skill_names_for_profile(profile_name: str) -> set[str]:
     """Read ``skills.disabled`` from the given profile's config.yaml."""
+    profile = str(profile_name or "").strip() or "default"
     try:
         from api.profiles import get_hermes_home_for_profile
         import yaml
 
-        home = Path(get_hermes_home_for_profile(profile_name))
+        home = Path(get_hermes_home_for_profile(profile))
         config_path = home / "config.yaml"
         if not config_path.is_file():
+            _log.debug(
+                "disabled names: profile=%s no config at %s", profile, config_path
+            )
             return set()
         with open(config_path, encoding="utf-8") as f:
             cfg = yaml.safe_load(f) or {}
         disabled = (cfg.get("skills") or {}).get("disabled") or []
         if not isinstance(disabled, list):
             return set()
-        return {str(name).strip() for name in disabled if str(name).strip()}
+        result = {str(name).strip() for name in disabled if str(name).strip()}
+        _log.debug(
+            "disabled names for profile %s: %d names (%s)",
+            profile,
+            len(result),
+            ", ".join(sorted(result))[:200],
+        )
+        return result
     except Exception as exc:
-        _log.debug("disabled names for profile %s failed: %s", profile_name, exc)
+        _log.debug("disabled names for profile %s failed: %s", profile, exc)
         return set()
 
 
@@ -570,7 +587,21 @@ def annotate_installed(
     except Exception:
         pass
 
-    disabled = disabled_names if disabled_names is not None else _disabled_skill_names()
+    if disabled_names is None:
+        _log.warning(
+            "annotate_installed called without disabled_names — "
+            "falling back to process-level _disabled_skill_names(). "
+            "Caller should pass profile-scoped disabled_names to avoid "
+            "HERMES_HOME drift during streaming / profile switches."
+        )
+        disabled = _disabled_skill_names()
+    else:
+        disabled = disabled_names
+    _log.debug(
+        "annotate_installed: %d skills, disabled_set_size=%d",
+        len(skills),
+        len(disabled),
+    )
     lock_fields_ok = True
     if locked_names is None:
         try:
@@ -679,8 +710,15 @@ def _hub_names_from_skills(skills: list[dict]) -> set[str]:
     return names
 
 
-def build_hub_catalog_context() -> _HubCatalogContext:
-    """Fetch hub catalog once per request and precompute install annotations."""
+def build_hub_catalog_context(profile: str = "default") -> _HubCatalogContext:
+    """Fetch hub catalog once per request and precompute install annotations.
+
+    ``profile`` determines which profile's ``skills.disabled`` list is used
+    for the ``disabled`` flag on each skill row. Default ``"default"`` —
+    callers with a known profile should pass it so the flag matches the
+    request's active profile, not the process-global ``HERMES_HOME``
+    (which drifts when streaming sessions patch process env).
+    """
     raw_skills = fetch_all_hub_skills(category=None)
     hub_names = _hub_names_from_skills(raw_skills)
     skills_dir = shared_skills_dir()
@@ -705,13 +743,24 @@ def build_hub_catalog_context() -> _HubCatalogContext:
         for name, installs in all_profiles.items()
         if installs
     }
+    profile_key = str(profile or "").strip() or "default"
+    _log.debug(
+        "build_hub_catalog_context: profile=%s, raw_skills=%d, hub_names=%d",
+        profile_key,
+        len(raw_skills),
+        len(hub_names),
+    )
+    disabled_names = _disabled_skill_names_for_profile(profile_key)
     annotated = [dict(skill) for skill in raw_skills]
     annotate_installed(
         annotated,
         locked_names=locked_names,
         profile_index=profile_index,
+        disabled_names=disabled_names,
     )
-    delisted = _build_delisted_installed(hub_names, locked_names, profile_index)
+    delisted = _build_delisted_installed(
+        hub_names, locked_names, profile_index, disabled_names=disabled_names
+    )
     return _HubCatalogContext(
         raw_skills=raw_skills,
         hub_names=hub_names,
@@ -726,6 +775,7 @@ def _build_delisted_installed(
     hub_names: set[str],
     locked_names: set[str],
     profile_index: dict[str, tuple[str, str]],
+    disabled_names: set[str] | None = None,
 ) -> list[dict]:
     """Synthetic rows for installed skills that no longer appear in the hub catalog.
 
@@ -754,7 +804,12 @@ def _build_delisted_installed(
         rows.append({"name": key, "category": category})
     if not rows:
         return []
-    annotate_installed(rows, locked_names=locked_names, profile_index=profile_index)
+    annotate_installed(
+        rows,
+        locked_names=locked_names,
+        profile_index=profile_index,
+        disabled_names=disabled_names,
+    )
     return rows
 
 
