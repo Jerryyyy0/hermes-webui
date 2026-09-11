@@ -1806,7 +1806,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--prompt-source",
         choices=("custom", "database", "model"),
-        default="database",
+        default="model",
         help="custom: built-in custom messages; database: sample history prompts; model: generate multi-turn file scenarios",
     )
     parser.add_argument(
