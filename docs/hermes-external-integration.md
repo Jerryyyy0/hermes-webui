@@ -3,6 +3,24 @@
 本 Fork 的外部集成实现位于 `integration/`。上游文件只保留必要的导入、注册或
 参数传递，以降低上游同步冲突。
 
+## Agent 历史语义与压缩
+
+`api/streaming.py::_sanitize_messages_for_api` 在正常、重试与重建 Agent 的
+`conversation_history` 入口显式启用 `preserve_agent_semantics`。
+`integration/agent_message_semantics/history.py` 在逐行投影时只保留已识别的
+`_hermes_message_class` / `_hermes_scaffold_kind`，并将旧兼容标记规范化；
+不扩展 Provider 字段白名单，不透传任意私有字段。Agent transport 在请求副本中
+剥离内部字段，Agent 内存历史和压缩持久化则保留语义，展示层继续隐藏内部输入。
+
+状态不变量：压缩保留的内部通知不能变成真实用户轮次；普通用户输入相同正文
+仍可见。此修复不扫描 inactive 历史、不改写真实数据库或既有 sidecar，已丢失
+标记的历史需另行基于原始记录审计修复，不能按文本前缀批量隐藏。
+
+验证：`./scripts/test.sh integration/tests/agent_message_semantics/test_agent_history.py`。
+设置 `HERMES_WEBUI_AGENT_DIR` 指向兼容 Agent checkout 可额外执行真实
+SQLite `archive_and_compact` → WebUI 回读/分页 → Agent transport 契约测试；
+使用临时数据库，不请求模型。不提供 Agent 时该契约用例跳过。
+
 ## Runtime configuration
 
 `api/models.py::_merge_session_display_metadata` 在复制轮次身份与 Agent 语义标签前，

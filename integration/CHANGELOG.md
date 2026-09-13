@@ -49,6 +49,8 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Fixed
 
+- 修复 WebUI 历史清洗过早丢弃 Agent 内部语义标记，导致异步委派完成通知、续写提示在压缩后显示为用户消息；正常、重试和恢复入口均保留历史标记，Provider 请求仍剥离内部字段。
+
 - **SkillHub 已安装列表包含已下架技能** — `scope=installed`（及 `local_all` / 会话气泡 `skills_count` 聚合）此前基于上游目录 ∩ 本地 `.hub_installed` 的交集计算，技能在市场下架后即使本地仍已安装也会从列表消失。现在 catalog context 额外用全 profile 安装索引合成「已下架仍安装」条目（按 profile+dir 去重，读取本地 SKILL.md 描述、`.category` 分类与版本信息），合并进 `scope=installed` 结果与 `stats.installed` 计数；`local_all` 同样按该 Profile 的安装索引补充这些条目，市场不可达时的本地兜底逻辑不变。
 
 - **skill-versions 接口返回 `delisted` 标识** — `GET /api/skillhub/skill-versions?name=…` 新增 `delisted` 布尔字段：技能本地已安装（存在 `.hub_installed`）但不在市场目录时为 `true`，前端可据此提示「该技能已从市场下架」；市场目录不可达或技能在售时为 `false`。
