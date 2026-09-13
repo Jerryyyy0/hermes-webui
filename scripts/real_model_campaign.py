@@ -538,8 +538,9 @@ def drain_blocking_prompts(api: "Api", session_id: str, *, limit: int = 8) -> di
 def create_plain_session(
     api: Api,
     *,
-    title_prefix: str = "campaign-first",
+    title_prefix: str = "batch-test",
     model: str | None = None,
+    model_provider: str | None = None,
 ) -> tuple[str, Path | None]:
     """Create a campaign session in the server-managed workspace."""
     body: dict[str, Any] = {"worktree": False}
@@ -547,6 +548,8 @@ def create_plain_session(
         # Let the WebUI resolve this explicit choice through the active
         # profile's config.yaml provider/custom-provider configuration.
         body["model"] = model
+    if model_provider:
+        body["model_provider"] = model_provider
     created = api.request("POST", "/api/session/new", body)
     session = created.get("session", {}) if isinstance(created, dict) else {}
     session_id = str(session.get("session_id") or "")
@@ -682,13 +685,18 @@ def create_replay_session(
     workspace: Path,
     question: HistoryPrompt,
     model: str,
+    model_provider: str | None = None,
 ) -> tuple[str, dict[str, Any], Path | None]:
     meta: dict[str, Any] = {"strategy": "replay_prefix", "prefix_messages": 0, "copied_files": []}
     prefix = load_prefix_messages(state_dir, question)
     meta["prefix_messages"] = len(prefix)
     if not prefix:
         meta["fallback"] = "missing_prefix_use_plain_session"
-        session_id, managed_workspace = create_plain_session(api)
+        session_id, managed_workspace = create_plain_session(
+            api,
+            model=model,
+            model_provider=model_provider,
+        )
         return session_id, meta, managed_workspace
     paths = prefix_delivery_paths(state_dir, question)
     meta["copied_files"] = copy_replay_files(
@@ -696,17 +704,24 @@ def create_replay_session(
         workspace,
         paths,
     )
-    imported = api.request("POST", "/api/session/import", {
+    import_body: dict[str, Any] = {
         "title": f"campaign-replay:{question.source_session_id}:turn{question.turn}",
         "workspace": str(workspace),
         "model": model,
         "messages": prefix,
-    })
+    }
+    if model_provider:
+        import_body["model_provider"] = model_provider
+    imported = api.request("POST", "/api/session/import", import_body)
     session_id = str(imported.get("session", {}).get("session_id") or "")
     if not session_id:
         meta["fallback"] = "import_failed_use_plain_session"
         meta["import_error"] = imported.get("error") or imported
-        session_id, managed_workspace = create_plain_session(api)
+        session_id, managed_workspace = create_plain_session(
+            api,
+            model=model,
+            model_provider=model_provider,
+        )
         return session_id, meta, managed_workspace
     enable_auto_approve(api, session_id)
     return session_id, meta, workspace
@@ -1555,7 +1570,7 @@ def run_campaign(
     if not allow_concurrent and (health.get("active_streams") or health.get("active_runs")):
         raise RuntimeError("WebUI must be healthy and have no active streams or runs")
     try:
-        from api.config import get_config
+        from api.config import get_config, resolve_model_provider
 
         config = get_config()
         model_config = config.get("model") if isinstance(config, dict) else {}
@@ -1565,7 +1580,18 @@ def run_campaign(
     selected_model = str(model or configured_model or "").strip()
     if not selected_model:
         raise RuntimeError("--model is required when config.yaml model.default is empty")
-    session_model = selected_model if model else None
+    session_model = None
+    session_model_provider = None
+    if model:
+        try:
+            session_model, session_model_provider, _ = resolve_model_provider(
+                selected_model,
+                explicitly_picked=True,
+            )
+        except Exception as exc:
+            raise RuntimeError("cannot resolve the explicit --model through config.yaml") from exc
+        session_model = str(session_model or selected_model).strip()
+        session_model_provider = str(session_model_provider or "").strip() or None
 
     state_dir = _state_dir()
     if prompt_source == "custom":
@@ -1694,14 +1720,23 @@ def run_campaign(
                 workspace = batch_root / f"replay-turn-{turn:02d}"
                 seed_workspace(workspace)
                 session_id, replay_meta, workspace = create_replay_session(
-                    api, state_dir, workspace, question, selected_model,
+                    api,
+                    state_dir,
+                    workspace,
+                    question,
+                    session_model or selected_model,
+                    session_model_provider,
                 )
                 if workspace is not None and replay_meta.get("fallback"):
                     seed_workspace(workspace)
                 strategy = "replay_prefix"
             else:
                 if not plain_session_id:
-                    create_kwargs = {"model": session_model} if session_model else {}
+                    create_kwargs = {}
+                    if session_model:
+                        create_kwargs["model"] = session_model
+                    if session_model_provider:
+                        create_kwargs["model_provider"] = session_model_provider
                     plain_session_id, plain_workspace = create_plain_session(api, **create_kwargs)
                     if plain_workspace is not None:
                         seed_workspace(plain_workspace)
@@ -1799,8 +1834,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
     parser.add_argument(
         "--model",
-        # default="grok-4.6",
-        help="Model ID to resolve through the active profile's config.yaml (default: model.default)",
+        default="gemini-3.8-flash",
+        help="Model ID resolved through the active profile's config.yaml (default: gemini-3.8-flash)",
     )
     parser.add_argument("--seed", type=int, default=None, help="RNG seed for reproducible history prompt sampling")
     parser.add_argument(

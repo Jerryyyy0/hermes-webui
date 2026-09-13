@@ -24275,10 +24275,12 @@ def _handle_session_import(handler, body):
     except (TypeError, ValueError) as e:
         return bad(handler, str(e))
     model = body.get("model", DEFAULT_MODEL)
+    model_provider = body.get("model_provider")
     s = Session(
         title=title,
         workspace=workspace,
         model=model,
+        model_provider=model_provider,
         messages=messages,
         tool_calls=body.get("tool_calls", []),
     )

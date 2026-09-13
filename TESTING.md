@@ -159,11 +159,13 @@ python scripts/real_model_campaign.py --sessions 1 --turns 5 --prompt-source mod
 python scripts/real_model_campaign.py --cleanup
 ```
 
-The campaign runs one stream at a time and uses the configured default model
-unless `--model MODEL_ID` is supplied. An explicit model is resolved with the
-active profile's `config.yaml` provider/custom-provider configuration and is
-sent when the campaign creates or imports a session. In `--prompt-source model`
-mode, the same resolved route generates the test scenarios.
+The campaign runs one stream at a time and defaults to `gemini-3.8-flash`.
+When `--model MODEL_ID` is supplied (including that CLI default), it resolves
+the selected model through the active profile's `config.yaml` and persists both
+the model and its resolved provider when it creates or imports a session. This
+prevents a cross-provider model name from silently falling back to the profile
+default. In `--prompt-source model` mode, the same route generates the test
+scenarios.
 It permits other active WebUI streams or runs by default; `--allow-concurrent`
 remains accepted for compatibility.
 `--prompt-source` controls where trial questions come from:

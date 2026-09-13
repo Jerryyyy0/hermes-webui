@@ -178,6 +178,19 @@ def test_main_forwards_model_override_to_campaign(monkeypatch):
     assert received["model"] == "configured/provider-model"
 
 
+def test_main_forwards_default_model_to_campaign(monkeypatch):
+    received = {}
+
+    def fake_run_campaign(*_args, **kwargs):
+        received.update(kwargs)
+        return 0
+
+    monkeypatch.setattr("scripts.real_model_campaign.run_campaign", fake_run_campaign)
+
+    assert main([]) == 0
+    assert received["model"] == "gemini-3.8-flash"
+
+
 def test_model_prompt_pool_calls_auxiliary_model_without_creating_session(monkeypatch):
     from api import profiles as profiles_api
     from integration.assistant_bubbles import collectors
@@ -540,6 +553,10 @@ def test_model_override_is_used_for_prompt_generation_and_new_sessions(tmp_path,
     api = _CancelFlowApi([], workspace=tmp_path / "workspace" / "sessions" / "sid-1")
     generated = []
     monkeypatch.setattr("api.config.get_config", lambda: {"model": {"default": "default-model"}})
+    monkeypatch.setattr(
+        "api.config.resolve_model_provider",
+        lambda model, **_kwargs: (model, "custom:campaign-proxy", None),
+    )
     monkeypatch.setattr("scripts.real_model_campaign.Api", lambda _base_url: api)
     monkeypatch.setattr("scripts.real_model_campaign._state_dir", lambda: tmp_path)
     monkeypatch.setattr(
@@ -568,7 +585,11 @@ def test_model_override_is_used_for_prompt_generation_and_new_sessions(tmp_path,
     assert api.calls[1] == (
         "POST",
         "/api/session/new",
-        {"worktree": False, "model": "configured/provider-model"},
+        {
+            "worktree": False,
+            "model": "configured/provider-model",
+            "model_provider": "custom:campaign-proxy",
+        },
     )
 
 
