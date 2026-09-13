@@ -2,6 +2,11 @@
 
 Fork-specific features live here so upstream rebases stay predictable.
 
+Manifest 重生成采用 `api/session_ops.py` 的破坏式裁剪：目标 turn 及后续 transcript/context/tool calls、
+委派 sidecar 和 Artifact rows 在新执行开始前删除，磁盘成果文件保留。Session JSON 的一次性 marker 仅用于
+复用原 turn key；本次 shrink 产生的 transcript `.json.bak` 会清除，避免启动恢复撤销主动重写。不新增
+revision 表、快照服务或依赖。`static/ui.js` 传 `regenerate: true` 并使用服务端返回的裁剪结果。
+
 Async inbox wakeups must pass `user_message_metadata` with `context_anchor` /
 `async_delegation_completion` to `start_session_turn`, including restored queued
 items. These markers persist through Agent and hide only the internal input,

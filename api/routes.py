@@ -13727,6 +13727,26 @@ def handle_post(handler, parsed) -> bool:
         with _get_session_agent_lock(body["session_id"]):
             old_msg_count = len(s.messages or [])
             old_ctx_count = len(getattr(s, 'context_messages', None) or [])
+            if body.get('regenerate') is True:
+                from api.session_ops import prepare_destructive_regenerate
+                try:
+                    result = prepare_destructive_regenerate(s, keep)
+                except ValueError as exc:
+                    return bad(handler, str(exc), 409)
+                logger.info(
+                    "regenerate %s: messages %d→%d, context_messages %d→%d, removed_turns=%s",
+                    body["session_id"], old_msg_count, len(s.messages or []),
+                    old_ctx_count, len(getattr(s, 'context_messages', None) or []),
+                    result['removed_turn_keys'],
+                )
+                return j(
+                    handler,
+                    {
+                        "ok": True,
+                        "session": redact_session_data(s.compact() | {"messages": s.messages}),
+                        "last_user_text": result['last_user_text'],
+                    },
+                )
             s.messages = s.messages[:keep]
             # Truncate context_messages in sync with messages so the agent's
             # model-facing context doesn't retain rows the user removed via
@@ -19427,7 +19447,11 @@ def _start_chat_stream_for_session(
                     prepared_turn_key = str(turn_key_override).strip()
                 if not prepared_turn_key:
                     from integration.session_manifest.manifest import _next_turn_key
-                    prepared_turn_key = _next_turn_key(getattr(s, "messages", None) or [])
+                    from api.session_ops import consume_pending_regenerate_turn_key
+                    prepared_turn_key = (
+                        consume_pending_regenerate_turn_key(s, msg)
+                        or _next_turn_key(getattr(s, "messages", None) or [])
+                    )
                 stream_id = uuid.uuid4().hex
                 diag.stage("save_pending_state") if diag else None
                 was_hidden_empty_session = _is_hidden_empty_session(s)

@@ -18443,24 +18443,20 @@ async function regenerateResponse(btn) {
   const assistantIdx = parseInt(row.dataset.msgIdx, 10);
   const absoluteKeepCount = _oldestIdx + assistantIdx;
   const initialSid = S.session.session_id;
-  let lastUserText = '';
-  for(let i = assistantIdx - 1; i >= 0; i--) {
-    const m = S.messages[i];
-    if(m && m.role === 'user') { lastUserText = msgContent(m); break; }
-  }
-  if(!lastUserText) return;
   if(typeof _ensureAllMessagesLoaded==='function'){
     await _ensureAllMessagesLoaded();
   }
   if(!S.session || S.session.session_id !== initialSid) return;
   try {
-    await api('/api/session/truncate', {method:'POST', body:JSON.stringify({
+    const regenerated = await api('/api/session/truncate', {method:'POST', body:JSON.stringify({
       session_id: initialSid,
-      keep_count: absoluteKeepCount
+      keep_count: absoluteKeepCount,
+      regenerate: true
     })});
-    S.messages = S.messages.slice(0, absoluteKeepCount);
+    if(!S.session || S.session.session_id !== initialSid) return;
+    S.messages = regenerated.session.messages;
     renderMessages();
-    $('msg').value = lastUserText;
+    $('msg').value = regenerated.last_user_text;
     await send();
   } catch(e) { setStatus(t('regen_failed') + e.message); }
 }

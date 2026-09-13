@@ -6,6 +6,7 @@ Behavior parity reference: gateway/run.py:_handle_*_command in
 the hermes-agent repo.
 """
 from __future__ import annotations
+import hashlib
 import json
 import logging
 from bisect import bisect_left
@@ -414,6 +415,107 @@ def truncate_session_at_keep(session, keep: int) -> tuple[int, int]:
     return old_msg_count, old_ctx_count
 
 
+def _regenerate_prompt_hash(prompt: str) -> str:
+    return hashlib.sha256(str(prompt or '').encode('utf-8')).hexdigest()
+
+
+def prepare_destructive_regenerate(session, assistant_index: int) -> dict[str, Any]:
+    """Delete the selected real turn and every later turn before regeneration.
+
+    The caller must hold the per-session agent lock. This deliberately has no
+    rollback: transcript/tool/delegation state and Manifest rows are removed at
+    preparation time, while workspace files are left untouched.
+    """
+    from integration.session_manifest.manifest import _message_text, _message_turns
+    from integration.session_manifest.store import delete_manifest_turn_records
+
+    if getattr(session, 'active_stream_id', None):
+        raise ValueError('当前对话仍在运行，请先停止后再重新生成')
+    messages = list(getattr(session, 'messages', None) or [])
+    if assistant_index < 0 or assistant_index >= len(messages):
+        raise ValueError('重新生成的位置已失效，请刷新后重试')
+    target = next(
+        (
+            turn for turn in reversed(_message_turns(messages))
+            if int(turn['start_msg_idx']) <= assistant_index <= int(turn['end_msg_idx'])
+        ),
+        None,
+    )
+    if target is None:
+        raise ValueError('没有可重新生成的真实用户轮次')
+
+    start = int(target['start_msg_idx'])
+    turn_key = str(target.get('turn_key') or '').strip()
+    prompt = _message_text(messages[start].get('content'))
+    removed_turn_keys = {
+        str(turn.get('turn_key') or '').strip()
+        for turn in _message_turns(messages)
+        if int(turn['start_msg_idx']) >= start and str(turn.get('turn_key') or '').strip()
+    }
+
+    truncate_session_at_keep(session, start)
+    session.tool_calls = [
+        row for row in (getattr(session, 'tool_calls', None) or [])
+        if isinstance(row, dict)
+        and isinstance(row.get('assistant_msg_idx'), int)
+        and row['assistant_msg_idx'] < start
+    ]
+    if isinstance(getattr(session, 'turn_artifacts', None), dict):
+        session.turn_artifacts = {
+            key: value
+            for key, value in session.turn_artifacts.items()
+            if str(key or '').strip() not in removed_turn_keys
+        }
+    if isinstance(getattr(session, 'async_delegation_origins', None), dict):
+        session.async_delegation_origins = {
+            delegation_id: record
+            for delegation_id, record in session.async_delegation_origins.items()
+            if not isinstance(record, dict)
+            or str(record.get('turn_key') or '').strip() not in removed_turn_keys
+        }
+        cancellation = getattr(session, 'async_delegation_cancellation', None)
+        if isinstance(cancellation, dict):
+            remaining_ids = [
+                str(delegation_id)
+                for delegation_id in cancellation.get('delegation_ids') or []
+                if str(delegation_id) in session.async_delegation_origins
+            ]
+            session.async_delegation_cancellation = (
+                {**cancellation, 'delegation_ids': remaining_ids}
+                if remaining_ids
+                else None
+            )
+    session.pending_regenerate = {
+        'turn_key': turn_key,
+        'prompt_hash': _regenerate_prompt_hash(prompt),
+    }
+
+    if not delete_manifest_turn_records(session, removed_turn_keys):
+        raise RuntimeError('删除旧成果记录失败，重生成未启动')
+    session.save()
+    try:
+        session.path.with_suffix('.json.bak').unlink(missing_ok=True)
+    except OSError as exc:
+        raise RuntimeError('清理旧会话恢复备份失败，重生成未启动') from exc
+    return {
+        'last_user_text': prompt,
+        'removed_count': len(messages) - start,
+        'turn_key': turn_key,
+        'removed_turn_keys': sorted(removed_turn_keys),
+    }
+
+
+def consume_pending_regenerate_turn_key(session, prompt: str) -> str:
+    """Consume a matching one-shot regenerate marker, else start normally."""
+    marker = getattr(session, 'pending_regenerate', None)
+    session.pending_regenerate = None
+    if not isinstance(marker, dict):
+        return ''
+    if str(marker.get('prompt_hash') or '') != _regenerate_prompt_hash(prompt):
+        return ''
+    return str(marker.get('turn_key') or '').strip()
+
+
 def retry_last(session_id: str) -> dict[str, Any]:
     """Truncate the session to before the last user message, return its text.
 
@@ -458,20 +560,11 @@ def retry_last(session_id: str) -> dict[str, Any]:
                     break
             if last_user_idx is None:
                 raise ValueError('No previous message to retry.')
-
-            last_user_text = _extract_text(history[last_user_idx].get('content', ''))
-            removed_count = len(history) - last_user_idx
-            s.messages = history[:last_user_idx]
-            s.truncation_watermark = _truncation_watermark_for(s.messages)
-            # Persist the original truncate cutoff so empty-sidecar recovery
-            # can distinguish legitimate prefix from deleted suffix.
-            s.truncation_boundary = s.truncation_watermark
-            if isinstance(getattr(s, 'context_messages', None), list) and s.context_messages:
-                truncated_context = _truncate_at_last_user(s.context_messages)
-                if truncated_context is not None:
-                    s.context_messages = truncated_context
-        s.save()
-    return {'last_user_text': last_user_text, 'removed_count': removed_count}
+        result = prepare_destructive_regenerate(s, last_user_idx)
+    return {
+        'last_user_text': result['last_user_text'],
+        'removed_count': result['removed_count'],
+    }
 
 
 def undo_last(session_id: str) -> dict[str, Any]:

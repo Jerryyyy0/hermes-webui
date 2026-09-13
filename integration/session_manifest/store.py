@@ -61,6 +61,13 @@ def _connect(db_path: Path | str | None = None) -> sqlite3.Connection:
 
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
+    # A short-lived development version created this table for regenerate
+    # snapshots. Destructive regeneration has no snapshot state, so remove any
+    # leftover table instead of silently carrying an obsolete second owner.
+    if conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'session_manifest_revisions'"
+    ).fetchone():
+        conn.execute("DROP TABLE session_manifest_revisions")
     existing = conn.execute(
         "SELECT name, sql FROM sqlite_master WHERE type = 'table' AND name = 'session_manifest_records'"
     ).fetchone()
@@ -400,6 +407,9 @@ def upsert_manifest_records(
     now = time.time()
     try:
         with closing(_connect(db_path)) as conn:
+            from integration.session_manifest.manifest import _artifact_source_priority
+
+            conn.create_function('artifact_priority', 1, _artifact_source_priority)
             with conn:
                 for record in records:
                     conn.execute(
@@ -413,7 +423,9 @@ def upsert_manifest_records(
                         DO UPDATE SET
                           session_id = excluded.session_id,
                           preview = excluded.preview,
-                          source_tool = excluded.source_tool,
+                          source_tool = CASE
+                            WHEN artifact_priority(excluded.source_tool) > artifact_priority(session_manifest_records.source_tool)
+                            THEN excluded.source_tool ELSE session_manifest_records.source_tool END,
                           updated_at = excluded.updated_at
                         """,
                         (
@@ -1174,6 +1186,55 @@ def delete_session_manifest_turns(
                 )
     except (sqlite3.Error, OSError):
         logger.debug("failed to prune session manifest turns for %s", sid, exc_info=True)
+
+
+def delete_manifest_turn_records(
+    session,
+    turn_keys: set[str] | list[str] | tuple[str, ...],
+    *,
+    db_path: Path | str | None = None,
+) -> bool:
+    """Delete exact turn decisions in the session's lineage/profile/root scope."""
+    keys = sorted({str(key or '').strip() for key in turn_keys or [] if str(key or '').strip()})
+    if not keys:
+        return True
+    lineage_key = resolve_manifest_lineage_key(session)
+    profile = _profile_for_session(session)
+    effective_root = _effective_workspace_root_text(_workspace_root_for_session(session))
+    placeholders = ','.join('?' for _ in keys)
+    try:
+        with closing(_connect(db_path)) as conn:
+            with conn:
+                roots = conn.execute(
+                    f"""
+                    SELECT DISTINCT workspace_root
+                    FROM session_manifest_records
+                    WHERE lineage_key = ? AND profile = ?
+                      AND turn_key IN ({placeholders}) AND record_kind = ?
+                    """,
+                    (lineage_key, profile, *keys, ARTIFACT_RECORD_KIND),
+                ).fetchall()
+                for row in roots:
+                    raw_root = str(row['workspace_root'] or '').strip()
+                    if _effective_workspace_root_text(raw_root) != effective_root:
+                        continue
+                    conn.execute(
+                        f"""
+                        DELETE FROM session_manifest_records
+                        WHERE lineage_key = ? AND profile = ? AND workspace_root = ?
+                          AND turn_key IN ({placeholders}) AND record_kind = ?
+                        """,
+                        (lineage_key, profile, raw_root, *keys, ARTIFACT_RECORD_KIND),
+                    )
+        return True
+    except (sqlite3.Error, OSError, ValueError):
+        logger.warning(
+            'failed to delete destructive-regenerate Manifest turns: session=%s turns=%s',
+            getattr(session, 'session_id', ''),
+            keys,
+            exc_info=True,
+        )
+        return False
 
 
 def backfill_from_session_turn_artifacts(

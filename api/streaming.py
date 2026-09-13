@@ -1810,8 +1810,6 @@ def _persist_turn_artifact_paths(
         if isinstance(entry, dict) and str(entry.get('path') or '').strip()
     ]
     artifact_count = len(_store_entries)
-    if not _store_entries and str(terminal_reason or '').strip() != 'completed':
-        return finish({'status': 'pending', 'stage': 'evidence_unsettled', 'turn_key': _turn_key, 'artifact_count': 0})
     if not _store_entries:
         _store_entries = [{'path': '', 'source_tool': 'assistant_prose', 'preview': 'file'}]
     try:

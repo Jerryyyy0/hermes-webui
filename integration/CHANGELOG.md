@@ -6,6 +6,10 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ## [Unreleased]
 
+- Session Manifest 最终真实 assistant 回复中的有效文件路径不再被同轮读取证据排除；移除正文候选数量上限，支持显式无扩展名和短扩展名路径，排除远程 Markdown 链接标签。同名递归匹配保留修改时间最新的全部并列文件；来源标签按 mutation > terminal > media > assistant_prose 保留。
+
+- 重新生成改为破坏式历史重写：开始时立即删除目标 turn 及后续 transcript/context/tool calls、委派记录与 Artifact rows，并清除会导致启动恢复的 transcript shrink 备份，磁盘成果文件保留；一次性 Session marker 复用原 turn key，新执行按普通终态规则重新登记或写 empty。失败、取消、刷新或重启均不恢复旧 Manifest 与后续 turns，不新增 revision 数据表，并清理开发期遗留的实验表。
+
 - 修复 Session Manifest 顶层累计 Artifact 快照被错误绑定到当前 turn 的跨轮污染；结算现只读取精确匹配的 `turns[]`，normal/error/cancel 均合并 durable transcript，并提供带 dry-run、一致性备份、原子替换及写后校验的单会话污染修复工具。
 
 - 修复 inbox scheduler 启动异步 wakeup 时遗漏 completion 语义标记，导致数据库回读将内部 completion 展示为用户消息；沿用 Agent 现有语义持久化与 WebUI 显示过滤契约。

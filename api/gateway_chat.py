@@ -771,6 +771,7 @@ def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, mode
             error_classification.get("hint", ""),
         )
         turn_duration = _terminal_turn_duration(session)
+        artifact_turn_key = str(getattr(session, 'pending_turn_key', '') or '')
         _materialize_pending_user_turn_before_error(session)
         session.active_stream_id = None
         session.pending_user_message = None
@@ -805,6 +806,9 @@ def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, mode
             session.save()
         except Exception:
             logger.debug("Failed to persist gateway terminal error settlement", exc_info=True)
+        else:
+            from api.streaming import _persist_turn_artifact_paths
+            _persist_turn_artifact_paths(session, artifact_turn_key, stream_id=stream_id, terminal_reason='error')
         error_payload["session"] = redact_session_data(
             _session_payload_with_full_messages(session, tool_calls=[])
         )
@@ -826,6 +830,30 @@ def _clear_gateway_pending_state(session: Any, stream_id: str) -> None:
     session.pending_user_source = None
     session.pending_turn_key = None
     session.save()
+
+
+def _settle_gateway_unfinished_artifacts(session: Any, stream_id: str, *, cancelled: bool) -> None:
+    """Persist the destructive regenerate turn's terminal empty/partial decision."""
+    if not _stream_writeback_is_current(session, stream_id):
+        return
+    from api.streaming import (
+        _materialize_pending_user_turn_before_error,
+        _persist_turn_artifact_paths,
+        _snapshot_and_append_partial_on_error,
+    )
+
+    turn_key = str(getattr(session, 'pending_turn_key', '') or '').strip()
+    if not turn_key:
+        return
+    _materialize_pending_user_turn_before_error(session)
+    _snapshot_and_append_partial_on_error(session, stream_id)
+    session.save()
+    _persist_turn_artifact_paths(
+        session,
+        turn_key,
+        stream_id=stream_id,
+        terminal_reason='cancelled' if cancelled else 'error',
+    )
 
 
 def _cleanup_gateway_pending_mirror(session_id: str) -> None:
@@ -1595,7 +1623,14 @@ def _run_gateway_chat_streaming(
         if s is not None:
             try:
                 with _get_session_agent_lock(session_id):
-                    _clear_gateway_pending_state(get_session(session_id), stream_id)
+                    current = get_session(session_id)
+                    if not success_writeback_committed:
+                        _settle_gateway_unfinished_artifacts(
+                            current,
+                            stream_id,
+                            cancelled=cancel_event.is_set(),
+                        )
+                    _clear_gateway_pending_state(current, stream_id)
             except Exception:
                 logger.debug("Failed to clear gateway stream state", exc_info=True)
             _cleanup_gateway_pending_mirror(session_id)

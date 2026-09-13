@@ -28,6 +28,11 @@ Artifact 继续保持只读。保存实现、路径安全和文件索引失效�
 
 ## External Manifest Artifact References
 
+重生成相关接缝：`api/session_ops.py` 统一执行破坏式裁剪，`api/routes.py` 接入 truncate/retry 与下一次
+chat-start 的一次性原 turn key 复用；`api/streaming.py` 和 `api/gateway_chat.py` 继续走普通终态结算。
+`static/ui.js` 只传递重生成标记并使用服务端裁剪结果。目标及后续 turn 的旧后台委派 sidecar 在准备时删除；
+不新增 revision 表或旧 Manifest 快照。
+
 `integration/session_manifest/external_references/` 承载外部绝对路径 Artifact 的策略、安全打开、登记
 record 查询与预览授权：`policy.py` 负责逐组件无跟随 fd 打开与受保护路径拒绝（已登记的会话附件与
 `HERMES_HOME/memories/` 文件是只读预览例外，上传本身不产生授权），`references.py`

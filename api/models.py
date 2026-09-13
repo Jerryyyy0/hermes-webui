@@ -1253,6 +1253,7 @@ class Session:
                  pending_started_at=None,
                  pending_user_source: str=None,
                  pending_turn_key: str=None,
+                 pending_regenerate=None,
                  context_messages=None,
                  compression_anchor_visible_idx=None,
                  compression_anchor_message_key=None,
@@ -1378,6 +1379,11 @@ class Session:
         self.pending_started_at = pending_started_at
         self.pending_user_source = pending_user_source
         self.pending_turn_key = str(pending_turn_key or '').strip() or None
+        self.pending_regenerate = (
+            dict(pending_regenerate)
+            if isinstance(pending_regenerate, dict)
+            else None
+        )
         self.context_messages = context_messages if isinstance(context_messages, list) else []
         self.compression_anchor_visible_idx = compression_anchor_visible_idx
         self.compression_anchor_message_key = compression_anchor_message_key
@@ -1514,6 +1520,7 @@ class Session:
             'control_generation', 'session_revision', 'cancel_state', 'cancel_stream_id', 'cancel_generation',
             'pending_next_turns', 'last_error_at',
             'pending_user_message', 'pending_attachments', 'pending_started_at', 'pending_user_source', 'pending_turn_key',
+            'pending_regenerate',
             'compression_anchor_visible_idx', 'compression_anchor_message_key',
             'compression_anchor_summary', 'pre_compression_snapshot',
             'context_engine', 'compression_anchor_engine', 'compression_anchor_mode',

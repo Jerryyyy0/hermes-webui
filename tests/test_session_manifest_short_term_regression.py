@@ -94,7 +94,7 @@ def test_followup_relative_basename_resolves_from_session_workspace(monkeypatch,
     }]
 
 
-def test_ambiguous_prior_basename_is_not_resolved(monkeypatch, tmp_path):
+def test_prior_basename_uses_newest_workspace_file(monkeypatch, tmp_path):
     workspace = tmp_path / 'ws'
     workspace.mkdir()
     for directory in ('first', 'second'):
@@ -129,7 +129,10 @@ def test_ambiguous_prior_basename_is_not_resolved(monkeypatch, tmp_path):
     manifest = build_session_manifest(session)
     by_turn = {turn['turn_key']: turn['artifacts'] for turn in manifest['turns']}
 
-    assert by_turn['turn:8'] == []
+    newest = max((workspace / 'first/report.md', workspace / 'second/report.md'), key=lambda path: path.stat().st_mtime_ns)
+    expected = {path.relative_to(workspace).as_posix() for path in (workspace / 'first/report.md', workspace / 'second/report.md')
+                if path.stat().st_mtime_ns == newest.stat().st_mtime_ns}
+    assert {row['path'] for row in by_turn['turn:8']} == expected
 
 
 def test_failed_mutation_and_skill_manage_do_not_persist(tmp_path):

@@ -152,6 +152,15 @@ GET /api/session/manifest?session_id=abc123
 
 GET 返回全部已有 turns。无对应 user turn 的 artifact 仍会保留在顶层 `artifacts`，但不会出现在 `turns[]`。
 
+`POST /api/session/truncate` 可传布尔字段 `regenerate: true`，此时 `keep_count` 定位待重生成
+assistant 所属真实 user 轮次。服务端立即删除该 user turn 及其后续 transcript、context、tool calls、委派
+记录与 Artifact rows；不删除磁盘成果文件，也不保留旧 Manifest 或后续 turns 供失败回滚。客户端应使用响应中的
+`session.messages` 立即重绘。
+重生成响应额外返回 `last_user_text`（string），为服务端确认的原始真实用户问题，客户端应使用该字段重新发送，
+避免分页或内部控制消息影响问题选择。文本匹配时服务端一次性复用原 turn key；失败、取消、刷新或重启不恢复
+被删除的历史；服务端也会清除本次裁剪产生的 transcript `.json.bak`，避免启动恢复撤销主动重生成。
+普通裁剪请求语义不变。
+
 ## 3. SSE `manifest_delta`
 
 `manifest_delta` 与聊天流共用 SSE 连接。

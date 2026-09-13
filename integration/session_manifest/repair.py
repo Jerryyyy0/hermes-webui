@@ -369,6 +369,8 @@ def repair_contaminated_manifest_session(
     }
     if not session_id:
         return report
+    if getattr(session, 'active_stream_id', None):
+        return {**report, 'status': 'active_execution'}
     if bool(getattr(session, '_messages_truncated', False)):
         return {**report, 'status': 'transcript_incomplete'}
     if lineage_key != session_id:
