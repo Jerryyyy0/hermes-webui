@@ -8335,7 +8335,11 @@ def _merge_session_display_metadata(target: dict | None, source: dict | None) ->
     """Preserve display and Agent-provenance metadata on duplicate rows."""
     if not isinstance(target, dict) or not isinstance(source, dict):
         return
-    _merge_turn_binding_metadata(target, source)
+    # Fuzzy replay matches (including a summary quoting a prompt) are not
+    # authority to reclassify a visible row or assign its turn ownership.
+    same_content = _session_message_content_key(target) == _session_message_content_key(source)
+    if same_content:
+        _merge_turn_binding_metadata(target, source)
     # Agent semantic fields decide whether a role:user row is model-only
     # context.  If a state.db row proves a sidecar duplicate is an async
     # completion anchor, retain that proof before the display projection runs.
@@ -8343,7 +8347,8 @@ def _merge_session_display_metadata(target: dict | None, source: dict | None) ->
     source_class = source.get("_hermes_message_class")
     source_kind = source.get("_hermes_scaffold_kind")
     if (
-        not target.get("_hermes_message_class")
+        same_content
+        and not target.get("_hermes_message_class")
         and not target.get("_hermes_scaffold_kind")
         and isinstance(source_class, str)
         and source_class.strip()

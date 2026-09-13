@@ -5,6 +5,11 @@
 
 ## Runtime configuration
 
+`api/models.py::_merge_session_display_metadata` 在复制轮次身份与 Agent 语义标签前，
+要求既有 content key 严格一致（包含 workspace 前缀归一化）。模糊匹配仅可用于既有
+展示去重，不能据此把真实消息标记为内部压缩摘要。相关回归覆盖位于
+`integration/tests/agent_message_semantics/test_reconciliation_provenance.py`。
+
 `api/routes.py::_turn_aligned_window_indices` 只复用 Manifest 的 turn 起点；
 分页结束位置使用下一有效起点或完整消息尾部，不能直接使用可能留有未绑定行间隙的
 Manifest end index，否则会遗漏异步 completion 后的 assistant/tool 消息。

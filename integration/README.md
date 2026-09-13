@@ -2,6 +2,11 @@
 
 Fork-specific features live here so upstream rebases stay predictable.
 
+Agent 消息语义合并接缝：`api/models.py::_merge_session_display_metadata` 仅在既有
+content key 严格相等时传递 `_turn_key` 与 `_hermes_message_class/_hermes_scaffold_kind`。
+文本包含或模糊去重不能将压缩摘要的隐藏语义传播到真实用户消息；普通展示统计沿用既有合并规则。
+此保护不读取 inactive 归档、不修改模型上下文或分页协议。
+
 Manifest 重生成采用 `api/session_ops.py` 的破坏式裁剪：目标 turn 及后续 transcript/context/tool calls、
 委派 sidecar 和 Artifact rows 在新执行开始前删除，磁盘成果文件保留。Session JSON 的一次性 marker 仅用于
 复用原 turn key；本次 shrink 产生的 transcript `.json.bak` 会清除，避免启动恢复撤销主动重写。不新增
