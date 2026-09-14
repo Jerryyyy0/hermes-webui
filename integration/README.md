@@ -23,6 +23,7 @@ export SKILLHUB_URL=http://127.0.0.1:8000   # optional; SkillHub market only (se
 
 - **Profile enrich** — `GET /api/profiles` adds nested `info` from `info.json`. UI via `hermes_profiles.js` (logo picker, edit, create).
 - **Profile assistant bubbles** — `GET /api/integration/assistant_bubbles?profile=<name>` returns fixed-order short assistant avatar bubbles from independent `<profile.path>/assistant_bubbles.json`; scheduled-task copy is computed live.
+- **Profile overview** — `GET /api/integration/profiles/{profile}/overview` aggregates assistant header data, current work metrics, rolling-year reply activity, recently learned skills, and raw profile documents. Dedicated `raw_files` routes support preview and download.
 - **WebUI appearance** — `GET /api/integration/webui_appearance` reads `{HERMES_HOME}/webui-appearance/webui-appearance.json` as-is; `GET /api/integration/webui_appearance/file?path=` streams assets under that directory.
 - **Runtime configuration** — `GET /api/integration/config` returns the allowlisted effective `BROWSER_PREVIEW_URL` value.
 - **Cross-profile cron** — Cron Hub and grouped cron APIs across profiles.
@@ -458,15 +459,44 @@ HTTP 接口仅服务知识库通知（`kb_apply`），从下游 `get_user_messag
 | Method | Path | Purpose |
 |--------|------|---------|
 | GET | `/api/integration/notifications` | 知识库通知列表（`read_type`/`action_status` 过滤、游标分页；永久排除 `massType=3, state=2` 结果待处理） |
+| GET | `/api/integration/notifications/summary` | 未读计数（铃铛角标；计数规则与列表排除一致） |
+| POST | `/api/integration/notifications/read` | 标记已读（`kb:` ID 批量转发下游 `mark_message_read`） |
+| POST | `/api/integration/notifications/delete` | 删除（`kb:` ID 批量转发下游 `delete_readed_message`） |
 
 ### 记忆统计（`HERMES_INTEGRATION=1`）
 
 | Method | Path | Purpose |
 |--------|------|---------|
 | GET | `/api/integration/memory/stats` | 聚合统计：会话天数和列表、定时任务及列表、记忆文件名；可选 `?profile=` 指定 profile（默认当前活跃 profile） |
-| GET | `/api/integration/notifications/summary` | 未读计数（铃铛角标；计数规则与列表排除一致） |
-| POST | `/api/integration/notifications/read` | 标记已读（`kb:` ID 批量转发下游 `mark_message_read`） |
-| POST | `/api/integration/notifications/delete` | 删除（`kb:` ID 批量转发下游 `delete_readed_message`） |
+
+### Profile overview (`integration/profile_overview/`)
+
+完整接口字段和示例：[`docs/integration/profile-overview-api.md`](../docs/integration/profile-overview-api.md)。
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/api/integration/profiles/{profile}/overview` | 返回 ProfileHeader、工作指标、滚动一年活跃度、近 7 日最近技能及档案列表 |
+| GET | `/api/integration/profiles/{profile}/raw_files` | 列出存在的 `SOUL.md`、`memories/MEMORY.md`、`memories/USER.md` |
+| GET | `/api/integration/profiles/{profile}/raw_files/{file_type}` | 预览固定档案；`file_type=soul\|memory\|user` |
+| GET | `/api/integration/profiles/{profile}/raw_files/{file_type}/download` | 下载固定档案 |
+
+聚合接口沿用 `GET /api/profiles` 的 `info.display_name`、`info.description`、`info.logo`，并读取 Hermes-X 新增的 ISO 8601 `info.time`。时间缺失或无效时保持兼容：`created_at=null`、`work_days=0`。在岗天数按 Asia/Shanghai 的“今天日期减创建日期”计算，同日为 0。
+
+`automatic_task_count` 是 Profile 下仍存在的全部 Cron Job 数，包含禁用任务；删除后自然减少。`conversation_task_count` 是仍存在的普通 WebUI 会话数，排除 Cron、Webhook、消息平台、CLI、API 与子 Agent 来源。活跃度区间为今天向前滚动一年但不包含去年同日，按周一至周日输出；`count` 只统计普通对话和 Cron 会话中最终持久化、可展示且正文非空的 assistant 回复。返回 `days` 原始日序列、补齐边界空位的 `weeks` 以及按一周多数天归属月份的 `month_labels`。
+
+最近学会从当前 Profile 已安装技能列表中读取 `SKILL.md` 修改时间，包含禁用技能；来源限定为 SkillHub 安装和 Agent 会话内记忆演化生成，排除带 `.user_created` 标记的手工上传及内置系统技能。仅返回今天及之前 6 个自然日内最新 3 项，重新安装或升级导致 `SKILL.md` 更新时会重新进入最近列表。
+
+### Profile memory (`integration/profile_memory/`)
+
+完整接口字段和示例：[`docs/integration/profile-memory-api.md`](../docs/integration/profile-memory-api.md)。
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/api/integration/profiles/{profile}/memory` | 返回当前 Profile 的 `MEMORY.md` 原文及更新时间 |
+| PUT | `/api/integration/profiles/{profile}/memory` | 覆盖 `target=memory`，并按 `§` 条目差异记录时间线 |
+| GET | `/api/integration/profiles/{profile}/memory/timeline` | 按时间倒序分页返回 `MEMORY.md` 的形成、修改、删除事件 |
+
+Agent 与 WebUI 共同追加 Profile 内的 `memories/memory_events.jsonl`。本功能只读取其中 `target=memory` 的事件；Agent 的 `USER.md` 事件不会出现在助理画像记忆时间线。本接口编辑记录 `source=webui`。上线前事件不回算，直接改文件不生成事件。
 
 列表查询参数：
 - `account` / `uuid` — 必填
@@ -573,6 +603,7 @@ Response includes global `stats`: `{ hub, installed, not_installed, custom }` ac
 | `skills/skillhub.py` | Upstream httpx client |
 | `skills/handlers.py` | `/api/skillhub/*` HTTP handlers |
 | `profiles/` | `GET /api/profiles` enrich; `POST /api/profile/info`; `GET /api/profile/logo-presets` |
+| `profile_overview/` | 助理主页聚合与固定 Profile 档案预览/下载 |
 | `scripts/fetch_profile_logos.py` | Generate built-in logo library |
 | `assets/profile-logos/` | Logo preset PNGs + manifest |
 | `agent_message_semantics/` | Hermes Agent 内部脚手架与 model-only context anchor 的兼容分类、一问一答显示投影和无正文 DEBUG 审计；`api/streaming.py` / `integration/session_manifest/manifest.py` 只保留薄调用 |

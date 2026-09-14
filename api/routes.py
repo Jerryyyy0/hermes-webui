@@ -12008,6 +12008,22 @@ def handle_get(handler, parsed) -> bool:
         pass
 
     try:
+        from integration.profile_overview.handlers import try_handle_get as _profile_overview_try_get
+
+        if _profile_overview_try_get(handler, parsed) is True:
+            return True
+    except ImportError:
+        pass
+
+    try:
+        from integration.profile_memory.handlers import try_handle_get as _profile_memory_try_get
+
+        if _profile_memory_try_get(handler, parsed) is True:
+            return True
+    except ImportError:
+        pass
+
+    try:
         from integration.workspace.handlers import try_handle_get as _workspace_try_get
 
         if _workspace_try_get(handler, parsed) is True:
@@ -15142,6 +15158,13 @@ def handle_put(handler, parsed) -> bool:
     if not _check_csrf(handler):
         return j(handler, {"error": "Cross-origin request rejected"}, status=403)
     body = read_body(handler)
+    try:
+        from integration.profile_memory.handlers import try_handle_put as _profile_memory_try_put
+
+        if _profile_memory_try_put(handler, parsed, body):
+            return True
+    except ImportError:
+        pass
     try:
         from integration.skills.handlers import try_handle_put as _integration_try_put
 

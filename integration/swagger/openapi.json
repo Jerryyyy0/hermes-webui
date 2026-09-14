@@ -33,6 +33,8 @@
     { "name": "IntegrationRecordScripts", "description": "录制脚本与关联 CSV（需 HERMES_INTEGRATION=1）。`relate_name` 由前端生成，一个 relate_name 对应一份脚本 JSON 字符串和一份 CSV，存储于 {HERMES_WEBUI_STATE_DIR}/attachments/record_scripts/<relate_name>/。" },
     { "name": "IntegrationNotifications", "description": "通知系统（混合模式：kb_apply 实时聚合自下游 get_user_messages；skill_publish 实时聚合自上游 external/notifications，不持久化本地）。read/delete 按 ID 前缀路由：kb: 透传下游，skill_publish: 转发上游。" },
     { "name": "IntegrationMemory",   "description": "记忆统计（需 HERMES_INTEGRATION=1）。聚合展示会话天数、定时任务和记忆文件。" },
+    { "name": "IntegrationProfileOverview", "description": "助理主页后端聚合（需 HERMES_INTEGRATION=1）。按 Profile 返回基础资料、工作指标、年度活跃度、最近技能和原始档案。" },
+    { "name": "IntegrationProfileMemory", "description": "助理画像记忆（需 HERMES_INTEGRATION=1）。只读取和编辑 MEMORY.md，分页查询其形成、修改、删除事件。" },
     { "name": "IntegrationAssistantBubbles", "description": "Profile 助理气泡（需 HERMES_INTEGRATION=1）。读取 `<profile.path>/assistant_bubbles.json` 独立缓存；定时任务槽位实时统计，不写回。" },
     { "name": "IntegrationWebuiAppearance", "description": "WebUI 外观配置（需 HERMES_INTEGRATION=1）。只读读取进程级 `{HERMES_HOME}/webui-appearance/` 下的 JSON 与资源文件；不做 schema 校验或写入。" },
     { "name": "IntegrationConfig", "description": "运行时环境配置（需 HERMES_INTEGRATION=1）。仅返回白名单环境变量 BROWSER_PREVIEW_URL。" }
@@ -3395,6 +3397,148 @@
       }
     },
 
+    "/api/integration/profiles/{profile}/memory": {
+      "get": {
+        "tags": ["IntegrationProfileMemory"],
+        "summary": "获取助理全部记忆",
+        "description": "返回当前 Profile 的 MEMORY.md 原文和更新时间，不读取 USER.md，也不进行业务分类。",
+        "parameters": [
+          { "name": "profile", "in": "path", "required": true, "schema": { "type": "string" }, "description": "Profile 名称" }
+        ],
+        "responses": {
+          "200": { "description": "助理记忆", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProfileMemoryOverview" } } } },
+          "404": { "description": "Profile 不存在" },
+          "500": { "description": "读取记忆数据失败" }
+        }
+      },
+      "put": {
+        "tags": ["IntegrationProfileMemory"],
+        "summary": "编辑一份助理记忆",
+        "description": "仅支持 target=memory 编辑 MEMORY.md；按 § 分隔后的条目差异逐条产生时间线事件。",
+        "parameters": [
+          { "name": "profile", "in": "path", "required": true, "schema": { "type": "string" }, "description": "Profile 名称" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProfileMemoryUpdateRequest" } } }
+        },
+        "responses": {
+          "200": { "description": "保存结果", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProfileMemoryUpdateResponse" } } } },
+          "400": { "description": "请求参数无效或超过记忆字符上限" },
+          "404": { "description": "Profile 不存在" },
+          "500": { "description": "保存记忆数据失败" }
+        }
+      }
+    },
+
+    "/api/integration/profiles/{profile}/memory/timeline": {
+      "get": {
+        "tags": ["IntegrationProfileMemory"],
+        "summary": "获取助理记忆时间线",
+        "description": "按写入时间倒序分页返回上线后由 Agent 或 WebUI 形成、修改、删除的 MEMORY.md 事件；USER.md 事件不返回。",
+        "parameters": [
+          { "name": "profile", "in": "path", "required": true, "schema": { "type": "string" }, "description": "Profile 名称" },
+          { "name": "page", "in": "query", "required": false, "schema": { "type": "integer", "minimum": 1, "default": 1 } },
+          { "name": "page_size", "in": "query", "required": false, "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 } }
+        ],
+        "responses": {
+          "200": { "description": "记忆时间线", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProfileMemoryTimeline" } } } },
+          "400": { "description": "分页参数无效" },
+          "404": { "description": "Profile 不存在" },
+          "500": { "description": "读取记忆数据失败" }
+        }
+      }
+    },
+
+    "/api/integration/profiles/{profile}/overview": {
+      "get": {
+        "tags": ["IntegrationProfileOverview"],
+        "summary": "获取助理主页聚合数据",
+        "description": "按当前用户运行实例中的 Profile 聚合助理资料、累计工作指标、滚动一年活跃度、近 7 日最近学会技能和可用原始档案。`info.time` 缺失或无效时 `created_at` 为 null、`work_days` 为 0。",
+        "parameters": [
+          { "name": "profile", "in": "path", "required": true, "schema": { "type": "string" }, "description": "Profile 名称" }
+        ],
+        "responses": {
+          "200": {
+            "description": "助理主页聚合数据",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProfileOverview" } } }
+          },
+          "400": { "description": "缺少或无效的 Profile 参数" },
+          "404": { "description": "Profile 不存在" }
+        }
+      }
+    },
+
+    "/api/integration/profiles/{profile}/raw_files": {
+      "get": {
+        "tags": ["IntegrationProfileOverview"],
+        "summary": "列出助理原始档案",
+        "description": "仅列出实际存在的固定档案：SOUL.md、memories/MEMORY.md、memories/USER.md。",
+        "parameters": [
+          { "name": "profile", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "档案列表",
+            "content": { "application/json": { "schema": {
+              "type": "object",
+              "required": ["profile", "files"],
+              "properties": {
+                "profile": { "type": "string" },
+                "files": { "type": "array", "items": { "$ref": "#/components/schemas/ProfileRawFile" } }
+              }
+            } } }
+          },
+          "404": { "description": "Profile 不存在" }
+        }
+      }
+    },
+
+    "/api/integration/profiles/{profile}/raw_files/{file_type}": {
+      "get": {
+        "tags": ["IntegrationProfileOverview"],
+        "summary": "预览助理原始档案",
+        "parameters": [
+          { "name": "profile", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "file_type", "in": "path", "required": true, "schema": { "type": "string", "enum": ["soul", "memory", "user"] } }
+        ],
+        "responses": {
+          "200": {
+            "description": "UTF-8 Markdown 内容",
+            "content": { "application/json": { "schema": {
+              "type": "object",
+              "required": ["profile", "file_type", "filename", "content"],
+              "properties": {
+                "profile": { "type": "string" },
+                "file_type": { "type": "string" },
+                "filename": { "type": "string" },
+                "content": { "type": "string" }
+              }
+            } } }
+          },
+          "400": { "description": "不支持的档案类型" },
+          "404": { "description": "Profile 或档案不存在" }
+        }
+      }
+    },
+
+    "/api/integration/profiles/{profile}/raw_files/{file_type}/download": {
+      "get": {
+        "tags": ["IntegrationProfileOverview"],
+        "summary": "下载助理原始档案",
+        "description": "以 attachment 方式下载固定 Markdown 档案。",
+        "parameters": [
+          { "name": "profile", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "file_type", "in": "path", "required": true, "schema": { "type": "string", "enum": ["soul", "memory", "user"] } }
+        ],
+        "responses": {
+          "200": { "description": "Markdown 文件", "content": { "text/markdown": { "schema": { "type": "string", "format": "binary" } } } },
+          "400": { "description": "不支持的档案类型" },
+          "404": { "description": "Profile 或档案不存在" }
+        }
+      }
+    },
+
     "/api/integration/memory/stats": {
       "get": {
         "tags": ["IntegrationMemory"],
@@ -6180,6 +6324,191 @@
           "tool_count": { "type": "integer", "description": "探测到的工具数量（仅 ok=true 时存在）" },
           "note": { "type": "string", "description": "测试说明（成功时）" },
           "error": { "type": "string", "description": "错误信息（仅 ok=false 时存在）" }
+        }
+      },
+      "ProfileMemoryDocument": {
+        "type": "object",
+        "required": ["filename", "content", "updated_at"],
+        "properties": {
+          "filename": { "type": "string", "enum": ["MEMORY.md"] },
+          "content": { "type": "string" },
+          "updated_at": { "type": "string", "format": "date-time", "nullable": true }
+        }
+      },
+      "ProfileMemoryOverview": {
+        "type": "object",
+        "required": ["profile", "assistant_name", "description", "updated_at", "memories"],
+        "properties": {
+          "profile": { "type": "string" },
+          "assistant_name": { "type": "string" },
+          "description": { "type": "string" },
+          "updated_at": { "type": "string", "format": "date-time", "nullable": true },
+          "memories": {
+            "type": "object",
+            "required": ["memory"],
+            "properties": {
+              "memory": { "$ref": "#/components/schemas/ProfileMemoryDocument" }
+            }
+          }
+        }
+      },
+      "ProfileMemoryUpdateRequest": {
+        "type": "object",
+        "required": ["target", "content"],
+        "additionalProperties": false,
+        "properties": {
+          "target": { "type": "string", "enum": ["memory"] },
+          "content": { "type": "string", "description": "完整文件内容；多条记忆使用独占一行的 § 分隔" }
+        }
+      },
+      "ProfileMemoryUpdateResponse": {
+        "type": "object",
+        "required": ["ok", "profile", "target", "filename", "content", "updated_at", "events_created"],
+        "properties": {
+          "ok": { "type": "boolean", "enum": [true] },
+          "profile": { "type": "string" },
+          "target": { "type": "string", "enum": ["memory"] },
+          "filename": { "type": "string", "enum": ["MEMORY.md"] },
+          "content": { "type": "string" },
+          "updated_at": { "type": "string", "format": "date-time" },
+          "events_created": { "type": "integer", "minimum": 0 }
+        }
+      },
+      "ProfileMemoryEvent": {
+        "type": "object",
+        "required": ["event_id", "target", "event_type", "event_name", "occurred_at", "content", "source"],
+        "properties": {
+          "event_id": { "type": "string" },
+          "target": { "type": "string", "enum": ["memory"] },
+          "event_type": { "type": "string", "enum": ["created", "updated", "deleted"] },
+          "event_name": { "type": "string", "enum": ["形成记忆", "修改记忆", "删除记忆"] },
+          "occurred_at": { "type": "string", "format": "date-time" },
+          "content": { "type": "string", "description": "形成/修改返回新内容，删除返回删除前内容" },
+          "source": { "type": "string", "enum": ["agent", "webui"] }
+        }
+      },
+      "ProfileMemoryTimeline": {
+        "type": "object",
+        "required": ["profile", "items", "pagination"],
+        "properties": {
+          "profile": { "type": "string" },
+          "items": { "type": "array", "items": { "$ref": "#/components/schemas/ProfileMemoryEvent" } },
+          "pagination": {
+            "type": "object",
+            "required": ["page", "page_size", "total", "has_more"],
+            "properties": {
+              "page": { "type": "integer", "minimum": 1 },
+              "page_size": { "type": "integer", "minimum": 1, "maximum": 100 },
+              "total": { "type": "integer", "minimum": 0 },
+              "has_more": { "type": "boolean" }
+            }
+          }
+        }
+      },
+      "ProfileRawFile": {
+        "type": "object",
+        "required": ["file_type", "filename", "size", "updated_at"],
+        "properties": {
+          "file_type": { "type": "string", "enum": ["soul", "memory", "user"] },
+          "filename": { "type": "string" },
+          "size": { "type": "integer", "minimum": 0 },
+          "updated_at": { "type": "string", "format": "date-time" }
+        }
+      },
+      "ProfileOverview": {
+        "type": "object",
+        "required": ["profile", "metrics", "activity", "recent_learned_skills", "raw_files"],
+        "properties": {
+          "profile": {
+            "type": "object",
+            "required": ["name", "assistant_name", "avatar", "role_type", "status", "created_at", "description"],
+            "properties": {
+              "name": { "type": "string" },
+              "assistant_name": { "type": "string" },
+              "avatar": { "type": "string", "description": "沿用 GET /api/profiles 的 info.logo" },
+              "role_type": { "type": "string", "enum": ["general", "position"] },
+              "status": { "type": "string", "enum": ["online"] },
+              "created_at": { "type": "string", "format": "date-time", "nullable": true, "description": "来自 info.time" },
+              "description": { "type": "string" }
+            }
+          },
+          "metrics": {
+            "type": "object",
+            "required": ["work_days", "automatic_task_count", "conversation_task_count"],
+            "properties": {
+              "work_days": { "type": "integer", "minimum": 0, "description": "上海日期的今天减 info.time 日期；同日为 0" },
+              "automatic_task_count": { "type": "integer", "minimum": 0, "description": "当前仍存在的全部 Cron Job，包含禁用及已有执行结果的任务" },
+              "conversation_task_count": { "type": "integer", "minimum": 0, "description": "当前仍存在的普通 WebUI 会话数，不含 Cron、Webhook、消息平台、CLI、API 和子 Agent 会话" }
+            }
+          },
+          "activity": {
+            "type": "object",
+            "required": ["start_date", "end_date", "timezone", "week_starts_on", "user_anchor", "safe_buffer", "colors", "days", "weeks", "month_labels"],
+            "properties": {
+              "start_date": { "type": "string", "format": "date" },
+              "end_date": { "type": "string", "format": "date" },
+              "timezone": { "type": "string", "enum": ["Asia/Shanghai"] },
+              "week_starts_on": { "type": "string", "enum": ["monday"] },
+              "user_anchor": { "type": "number", "minimum": 0, "description": "区间内非零日回复数的第 80 百分位" },
+              "safe_buffer": { "type": "number", "enum": [1.6] },
+              "colors": { "type": "array", "minItems": 5, "maxItems": 5, "items": { "type": "string" } },
+              "days": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["date", "count", "ratio", "level"],
+                  "properties": {
+                    "date": { "type": "string", "format": "date" },
+                    "count": { "type": "integer", "minimum": 0 },
+                    "ratio": { "type": "number", "minimum": 0, "maximum": 1 },
+                    "level": { "type": "integer", "minimum": 0, "maximum": 4 }
+                  }
+                }
+              },
+              "weeks": {
+                "type": "array",
+                "description": "周一至周日；滚动一年边界之外的位置为 null。跨月周归入占至少 4 天的月份。",
+                "items": {
+                  "type": "object",
+                  "required": ["week_start", "month", "days"],
+                  "properties": {
+                    "week_start": { "type": "string", "format": "date" },
+                    "month": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}$" },
+                    "days": { "type": "array", "minItems": 7, "maxItems": 7, "items": { "type": "object", "nullable": true } }
+                  }
+                }
+              },
+              "month_labels": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["month", "label", "week_index"],
+                  "properties": {
+                    "month": { "type": "string" },
+                    "label": { "type": "string" },
+                    "week_index": { "type": "integer", "minimum": 0 }
+                  }
+                }
+              }
+            }
+          },
+          "recent_learned_skills": {
+            "type": "array",
+            "maxItems": 3,
+            "items": {
+              "type": "object",
+              "required": ["name", "display_name", "description", "learned_at", "disabled", "source"],
+              "properties": {
+                "name": { "type": "string" },
+                "display_name": { "type": "string" },
+                "description": { "type": "string" },
+                "learned_at": { "type": "string", "format": "date-time" },
+                "disabled": { "type": "boolean" },
+                "source": { "type": "string", "enum": ["skillhub", "memory_evolution"] }
+              }
+            }
+          },
+          "raw_files": { "type": "array", "items": { "$ref": "#/components/schemas/ProfileRawFile" } }
         }
       },
       "GenericObject": {
