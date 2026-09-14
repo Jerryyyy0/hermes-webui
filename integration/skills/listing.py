@@ -71,13 +71,22 @@ def _delisted_installed_for_profile(
     """Installed skills absent from the upstream catalog (e.g. delisted), for one profile."""
     if skills_dir is None:
         skills_dir = skills_dir_for_profile(profile_key)
-    by_dir: dict[str, str] = {}
+    # Group by dir first: the index may alias several names to one install
+    # (sidecar catalog name, frontmatter name, directory leaf). A dir already
+    # covered by a hub catalog row must not resurface under another alias as
+    # a phantom delisted entry (e.g. versioned dir "foo-1.0.1").
+    names_by_dir: dict[str, list[str]] = {}
     for name, dir_name in installed_index.items():
         skill_name = str(name or "").strip()
         dir_key = str(dir_name or "").strip()
-        if not skill_name or not dir_key or skill_name in ctx.hub_names:
+        if not skill_name or not dir_key:
             continue
-        by_dir.setdefault(dir_key, skill_name)
+        names_by_dir.setdefault(dir_key, []).append(skill_name)
+    by_dir: dict[str, str] = {}
+    for dir_key, names in names_by_dir.items():
+        if any(name in ctx.hub_names for name in names):
+            continue
+        by_dir[dir_key] = names[0]
     if not by_dir:
         return []
     synthetic = [

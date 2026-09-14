@@ -834,18 +834,22 @@ def _build_delisted_installed(
     The upstream catalog only lists currently-published skills; a delisted
     skill still has its local ``.hub_installed`` marker and must stay visible
     under scope=installed. The all-profiles index may alias several names to
-    the same directory — collapse to one row per (profile, dir).
+    the same directory — collapse to one row per (profile, dir). A dir whose
+    catalog name still appears in the hub (versioned dir leaf registered as
+    an alias) is already shown as a catalog row; its aliases must not
+    resurface as phantom delisted entries.
     """
-    rows: list[dict] = []
-    seen_dirs: set[tuple[str, str]] = set()
+    names_by_dir: dict[tuple[str, str], list[str]] = {}
     for name, (profile_name, dir_name) in profile_index.items():
         key = str(name or "").strip()
-        if not key or key in hub_names:
-            continue
         dir_key = (str(profile_name or ""), str(dir_name or ""))
-        if not dir_key[1] or dir_key in seen_dirs:
+        if not key or not dir_key[1]:
             continue
-        seen_dirs.add(dir_key)
+        names_by_dir.setdefault(dir_key, []).append(key)
+    rows: list[dict] = []
+    for dir_key, names in names_by_dir.items():
+        if any(name in hub_names for name in names):
+            continue
         category = ""
         try:
             category = _read_local_skill_category(
@@ -853,7 +857,7 @@ def _build_delisted_installed(
             )
         except Exception:
             category = ""
-        rows.append({"name": key, "category": category})
+        rows.append({"name": names[0], "category": category})
     if not rows:
         return []
     annotate_installed(
@@ -1102,7 +1106,22 @@ def is_delisted_installed(name: str) -> bool:
         installs = _hub_installed_profiles_all()
     except Exception:
         return False
-    return bool(installs.get(key))
+    entries = installs.get(key)
+    if not entries:
+        return False
+    # The index may alias several names to one install (sidecar catalog name,
+    # frontmatter name, directory leaf). If any alias of the same install is
+    # still in the catalog, the skill is not delisted.
+    mine = {
+        (str(e.get("profile") or ""), str(e.get("dir_name") or "")) for e in entries
+    }
+    for other_name, other_entries in installs.items():
+        if other_name not in hub_names:
+            continue
+        for e in other_entries:
+            if (str(e.get("profile") or ""), str(e.get("dir_name") or "")) in mine:
+                return False
+    return True
 
 
 def _copy_existing_local_install(
