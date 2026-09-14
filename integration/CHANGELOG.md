@@ -6,6 +6,8 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ## [Unreleased]
 
+- Session Manifest 现在能完整识别独占一行的带空格 `MEDIA:` 路径、`MEDIA:<...>` 显式边界，以及最终 assistant 回复中 `**带空格文件名.docx**` 形式的裸文件名；普通粗体文案、远程 URL 与现有路径安全门禁保持不变。
+
 - 知识库 MCP 引用提示词现在明确 `chunks[]`、`page_content` 与同一知识块 `_cite` 的绑定关系，并加入误抄时仍会被既有过滤层拦截的合法格式示例及反向约束；同时明确可见编号和 HTML 角标只由宿主结算生成，禁止模型输出 `[1]`、`data-cite` / `data-c` 标签、Markdown 脚注或参考文献列表，减少跨块错引、仅因检索命中而引用及格式漂移。
 
 - 修复 state.db 压缩摘要包含原始提问时，模糊去重将摘要的内部语义标签复制给真实消息，导致历史以 assistant 开头的问题；轮次归属与语义标签仅在内容严格一致（允许既有 workspace 前缀归一化）时传递。

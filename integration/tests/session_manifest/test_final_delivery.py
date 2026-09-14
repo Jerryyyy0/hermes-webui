@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from integration.session_manifest.manifest import (
+    _paths_from_assistant_media,
     _paths_from_last_assistant_message,
     extract_turn_artifact_entries_for_manifest,
     extract_manifest_delta_from_turn_reconcile,
@@ -32,6 +33,77 @@ def test_read_execute_code_final_delivery(tmp_path):
         '公开知识库列表.csv', '公开知识库列表.mp4'}
     delta = extract_manifest_delta_from_turn_reconcile(messages, tmp_path, turn_key='turn:4', sequence=1)
     assert {row['path'] for row in delta['artifacts']} == {'公开知识库列表.csv', '公开知识库列表.mp4'}
+
+
+def test_media_line_preserves_spaces_in_local_path(tmp_path):
+    artifact = tmp_path / '抒情 散文.docx'
+    artifact.write_bytes(b'output')
+
+    assert _paths_from_assistant_media(
+        f'MEDIA:{artifact}', tmp_path,
+    ) == ['抒情 散文.docx']
+    assert _paths_from_assistant_media(
+        f'下载 MEDIA:<{artifact}>', tmp_path,
+    ) == ['抒情 散文.docx']
+    assert _paths_from_assistant_media(
+        f'MEDIA:{artifact}\r\n校验通过', tmp_path,
+    ) == ['抒情 散文.docx']
+
+
+def test_inline_legacy_media_keeps_whitespace_boundary(tmp_path):
+    artifact = tmp_path / 'report.docx'
+    artifact.write_bytes(b'output')
+
+    assert _paths_from_assistant_media(
+        f'查看 MEDIA:{artifact} 下载', tmp_path,
+    ) == ['report.docx']
+
+
+def test_final_bold_bare_filename_preserves_spaces(tmp_path):
+    artifact = tmp_path / '抒情 散文.docx'
+    artifact.write_bytes(b'output')
+
+    assert _paths_from_last_assistant_message(
+        '已生成 **抒情 散文.docx**：A4 两页。', tmp_path,
+    ) == ['抒情 散文.docx']
+
+
+def test_final_bold_prose_is_not_a_file_candidate(tmp_path):
+    (tmp_path / '转换成功').write_bytes(b'not-an-artifact')
+
+    assert _paths_from_last_assistant_message(
+        '**转换成功**，已生成 Word 文档。', tmp_path,
+    ) == []
+
+
+def test_reported_spaced_docx_delivery_is_registered_once(tmp_path):
+    artifact = tmp_path / '抒情 散文.docx'
+    artifact.write_bytes(b'output')
+    messages = [
+        {'role': 'user', 'content': '帮我转为word', '_turn_key': 'turn:2'},
+        {
+            'role': 'assistant',
+            'content': (
+                '校验通过：中文文本层完整、A4 两页、无乱码。\n\n'
+                f'MEDIA:{artifact}\n\n'
+                '已生成 **抒情 散文.docx**：标题宋体 18pt。'
+            ),
+        },
+    ]
+
+    delta = extract_manifest_delta_from_turn_reconcile(
+        messages, tmp_path, turn_key='turn:2', sequence=1,
+    )
+
+    assert delta['turns'] == [{
+        'turn_key': 'turn:2',
+        'artifacts': [{
+            'path': '抒情 散文.docx',
+            'preview': 'file',
+            'source_tool': 'media',
+        }],
+        'references': [],
+    }]
 
 
 def test_unlimited_deliveries(tmp_path):

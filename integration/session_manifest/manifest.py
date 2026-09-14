@@ -80,7 +80,6 @@ MANIFEST_STATUS_EXPIRED = 'expired'
 MEDIA_ARTIFACT_SOURCE = 'media'
 ASSISTANT_PROSE_ARTIFACT_SOURCE = 'assistant_prose'
 TURN_RECONCILE_SOURCE = 'reconcile'
-_MEDIA_TOKEN_RE = re.compile(r'MEDIA:([^\s\]]+)')
 _REFERENCE_ONLY_TOOLS = (
     ARTIFACT_EXCLUSION_READ_TOOLS
     | REFERENCE_DISCOVERY_TOOLS
@@ -141,9 +140,11 @@ def _artifact_source_priority(source_tool: str) -> int:
 def _paths_from_assistant_media(text: str, workspace: Path) -> list[str]:
     if not text:
         return []
+    from integration.session_manifest.final_paths import media_references
+
     paths: list[str] = []
     seen: set[str] = set()
-    for ref in _MEDIA_TOKEN_RE.findall(text):
+    for ref in media_references(text):
         if '://' in ref:
             continue
         raw_ref = ref
