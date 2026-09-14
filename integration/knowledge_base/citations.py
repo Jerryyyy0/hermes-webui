@@ -318,9 +318,17 @@ class KnowledgeBaseCitationHook:
             "The example token is not evidence; never reuse this example token.\n"
             "If a claim is not supported by an annotated chunk, write it without a "
             "citation marker. Do not cite a chunk merely because it appeared in search results.\n"
+            "Rendering boundary: The host converts valid internal markers into visible "
+            "numbered citations after validating the response. Do not render citations yourself. "
+            "Never output visible citation numbers such as `[1]`, HTML citation tags such as "
+            "`<sup data-cite=\"...\">[1]</sup>` or `<sup data-c=\"1\">[1]</sup>`, "
+            "Markdown footnotes or reference lists. Those forms are invalid.\n"
             "Use only `_cite` values present in the provided chunks. Never use a token "
             "from a different chunk, and do not invent, modify, translate, renumber, "
-            "or expose citation tokens in any other form."
+            "or expose citation tokens in any other form. Before completing the answer, "
+            "verify that every marker contains an exact 16-character `_cite` value, "
+            "follows the required marker structure, and is attached to a claim supported "
+            "by that same chunk."
         )
 
     def prepare_final_assistant(self, *, raw_content: Any) -> dict[str, Any]:
