@@ -16,6 +16,7 @@ from integration.skills.utils import (
     has_hub_installed_marker,
     is_system_skill,
     skill_path_within,
+    skill_uninstall_root,
 )
 from integration.project_logging import get_logger
 from integration.skills.validate import validate_skill_md_content
@@ -1660,12 +1661,12 @@ def delete_local_skill(name: str, dir_name: str = "", profile: str = "") -> dict
         skill_dir, skills_dir = _resolve_skill_dir_in_any_profile(name, dir_name)
         if not skill_dir or not skills_dir:
             return {"error": "Skill not found", "status": 404}
-    hub_installed = (skill_dir / ".hub_installed").is_file()
+    hub_installed = has_hub_installed_marker(skill_dir, skills_dir)
     skill_md = find_skill_main_file(skill_dir)
     logical_name = (
         parse_logical_name_from_skill_md(skill_md) if skill_md else None
     ) or str(name or "").strip() or skill_dir.name
-    shutil.rmtree(skill_dir)
+    shutil.rmtree(skill_uninstall_root(skill_dir, skills_dir))
     try:
         from integration.skills.no_self_improve import remove_names
 
