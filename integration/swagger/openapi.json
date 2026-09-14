@@ -35,7 +35,8 @@
     { "name": "IntegrationMemory",   "description": "记忆统计（需 HERMES_INTEGRATION=1）。聚合展示会话天数、定时任务和记忆文件。" },
     { "name": "IntegrationAssistantBubbles", "description": "Profile 助理气泡（需 HERMES_INTEGRATION=1）。读取 `<profile.path>/assistant_bubbles.json` 独立缓存；定时任务槽位实时统计，不写回。" },
     { "name": "IntegrationWebuiAppearance", "description": "WebUI 外观配置（需 HERMES_INTEGRATION=1）。只读读取进程级 `{HERMES_HOME}/webui-appearance/` 下的 JSON 与资源文件；不做 schema 校验或写入。" },
-    { "name": "IntegrationConfig", "description": "运行时环境配置（需 HERMES_INTEGRATION=1）。仅返回白名单环境变量 BROWSER_PREVIEW_URL。" }
+    { "name": "IntegrationConfig", "description": "运行时环境配置（需 HERMES_INTEGRATION=1）。仅返回白名单环境变量 BROWSER_PREVIEW_URL。" },
+    { "name": "IntegrationSlashCommands", "description": "外部前端可用的斜杠命令目录（需 HERMES_INTEGRATION=1）。" }
   ],
   "paths": {
 
@@ -2114,6 +2115,42 @@
             }
           },
           "500": { "description": "BROWSER_PREVIEW_URL 未配置" }
+        }
+      }
+    },
+    "/api/integration/slash_commands": {
+      "get": {
+        "tags": ["IntegrationSlashCommands"],
+        "summary": "查询外部前端可用的斜杠命令",
+        "description": "需 `HERMES_INTEGRATION=1`。V1 仅返回 `/compact`；命令名不包含斜杠，前端按现有 `/api/commands` 约定展示。",
+        "responses": {
+          "200": {
+            "description": "斜杠命令目录",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["commands"],
+                  "properties": {
+                    "commands": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": ["name", "description", "args_hint"],
+                        "properties": {
+                          "name": { "type": "string", "enum": ["compact"] },
+                          "description": { "type": "string" },
+                          "args_hint": { "type": "string", "enum": ["[focus topic]"] }
+                        },
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          }
         }
       }
     },

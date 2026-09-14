@@ -116,6 +116,18 @@ def test_openapi_routes_match_current_method_contracts():
     assert "/api/auth/passkey/login/options" not in paths
 
 
+def test_openapi_documents_external_slash_command_catalog():
+    spec = json.loads(Path(sh.__file__).with_name("openapi.json").read_text(encoding="utf-8"))
+    operation = spec["paths"]["/api/integration/slash_commands"]["get"]
+    schema = operation["responses"]["200"]["content"]["application/json"]["schema"]
+
+    assert operation["tags"] == ["IntegrationSlashCommands"]
+    command = schema["properties"]["commands"]["items"]["properties"]
+    assert command["name"]["enum"] == ["compact"]
+    assert set(command) == {"name", "description", "args_hint"}
+    assert command["args_hint"]["enum"] == ["[focus topic]"]
+
+
 def test_openapi_request_schemas_match_session_and_configuration_handlers():
     """Document the body/query field names consumed by their handlers."""
     spec = json.loads(Path(sh.__file__).with_name("openapi.json").read_text(encoding="utf-8"))
