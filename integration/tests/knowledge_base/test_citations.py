@@ -31,6 +31,11 @@ def test_provider_prompt_defines_chunk_evidence_and_same_chunk_token_binding():
     assert "same chunk's `_cite`" in prompt
     assert "merely because it appeared in search results" in prompt
     assert "never reuse this example token" in prompt
+    assert "The host converts valid internal markers into visible numbered citations" in prompt
+    assert "Never output visible citation numbers such as `[1]`" in prompt
+    assert '`<sup data-cite="...">[1]</sup>`' in prompt
+    assert '`<sup data-c="1">[1]</sup>`' in prompt
+    assert "Markdown footnotes or reference lists" in prompt
     assert "[[c:X]]" not in prompt
     assert "[[c:TOKEN]]" not in prompt
     example_markers = re.findall(r"\[\[c:[A-Za-z0-9_-]{16}\]\]", prompt)
