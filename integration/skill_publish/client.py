@@ -195,24 +195,33 @@ def fetch_external_notifications(
     platform: str,
     external_user_id: str,
     since_id: int = 0,
+    before_id: int = 0,
     limit: int = _NOTIFICATIONS_LIMIT,
     read_type: str = "all",
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], int]:
     """B3: GET /api/external/notifications (live event stream).
 
     ``read_type`` mirrors the KB contract: ``all`` / ``unread`` / ``seen``.
     Read state is owned by upstream SkillHub, not persisted locally.
+
+    Returns ``(events, min_id)`` where ``min_id`` is the smallest event ID in
+    the response (0 when empty) — callers pass it as ``before_id`` for the
+    next page.
     """
+    params: dict[str, Any] = {
+        "platform": platform,
+        "externalUserId": external_user_id,
+        "limit": limit,
+        "readType": read_type,
+    }
+    if since_id:
+        params["sinceId"] = since_id
+    if before_id:
+        params["beforeId"] = before_id
     resp = _request(
         "GET",
         f"{_hub_base()}/api/external/notifications",
-        params={
-            "platform": platform,
-            "externalUserId": external_user_id,
-            "sinceId": since_id,
-            "limit": limit,
-            "readType": read_type,
-        },
+        params=params,
     )
     try:
         payload = resp.json()
@@ -222,8 +231,10 @@ def fetch_external_notifications(
         ) from exc
     items = payload.get("notifications") if isinstance(payload, dict) else None
     if not isinstance(items, list):
-        return []
-    return [item for item in items if isinstance(item, dict)]
+        return [], 0
+    events = [item for item in items if isinstance(item, dict)]
+    min_id = int(payload.get("minId") or 0) if events else 0
+    return events, min_id
 
 
 def mark_external_notifications_read(

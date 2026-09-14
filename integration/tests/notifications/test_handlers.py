@@ -441,3 +441,39 @@ def test_get_notifications_kb_disabled():
     mock_post.assert_not_called()
     payload = _json_payload(handler)
     assert payload["items"] == []
+
+
+def test_get_notifications_forwards_before_id_and_returns_next():
+    """GET /api/integration/notifications passes before_id to skill_publish and returns next_before_id."""
+    handler = MagicMock()
+    parsed = urlparse(
+        "/api/integration/notifications?account=a&uuid=b&before_id=50"
+    )
+    with patch(
+        "integration.notifications.handlers.skill_publish_enabled",
+        return_value=True,
+    ):
+        with patch(
+            "integration.notifications.handlers.knowledge_base_enabled",
+            return_value=True,
+        ):
+            with patch(
+                "integration.notifications.handlers._fetch_skill_publish_events",
+                return_value=([{"id": "skill_publish:30", "category": "skill_publish",
+                                "title": "t", "body": "", "source": "s",
+                                "ref_id": "", "status": "unread", "priority": "normal",
+                                "actionable": 0, "action_status": "",
+                                "metadata": {}, "created_at": 100.0, "updated_at": 100.0}], 30),
+            ) as mock_sp:
+                with patch(
+                    "integration.notifications.handlers.kb_client.post_json",
+                    return_value=(200, {"code": 200, "data": []}),
+                ):
+                    assert try_handle_get(handler, parsed) is True
+
+    mock_sp.assert_called_once()
+    assert mock_sp.call_args.kwargs["before_id"] == 50
+
+    payload = _json_payload(handler)
+    assert payload["next_before_id"] == 30
+    assert len(payload["items"]) == 1

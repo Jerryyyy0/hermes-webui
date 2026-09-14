@@ -201,6 +201,52 @@ def test_build_hub_catalog_context_builds_delisted(hub_url, tmp_path):
     assert ctx.delisted_installed[0]["category"] == "tools"
 
 
+def test_build_hub_catalog_context_uses_profile_level_disabled(tmp_path):
+    """disabled flag comes from the requested profile's config, not process env."""
+    skills_dir = tmp_path / "skills"
+    installed_dir = skills_dir / "my-skill"
+    installed_dir.mkdir(parents=True)
+    (installed_dir / "SKILL.md").write_text("---\nname: my-skill\n---\n", encoding="utf-8")
+    (installed_dir / ".hub_installed").write_text("1", encoding="utf-8")
+    (installed_dir / ".hub_catalog_name").write_text("my-skill", encoding="utf-8")
+
+    profile_home = tmp_path / "profiles" / "alice"
+    profile_home.mkdir(parents=True)
+    (profile_home / "config.yaml").write_text(
+        "skills:\n  disabled:\n    - my-skill\n", encoding="utf-8"
+    )
+
+    with patch("integration.skills.skillhub.fetch_all_hub_skills", return_value=[{"name": "my-skill"}]):
+        with patch("integration.skills.skillhub.shared_skills_dir", return_value=skills_dir):
+            with patch("integration.skills.skillhub._hub_installed_index", return_value={"my-skill": "my-skill"}):
+                with patch(
+                    "integration.skills.skillhub._hub_installed_profiles_all",
+                    return_value={
+                        "my-skill": [
+                            {"profile": "alice", "dir_name": "my-skill", "skill_dir": installed_dir},
+                        ],
+                    },
+                ):
+                    with patch(
+                        "integration.skills.no_self_improve.get_no_self_improve_names",
+                        return_value=set(),
+                    ):
+                        with patch(
+                            "integration.skills.skillhub.skills_dir_for_profile",
+                            return_value=skills_dir,
+                        ):
+                            with patch(
+                                "api.profiles.get_hermes_home_for_profile",
+                                return_value=profile_home,
+                            ):
+                                ctx = skillhub.build_hub_catalog_context(profile="alice")
+
+    entry = next((s for s in ctx.annotated_all if s["name"] == "my-skill"), None)
+    assert entry is not None
+    assert entry["disabled"] is True
+    assert entry["installed"] is True
+
+
 def test_list_hub_catalog_paged_sort_and_pagination(hub_url):
     annotated = [
         {"name": "c", "mtime": 1.0, "installed": False},

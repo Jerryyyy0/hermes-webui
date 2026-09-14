@@ -648,6 +648,7 @@ def _skills_list_from_dir(
     leak through the skills tool's module-global ``SKILLS_DIR``.
     """
     from agent.skill_utils import iter_skill_index_files
+    from integration.skills.utils import has_hub_installed_marker
     from tools.skills_tool import (
         MAX_DESCRIPTION_LENGTH,
         _EXCLUDED_SKILL_DIRS,
@@ -693,7 +694,7 @@ def _skills_list_from_dir(
                 if len(description) > MAX_DESCRIPTION_LENGTH:
                     description = description[: MAX_DESCRIPTION_LENGTH - 3] + "..."
                 seen_names.add(name)
-                hub_installed = (skill_dir / ".hub_installed").is_file()
+                hub_installed = has_hub_installed_marker(skill_dir, scan_dir)
                 entry = {
                     "name": name,
                     "description": description,

@@ -13,6 +13,7 @@ from integration.skills.paths import shared_skills_dir, skills_dir_for_profile
 from integration.skills.utils import (
     extract_zip_and_flatten,
     find_skill_main_file,
+    has_hub_installed_marker,
     is_system_skill,
     skill_path_within,
 )
@@ -385,8 +386,9 @@ def _scan_custom_skill_dicts(
             dir_key = _skill_dir_rel_path(skill_dir, skills_dir)
             if dir_key in seen:
                 continue
-            # Exclude hub-installed skills via marker file only
-            if (skill_dir / ".hub_installed").is_file():
+            # Exclude hub-installed skills via marker file only (the marker may
+            # sit on an ancestor dir when the zip wrapper failed to flatten)
+            if has_hub_installed_marker(skill_dir, skills_dir):
                 continue
             # user_created_only: show user-uploaded (.user_created) and
             # unmarked skills (session-created, profile-bundled), but not

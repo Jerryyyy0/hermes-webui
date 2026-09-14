@@ -2800,6 +2800,22 @@
       }
     },
 
+    "/api/skillhub/publish/validate": {
+      "get": {
+        "tags": ["SkillPublish"],
+        "summary": "发布前技能包格式校验",
+        "description": "校验本地技能文件是否符合发布规范（与提交审核时的强制拦截同一套规则）：SKILL.md 必须恰好一个且位于技能根目录（大小写变体或不同子目录均计为多个）、SKILL.md 内容与 frontmatter 合规（name/description）、frontmatter name 仅允许字母数字连字符下划线（上游 slug 硬约束）、打包总大小不超过上游 500MB 限制。返回 issues 列表：severity=error 阻断发布；warning（如 __pycache__/.pyc 冗余文件、frontmatter name 与技能名不一致）仅提示不阻断。",
+        "parameters": [
+          { "name": "skill_name", "in": "query", "required": true, "schema": { "type": "string" }, "description": "技能英文名" }
+        ],
+        "responses": {
+          "200": { "description": "{ valid, skill_name, issues[] }；issue 含 code/severity/message/message_zh，部分附 files/file/name" },
+          "400": { "description": "缺少 skill_name" },
+          "404": { "description": "本地技能不存在" }
+        }
+      }
+    },
+
     "/api/skillhub/skills": {
       "get": {
         "tags": ["SkillHub"],
@@ -2995,7 +3011,9 @@
           { "name": "name", "in": "query", "required": true, "schema": { "type": "string" }, "description": "技能名称" },
           { "name": "path", "in": "query", "schema": { "type": "string" }, "description": "文件相对路径（与 file 二选一）" },
           { "name": "file", "in": "query", "schema": { "type": "string" }, "description": "path 的别名" },
-          { "name": "scope", "in": "query", "schema": { "type": "string", "enum": ["auto", "hub", "custom"], "default": "auto" }, "description": "auto 与 custom=仅本地；hub=本地优先，否则 SkillHub file" }
+          { "name": "scope", "in": "query", "schema": { "type": "string", "enum": ["auto", "hub", "custom"], "default": "auto" }, "description": "auto 与 custom=仅本地；hub=本地优先，否则 SkillHub file" },
+          { "name": "profile", "in": "query", "schema": { "type": "string" }, "description": "目标助理（profile）名称；传了之后只从该助理的技能目录读取，用于精确寻址同一技能在不同助理下的副本" },
+          { "name": "dir_name", "in": "query", "schema": { "type": "string" }, "description": "技能目录相对路径（如未分类/my-skill）；配合 profile 使用，消除同名技能的歧义" }
         ],
         "responses": {
           "200": {
@@ -3225,6 +3243,12 @@
             "in": "query",
             "description": "游标分页，使用上次返回的 next_cursor（首次请求不传）",
             "schema": { "type": "number", "format": "float" }
+          },
+          {
+            "name": "before_id",
+            "in": "query",
+            "description": "skill_publish 事件翻页游标，使用上次返回的 next_before_id（首次请求不传）；传入后上游只返回 id < before_id 的事件",
+            "schema": { "type": "integer" }
           }
         ],
         "responses": {
@@ -3243,7 +3267,12 @@
                       "type": "number",
                       "format": "float",
                       "nullable": true,
-                      "description": "下一页游标，null 表示没有更多数据"
+                      "description": "下一页游标（KB 消息时间戳），null 表示没有更多 KB 数据"
+                    },
+                    "next_before_id": {
+                      "type": "integer",
+                      "nullable": true,
+                      "description": "skill_publish 事件下一页游标（上游事件最小 ID），null 表示没有更多 skill_publish 数据；传入下次请求的 before_id 参数即可翻页"
                     }
                   },
                   "required": ["items", "next_cursor"]
@@ -6017,6 +6046,31 @@
         "responses": { "200": { "description": "删除结果" } }
       }
     },
+    "/api/skillhub/skill-versions": {
+      "get": {
+        "tags": ["SkillHub"],
+        "summary": "获取技能版本历史",
+        "description": "按技能来源自动路由：市场技能返回上游 SkillHub 版本历史，用户自建技能返回本地发布申请单版本记录。可通过 scope 参数强制限定来源。",
+        "parameters": [
+          { "name": "name", "in": "query", "required": true, "schema": { "type": "string" }, "description": "技能名称（逻辑名/英文标识）" },
+          { "name": "profile", "in": "query", "schema": { "type": "string" }, "description": "目标助理（profile）名称，用于按助理限定技能来源；不传则跨助理扫描" },
+          { "name": "scope", "in": "query", "schema": { "type": "string", "enum": ["hub", "custom"] }, "description": "强制限定来源：hub=仅市场技能，custom=仅用户自建技能；不传则自动检测" }
+        ],
+        "responses": {
+          "200": {
+            "description": "版本历史",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/SkillHubVersionHistory" }
+              }
+            }
+          },
+          "400": { "description": "缺少 name 参数，或 scope 取值非法" },
+          "404": { "description": "技能不存在，或限定 scope 后匹配不到" },
+          "502": { "description": "上游 SkillHub 请求失败" }
+        }
+      }
+    },
     "/api/skillhub/sync-profiles": {
       "post": {
         "tags": ["Skills"],
@@ -6914,6 +6968,38 @@
           "scripts":    { "type": "array", "items": { "$ref": "#/components/schemas/SkillHubStructureFile" } },
           "references": { "type": "array", "items": { "$ref": "#/components/schemas/SkillHubStructureFile" } }
         }
+      },
+      "SkillHubVersionHistory": {
+        "type": "object",
+        "properties": {
+          "ok":              { "type": "boolean" },
+          "name":            { "type": "string", "description": "技能名称" },
+          "source":          { "type": "string", "enum": ["hub", "custom"], "description": "技能来源：hub=市场技能，custom=用户自建技能" },
+          "published":       { "type": "boolean", "description": "是否已发布过（自建技能从未发布时为 false）" },
+          "current_version": { "type": "string", "description": "当前本地安装版本（hub）或当前最新发布版本（custom）" },
+          "latest_version":  { "type": "string", "description": "市场最新版本（hub）或本地最新发布版本（custom）" },
+          "next_version":    { "type": "string", "description": "下一版本号（仅自建技能首次发布时为 1.0.0，其余为空）" },
+          "delisted":        { "type": "boolean", "description": "是否已从市场下架（仅 hub 来源有意义）" },
+          "versions": {
+            "type": "array",
+            "description": "版本列表，按版本倒序排列（最新在前）。hub 来源为上游版本历史；custom 来源为本地发布申请单合并结果。两种来源共享 version / published_at / change_logs 三个核心字段，custom 额外返回审核相关字段。",
+            "items": {
+              "type": "object",
+              "properties": {
+                "version":         { "type": "string", "description": "版本号（公共字段）" },
+                "published_at":    { "type": "string", "description": "发布时间（公共字段），格式 yyyy-MM-dd HH:mm:ss。custom 来源为审核通过时间，未审核通过时为空字符串" },
+                "change_logs":     { "type": "array", "description": "变更记录（公共字段），每项含 type / changeLog", "items": { "type": "object", "additionalProperties": true } },
+                "status":          { "type": "string", "description": "仅 custom：版本状态 draft/pending/approved/rejected/withdrawn" },
+                "application_type":{ "type": "string", "description": "仅 custom：申请类型 publish/unpublish" },
+                "submitted_at":    { "type": "number", "description": "仅 custom：提交时间戳" },
+                "audited_at":      { "type": "number", "description": "仅 custom：审核时间戳" },
+                "audit_comment":   { "type": "string", "description": "仅 custom：审核意见" },
+                "application_id":  { "type": "string", "description": "仅 custom：申请单 ID" }
+              }
+            }
+          }
+        },
+        "required": ["ok", "name", "source", "versions"]
       },
       "SkillHubFileContent": {
         "type": "object",

@@ -25,7 +25,9 @@ from integration.skills.paths import shared_skills_dir, skills_dir_for_profile
 from integration.skills.sort_utils import sort_skill_items
 from integration.skills.utils import (
     extract_zip_and_flatten,
+    find_skill_main_dir,
     find_skill_main_file,
+    has_hub_installed_marker,
     skill_path_within,
 )
 
@@ -344,6 +346,25 @@ def _record_install_version(
     )
 
 
+def _read_local_detail_json(skill_dir: Path) -> dict | None:
+    """Read .detail.json from skill_dir, falling back to the install wrapper.
+
+    Installs write .detail.json on the install target; when dir_name points
+    at a nested main dir, the metadata may sit one level up.
+    """
+    data = read_detail_json(skill_dir)
+    if data is not None:
+        return data
+    node = skill_dir.parent
+    while node is not None and node.parent != node:
+        if (node / ".hub_installed").is_file():
+            return read_detail_json(node)
+        if find_skill_main_file(node):
+            return None
+        node = node.parent
+    return None
+
+
 def _read_local_skill_description(skills_dir: Path, dir_name: str) -> str:
     """Read description from local SKILL.md when installed under dir_name."""
     rel = str(dir_name or "").strip()
@@ -378,13 +399,22 @@ def _read_local_skill_description(skills_dir: Path, dir_name: str) -> str:
 
 
 def _read_hub_catalog_name_sidecar(skill_dir: Path) -> str:
-    sidecar = skill_dir / _HUB_CATALOG_NAME_SIDECAR
-    if not sidecar.is_file():
-        return ""
-    try:
-        return sidecar.read_text(encoding="utf-8").strip()
-    except Exception:
-        return ""
+    """Read ``.hub_catalog_name`` from skill_dir, walking up to the marker dir.
+
+    The sidecar sits next to ``.hub_installed`` on the install target, which
+    is an ancestor when SKILL.md nests below an unflattened wrapper.
+    """
+    node = skill_dir
+    while True:
+        sidecar = node / _HUB_CATALOG_NAME_SIDECAR
+        if sidecar.is_file():
+            try:
+                return sidecar.read_text(encoding="utf-8").strip()
+            except Exception:
+                return ""
+        if (node / ".hub_installed").is_file() or node.parent == node:
+            return ""
+        node = node.parent
 
 
 def _read_local_skill_category(skills_dir: Path, dir_name: str) -> str:
@@ -418,7 +448,12 @@ def _lookup_installed_dir(installed_index: dict[str, str], catalog_name: str) ->
 def _read_skill_catalog_name(skill_dir: Path, leaf: str) -> str:
     skill_md = find_skill_main_file(skill_dir)
     if not skill_md:
-        return leaf
+        # Flatten-failure layout: SKILL.md nests below the marker dir while
+        # the dir itself (the install target) only holds sidecars.
+        try:
+            skill_md = next(skill_dir.rglob("SKILL.md"))
+        except StopIteration:
+            return leaf
     try:
         from tools.skills_tool import _parse_frontmatter
 
@@ -435,52 +470,80 @@ def _disabled_skill_names() -> set[str]:
     try:
         from tools.skills_tool import _get_disabled_skill_names
 
-        return _get_disabled_skill_names()
+        names = _get_disabled_skill_names()
+        _log.debug(
+            "_disabled_skill_names (process-level): %d names (HERMES_HOME=%s)",
+            len(names),
+            __import__("os").environ.get("HERMES_HOME", ""),
+        )
+        return names
     except Exception:
         return set()
 
 
 def _disabled_skill_names_for_profile(profile_name: str) -> set[str]:
     """Read ``skills.disabled`` from the given profile's config.yaml."""
+    profile = str(profile_name or "").strip() or "default"
     try:
         from api.profiles import get_hermes_home_for_profile
         import yaml
 
-        home = Path(get_hermes_home_for_profile(profile_name))
+        home = Path(get_hermes_home_for_profile(profile))
         config_path = home / "config.yaml"
         if not config_path.is_file():
+            _log.debug(
+                "disabled names: profile=%s no config at %s", profile, config_path
+            )
             return set()
         with open(config_path, encoding="utf-8") as f:
             cfg = yaml.safe_load(f) or {}
         disabled = (cfg.get("skills") or {}).get("disabled") or []
         if not isinstance(disabled, list):
             return set()
-        return {str(name).strip() for name in disabled if str(name).strip()}
+        result = {str(name).strip() for name in disabled if str(name).strip()}
+        _log.debug(
+            "disabled names for profile %s: %d names (%s)",
+            profile,
+            len(result),
+            ", ".join(sorted(result))[:200],
+        )
+        return result
     except Exception as exc:
-        _log.debug("disabled names for profile %s failed: %s", profile_name, exc)
+        _log.debug("disabled names for profile %s failed: %s", profile, exc)
         return set()
 
 
 def _hub_installed_index(skills_dir: Path) -> dict[str, str]:
-    """Map catalog skill name to relative path under skills_dir for hub installs."""
+    """Map catalog skill name to relative path under skills_dir for hub installs.
+
+    dir_name points at the skill's main directory — the one that directly
+    holds SKILL.md. When an install target (the dir carrying .hub_installed)
+    wraps the skill one level deep (unflattened upstream zip), the nested
+    main dir is resolved instead, so dir_name always addresses the real
+    skill content.
+    """
     index: dict[str, str] = {}
     if not skills_dir.exists():
         return index
     for marker in skills_dir.rglob(".hub_installed"):
         if not marker.is_file():
             continue
-        skill_dir = marker.parent
-        leaf = skill_dir.name
-        if not leaf or leaf.startswith("."):
+        install_dir = marker.parent
+        if not install_dir.name or install_dir.name.startswith("."):
             continue
+        skill_dir = find_skill_main_dir(install_dir) or install_dir
         dir_name = _skill_dir_rel_path(skill_dir, skills_dir)
         hub_catalog_name = _read_hub_catalog_name_sidecar(skill_dir)
         if hub_catalog_name:
             index[hub_catalog_name] = dir_name
-        catalog_name = _read_skill_catalog_name(skill_dir, leaf)
+        catalog_name = _read_skill_catalog_name(skill_dir, skill_dir.name)
         index[catalog_name] = dir_name
-        if leaf != catalog_name:
-            index.setdefault(leaf, dir_name)
+        # Leaf alias enables lookups by directory name, but only when the dir
+        # is the skill root (SKILL.md direct). With SKILL.md unresolved the
+        # leaf is just an install target (often an upstream skillId) and would
+        # resurface as a phantom "delisted" entry.
+        if skill_dir.name != catalog_name and find_skill_main_file(skill_dir):
+            index.setdefault(skill_dir.name, dir_name)
     return index
 
 
@@ -570,7 +633,21 @@ def annotate_installed(
     except Exception:
         pass
 
-    disabled = disabled_names if disabled_names is not None else _disabled_skill_names()
+    if disabled_names is None:
+        _log.warning(
+            "annotate_installed called without disabled_names — "
+            "falling back to process-level _disabled_skill_names(). "
+            "Caller should pass profile-scoped disabled_names to avoid "
+            "HERMES_HOME drift during streaming / profile switches."
+        )
+        disabled = _disabled_skill_names()
+    else:
+        disabled = disabled_names
+    _log.debug(
+        "annotate_installed: %d skills, disabled_set_size=%d",
+        len(skills),
+        len(disabled),
+    )
     lock_fields_ok = True
     if locked_names is None:
         try:
@@ -599,7 +676,7 @@ def annotate_installed(
                 skill["description"] = local_description
             skill_dir = (skills_dir / dir_name).resolve()
             if skill_path_within(skills_dir, skill_dir) and skill_dir.is_dir():
-                detail_data = read_detail_json(skill_dir)
+                detail_data = _read_local_detail_json(skill_dir)
                 if detail_data:
                     dn = str(detail_data.get("display_name") or "").strip()
                     dd = str(detail_data.get("display_description") or "").strip()
@@ -679,8 +756,15 @@ def _hub_names_from_skills(skills: list[dict]) -> set[str]:
     return names
 
 
-def build_hub_catalog_context() -> _HubCatalogContext:
-    """Fetch hub catalog once per request and precompute install annotations."""
+def build_hub_catalog_context(profile: str = "default") -> _HubCatalogContext:
+    """Fetch hub catalog once per request and precompute install annotations.
+
+    ``profile`` determines which profile's ``skills.disabled`` list is used
+    for the ``disabled`` flag on each skill row. Default ``"default"`` —
+    callers with a known profile should pass it so the flag matches the
+    request's active profile, not the process-global ``HERMES_HOME``
+    (which drifts when streaming sessions patch process env).
+    """
     raw_skills = fetch_all_hub_skills(category=None)
     hub_names = _hub_names_from_skills(raw_skills)
     skills_dir = shared_skills_dir()
@@ -705,13 +789,24 @@ def build_hub_catalog_context() -> _HubCatalogContext:
         for name, installs in all_profiles.items()
         if installs
     }
+    profile_key = str(profile or "").strip() or "default"
+    _log.debug(
+        "build_hub_catalog_context: profile=%s, raw_skills=%d, hub_names=%d",
+        profile_key,
+        len(raw_skills),
+        len(hub_names),
+    )
+    disabled_names = _disabled_skill_names_for_profile(profile_key)
     annotated = [dict(skill) for skill in raw_skills]
     annotate_installed(
         annotated,
         locked_names=locked_names,
         profile_index=profile_index,
+        disabled_names=disabled_names,
     )
-    delisted = _build_delisted_installed(hub_names, locked_names, profile_index)
+    delisted = _build_delisted_installed(
+        hub_names, locked_names, profile_index, disabled_names=disabled_names
+    )
     return _HubCatalogContext(
         raw_skills=raw_skills,
         hub_names=hub_names,
@@ -726,6 +821,7 @@ def _build_delisted_installed(
     hub_names: set[str],
     locked_names: set[str],
     profile_index: dict[str, tuple[str, str]],
+    disabled_names: set[str] | None = None,
 ) -> list[dict]:
     """Synthetic rows for installed skills that no longer appear in the hub catalog.
 
@@ -754,7 +850,12 @@ def _build_delisted_installed(
         rows.append({"name": key, "category": category})
     if not rows:
         return []
-    annotate_installed(rows, locked_names=locked_names, profile_index=profile_index)
+    annotate_installed(
+        rows,
+        locked_names=locked_names,
+        profile_index=profile_index,
+        disabled_names=disabled_names,
+    )
     return rows
 
 
@@ -1084,12 +1185,12 @@ def install_skill(name: str, display_name: str = "", category: str = "") -> dict
     if existing_dir is not None:
         rel_path = _skill_dir_rel_path(existing_dir, skills_dir)
         return {
-            "error": f"Skill already installed at '{rel_path}'",
+            "error": f"该技能已安装在 '{rel_path}'",
             "status": 409,
         }
 
     if find_skill_main_file(target) or (target / ".hub_installed").is_file():
-        return {"error": "Skill already installed", "status": 409}
+        return {"error": "该技能已安装", "status": 409}
 
     label = (display_name or name).strip()
     try:
@@ -1165,12 +1266,12 @@ def install_skill_to_profile(
     if existing_dir is not None:
         rel_path = _skill_dir_rel_path(existing_dir, skills_dir)
         return {
-            "error": f"Skill already installed at '{rel_path}'",
+            "error": f"该技能已安装在 '{rel_path}'",
             "status": 409,
         }
 
     if find_skill_main_file(target) or (target / ".hub_installed").is_file():
-        return {"error": "Skill already installed", "status": 409}
+        return {"error": "该技能已安装", "status": 409}
 
     label = (display_name or name).strip()
     try:
@@ -1488,7 +1589,7 @@ def copy_custom_skill_to_profile(name: str, profile_name: str, category: str = "
     # Check if already exists
     if target.exists():
         rel_path = _skill_dir_rel_path(target, skills_dir)
-        return {"error": f"Skill already installed at '{rel_path}'", "status": 409}
+        return {"error": f"该技能已安装在 '{rel_path}'", "status": 409}
 
     # Copy the entire skill directory
     try:
@@ -1525,7 +1626,7 @@ def delete_skill_from_profile(name: str, profile_name: str, dir_name: str = "") 
     skill_dir = _resolve_skill_dir(skills_dir, name, dir_name)
     if not skill_dir:
         return {"error": "Skill not found", "status": 404}
-    hub_installed = (skill_dir / ".hub_installed").is_file()
+    hub_installed = has_hub_installed_marker(skill_dir, skills_dir)
     skill_md = find_skill_main_file(skill_dir)
     logical_name = (
         parse_logical_name_from_skill_md(skill_md) if skill_md else None
@@ -1608,13 +1709,18 @@ def delete_skill_from_all_profiles(name: str, dir_name: str = "", source: str = 
 
 
 def _read_install_name(skill_dir: Path) -> str:
-    sidecar = skill_dir / ".install_name"
-    if not sidecar.is_file():
-        return ""
-    try:
-        return sidecar.read_text(encoding="utf-8").strip()
-    except Exception:
-        return ""
+    """Read ``.install_name`` from skill_dir, walking up to the marker dir."""
+    node = skill_dir
+    while True:
+        sidecar = node / ".install_name"
+        if sidecar.is_file():
+            try:
+                return sidecar.read_text(encoding="utf-8").strip()
+            except Exception:
+                return ""
+        if (node / ".hub_installed").is_file() or node.parent == node:
+            return ""
+        node = node.parent
 
 
 def get_skill_installed_profiles(name: str, source: str = "") -> dict:
@@ -1663,7 +1769,7 @@ def get_skill_installed_profiles(name: str, source: str = "") -> dict:
                 if any(part in _EXCLUDED_SKILL_DIRS for part in skill_md.parts):
                     continue
                 skill_dir = skill_md.parent
-                if (skill_dir / ".hub_installed").is_file():
+                if has_hub_installed_marker(skill_dir, skills_dir):
                     continue  # Already checked hub-installed
                 dir_name = _skill_dir_rel_path(skill_dir, skills_dir)
                 # Match by directory name or SKILL.md frontmatter name

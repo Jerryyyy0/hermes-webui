@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import logging
+
 from integration.skills import local_skills, skillhub
 from integration.skills.list_item_shape import normalize_skill_list_items
 from integration.skills.mtime_utils import enrich_skills_mtime
 from integration.skills.paths import skills_dir_for_profile
 from integration.skills.sort_utils import sort_skill_items
 from integration.skills.skillhub import _filter_skills_by_category, _filter_skills_by_q, _is_uncategorized_match
+
+_log = logging.getLogger(__name__)
 
 _VALID_SCOPES = frozenset({"hub", "installed", "not_installed", "custom", "local_all"})
 
@@ -205,7 +209,7 @@ def list_local_all_enabled_skills(profile: str = "default") -> list[dict]:
     """
     profile_key = _normalize_profile(profile)
     try:
-        ctx = skillhub.build_hub_catalog_context()
+        ctx = skillhub.build_hub_catalog_context(profile=profile_key)
         installed_hub, custom_skills = _local_all_skills_for_profile(ctx, profile_key)
         return _merge_local_all_skills(installed_hub, custom_skills)
     except Exception:
@@ -228,7 +232,17 @@ def list_skillhub_skills(
     page_limit = _normalize_page_size(page_size)
     category_key = str(category or "").strip()
     profile_key = _normalize_profile(profile)
-    ctx = skillhub.build_hub_catalog_context()
+    _log.debug(
+        "list_skillhub_skills: scope=%s, profile=%s, category=%r, q=%r, sort=%s/%s, all_records=%s",
+        _normalize_scope(scope),
+        profile_key,
+        category_key,
+        q,
+        sort,
+        order,
+        all_records,
+    )
+    ctx = skillhub.build_hub_catalog_context(profile=profile_key)
     # Always scan user-created skills for stats and custom scope
     custom_all = local_skills.scan_custom_skills_global(
         ctx.hub_names, profile=profile_key, user_created_only=True
