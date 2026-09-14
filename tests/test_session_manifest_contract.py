@@ -139,7 +139,7 @@ def test_streaming_manifest_turn_key_uses_bound_key_without_transcript_guessing(
     assert '_stream_artifact_evidence' in persist_block
     assert "'stage': 'stale_worker'" in persist_block
     assert "'stage': 'transcript_unavailable'" in persist_block
-    assert 'upsert_manifest_records' in persist_block
+    assert 'from integration.session_manifest.store import upsert_manifest_records' in persist_block
     assert "'status': 'persisted'" in persist_block
     assert 'turn_artifacts' not in persist_block
 
@@ -190,7 +190,7 @@ def test_session_manifest_docs_assign_public_contract_to_api():
     assert '最后一条 assistant' in artifacts
     assert 'ARTIFACT_EXCLUSION_READ_TOOLS' in artifacts
     assert '不进入顶层/per-turn references' in artifacts
-    assert '只抑制同 turn、同 path 的 `assistant_prose`' in artifacts
+    assert '不抑制同 turn、同 path 的 `assistant_prose`' in artifacts
     assert '完整 JSON' not in artifacts
     assert 'event: manifest_delta' not in artifacts
 

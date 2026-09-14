@@ -1253,6 +1253,7 @@ class Session:
                  pending_started_at=None,
                  pending_user_source: str=None,
                  pending_turn_key: str=None,
+                 pending_regenerate=None,
                  context_messages=None,
                  compression_anchor_visible_idx=None,
                  compression_anchor_message_key=None,
@@ -1378,6 +1379,11 @@ class Session:
         self.pending_started_at = pending_started_at
         self.pending_user_source = pending_user_source
         self.pending_turn_key = str(pending_turn_key or '').strip() or None
+        self.pending_regenerate = (
+            dict(pending_regenerate)
+            if isinstance(pending_regenerate, dict)
+            else None
+        )
         self.context_messages = context_messages if isinstance(context_messages, list) else []
         self.compression_anchor_visible_idx = compression_anchor_visible_idx
         self.compression_anchor_message_key = compression_anchor_message_key
@@ -1514,6 +1520,7 @@ class Session:
             'control_generation', 'session_revision', 'cancel_state', 'cancel_stream_id', 'cancel_generation',
             'pending_next_turns', 'last_error_at',
             'pending_user_message', 'pending_attachments', 'pending_started_at', 'pending_user_source', 'pending_turn_key',
+            'pending_regenerate',
             'compression_anchor_visible_idx', 'compression_anchor_message_key',
             'compression_anchor_summary', 'pre_compression_snapshot',
             'context_engine', 'compression_anchor_engine', 'compression_anchor_mode',
@@ -8328,7 +8335,11 @@ def _merge_session_display_metadata(target: dict | None, source: dict | None) ->
     """Preserve display and Agent-provenance metadata on duplicate rows."""
     if not isinstance(target, dict) or not isinstance(source, dict):
         return
-    _merge_turn_binding_metadata(target, source)
+    # Fuzzy replay matches (including a summary quoting a prompt) are not
+    # authority to reclassify a visible row or assign its turn ownership.
+    same_content = _session_message_content_key(target) == _session_message_content_key(source)
+    if same_content:
+        _merge_turn_binding_metadata(target, source)
     # Agent semantic fields decide whether a role:user row is model-only
     # context.  If a state.db row proves a sidecar duplicate is an async
     # completion anchor, retain that proof before the display projection runs.
@@ -8336,7 +8347,8 @@ def _merge_session_display_metadata(target: dict | None, source: dict | None) ->
     source_class = source.get("_hermes_message_class")
     source_kind = source.get("_hermes_scaffold_kind")
     if (
-        not target.get("_hermes_message_class")
+        same_content
+        and not target.get("_hermes_message_class")
         and not target.get("_hermes_scaffold_kind")
         and isinstance(source_class, str)
         and source_class.strip()

@@ -45,6 +45,25 @@ def _import_session_with_messages(cleanup_list, messages, model='openai/gpt-5.4-
 
 # -- /api/session/retry ----------------------------------------------------
 
+def test_regenerate_truncate_returns_real_prompt_and_whole_turn_cutoff(cleanup_test_sessions):
+    sid = _import_session_with_messages(cleanup_test_sessions, [
+        {'role': 'user', 'content': 'earlier', '_turn_key': 'turn:0'},
+        {'role': 'assistant', 'content': 'earlier reply'},
+        {'role': 'user', 'content': 'real question', '_turn_key': 'turn:2'},
+        {'role': 'assistant', 'content': 'progress'},
+        {'role': 'assistant', 'content': 'final reply'},
+    ])
+    response = _post(TEST_BASE, '/api/session/truncate', {
+        'session_id': sid, 'keep_count': 4, 'regenerate': True,
+    })
+    assert response['ok'] is True
+    assert response['last_user_text'] == 'real question'
+    assert [row['content'] for row in response['session']['messages']] == ['earlier', 'earlier reply']
+    assert all(
+        turn['turn_key'] != 'turn:2'
+        for turn in _get(f'/api/session/manifest?session_id={sid}')['manifest']['turns']
+    )
+
 def test_retry_returns_last_user_text(cleanup_test_sessions):
     sid = _import_session_with_messages(cleanup_test_sessions, [
         {'role': 'user', 'content': 'first user msg'},

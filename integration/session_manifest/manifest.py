@@ -81,18 +81,6 @@ MEDIA_ARTIFACT_SOURCE = 'media'
 ASSISTANT_PROSE_ARTIFACT_SOURCE = 'assistant_prose'
 TURN_RECONCILE_SOURCE = 'reconcile'
 _MEDIA_TOKEN_RE = re.compile(r'MEDIA:([^\s\]]+)')
-_ASSISTANT_PATH_TOKEN_CHARS = r'\w\u00b7\u4e00-\u9fff/._\-\(\)（）'
-_ASSISTANT_PATH_CONTINUATION_CHARS = r'\w\u00b7\u4e00-\u9fff/_\-'
-_BROAD_FILENAME_EXT_RE = re.compile(
-    rf'(?<![{_ASSISTANT_PATH_CONTINUATION_CHARS}])'
-    rf'([{_ASSISTANT_PATH_TOKEN_CHARS}]{{1,240}}\.[A-Za-z0-9]{{2,8}})'
-    rf'(?![{_ASSISTANT_PATH_CONTINUATION_CHARS}])(?!\.[A-Za-z0-9])'
-)
-_LAST_ASSISTANT_TILDE_PATH_RE = re.compile(
-    rf'(?<![{_ASSISTANT_PATH_CONTINUATION_CHARS}])'
-    r'(~/[^\s`\'"<>|，,；;。：)\]]{1,240}\.[A-Za-z0-9]{2,8})'
-    rf'(?![{_ASSISTANT_PATH_CONTINUATION_CHARS}])(?!\.[A-Za-z0-9])'
-)
 _REFERENCE_ONLY_TOOLS = (
     ARTIFACT_EXCLUSION_READ_TOOLS
     | REFERENCE_DISCOVERY_TOOLS
@@ -139,9 +127,13 @@ def _normalize_tool_name(name: str | None) -> str:
 
 def _artifact_source_priority(source_tool: str) -> int:
     tool = str(source_tool or '').strip().lower()
-    if tool in ARTIFACT_MUTATION_TOOLS:
+    if tool in ARTIFACT_MUTATION_TOOLS or tool == SKILL_MANAGE_TOOL:
+        return 4
+    if tool in EXECUTION_ARTIFACT_TOOLS:
+        return 3
+    if tool == MEDIA_ARTIFACT_SOURCE:
         return 2
-    if tool in (MEDIA_ARTIFACT_SOURCE, ASSISTANT_PROSE_ARTIFACT_SOURCE):
+    if tool == ASSISTANT_PROSE_ARTIFACT_SOURCE:
         return 1
     return 0
 
@@ -172,21 +164,8 @@ def _paths_from_assistant_media(text: str, workspace: Path) -> list[str]:
 
 def _assistant_path_candidates(text: str) -> list[str]:
     """Return explicit file-like mentions from the final assistant message."""
-    if not text or not isinstance(text, str):
-        return []
-    candidates: list[str] = []
-    seen: set[str] = set()
-    for match in _BROAD_FILENAME_EXT_RE.finditer(text):
-        raw = str(match.group(1) or '').strip()
-        if raw and raw not in seen:
-            seen.add(raw)
-            candidates.append(raw)
-    for match in _LAST_ASSISTANT_TILDE_PATH_RE.finditer(text):
-        raw = str(match.group(1) or '').strip()
-        if raw and raw not in seen:
-            seen.add(raw)
-            candidates.append(raw)
-    return candidates
+    from integration.session_manifest.final_paths import candidates
+    return candidates(text)
 
 
 def _is_bare_assistant_filename(raw: str) -> bool:
@@ -205,13 +184,13 @@ def _workspace_root_has_bare_candidate(workspace: Path, name: str) -> bool:
         return False
 
 
-def _unique_workspace_bare_file_paths(workspace: Path, names: set[str]) -> dict[str, str]:
+def _unique_workspace_bare_file_paths(workspace: Path, names: set[str]) -> dict[str, list[str]]:
     """Resolve explicitly delivered basenames to one safe workspace file each.
 
     This is deliberately a bounded lookup, not an inventory: callers supply
     only basename candidates from the final assistant response.  Multiple safe
-    matches resolve to the uniquely newest modification time; a newest-time tie
-    or traversal failure fails closed.  The normal preview gate still validates
+    matches resolve to the newest modification time, including all ties;
+    traversal failure fails closed. The normal preview gate still validates
     each selected path before it can become an artifact.
     """
     if not names:
@@ -263,7 +242,7 @@ def _unique_workspace_bare_file_paths(workspace: Path, names: set[str]) -> dict[
         except OSError:
             return {}
 
-    resolved: dict[str, str] = {}
+    resolved: dict[str, list[str]] = {}
     for name, candidates in matches.items():
         if not candidates:
             continue
@@ -272,8 +251,7 @@ def _unique_workspace_bare_file_paths(workspace: Path, names: set[str]) -> dict[
             path for modified_ns, path in candidates
             if modified_ns == newest_modified_ns
         ]
-        if len(newest_paths) == 1:
-            resolved[name] = newest_paths[0]
+        resolved[name] = sorted(newest_paths)
     return resolved
 
 
@@ -286,7 +264,7 @@ def _paths_from_last_assistant_message(
     seen: set[str] = set()
 
     def add(raw: str) -> bool:
-        if not raw or '://' in raw or len(paths) >= _MAX_EXECUTION_ARTIFACTS:
+        if not raw or '://' in raw:
             return False
         raw = str(raw).strip()
         try:
@@ -325,8 +303,7 @@ def _paths_from_last_assistant_message(
     fallback_paths = _unique_workspace_bare_file_paths(workspace, unresolved_basenames)
     for raw in candidates:
         name = _clean_manifest_path_raw(raw)
-        resolved = fallback_paths.get(name, '') if name in unresolved_basenames else ''
-        if resolved:
+        for resolved in fallback_paths.get(name, []) if name in unresolved_basenames else []:
             add(resolved)
     return paths
 
@@ -423,6 +400,11 @@ def _collect_final_assistant_artifact_events(
             if isinstance(message, dict) and message.get('role') == 'assistant'
         ]
     )
+    indices = [idx for idx in indices
+               if not _is_synthetic_control_message(messages[idx])
+               and _message_text(messages[idx].get('content')).strip()
+               and not _message_text(messages[idx].get('content')).startswith(
+                   '[CONTEXT COMPACTION \u2014 REFERENCE ONLY]')]
     if not indices:
         return []
     msg_idx = indices[-1]
@@ -983,36 +965,26 @@ def _collect_turn_artifact_entries_from_events(
 ) -> list[dict[str, str]]:
     """Extract file and skill artifact entries from scoped tool/prose events."""
     entries: list[dict[str, str]] = []
-    seen: set[str] = set()
-    read_evidence_keys = {
-        key
-        for event in events
-        if event.name in ARTIFACT_EXCLUSION_READ_TOOLS and _tool_event_succeeded(event)
-        for path in _paths_from_args(event.args, workspace)
-        for key in [_canonical_manifest_file_key(path, workspace)]
-        if key
-    }
+    seen: dict[str, dict[str, str]] = {}
+
+    def add(path: str, source_tool: str, preview: str) -> None:
+        if not path:
+            return
+        existing = seen.get(path)
+        if existing is not None:
+            if _artifact_source_priority(source_tool) > _artifact_source_priority(existing['source_tool']):
+                existing.update(source_tool=source_tool, preview=preview)
+            return
+        entry = {'path': path, 'source_tool': source_tool, 'preview': preview}
+        seen[path] = entry
+        entries.append(entry)
 
     def add_file(path: str, source_tool: str) -> None:
-        if not path or path in seen:
-            return
-        seen.add(path)
-        entries.append({
-            'path': path,
-            'source_tool': source_tool,
-            'preview': MANIFEST_PREVIEW_FILE,
-        })
+        add(path, source_tool, MANIFEST_PREVIEW_FILE)
 
     def add_skill(raw_name: str, source_tool: str) -> None:
         canonical = _canonical_skill_manifest_path(raw_name, skills_dir)
-        if not canonical or canonical in seen:
-            return
-        seen.add(canonical)
-        entries.append({
-            'path': canonical,
-            'source_tool': source_tool,
-            'preview': MANIFEST_PREVIEW_SKILL,
-        })
+        add(canonical, source_tool, MANIFEST_PREVIEW_SKILL)
 
     for ev in events:
         if ev.name in ARTIFACT_MUTATION_TOOLS:
@@ -1041,11 +1013,6 @@ def _collect_turn_artifact_entries_from_events(
             continue
         if ev.name in (MEDIA_ARTIFACT_SOURCE, ASSISTANT_PROSE_ARTIFACT_SOURCE):
             for raw_path in _paths_from_args(ev.args, workspace):
-                if (
-                    ev.name == ASSISTANT_PROSE_ARTIFACT_SOURCE
-                    and _canonical_manifest_file_key(raw_path, workspace) in read_evidence_keys
-                ):
-                    continue
                 add_file(raw_path, ev.name)
     return entries
 
@@ -1769,18 +1736,11 @@ def _extract_manifest_records(
     # sides of a later user boundary. Keep its latest occurrence; recovery
     # restamps replay rows after the current turn and that is the canonical tail.
     execution_turn_owners: dict[str, str | None] = {}
-    read_evidence_by_turn: dict[str, set[str]] = {}
     for event in events:
         event_turn_key = _turn_key_for_event(event, turns)
         execution_key = str(event.tid or '').strip()
         if execution_key:
             execution_turn_owners[execution_key] = event_turn_key
-        if event.name in ARTIFACT_EXCLUSION_READ_TOOLS and _tool_event_succeeded(event):
-            evidence = read_evidence_by_turn.setdefault(str(event_turn_key or ''), set())
-            for path in _paths_from_args(event.args, workspace):
-                key = _canonical_manifest_file_key(path, workspace)
-                if key:
-                    evidence.add(key)
 
     for event in events:
         name = event.name
@@ -1806,22 +1766,34 @@ def _extract_manifest_records(
         )
         turn = turn_rows.get(turn_key or '')
 
-        def add_artifact(path: str) -> None:
+        def add_artifact(
+            path: str,
+            *,
+            _event=event,
+            _turn=turn,
+            _replayed_execution=replayed_execution,
+        ) -> None:
             _merge_file_records(
-                artifacts, kind='artifact', path=path, event=event, entry_kind='file', workspace=workspace,
+                artifacts, kind='artifact', path=path, event=_event, entry_kind='file', workspace=workspace,
             )
-            if turn is not None and not replayed_execution:
+            if _turn is not None and not _replayed_execution:
                 _merge_file_records(
-                    turn['artifacts'], kind='artifact', path=path, event=event, entry_kind='file', workspace=workspace,
+                    _turn['artifacts'], kind='artifact', path=path, event=_event, entry_kind='file', workspace=workspace,
                 )
 
-        def add_skill_artifact(path: str) -> None:
+        def add_skill_artifact(
+            path: str,
+            *,
+            _event=event,
+            _turn=turn,
+            _replayed_execution=replayed_execution,
+        ) -> None:
             skill_name = _skill_manifest_name_from_skills_path(path, skills_dir)
             if not skill_name:
                 return
-            _merge_skill_records(artifacts, skill_name=skill_name, event=event)
-            if turn is not None and not replayed_execution:
-                _merge_skill_records(turn['artifacts'], skill_name=skill_name, event=event)
+            _merge_skill_records(artifacts, skill_name=skill_name, event=_event)
+            if _turn is not None and not _replayed_execution:
+                _merge_skill_records(_turn['artifacts'], skill_name=skill_name, event=_event)
 
         if name in ARTIFACT_MUTATION_TOOLS and _tool_event_succeeded(event):
             artifact_paths = args_paths + diff_paths
@@ -1838,12 +1810,6 @@ def _extract_manifest_records(
 
         if name in (MEDIA_ARTIFACT_SOURCE, ASSISTANT_PROSE_ARTIFACT_SOURCE):
             for path in args_paths:
-                if (
-                    name == ASSISTANT_PROSE_ARTIFACT_SOURCE
-                    and _canonical_manifest_file_key(path, workspace)
-                    in read_evidence_by_turn.get(str(turn_key or ''), set())
-                ):
-                    continue
                 add_artifact(path)
 
         if name in REFERENCE_SKILL_TOOLS:
@@ -2206,14 +2172,6 @@ def extract_turn_artifact_entries_for_manifest(
     turn_slice = _artifact_messages_for_turn(messages, key)
     if not turn_slice:
         return []
-    turn_bounds = next(
-        (
-            (turn.get('start_msg_idx'), turn.get('end_msg_idx'))
-            for turn in _message_turns(messages)
-            if str(turn.get('turn_key') or '') == key
-        ),
-        None,
-    )
     workspace = Path(str(getattr(session, 'workspace', '') or '')).expanduser().resolve()
     artifact_workspace = artifact_workspace_root_for_session(session)
     skills_dir = _skills_dir_for_session(session)
@@ -2387,7 +2345,7 @@ def _merge_reconcile_artifacts_for_turn(
     turn_key = str(turn_record.get('turn_key') or '').strip()
     if not turn_key:
         return
-    turn_messages = _turn_message_slice(messages, turn_key)
+    turn_messages = _artifact_messages_for_turn(messages, turn_key)
     if not turn_messages:
         return
 
@@ -2412,14 +2370,6 @@ def _merge_reconcile_artifacts_for_turn(
         strong_paths=strong_paths,
         prior_artifact_paths=prior_artifact_paths,
     ))
-    read_evidence_keys = {
-        key
-        for event in events
-        if event.name in ARTIFACT_EXCLUSION_READ_TOOLS and _tool_event_succeeded(event)
-        for path in _paths_from_args(event.args, workspace)
-        for key in [_canonical_manifest_file_key(path, workspace)]
-        if key
-    }
     local_turn_record = {
         'turn_key': turn_key,
         'start_msg_idx': 0,
@@ -2433,11 +2383,6 @@ def _merge_reconcile_artifacts_for_turn(
         if event.name == 'todo':
             continue
         for path in _reconcile_candidate_paths(event, workspace):
-            if (
-                event.name == ASSISTANT_PROSE_ARTIFACT_SOURCE
-                and _canonical_manifest_file_key(path, workspace) in read_evidence_keys
-            ):
-                continue
             if not _artifact_path_is_real(workspace, path):
                 continue
             skill_name = _skill_manifest_name_from_skills_path(path, skills_dir)
@@ -2513,7 +2458,7 @@ def reconcile_turn_artifact_events(
     tool_calls: list | None = None,
 ) -> list[ToolEvent]:
     """Return tool/media events for one turn (inputs to reconcile extraction)."""
-    turn_messages = _turn_message_slice(messages, turn_key)
+    turn_messages = _artifact_messages_for_turn(messages, turn_key)
     if not turn_messages:
         return []
     turn_record = _turn_record_for_key(messages, turn_key)
@@ -2537,7 +2482,7 @@ def _reconcile_turn_artifact_rows(
     tool_calls: list | None = None,
 ) -> tuple[list[dict], list[dict]]:
     """Build reconciled artifact rows for one turn (pre-wire internal records)."""
-    turn_messages = _turn_message_slice(messages, turn_key)
+    turn_messages = _artifact_messages_for_turn(messages, turn_key)
     if not turn_messages:
         return [], []
     turns = _message_turns(messages)
@@ -3374,8 +3319,6 @@ def extract_manifest_delta_from_turn_reconcile(
         session_artifacts, artifact_root, skills_dir,
         default_profile=default_profile, collection='artifacts',
     )
-    if not wire_artifacts:
-        return {}
     turn_wire = _rows_to_wire(
         turn_artifacts, artifact_root, skills_dir,
         default_profile=default_profile, collection='artifacts',
