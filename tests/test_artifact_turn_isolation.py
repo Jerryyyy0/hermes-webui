@@ -229,7 +229,7 @@ def test_cancelled_settlement_recovers_completed_durable_tool_when_live_turn_is_
     ]
 
 
-def test_settlement_does_not_promote_same_turn_read_input_from_final_prose(tmp_path, monkeypatch):
+def test_settlement_includes_same_turn_read_input_from_final_prose(tmp_path, monkeypatch):
     from api import streaming
     from integration.session_manifest.store import load_manifest_records
 
@@ -287,6 +287,7 @@ def test_settlement_does_not_promote_same_turn_read_input_from_final_prose(tmp_p
     assert result["status"] == "persisted"
     assert [(row["path"], row["source_tool"]) for row in load_manifest_records(session)] == [
         ("analysis.md", "write_file"),
+        ("source.csv", "assistant_prose"),
     ]
 
 
@@ -422,13 +423,13 @@ def test_cancelled_settlement_does_not_persist_removed_stream_artifact(tmp_path,
     )
 
     assert result == {
-        "status": "pending",
-        "stage": "evidence_unsettled",
+        "status": "persisted",
+        "decision": "empty",
         "turn_key": "turn:7",
         "artifact_count": 0,
     }
     assert load_manifest_records(session) == []
-    assert load_manifest_decided_turn_keys(session) == set()
+    assert load_manifest_decided_turn_keys(session) == {'turn:7'}
 
 
 def test_synthetic_verification_nudge_does_not_block_bound_artifact_settlement(tmp_path, monkeypatch):

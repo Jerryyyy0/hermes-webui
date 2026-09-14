@@ -93,6 +93,7 @@ from integration.approval_localization import (
 from integration.clarify_localization.policy import (
     clarify_language_rule as _clarify_language_rule,
 )
+from integration.agent_message_semantics.history import carry_agent_semantics
 from integration.agent_message_semantics.audit import log_control_message
 from integration.agent_message_semantics.classifier import is_non_anchor_control_message
 from integration.agent_message_semantics.projection import drop_non_display_messages
@@ -1810,8 +1811,6 @@ def _persist_turn_artifact_paths(
         if isinstance(entry, dict) and str(entry.get('path') or '').strip()
     ]
     artifact_count = len(_store_entries)
-    if not _store_entries and str(terminal_reason or '').strip() != 'completed':
-        return finish({'status': 'pending', 'stage': 'evidence_unsettled', 'turn_key': _turn_key, 'artifact_count': 0})
     if not _store_entries:
         _store_entries = [{'path': '', 'source_tool': 'assistant_prose', 'preview': 'file'}]
     try:
@@ -4370,8 +4369,13 @@ def _sanitize_messages_for_api(
     effective_model: str | None = None,
     effective_provider: str | None = None,
     effective_base_url: str | None = None,
+    preserve_agent_semantics: bool = False,
 ):
-    """Return a deep copy of messages with only API-safe fields.
+    """Project history to API fields, optionally retaining Agent provenance.
+
+    Agent conversation_history must set preserve_agent_semantics: compression
+    persists that history before WebUI can restore display metadata. The default
+    remains provider-safe; Agent transports strip provenance on their wire copy.
 
     The webui stores extra metadata on messages (attachments, timestamp, _ts)
     for display purposes. Some providers (e.g. Z.AI/GLM) reject unknown fields
@@ -4433,6 +4437,8 @@ def _sanitize_messages_for_api(
                 # Orphaned tool result — skip to avoid 400 from strict providers.
                 continue
         sanitized = {k: v for k, v in msg.items() if k in _API_SAFE_MSG_KEYS}
+        if preserve_agent_semantics:
+            carry_agent_semantics(msg, sanitized)
         # Drop empty tool_calls — strict providers (DeepSeek, newer OpenAI)
         # reject tool_calls: [] with HTTP 400 even when no orphaned calls exist.
         if 'tool_calls' in sanitized and not sanitized['tool_calls']:
@@ -9238,7 +9244,9 @@ def _run_agent_streaming(
             if _process_notifications:
                 _agent_msg_text = "\n\n".join([*_process_notifications, msg_text]).strip()
             user_message = _build_native_multimodal_message(workspace_ctx, _agent_msg_text, attachments, workspace, cfg=_cfg)
-            conversation_history = _sanitize_messages_for_api(_previous_context_messages, cfg=_cfg)
+            conversation_history = _sanitize_messages_for_api(
+                _previous_context_messages, cfg=_cfg, preserve_agent_semantics=True,
+            )
             stream_diag.event(
                 "webui.worker.context_prepared",
                 "模型调用前上下文准备完成，包括历史消息读取、去重、附件处理和 API 输入整理。",
@@ -9791,7 +9799,9 @@ def _run_agent_streaming(
                                 _heal_result = agent.run_conversation(
                                     user_message=user_message,
                                     system_message=workspace_system_msg,
-                                    conversation_history=_sanitize_messages_for_api(_previous_context_messages, cfg=_cfg),
+                                    conversation_history=_sanitize_messages_for_api(
+                                        _previous_context_messages, cfg=_cfg, preserve_agent_semantics=True,
+                                    ),
                                     task_id=session_id,
                                     persist_user_message=msg_text,
                                     **({
@@ -11069,6 +11079,7 @@ def _run_agent_streaming(
                         system_message=workspace_system_msg,
                         conversation_history=_sanitize_messages_for_api(
                             _previous_context_messages,
+                            preserve_agent_semantics=True,
                             cfg=_cfg,
                             effective_model=resolved_model,
                             effective_provider=resolved_provider,

@@ -302,12 +302,25 @@ class KnowledgeBaseCitationHook:
 
     def provider_system_prompt(self) -> str:
         return (
-            "Knowledge-base citation rule: when the final answer makes a factual "
-            "claim supported by an annotated knowledge-base chunk, append the "
-            "matching marker exactly as [[c:TOKEN]] immediately after that claim. "
-            "Use only tokens present in the corresponding chunk's _cite field; "
-            "do not invent, modify, or expose token syntax otherwise. "
-            "If no annotated chunk supports the claim, do not emit a marker."
+            "Knowledge-base citation rule:\n"
+            "A knowledge-base chunk is one object inside a knowledge-base tool "
+            "result's `chunks` array. Its `page_content` is the factual evidence, "
+            "the same chunk's `_cite` is the citation token bound to that evidence, "
+            "and `score` is retrieval metadata rather than a citation token.\n"
+            "When the final answer makes a factual claim supported by a chunk's "
+            "`page_content`, append that same chunk's exact `_cite` value immediately "
+            "after the supported claim. Build the marker from the literal prefix "
+            "`[[c:`, the exact `_cite` value, and the literal suffix `]]`.\n"
+            "Format-only example: if a supporting chunk has "
+            "`page_content: Refunds close after seven days` and "
+            "`_cite: K7x8pQm2Vt4zAa9B`, write "
+            "`Refunds close after seven days.[[c:K7x8pQm2Vt4zAa9B]]`. "
+            "The example token is not evidence; never reuse this example token.\n"
+            "If a claim is not supported by an annotated chunk, write it without a "
+            "citation marker. Do not cite a chunk merely because it appeared in search results.\n"
+            "Use only `_cite` values present in the provided chunks. Never use a token "
+            "from a different chunk, and do not invent, modify, translate, renumber, "
+            "or expose citation tokens in any other form."
         )
 
     def prepare_final_assistant(self, *, raw_content: Any) -> dict[str, Any]:

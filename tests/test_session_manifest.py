@@ -1197,7 +1197,7 @@ def test_extract_manifest_delta_read_file_has_no_public_reference(tmp_path, monk
     assert delta['artifacts'] == []
 
 
-def test_read_evidence_suppresses_only_final_assistant_prose(tmp_path, monkeypatch):
+def test_read_evidence_does_not_suppress_final_assistant_prose(tmp_path, monkeypatch):
     workspace = tmp_path / 'ws'
     workspace.mkdir()
     target = workspace / 'input.md'
@@ -1227,7 +1227,7 @@ def test_read_evidence_suppresses_only_final_assistant_prose(tmp_path, monkeypat
 
     manifest = build_session_manifest(session)
 
-    assert manifest['artifacts'] == []
+    assert manifest['artifacts'] == [{'path': 'input.md', 'preview': 'file', 'source_tool': 'assistant_prose'}]
     assert manifest['references'] == []
 
 
@@ -2262,7 +2262,7 @@ def test_paths_from_last_assistant_message_finds_unique_nested_bare_delivery_onc
     assert paths == ['table_outputs/employee_data_2024.csv']
 
 
-def test_paths_from_last_assistant_message_limits_final_deliveries_to_32(tmp_path):
+def test_paths_from_last_assistant_message_has_no_delivery_count_limit(tmp_path):
     workspace = tmp_path / 'ws'
     workspace.mkdir()
     filenames = [f'output_{index:02}.pdf' for index in range(33)]
@@ -2271,7 +2271,7 @@ def test_paths_from_last_assistant_message_limits_final_deliveries_to_32(tmp_pat
 
     paths = _paths_from_last_assistant_message(' '.join(filenames), workspace)
 
-    assert paths == filenames[:32]
+    assert paths == filenames
 
 
 def test_paths_from_last_assistant_message_uses_newest_nested_bare_delivery(tmp_path):
@@ -2288,7 +2288,7 @@ def test_paths_from_last_assistant_message_uses_newest_nested_bare_delivery(tmp_
     assert _paths_from_last_assistant_message('已生成 report.pdf', workspace) == ['second/report.pdf']
 
 
-def test_paths_from_last_assistant_message_rejects_newest_time_tie(tmp_path):
+def test_paths_from_last_assistant_message_keeps_newest_time_ties(tmp_path):
     workspace = tmp_path / 'ws'
     (workspace / 'first').mkdir(parents=True)
     (workspace / 'second').mkdir()
@@ -2299,7 +2299,7 @@ def test_paths_from_last_assistant_message_rejects_newest_time_tie(tmp_path):
     os.utime(first, ns=(1_000_000_000, 1_000_000_000))
     os.utime(second, ns=(1_000_000_000, 1_000_000_000))
 
-    assert _paths_from_last_assistant_message('已生成 report.pdf', workspace) == []
+    assert _paths_from_last_assistant_message('已生成 report.pdf', workspace) == ['first/report.pdf', 'second/report.pdf']
 
 
 def test_paths_from_last_assistant_message_does_not_substitute_nested_file_for_root_name(tmp_path):
@@ -2915,7 +2915,8 @@ def test_extract_manifest_delta_from_turn_reconcile_turn_scope(tmp_path):
         turn_key='turn:0',
         sequence=4,
     )
-    assert delta == {}
+    assert delta['artifacts'] == []
+    assert delta['turns'] == [{'turn_key': 'turn:0', 'artifacts': [], 'references': []}]
 
 
 def test_merge_manifest_delta_turn_reconcile_idempotent(tmp_path):
@@ -3312,7 +3313,8 @@ def test_build_session_manifest_turn_reconcile_scopes_session_tool_calls(tmp_pat
         sequence=1,
         tool_calls=tool_calls,
     )
-    assert delta == {}
+    assert delta['artifacts'] == []
+    assert delta['turns'] == [{'turn_key': 'turn:0', 'artifacts': [], 'references': []}]
 
 
 def test_extract_turn_artifact_paths_scopes_session_tool_calls(tmp_path):

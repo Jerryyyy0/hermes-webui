@@ -3,7 +3,30 @@
 本 Fork 的外部集成实现位于 `integration/`。上游文件只保留必要的导入、注册或
 参数传递，以降低上游同步冲突。
 
+## Agent 历史语义与压缩
+
+`api/streaming.py::_sanitize_messages_for_api` 在正常、重试与重建 Agent 的
+`conversation_history` 入口显式启用 `preserve_agent_semantics`。
+`integration/agent_message_semantics/history.py` 在逐行投影时只保留已识别的
+`_hermes_message_class` / `_hermes_scaffold_kind`，并将旧兼容标记规范化；
+不扩展 Provider 字段白名单，不透传任意私有字段。Agent transport 在请求副本中
+剥离内部字段，Agent 内存历史和压缩持久化则保留语义，展示层继续隐藏内部输入。
+
+状态不变量：压缩保留的内部通知不能变成真实用户轮次；普通用户输入相同正文
+仍可见。此修复不扫描 inactive 历史、不改写真实数据库或既有 sidecar，已丢失
+标记的历史需另行基于原始记录审计修复，不能按文本前缀批量隐藏。
+
+验证：`./scripts/test.sh integration/tests/agent_message_semantics/test_agent_history.py`。
+设置 `HERMES_WEBUI_AGENT_DIR` 指向兼容 Agent checkout 可额外执行真实
+SQLite `archive_and_compact` → WebUI 回读/分页 → Agent transport 契约测试；
+使用临时数据库，不请求模型。不提供 Agent 时该契约用例跳过。
+
 ## Runtime configuration
+
+`api/models.py::_merge_session_display_metadata` 在复制轮次身份与 Agent 语义标签前，
+要求既有 content key 严格一致（包含 workspace 前缀归一化）。模糊匹配仅可用于既有
+展示去重，不能据此把真实消息标记为内部压缩摘要。相关回归覆盖位于
+`integration/tests/agent_message_semantics/test_reconciliation_provenance.py`。
 
 `api/routes.py::_turn_aligned_window_indices` 只复用 Manifest 的 turn 起点；
 分页结束位置使用下一有效起点或完整消息尾部，不能直接使用可能留有未绑定行间隙的
@@ -27,6 +50,11 @@ Manifest end index，否则会遗漏异步 completion 后的 assistant/tool 消�
 Artifact 继续保持只读。保存实现、路径安全和文件索引失效均由 integration 层负责。
 
 ## External Manifest Artifact References
+
+重生成相关接缝：`api/session_ops.py` 统一执行破坏式裁剪，`api/routes.py` 接入 truncate/retry 与下一次
+chat-start 的一次性原 turn key 复用；`api/streaming.py` 和 `api/gateway_chat.py` 继续走普通终态结算。
+`static/ui.js` 只传递重生成标记并使用服务端裁剪结果。目标及后续 turn 的旧后台委派 sidecar 在准备时删除；
+不新增 revision 表或旧 Manifest 快照。
 
 `integration/session_manifest/external_references/` 承载外部绝对路径 Artifact 的策略、安全打开、登记
 record 查询与预览授权：`policy.py` 负责逐组件无跟随 fd 打开与受保护路径拒绝（已登记的会话附件与

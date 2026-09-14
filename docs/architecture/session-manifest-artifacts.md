@@ -1,12 +1,14 @@
 # Session Manifest Artifacts 实现
 
-本文是 Artifacts 证据提取、路径安全、turn 归属、持久化与显式 backfill/read-repair 的唯一实现说明。对外资源语义、HTTP/SSE 字段和 wire 示例以 [Session Manifest HTTP/SSE 契约](../api/session-manifest-api.md) 为准。
+本文是 Artifacts 证据提取、路径安全、turn 归属、持久化、重生成替换与显式历史维护的唯一实现说明。所有 Artifact 入库资格和写入入口均以本文为准；对外资源语义、HTTP/SSE 字段和 wire 示例以 [Session Manifest HTTP/SSE 契约](../api/session-manifest-api.md) 为准。
 
-实现入口：`integration/session_manifest/manifest.py`、`integration/session_manifest/store.py`、`api/streaming.py`、`api/gateway_chat.py`，以及 Fork 的 `integration/session_manifest/external_references/`。
+实现入口：`integration/session_manifest/manifest.py`、`integration/session_manifest/final_paths.py`、`integration/session_manifest/store.py`、`integration/session_manifest/repair.py`、`api/session_ops.py`、`api/streaming.py`、`api/gateway_chat.py`，以及 Fork 的 `integration/session_manifest/external_references/`。
 
 ## 1. 状态层与不变量
 
-Artifacts 的权威持久化状态层是 `{HERMES_WEBUI_STATE_DIR}/session_manifest.db`。v1 只持久化 artifacts，不持久化 todos/references。
+Artifacts 的唯一权威持久化状态层是 `{HERMES_WEBUI_STATE_DIR}/session_manifest.db` 中的
+`session_manifest_records`。Todos/references 从 transcript 派生。重生成不新增快照或 revision 表；若本次
+开发过程曾创建实验性的 `session_manifest_revisions`，schema 初始化会删除该遗留表。
 
 身份键：
 
@@ -18,12 +20,12 @@ lineage_key + profile + workspace_root + turn_key + record_kind + path
 
 1. 工具事件和最终 assistant 提取必须限定在当前 turn slice。
 2. 中间 assistant prose 不提取路径。
-3. 不从 terminal stdout、目录列表、heredoc/Python 源码或任意 workspace 文件清单推断 Artifact；仅最终 assistant 明确点名的裸文件名可使用本节定义的受控唯一匹配补全。
-4. 非空 DB decision 是该 turn 的权威记录；正常完成结算时，同轮最终 assistant 明确列出且存在的文件会追加到该 decision，重复路径保留工具来源。
-5. Empty decision 只能由显式维护操作使用同轮完整 transcript 的强证据原子修复。
+3. 不从 terminal stdout、目录列表、heredoc/Python 源码或任意 workspace 文件清单推断 Artifact；仅最终 assistant 明确点名的裸文件名可触发受控递归补全：workspace 根目录优先，否则选择修改时间最新的文件，最新时间并列时全部保留。
+4. 非空 DB decision 是该 turn 的权威记录；普通结算时，同轮最终 assistant 明确列出且存在的文件会加入该 decision，重复路径按 `mutation > terminal > media > assistant_prose` 保留最高优先级来源。
+5. Empty decision 可由同执行、明确归属原 turn 的迟到证据升级；历史数据只通过显式维护修复。
 6. `GET /api/session/manifest` 是只读操作，不更新 artifact store、session recency 或 session-list 事件。
 7. 同一稳定 `tool_call_id` 的重放不得跨 turn 重复归属。
-8. 工具来源只接受成功 completed 事件；成功文件读取只建立同 turn 瞬态 evidence，不进入 wire/store。
+8. 工具来源只接受成功 completed 事件；文件读取不产生 Artifact，也不否决最终回复中的有效路径。
 9. `workspace_root=""` 是历史默认根别名：读取时映射到启动时的 `HERMES_WEBUI_DEFAULT_WORKSPACE`，不回填数据库；decision 与 artifact identity 必须按逻辑 root 隔离。
 
 
@@ -53,11 +55,11 @@ flowchart TD
 
 
 
-### 2.2 Repair 的触发时机
+### 2.2 历史维护的触发时机
 
-当前实现**不会自动执行 repair**：打开会话、`GET /api/session/manifest`、SSE、正常/Gateway
-完成、error/cancel 结算均不会调用 `repair_empty_manifest_turns()`。仓库当前也没有将它接入任何
-生产流程；只有维护脚本或人工维护调用该函数时才会执行。
+当前实现**不会自动执行 repair 或 backfill**：打开会话、`GET /api/session/manifest`、SSE、正常/Gateway
+完成、error/cancel 结算均不会调用历史维护入口。仓库当前也没有将它们接入任何生产读取流程；只有维护
+脚本或人工维护显式调用时才会执行。
 
 一次显式 repair 只处理当前 session 的 lineage、profile 和逻辑 workspace root 范围内，且数据库
 decision 恰好为 empty marker 的 turn。它重新从已完成 transcript、已结算工具调用和最后 assistant
@@ -68,8 +70,17 @@ decision 恰好为 empty marker 的 turn。它重新从已完成 transcript、�
 decision、其它 root 或未提取到有效成果的 empty turn 均不改动；因此同一次成功 repair 再执行会返回
 `0`，是幂等操作。
 
-`backfill_missing_manifest_records()` 也是显式维护操作，但范围不同：它只在整个 lineage 尚无任何
-decision 时补历史记录。它不能替代 repair，也不会覆盖已有的 empty 或非空 decision。
+`backfill_missing_manifest_records()` 也是显式维护操作，但范围不同：它只在当前逻辑 root 的整个 lineage
+尚无任何 decision 时补历史记录。它先导入非空 Legacy `session.turn_artifacts`；Legacy 没有可写 rows 时，
+再由 `backfill_session_artifacts()` 用当前共享提取规则逐 turn 重建，并为成功确认无成果的 turn 写 empty。
+它不能替代 repair，也不会覆盖已有的 empty 或非空 decision。
+
+`backfill_workspace_artifacts_from_sessions()` 是上述 transcript-derived backfill 的批量维护包装，只处理符合
+条件的持久化 session。当前明确禁用服务启动时的自动调用；不得把保留在代码中的 helper 误解成自动入库流程。
+
+`repair_contaminated_manifest_session()` 是另一条显式、单会话的完整历史重建入口：默认 dry-run，展示
+`kept`、`added`、`removed`；只有显式 `--apply` 才会先备份数据库，再原子替换该会话范围内的 Artifact
+rows。它不是 GET repair，也不由正常结算自动触发。
 
 ### 2.3 Store schema、范围与事务
 
@@ -90,6 +101,23 @@ timeout；写失败必须保留失败事实，不能改写为 empty decision。
 
 ## 3. Turn 与工具事件
 
+### 3.1 破坏式重生成
+
+`/api/session/retry` 与 `/api/session/truncate` 的 `regenerate: true` 分支按被选 assistant 所属的真实
+user turn 定位边界，并在新执行启动前立即删除该 user turn 及其后全部 transcript、model context、
+缓存 tool calls、Legacy `turn_artifacts`、异步委派 sidecar 和 `session_manifest_records`。若 API 指定较早
+turn，较晚 turns 也永久删除，不保存或恢复后缀。
+
+Session JSON 仅保存一次性 `pending_regenerate={turn_key,prompt_hash}`。下一次提交文本的 hash 匹配时，
+消费 marker 并复用原 `turn_key`；不匹配时丢弃 marker，按普通新 turn 分配 key。该 marker 不是旧 Manifest
+快照，也不保存成果、执行 ID 或被删历史。
+
+重生成期间 GET 与 SSE 直接反映裁剪后的当前状态；旧成果不会继续显示。新执行在 normal、error 或 cancel
+终态走普通结算：有有效证据则 upsert，无成果则写 empty decision。新执行失败、取消、刷新或服务重启均不
+恢复旧 Manifest 或被删后续 turns。裁剪保存成功后删除 `Session.save()` 为本次 shrink 生成的 `.json.bak`，
+避免启动恢复撤销这次主动历史重写。操作不删除磁盘成果文件；文件可仍存在于 workspace，但没有新的有效
+入库证据就不会自动回到该会话 Manifest。
+
 `_message_turns()` 以每条非 compression-marker 的 `role=user` 消息开启一轮：
 
 ```text
@@ -108,7 +136,7 @@ turn_key = user._turn_key 或 turn:<user_msg_idx>
 
 以 `[CONTEXT COMPACTION — REFERENCE ONLY]` 开头的 assistant 消息不提供 artifact prose/media 证据。
 
-### 3.1 Turn 绑定、结算与 orphan
+### 3.2 Turn 绑定、结算与 orphan
 
 当前 worker 结算前校验最新真实 user 的 `_turn_key` 与 `stream_turn_key`。带
 `_hermes_message_class: internal_scaffold` 或 `context_anchor` 的 Agent 内部 user/assistant 行不是真实
@@ -118,48 +146,48 @@ turn 边界，必须跳过；最终未标记 assistant 仍归属前一个真实 
 error 与 cancel 路径共用同一个结算入口；任何非 `persisted` 结果都会在 turn journal 记录
 expected/actual key、stage 与 terminal reason。
 
+异步委派或迟到工具结果必须携带其 origin turn 的明确 provenance，并写回 origin `turn_key`，不能归到结果
+到达时的最新 turn。重生成后，旧执行 ID 或旧重生成版本绑定的异步结果一律拒绝，不能覆盖同 key 的新 decision。
+
 历史 store record 若找不到同 key 的 user anchor，仍保留在顶层 `artifacts`，并把 key 暴露在
 `diagnostics.orphan_turn_keys`；它不会进入正常 `turns[]`，因此不会产生错误的 per-turn chip。
 
 `scripts/rebind_manifest_turn.py` 默认只报告命中的 lineage/profile/path 证据。确认映射后再增加
 `--apply`；工具在单个 SQLite 事务中 upsert 新 key 并删除旧 key，重复路径由 store 唯一键合并。
 
-## 4. Artifact 证据来源
+## 4. Artifact 入库规则
 
+### 4.1 入库判定总表
 
-| 来源                 | `source_tool`          | 证据                                                |
-| ------------------ | ---------------------- | ------------------------------------------------- |
-| Workspace mutation | 实际工具名                  | 结构化参数与 diff                                       |
-| Skill mutation     | `skill_manage` 或实际写入工具 | mutation action、skill name/path、真实 `SKILL.md`     |
-| Terminal           | `terminal`             | 成功命令中的静态 `-o`/`--output`/`--print-to-pdf` 操作数     |
-| Media              | `media`                | assistant 显式 `MEDIA:<local-path>`                 |
-| Final assistant    | `assistant_prose`      | 当前 turn 最后一条 assistant 中经边界校验的既存路径                |
-| Legacy             | 原有 source 或规范化值        | `session.turn_artifacts`，仅 lineage 完全无 decision 时 |
+“能否成为 Artifact”与“同路径最终显示哪个 `source_tool`”是两件事。下表每一种正常证据来源都是独立的
+资格入口；其中**当前 turn 最后一条真实、非空、非控制类 assistant message 中出现的有效文件路径，单独
+就足以成为 Artifact**。它不要求同轮存在 mutation/terminal，也不受任何 read evidence 否决。来源优先级
+只在多个有效来源命中同一 canonical path 时选择标签，不会撤销任何来源的入库资格。
 
+| 证据来源 | 接受时机与路径来源 | 是否要求出现在末条 assistant | read evidence 的影响 | 统一路径/安全 gate | 持久化 `source_tool` | 可否独立形成非空 decision |
+| --- | --- | --- | --- | --- | --- | --- |
+| Workspace mutation | 当前 turn 的工具成功 completed；从结构化 path 参数或 diff 取路径。 | 否 | 无 | 文件须在结算时存在、可预览、非目录/`uploads/`/cruft；相对路径不得逃逸 workspace，外部绝对路径须通过策略。 | 实际 mutation 工具名 | 可以 |
+| Terminal | 当前 turn 的 `terminal` 零退出；只取受控、静态可解析的输出操作数，不读 stdout。 | 否 | 无 | 同上；每次执行最多接受 32 个输出候选。 | `terminal` | 可以 |
+| Media | 当前 turn 任一真实 assistant 的显式本地 `MEDIA:<path>`；远程 URL 不接受。 | 否 | 无 | workspace 内转相对路径；外部保留绝对路径并通过 media 登记/预览策略；目标须存在且可预览。 | `media` | 可以 |
+| Final assistant | 只扫描当前 turn 最后一条真实、非空、非控制类 assistant message；取显式本地路径、Markdown 本地链接目标和可解析裸文件名。 | 是，这一行本身就是末条回复规则 | **无；read 不产生 Artifact，也不抑制本行** | 目标须当前存在、可预览、非目录/`uploads/`/cruft；相对路径限当前 workspace，外部绝对路径须通过策略。 | `assistant_prose` | **可以** |
+| Skill mutation | 当前 turn 的 `skill_manage` mutation 或通用 mutation 成功写入真实 `SKILL.md`。 | 否 | 无 | 必须解析到当前 profile 下存在的 canonical skill；wire 使用 skill 名而非磁盘绝对路径。 | `skill_manage` 或实际 mutation 工具名 | 可以 |
+| Legacy 显式 backfill | 仅当前逻辑 root 的整个 lineage 无任何 decision 时，人工调用 backfill 读取 `session.turn_artifacts`。 | 不适用 | 无 | Store 规范化 scope/source/preview；不扫描 workspace。历史 path 可先入库，GET/preview 再按当前 gate 输出正常或 `expired`。 | 保留旧值；缺失时为 `assistant_prose` | 可以，但只属于显式历史维护 |
+| Transcript 显式 backfill | 上述范围无 decision 且没有 Legacy rows 时，或维护者直接调用 transcript backfill；逐 turn 复用当前共享提取器。 | Final assistant 来源仍只认各 turn 末条；其它来源按各自规则 | 无 | 与正常提取相同；只写当前仍存在、可预览的候选，并可为无候选 turn 写 empty。 | 按正常来源规则 | 可以，但只属于显式历史维护 |
 
+除 Legacy 显式 backfill 外，所有候选都必须同时满足：证据属于准确 `turn_key`、来源达到自身成功/内容门槛、
+canonical path 通过存在性与预览安全 gate、结算写入成功。正常完成、Gateway、error、cancel 共用同一套资格
+语义；error/cancel 不会降低证据门槛，但成功确认没有候选时仍可写 empty decision。
 
-
-### 4.1 Artifact 资格矩阵
-
-
-| 来源           | 成为 file Artifact 的必要条件                    | 路径表示                             |
-| ------------ | ----------------------------------------- | -------------------------------- |
-| mutation     | 当前 turn 成功 completed；结构化参数或 diff 给出路径。    | workspace 内相对；外部保留绝对路径。          |
-| terminal     | 当前 turn 零退出；命令命中受控输出操作数。                  | workspace 内相对；外部保留绝对路径。          |
-| 最后 assistant | 仅最后真实 assistant；路径边界、存在性与安全 gate 都通过。     | 相对/裸文件名必须在当前 workspace；绝对路径可在外部。 |
-| `MEDIA:`     | assistant 显式本地 token；符合 media 规则。         | workspace 内相对；外部保留绝对路径。          |
-| skill        | 成功 mutation 且可解析到真实 canonical `SKILL.md`。 | canonical skill 名。               |
-
-
-用户消息、较早 assistant、工具 start、失败/取消工具、读取工具、搜索命中、目录列表、terminal stdout、
-普通 URL、Python/heredoc 源码与全 workspace 扫描都不能仅凭路径产生 Artifact。
+用户消息、较早的普通 assistant prose、工具 start、失败/取消工具、读取工具、搜索命中、目录列表、terminal
+stdout、普通 URL、Python/heredoc 源码与全 workspace 扫描都不能仅凭路径产生 Artifact。显式 repair、完整
+污染重建和 rebind 只是维护既有资格判断或归属的写入操作，不是新的证据来源。
 
 `write_file(path="reports/result.docx")` 是有效的相对工具参数。Agent 将它按当前
 `session.workspace` 解析；Manifest 以实际解析后的路径决定相对或绝对入库表示。
 
 ### 4.2 会成为 Artifact 的文件示例
 
-以下示例均假定工具已成功完成、目标文件仍存在且可预览；外部绝对路径还须通过受保护路径策略。
+以下示例均假定对应来源已达到自身资格门槛、目标文件仍存在且可预览；外部绝对路径还须通过受保护路径策略。
 `<workspace>` 是当前 session 的 workspace，`<sid>` 是当前 session id。
 
 
@@ -231,12 +259,13 @@ User 消息中的 MEDIA:、工具结果 JSON 的相似字段和普通 URL 都不
 
 ### 4.6 最后一条 assistant
 
-每个 turn 只扫描最后一条 role=assistant。_paths_from_last_assistant_message() 使用：
+每个 turn 只扫描最后一条非空、非内部控制的真实 assistant 内容。`final_paths.py` 负责词法候选：
 
-- _BROAD_FILENAME_EXT_RE：绝对路径、相对路径、裸文件名；
-- _LAST_ASSISTANT_TILDE_PATH_RE：~/... 路径候选。
+- 显式路径、引号/反引号包围的路径允许空格、无扩展名和单字符扩展名；普通无扩展名词不扫描。
+- Markdown 链接只取本地目标，不扫描标签；远程链接与其标签均排除。
+- 正文、表格和代码中的有效路径使用相同文件安全校验。
 
-绝对路径可以在 session workspace 内或外：前者按既有 workspace 相对路径表示，后者原样以绝对路径表示为直接引用。含目录的相对路径只以当前 `session.workspace` 为基准解析，解析后必须仍位于该目录。裸文件名先按 workspace 根解析；仅根目录没有该文件时，才在当前 workspace 内进行一次受控递归匹配：候选必须由最终 assistant 明确点名、是普通非 symlink 文件、不在 `uploads/` 或 cruft 目录，并在受限条目数内选取修改时间最新的匹配。若最新修改时间并列、没有命中或遍历失败则跳过，不借用前序 turn、工具输出或目录描述补全。后续纯问答 turn 若最后一条 assistant 明确列出一个实际存在的 workspace 文件，仍可产生该 turn 的 `assistant_prose` artifact。
+绝对路径可以在 session workspace 内或外：前者按 workspace 相对路径表示，后者保留绝对路径。含目录的相对路径仅在当前 workspace 解析。裸文件名先匹配根目录；根目录无文件时才受控递归查找，选择修改时间最新的全部并列普通文件，保留各自相对路径。无命中、遍历失败或超限时失败关闭，不借用其它轮证据补全。纯问答轮最终回复中的有效路径同样可成为 Artifact。
 
 不依赖“已保存”“文件路径”等交付关键词。候选必须：
 
@@ -244,7 +273,7 @@ User 消息中的 MEDIA:、工具结果 JSON 的相似字段和普通 URL 都不
 - 当前真实存在且可预览；
 - 不是 `uploads/` 输入文件；
 - 不命中 `.git`、`node_modules`、缓存、构建目录等 cruft；
-- 不超过每轮 32 个候选上限；
+- 最终回复不设候选数量上限（terminal 的 32 个输出上限保持不变）；
 - 裸文件名的递归查找不超过 4,096 个 workspace 条目，超过即整次 fallback 失败关闭；
 - canonical path 去重。
 
@@ -255,35 +284,36 @@ User 消息中的 MEDIA:、工具结果 JSON 的相似字段和普通 URL 都不
 2. **路径边界：** 相对和裸文件名只在当前 `session.workspace` 解析，且结果仍在该目录。绝对路径可在外部，
   但必须通过外部直接引用策略。
 3. **文件边界：** 候选必须是存在的普通文件，非目录、非 cruft、非 `uploads/`，并通过对应 preview gate。
-4. **归属边界：** 候选只归当前 `turn_key`；read evidence 仅抑制同 turn、同 path 的 prose 候选。
+4. **归属边界：** 候选只归当前 `turn_key`；读取证据不抑制最终回复路径。
 
 因此最终回复表格中的 `报告.html` 可成为成果；不存在的 `摘要.md` 不会被推断补全。中间 assistant
 即使写出绝对路径或“文件位置”也不产生 prose artifact。
 
 ### 4.7 Read evidence
 
-`ARTIFACT_EXCLUSION_READ_TOOLS` 包含文件读取工具。成功 completed 读取事件只从结构化 args 收集当前 turn 的 canonical workspace path，形成瞬态 evidence：
+`ARTIFACT_EXCLUSION_READ_TOOLS` 包含文件读取工具。读取工具本身不构成成果证据：
 
 - 不进入顶层/per-turn references；
 - 不进入 SSE 或 artifact store；
 - 不从 stdout/result 猜路径；
-- 只抑制同 turn、同 path 的 `assistant_prose` 候选；
+- 不抑制同 turn、同 path 的 `assistant_prose` 候选；
 - 不抑制 mutation、terminal、`MEDIA:` 或 skill mutation；
 - 不跨 turn，稳定 tool-call replay 仍服从 turn owner。
 
-因此 read→edit、edit→read、read→edit→read 均保留单一 mutation artifact；失败/取消 read 不建立 evidence。
+因此 read→edit、edit→read、read→edit→read 均保留单一 mutation artifact；只有读取、但最终回复明确给出有效文件路径时，登记为 assistant_prose。
 
 ### 4.8 同路径去重与来源优先级
 
-同一 turn 的 file Artifact 以规范化后的 canonical path 去重。每个命中保存在内部 `hits[]`，但 wire/store
-只保留一行；不会因为同一路径被多次提及而产生多个 chip。
+同一 turn 的 file Artifact 以规范化后的 canonical path 去重，wire/store 只保留一行；不会因为同一路径
+被多次提及而产生多个 chip。
 
 
 | 优先级 | 来源                        | 最终 `source_tool` 规则     |
 | --- | ------------------------- | ----------------------- |
-| 2   | `ARTIFACT_MUTATION_TOOLS` | 覆盖低优先级来源。               |
-| 1   | `media`、`assistant_prose` | 仅在尚无 mutation 来源时作为主来源。 |
-| 0   | terminal 等其它已允许来源         | 保留为主来源，除非之后出现更高优先级。     |
+| 4   | `ARTIFACT_MUTATION_TOOLS`、`skill_manage` | 覆盖低优先级来源。 |
+| 3   | `terminal` | 高于 media 和正文。 |
+| 2   | `media` | 保留独立媒体来源。 |
+| 1   | `assistant_prose` | 最终回复有效路径足以登记；优先级只影响来源标签。 |
 
 
 相同优先级不会因为后一次命中改写主来源。该规则只决定显示/持久化的 `source_tool`，不会把 read
@@ -460,10 +490,10 @@ updated_at:     1787460613.456
 源文件删除、改名、替换为 symlink、变为非常规文件或后来命中拒绝策略时，Manifest 保留原 path 并标记
 `expired`。内容修改或同名普通文件替换则继续预览当前版本；系统不会创建快照或比对摘要。
 
-搜索命中、目录列表、只读工具、workspace 全量扫描、相似字段和跨字段补全均不产生 artifact。
-同一 turn 内，成功 read 工具的输入路径会压制末条 assistant prose 对同一路径的重复提名；后续成功
-mutation 仍可把该路径提升为本轮 Artifact。这样 read→说明不会把输入误报为成果，而 read→edit 仍保留
-真实产出。
+搜索命中、目录列表、只读工具、workspace 全量扫描、相似字段和跨字段补全均不产生 Artifact。成功 read
+工具既不提供成果资格，也不否决其它来源：同一 turn 的末条 assistant 只要明确给出通过全部 gate 的有效
+路径，该路径仍以 `assistant_prose` 入库；若同路径另有 mutation/terminal/media 证据，只按第 4.8 节选择
+更高优先级的 `source_tool`。
 
 ### 5.5 源文件与 record 的生命周期
 
@@ -503,7 +533,7 @@ final assistant 已进入 s.messages
 不能把顶层历史行默认绑定到待结算 key。normal、error 与 cancel 都会再合并已持久化 transcript 的同轮
 证据，以恢复“工具已成功并写入 transcript，但 live delta 在中断前未发布”的成果。
 
-首次结算会将合并后的 stream 和 transcript 证据统一通过存在性与预览 gate 后再写入 store。因此同一轮内已经删除、改名或变得不可预览的候选不会形成 artifact record；若无其它候选，该 turn 写 empty decision，避免后续 read-repair 从已失效证据回填。该 gate 不解析或推断重命名目标，例如 `mv old.jpg new.png` 不会自动把 `new.png` 登记为成果。
+首次结算会将合并后的 stream 和 transcript 证据统一通过存在性与预览 gate 后再写入 store。因此同一轮内已经删除、改名或变得不可预览的候选不会形成 artifact record；若无其它候选，该 turn 写 empty decision，避免后续显式 empty repair 从已失效证据回填。该 gate 不解析或推断重命名目标，例如 `mv old.jpg new.png` 不会自动把 `new.png` 登记为成果。
 
 Store row 最小字段：
 
@@ -521,14 +551,21 @@ Legacy `session.turn_artifacts` 不再是新会话写入目标，只在显式 ba
 ### 6.2 结算生命周期矩阵
 
 
-| 生命周期阶段               | Artifact 动作                                         | 失败语义                                      |
-| -------------------- | --------------------------------------------------- | ----------------------------------------- |
-| 成功 `tool_complete`   | 可产生当前 turn 的内存候选和乐观 delta。                          | 未完成、失败、取消或非零 exit code 不产生证据。             |
-| normal / Gateway 完成  | transcript durable 后，共用 turn settlement 合并候选并写入 DB。 | turn owner/key 不可信或持久化失败时，不写 empty。       |
-| error / cancel 完成    | 使用同一 turn-owner 校验与结算边界；只持久化已被验证的候选。                | journal 记录 terminal reason；不能把异常掩盖为“无成果”。 |
-| `done` 后刷新           | GET 从 DB 投影，并覆盖临时 delta。                            | 外部文件已失效时显示 `expired`。                     |
-| 重放 / 重启恢复            | 读取既有 lineage/root decision，不从 transcript 自动重建。      | 稳定 tool call 仍只归属原 turn。                  |
-| 显式 repair / backfill | 仅按其各自范围写 SQLite。                                    | GET 从不触发 repair/backfill。                 |
+| 写入入口 / 生命周期 | Artifact 写入规则 | 更新方式 | 失败或空结果语义 |
+| --- | --- | --- | --- |
+| 成功 `tool_complete` | 只形成当前 origin turn 的内存候选和乐观 delta；尚不是 DB decision。 | 不写 DB | 未完成、失败、取消或非零 exit code 不产生证据。 |
+| normal / Gateway 终态结算 | transcript durable 后，共用 settlement 合并当前 turn 的 stream 与 transcript 证据，并重新执行存在性/安全 gate。 | 对同 turn `upsert`；同路径按来源优先级归并 | 成功确认无候选时写 empty；turn owner/key 不可信、提取失败或写库失败时不写 empty。 |
+| error / cancel 终态结算 | 与正常完成使用完全相同的归属、资格、过滤和持久化规则，只保留终态前已经成功的证据。 | 对同 turn `upsert` | 成功确认无有效证据时可以写 empty；只有提取/持久化失败不能伪装成 empty，journal 同时记录 terminal reason。 |
+| 同执行迟到成功证据 | 必须仍能明确绑定 origin turn；可补充已结算 decision。 | `upsert`，非空证据会移除同 turn 的 empty marker | 无可靠 origin 或执行已失效时拒绝。 |
+| 异步委派结果 | 按显式 provenance 写回 origin turn，不按到达时的最新 turn。重生成准备时删除目标及后续 turn 的委派 sidecar。 | 与普通同执行结算一致 | origin record 已删除或不可信时拒绝。此简化方案不另建持久化 revision fence。 |
+| 重生成准备 | 立即删除目标 user turn 及后续 transcript/context/tool calls、委派 sidecar 和 Artifact rows；磁盘成果文件保留。 | Session JSON 裁剪 + 删除 `session_manifest_records` + 清除 shrink `.json.bak` | 不保存旧快照；失败、取消、刷新或重启均不回滚。 |
+| 重生成终态 | 匹配一次性 prompt marker 时复用原 turn key，并按普通终态规则重新提取。 | 普通 `upsert`；无成果写 empty | 不恢复较晚 turns；写入失败也不恢复旧 Manifest。 |
+| `done` 后刷新 / 重启恢复 | GET 只从当前 lineage/profile/root 的 DB decision 投影。 | 只读 | 不从 transcript 自动 repair；外部文件失效时显示 `expired`。 |
+| `repair_empty_manifest_turns()` | 只重新检查当前会话范围内的 empty turns。 | 有有效结果才原子 `replace` marker | 非空 decision、其它 root、仍为空的 turn 不改动；仅显式调用。 |
+| `repair_contaminated_manifest_session()` | 从完整 transcript 重建指定单会话，可增加、保留或移除 rows。 | 默认 dry-run；`--apply` 先备份再原子替换 | 拒绝共享 lineage、未知 turn、并发变化；GET 不触发。 |
+| `backfill_missing_manifest_records()` | 仅 lineage/root 完全没有任何 decision 时：优先导入 Legacy rows；没有 Legacy rows 再按 transcript 共享规则逐 turn 重建。 | 一次性写入 SQLite | 已有任一 empty/非空 decision 即整项跳过；GET 不触发。 |
+| `backfill_session_artifacts()` / workspace 批量包装 | 显式从 transcript 逐 turn 派生；批量包装只选择符合条件的持久化 session。 | 非空候选和成功确认的 empty decision 均可写入 | 只要当前 scope 已有任一 decision 就跳过；服务启动自动调用已禁用。 |
+| `rebind_manifest_turn_records()` | 仅按人工明确给出的 old key → new key 修正归属。 | 单事务 upsert 新 key 并删除旧 key | 不猜测相邻 turn、内容相似度或时间关系；不移动源文件。 |
 
 
 外部绝对路径不会进入 upsert 前的预览能力。只有 store 写入成功后的 GET 才能将它作为可点击的 file
@@ -540,8 +577,8 @@ empty decision 表示“该 root 下的该 turn 已结算且没有可持久化 A
 正常结算的提取/写入失败必须显式暴露；只有成功确认无候选时才可写 empty marker。
 
 `repair_empty_manifest_turns()` 只读取 empty turns 的完整证据，并以原子 replace 将 marker 换成真实 rows。
-`backfill_missing_manifest_records()` 只在当前逻辑 root 的 lineage 没有任何 decision 时运行，避免混入
-半迁移历史。
+`backfill_missing_manifest_records()`、`backfill_session_artifacts()` 及 workspace 批量包装只在当前逻辑
+root 的 lineage 没有任何 decision 时运行，避免混入半迁移历史。
 
 `rebind_manifest_turn_records()` 只接受明确 old key → new key 映射。它不根据相邻编号、文本相似度或时间戳
 猜测归属，也不会移动 workspace 或外部源文件。
@@ -567,7 +604,9 @@ Manifest store 的第二份权威数据。
 
 只有显式调用 `backfill_missing_manifest_records()`，并且该 session 的 lineage 在当前逻辑 workspace root
 下没有任何 SQLite Artifact decision 时，系统才读取这个字段并写入新的 store rows。字符串 entry 和缺失的
-`source_tool` 会规范化为 `assistant_prose`；合法的历史 `source_tool` 与 `preview` 则尽量保留。
+`source_tool` 会规范化为 `assistant_prose`；历史 `source_tool` 与合法 `preview` 尽量保留。Legacy row 的
+写入不证明文件当前仍有效；GET/preview 会执行现行路径和安全 gate，不可用但有 provenance 的 row 可显示为
+`expired`。
 
 只要 SQLite 已有任一 empty 或非空 decision，Legacy 数据即被忽略，避免旧字段向已结算的历史混入成果。
 正常 turn 结算只写 SQLite；`GET /api/session/manifest` 只投影 SQLite，既不读取也不回填该字段。
@@ -592,11 +631,20 @@ Manifest store 的第二份权威数据。
 反例：若同一 lineage/root 已有任一 decision，例如 `turn:8` 的 empty marker，显式 backfill 直接跳过，
 不会把 `turn:12` 的旧字段补进数据库。这样已有数据库决策始终是该范围内的唯一权威来源。
 
+若 lineage/root 无 decision 且 `session.turn_artifacts` 没有非空 rows，`backfill_missing_manifest_records()`
+才回退到 `backfill_session_artifacts()`，按本文正常证据规则从 transcript 逐 turn 派生；这一回退仍是显式
+维护，不会由 GET、SSE 或服务启动自动执行。
+
 ## 7. 对外投影边界
 
 本模块只决定候选能否投影，不定义对外 JSON。`preview=file` 接受可预览的 workspace file、已登记且当前安全的外部直接引用，或允许的 media；`preview=skill` 仅接受可预览 canonical skill。外部绝对路径只会在持久化 row 存在后进入 wire，随后通过既有 `GET /api/integration/workspace/file?path=...` 预览；该 URL 的绝对路径分支只查精确登记记录并用同一 fd 读取。绝对 `media` Artifact 同样可走该只读 preview 分支，但只扩展预览授权，不改变 `MEDIA:` 的独立证据、生成与去重规则。历史证据存在但目标已不可预览时可投影为 expired；结算前已失效或没有 provenance 的候选一律不输出。字段、去重优先级和 SSE 帧均以 [Session Manifest HTTP/SSE 契约](../api/session-manifest-api.md) 为准。
 
-`extract_manifest_delta_from_tool_event()` 只接受成功 `tool_complete`；`extract_manifest_delta_from_turn_reconcile()` 在 assistant durable 后、`done` 前产生当前 turn 的补充候选。两者只更新 Inspector 乐观态，聊天区 chips 始终在 `done` 后以 GET 为准。
+`extract_manifest_delta_from_tool_event()` 只接受成功 `tool_complete`；`extract_manifest_delta_from_turn_reconcile()`
+在 assistant durable 后、`done` 前产生当前 turn 的补充候选。常态下两者更新 Inspector 乐观态，聊天区
+chips 始终在 `done` 后以 GET 为准。
+
+重生成没有额外的可见性投影。准备响应返回裁剪后的 `session.messages`，客户端立即据此重绘；后续
+`manifest_delta` 与普通执行相同。客户端仍按完整快照语义替换顶层集合，并按 `turn_key` 替换对应 turn。
 
 ## 8. 实现模块与关键函数
 
@@ -612,6 +660,7 @@ Manifest store 的第二份权威数据。
 | `_collect_tool_events`                     | Transcript/tool_calls → ToolEvent               |
 | `_collect_media_artifact_events`           | `MEDIA:` → events                               |
 | `_collect_final_assistant_artifact_events` | 当前轮末条 prose → events                            |
+| `final_paths.candidates`                   | 末条回复中的显式路径、Markdown 本地目标与裸文件名词法候选              |
 | `_tool_event_succeeded`                    | 统一工具成功门槛                                        |
 | `ARTIFACT_EXCLUSION_READ_TOOLS`            | 文件读取瞬态排除分类                                      |
 | `_terminal_output_paths`                   | 受控 terminal 输出操作数                               |
@@ -623,20 +672,24 @@ Manifest store 的第二份权威数据。
 | `external_references.preview`              | 复用既有 workspace preview URL 的授权读取                |
 | `upsert_manifest_records`                  | 普通 store upsert                                 |
 | `replace_manifest_turn_records`            | 原子替换单 turn decision                             |
-| `repair_empty_manifest_turns`              | 显式维护时的 empty-only read-repair                   |
+| `repair_empty_manifest_turns`              | 显式维护时的 empty-only repair                        |
 | `repair_contaminated_manifest_session`     | 完整 transcript 驱动的单会话污染重建与备份                   |
 | `backfill_missing_manifest_records`        | 显式维护时、当前逻辑 root 的 lineage 无 decision 的 backfill |
+| `backfill_session_artifacts` / `backfill_workspace_artifacts_from_sessions` | 显式单会话 / 批量 transcript-derived backfill |
 | `_row_to_wire` / `_rows_to_wire`           | Wire 与 expired projection                       |
 | `_persist_turn_artifact_paths`             | Turn 完成持久化                                      |
+| `prepare_destructive_regenerate`           | 删除目标及后续会话状态与 Artifact rows，写一次性 marker             |
+| `consume_pending_regenerate_turn_key`      | 匹配 prompt 后一次性复用原 turn key                         |
 
 
 
 
 ### 8.2 模块归属与接缝
 
-`integration/session_manifest/manifest.py` 负责候选提取、路径投影与 expired 判断；`store.py` 负责
-SQLite decision，`repair.py` 只承载显式维护操作。三者是唯一 Manifest 实现入口；原
-`api/session_manifest*.py` 已删除，不保留 shim 或第二套模块状态。
+`integration/session_manifest/manifest.py` 负责证据归并、路径 gate、wire 投影与 expired 判断；
+`final_paths.py` 只负责末条 assistant 的词法候选，不自行授权文件；`store.py` 负责 SQLite decision；
+`repair.py` 只承载显式历史维护操作；`api/session_ops.py` 负责破坏式重生成裁剪与一次性 marker。这些模块
+共同构成唯一 Manifest 实现，原 `api/session_manifest*.py` 已删除，不保留 shim 或第二套模块状态。
 
 `integration/session_manifest/external_references/` 集中外部直接引用的路径策略、安全 fd 打开、来源判定、
 精确 row 查询和预览读取。`integration/workspace/handlers.py` 仅在既有 file URL 收到绝对 `path` 时作
@@ -657,7 +710,10 @@ SQLite decision，`repair.py` 只承载显式维护操作。三者是唯一 Mani
   tests/test_session_manifest_artifact_persistence.py \
   tests/test_artifact_turn_isolation.py \
   tests/test_contaminated_manifest_repair.py \
+  tests/test_session_ops.py \
   integration/tests/session_manifest/test_external_references.py \
+  integration/tests/session_manifest/test_final_delivery.py \
+  integration/tests/session_manifest/test_regenerate.py \
   integration/tests/workspace/test_handlers.py -q
 ```
 
@@ -665,12 +721,18 @@ SQLite decision，`repair.py` 只承载显式维护操作。三者是唯一 Mani
 
 - 工具参数/diff 与 stable tool-call turn 归属；
 - 同路径的 mutation、terminal、`MEDIA:`、assistant prose 去重与来源优先级；
-- Final assistant Unicode/相对路径/裸文件名；
-- 中间 assistant prose 不提取；成功 read evidence 仅抑制同轮 final prose；
+- Final assistant Unicode、显式/相对/绝对路径、带空格/无扩展名/单字符扩展名和裸文件名；
+- Markdown 本地链接只取 target；远程链接及其文件名 label（包括后接中文正文）不产生本地候选；
+- 裸 basename 根目录优先，否则选择最新 mtime，最新时间并列全部保留；遍历超限失败关闭；
+- Final assistant 候选无数量上限，terminal 仍限制每次执行 32 个输出候选；
+- 中间 assistant prose 不提取；成功 read evidence 不抑制同轮 final prose；
 - Terminal `-o` 与 stdout/heredoc 排除；
 - Workspace、`uploads/`、cruft、缺失文件过滤；
 - workspace、外部直接引用、绝对 media、附件与 memory 的 preview URL、精确 row 授权、受保护路径/symlink 拒绝与 expired 投影；
-- 正常/Gateway/error/cancel 的结算、SSE 临时候选与 GET 持久化授权边界；
+- 正常/Gateway/error/cancel 的结算、成功空结果、SSE 临时候选与 GET 持久化授权边界；
+- 重生成开始即删除目标及后续 transcript/context/tool calls、委派 sidecar 与 Artifact rows，同时保留磁盘文件；
+- 一次性 marker 只在 prompt 匹配时复用原 turn key；较早 turn 的后续 turns 不恢复；
+- 异步结果只归 origin turn，已删除 origin record 的 completion 不重新绑定；
 - 未登记绝对路径、重复路径、同路径多来源、profile/lineage/root 隔离和 replay；
 - 绝对路径不可枚举、不可编辑/保存/删除/重命名，以及不泄露拒绝路径的 HTTP 响应；
 - Skill canonicalization；

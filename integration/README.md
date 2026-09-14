@@ -2,6 +2,16 @@
 
 Fork-specific features live here so upstream rebases stay predictable.
 
+Agent 消息语义合并接缝：`api/models.py::_merge_session_display_metadata` 仅在既有
+content key 严格相等时传递 `_turn_key` 与 `_hermes_message_class/_hermes_scaffold_kind`。
+文本包含或模糊去重不能将压缩摘要的隐藏语义传播到真实用户消息；普通展示统计沿用既有合并规则。
+此保护不读取 inactive 归档、不修改模型上下文或分页协议。
+
+Manifest 重生成采用 `api/session_ops.py` 的破坏式裁剪：目标 turn 及后续 transcript/context/tool calls、
+委派 sidecar 和 Artifact rows 在新执行开始前删除，磁盘成果文件保留。Session JSON 的一次性 marker 仅用于
+复用原 turn key；本次 shrink 产生的 transcript `.json.bak` 会清除，避免启动恢复撤销主动重写。不新增
+revision 表、快照服务或依赖。`static/ui.js` 传 `regenerate: true` 并使用服务端返回的裁剪结果。
+
 Async inbox wakeups must pass `user_message_metadata` with `context_anchor` /
 `async_delegation_completion` to `start_session_turn`, including restored queued
 items. These markers persist through Agent and hide only the internal input,
@@ -11,6 +21,24 @@ Async delegation delivery uses `async_delegation_turns/delivery_scope.py` to bin
 Agent claim/ACK/release and inbox readback to the origin session's Profile.
 The `api/process_event_utils.py` seam installs context-local scopes; it never
 changes process-wide `HERMES_HOME`.
+
+## Agent 历史语义与压缩
+
+`api/streaming.py::_sanitize_messages_for_api` 在正常、重试与重建 Agent 的
+`conversation_history` 入口显式启用 `preserve_agent_semantics`。
+`integration/agent_message_semantics/history.py` 在逐行投影时只保留已识别的
+`_hermes_message_class` / `_hermes_scaffold_kind`，并将旧兼容标记规范化；
+不扩展 Provider 字段白名单，不透传任意私有字段。Agent transport 在请求副本中
+剥离内部字段，Agent 内存历史和压缩持久化则保留语义，展示层继续隐藏内部输入。
+
+状态不变量：压缩保留的内部通知不能变成真实用户轮次；普通用户输入相同正文
+仍可见。此修复不扫描 inactive 历史、不改写真实数据库或既有 sidecar，已丢失
+标记的历史需另行基于原始记录审计修复，不能按文本前缀批量隐藏。
+
+验证：`./scripts/test.sh integration/tests/agent_message_semantics/test_agent_history.py`。
+设置 `HERMES_WEBUI_AGENT_DIR` 指向兼容 Agent checkout 可额外执行真实
+SQLite `archive_and_compact` → WebUI 回读/分页 → Agent transport 契约测试；
+使用临时数据库，不请求模型。不提供 Agent 时该契约用例跳过。
 
 ## Enable
 
@@ -594,7 +622,7 @@ Response includes global `stats`: `{ hub, installed, not_installed, custom }` ac
 | Path | Role |
 |------|------|
 | `config.py` | `HERMES_INTEGRATION`, `SKILLHUB_URL`, `KNOWLEDGE_BASE_URL`, `ZHILING_CONTROL_PLANE_URL`, `ZHILING_LOGOUT_API_URL`, `ZHILING_IDENTITY_CACHE_TTL_SECONDS`, `skillhub_enabled()`, `knowledge_base_enabled()`, `identity_lookup_enabled()`, `zhiling_identity_cache_ttl_seconds()`, `zhiling_logout_enabled()` |
-| `knowledge_base/` | `/api/integration/knowledge_base/*` → `{KNOWLEDGE_BASE_URL}/knowledge_base/*`; `turn_references.py` normalizes the two IThink KB MCP search results for Session Manifest. `citations.py` owns the per-stream chunk candidates and provider-only `_cite` markers; committed citations are stored with the final assistant message in `session.json` (`citations[]` plus private evidence). KB candidates never enter `manifest_delta` or `STREAM_LIVE_MANIFEST`, and committed citations resolve through the final message `citations[]` to Manifest references. `integration/session_manifest/manifest.py` also owns the shared live-reference snapshot projection used by both stream backends; each public SSE `references` field is already a full, deduplicated snapshot. |
+| `knowledge_base/` | `/api/integration/knowledge_base/*` → `{KNOWLEDGE_BASE_URL}/knowledge_base/*`; `turn_references.py` normalizes the two IThink KB MCP search results for Session Manifest. `citations.py` owns the per-stream chunk candidates and provider-only `_cite` markers; its provider prompt defines each `chunks[]` object as one evidence unit and requires claims to use the `_cite` from that same object. Committed citations are stored with the final assistant message in `session.json` (`citations[]` plus private evidence). KB candidates never enter `manifest_delta` or `STREAM_LIVE_MANIFEST`, and committed citations resolve through the final message `citations[]` to Manifest references. `integration/session_manifest/manifest.py` also owns the shared live-reference snapshot projection used by both stream backends; each public SSE `references` field is already a full, deduplicated snapshot. |
 | `notifications/` | `/api/integration/notifications/*` — 通知存储（`notifications.db`）与知识库消息聚合 |
 | `webui_appearance/` | `GET /api/integration/webui_appearance` + `/file` — 读 `{HERMES_HOME}/webui-appearance/` 配置与资源 |
 | `env_config/` | `GET /api/integration/config` — 返回白名单环境配置 `BROWSER_PREVIEW_URL` |

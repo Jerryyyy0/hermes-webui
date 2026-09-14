@@ -6,6 +6,14 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ## [Unreleased]
 
+- 知识库 MCP 引用提示词现在明确 `chunks[]`、`page_content` 与同一知识块 `_cite` 的绑定关系，并加入误抄时仍会被既有过滤层拦截的合法格式示例及反向约束，减少跨块错引、仅因检索命中而引用及格式漂移。
+
+- 修复 state.db 压缩摘要包含原始提问时，模糊去重将摘要的内部语义标签复制给真实消息，导致历史以 assistant 开头的问题；轮次归属与语义标签仅在内容严格一致（允许既有 workspace 前缀归一化）时传递。
+
+- Session Manifest 最终真实 assistant 回复中的有效文件路径不再被同轮读取证据排除；移除正文候选数量上限，支持显式无扩展名和短扩展名路径，排除远程 Markdown 链接标签。同名递归匹配保留修改时间最新的全部并列文件；来源标签按 mutation > terminal > media > assistant_prose 保留。
+
+- 重新生成改为破坏式历史重写：开始时立即删除目标 turn 及后续 transcript/context/tool calls、委派记录与 Artifact rows，并清除会导致启动恢复的 transcript shrink 备份，磁盘成果文件保留；一次性 Session marker 复用原 turn key，新执行按普通终态规则重新登记或写 empty。失败、取消、刷新或重启均不恢复旧 Manifest 与后续 turns，不新增 revision 数据表，并清理开发期遗留的实验表。
+
 - 修复 Session Manifest 顶层累计 Artifact 快照被错误绑定到当前 turn 的跨轮污染；结算现只读取精确匹配的 `turns[]`，normal/error/cancel 均合并 durable transcript，并提供带 dry-run、一致性备份、原子替换及写后校验的单会话污染修复工具。
 
 - 修复 inbox scheduler 启动异步 wakeup 时遗漏 completion 语义标记，导致数据库回读将内部 completion 展示为用户消息；沿用 Agent 现有语义持久化与 WebUI 显示过滤契约。
@@ -46,6 +54,8 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 - **Unified Profile Gateway ownership** — `server.py` 启动时会重启每个可见 Profile Gateway：原生主机中确认由 launchd/systemd 管理的 Gateway 仍通过 Agent service manager 重启，并持续跟随各 Profile 新写入的 `gateway.log` 与 `gateway.error.log` 到 WebUI 控制台；未受管、所有权不明或状态探测不明的原生 Gateway，以及普通容器中的遗留 Gateway，统一使用 Agent 的 `--replace` 协议接管，确保新 WebUI 继续转发日志。所有 WebUI-owned Gateway 都以前台 `gateway run -v --external-supervisor` 子进程运行，将合并 stdout/stderr 以 `[gateway:<profile>]` 前缀写入 WebUI 控制台及同一持久化日志。转发行不受 `HERMES_WEBUI_LOG_LEVEL` 过滤，敏感字段在输出前脱敏；WebUI 退出时只终止自身创建的 Gateway。s6 通过 service manager 执行 `gateway restart`，不由 WebUI 替换。
 
 ### Fixed
+
+- 修复 WebUI 历史清洗过早丢弃 Agent 内部语义标记，导致异步委派完成通知、续写提示在压缩后显示为用户消息；正常、重试和恢复入口均保留历史标记，Provider 请求仍剥离内部字段。
 
 - **SkillHub 已安装列表包含已下架技能** — `scope=installed`（及 `local_all` / 会话气泡 `skills_count` 聚合）此前基于上游目录 ∩ 本地 `.hub_installed` 的交集计算，技能在市场下架后即使本地仍已安装也会从列表消失。现在 catalog context 额外用全 profile 安装索引合成「已下架仍安装」条目（按 profile+dir 去重，读取本地 SKILL.md 描述、`.category` 分类与版本信息），合并进 `scope=installed` 结果与 `stats.installed` 计数；`local_all` 同样按该 Profile 的安装索引补充这些条目，市场不可达时的本地兜底逻辑不变。
 

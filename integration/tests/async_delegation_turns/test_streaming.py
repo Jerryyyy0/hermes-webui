@@ -58,6 +58,18 @@ def test_successful_async_worker_commits_event_then_settles_sidecar(tmp_path, mo
             }
         },
     )
+    # A later wakeup must retain earlier control rows through the real worker's
+    # history preparation; matching human text must keep its ordinary role.
+    prior_control = {
+        "role": "user", "content": "earlier background result",
+        "_hermes_message_class": "context_anchor",
+        "_hermes_scaffold_kind": "async_delegation_completion",
+    }
+    session.context_messages.extend([
+        prior_control,
+        {"role": "assistant", "content": "earlier result processed"},
+    ])
+    received_histories = []
     session.save(touch_updated_at=False)
     models.SESSIONS[session.session_id] = session
 
@@ -76,6 +88,7 @@ def test_successful_async_worker_commits_event_then_settles_sidecar(tmp_path, mo
 
         def run_conversation(self, **kwargs):
             history = list(kwargs.get("conversation_history") or [])
+            received_histories.append(history)
             if self.stream_delta_callback:
                 self.stream_delta_callback("async final")
                 self.stream_delta_callback(None)
@@ -163,3 +176,9 @@ def test_successful_async_worker_commits_event_then_settles_sidecar(tmp_path, mo
     assert saved.messages[-1]["content"] == "async final"
     assert saved.messages[-1]["_turn_key"] == "turn:1"
     assert saved.messages[-1]["delegation_id"] == "deleg-1"
+
+    assert received_histories
+    earlier = next(m for m in received_histories[0] if m.get("content") == prior_control["content"])
+    assert earlier["_hermes_message_class"] == "context_anchor"
+    assert earlier["_hermes_scaffold_kind"] == "async_delegation_completion"
+    assert all(m.get("content") != prior_control["content"] for m in saved.messages)

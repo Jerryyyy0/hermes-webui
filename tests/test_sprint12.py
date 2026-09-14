@@ -186,6 +186,7 @@ def test_import_session_basic():
             {"role": "assistant", "content": "Hi there!"},
         ],
         "model": "test/import-model",
+        "model_provider": "custom:campaign-proxy",
     }
     d, status = post("/api/session/import", payload)
     assert status == 200
@@ -197,6 +198,7 @@ def test_import_session_basic():
         # Verify it loads correctly
         d2, _ = get(f"/api/session?session_id={sid}")
         assert d2['session']['model'] == 'test/import-model'
+        assert d2['session']['model_provider'] == 'custom:campaign-proxy'
     finally:
         post("/api/session/delete", {"session_id": sid})
 
