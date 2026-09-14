@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import logging
+import shutil
 import zipfile
 from pathlib import Path
 
@@ -33,6 +34,85 @@ def find_skill_main_file(skill_dir: Path) -> Path | None:
     if legacy.is_file():
         return legacy
     return None
+
+
+def has_hub_installed_marker(skill_dir: Path, skills_root: Path) -> bool:
+    """True when skill_dir or any ancestor up to skills_root carries .hub_installed.
+
+    Normally the marker sits next to SKILL.md. A zip whose wrapper layer was
+    not flattened leaves the marker on an ancestor while SKILL.md nests one
+    level deeper, so checks must walk up instead of looking at skill_dir only.
+    """
+    node = skill_dir
+    while True:
+        if (node / ".hub_installed").is_file():
+            return True
+        if node == skills_root or node.parent == node:
+            break
+        node = node.parent
+    return False
+
+
+def find_skill_main_dir(base: Path) -> Path | None:
+    """Resolve the directory whose direct child SKILL.md is the skill's main file.
+
+    Normally that is ``base`` itself. When the install wrapper was not
+    flattened (e.g. a hash-named skillId dir wrapping the real skill folder),
+    descend through the unambiguous single-dir chain until a directory holding
+    SKILL.md is found. Ambiguous layouts fall back to the shallowest SKILL.md
+    under ``base``. Returns None when no SKILL.md exists below ``base`` at all.
+    """
+    if not base.is_dir():
+        return None
+    node = base
+    while True:
+        if find_skill_main_file(node):
+            return node
+        children = [
+            child
+            for child in node.iterdir()
+            if child.is_dir() and not child.name.startswith(".")
+        ]
+        if len(children) != 1:
+            break
+        node = children[0]
+    hits = sorted(
+        (skill_md for skill_md in base.rglob("SKILL.md") if skill_md.is_file()),
+        key=lambda skill_md: (len(skill_md.parts), skill_md.as_posix()),
+    )
+    return hits[0].parent if hits else None
+
+
+def _promote_nested_skill_dir(target_dir: Path) -> None:
+    """Lift a single nested skill dir up to target_dir.
+
+    SkillHub zips bundle a manifest file (skill.json) at the archive root next
+    to the actual skill folder, which defeats the common-prefix flattening above
+    and leaves SKILL.md one level below the install sidecars. When target_dir
+    itself has no SKILL.md and exactly one immediate child does, move that
+    child's contents up (nested copy wins on conflicts).
+    """
+    if find_skill_main_file(target_dir):
+        return
+    candidates = [
+        child
+        for child in target_dir.iterdir()
+        if child.is_dir()
+        and not child.name.startswith(".")
+        and find_skill_main_file(child)
+    ]
+    if len(candidates) != 1:
+        return
+    nested = candidates[0]
+    for entry in list(nested.iterdir()):
+        dest = target_dir / entry.name
+        if dest.exists():
+            if dest.is_dir():
+                shutil.rmtree(dest)
+            else:
+                dest.unlink()
+        entry.rename(dest)
+    nested.rmdir()
 
 
 def extract_zip_and_flatten(zip_bytes: bytes, target_dir: Path) -> None:
@@ -66,6 +146,7 @@ def extract_zip_and_flatten(zip_bytes: bytes, target_dir: Path) -> None:
                 continue
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_bytes(zf.read(member))
+    _promote_nested_skill_dir(target_dir)
 
 
 def stream_zip_to_handler(

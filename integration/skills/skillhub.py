@@ -25,7 +25,9 @@ from integration.skills.paths import shared_skills_dir, skills_dir_for_profile
 from integration.skills.sort_utils import sort_skill_items
 from integration.skills.utils import (
     extract_zip_and_flatten,
+    find_skill_main_dir,
     find_skill_main_file,
+    has_hub_installed_marker,
     skill_path_within,
 )
 
@@ -344,6 +346,25 @@ def _record_install_version(
     )
 
 
+def _read_local_detail_json(skill_dir: Path) -> dict | None:
+    """Read .detail.json from skill_dir, falling back to the install wrapper.
+
+    Installs write .detail.json on the install target; when dir_name points
+    at a nested main dir, the metadata may sit one level up.
+    """
+    data = read_detail_json(skill_dir)
+    if data is not None:
+        return data
+    node = skill_dir.parent
+    while node is not None and node.parent != node:
+        if (node / ".hub_installed").is_file():
+            return read_detail_json(node)
+        if find_skill_main_file(node):
+            return None
+        node = node.parent
+    return None
+
+
 def _read_local_skill_description(skills_dir: Path, dir_name: str) -> str:
     """Read description from local SKILL.md when installed under dir_name."""
     rel = str(dir_name or "").strip()
@@ -378,13 +399,22 @@ def _read_local_skill_description(skills_dir: Path, dir_name: str) -> str:
 
 
 def _read_hub_catalog_name_sidecar(skill_dir: Path) -> str:
-    sidecar = skill_dir / _HUB_CATALOG_NAME_SIDECAR
-    if not sidecar.is_file():
-        return ""
-    try:
-        return sidecar.read_text(encoding="utf-8").strip()
-    except Exception:
-        return ""
+    """Read ``.hub_catalog_name`` from skill_dir, walking up to the marker dir.
+
+    The sidecar sits next to ``.hub_installed`` on the install target, which
+    is an ancestor when SKILL.md nests below an unflattened wrapper.
+    """
+    node = skill_dir
+    while True:
+        sidecar = node / _HUB_CATALOG_NAME_SIDECAR
+        if sidecar.is_file():
+            try:
+                return sidecar.read_text(encoding="utf-8").strip()
+            except Exception:
+                return ""
+        if (node / ".hub_installed").is_file() or node.parent == node:
+            return ""
+        node = node.parent
 
 
 def _read_local_skill_category(skills_dir: Path, dir_name: str) -> str:
@@ -418,7 +448,12 @@ def _lookup_installed_dir(installed_index: dict[str, str], catalog_name: str) ->
 def _read_skill_catalog_name(skill_dir: Path, leaf: str) -> str:
     skill_md = find_skill_main_file(skill_dir)
     if not skill_md:
-        return leaf
+        # Flatten-failure layout: SKILL.md nests below the marker dir while
+        # the dir itself (the install target) only holds sidecars.
+        try:
+            skill_md = next(skill_dir.rglob("SKILL.md"))
+        except StopIteration:
+            return leaf
     try:
         from tools.skills_tool import _parse_frontmatter
 
@@ -479,25 +514,36 @@ def _disabled_skill_names_for_profile(profile_name: str) -> set[str]:
 
 
 def _hub_installed_index(skills_dir: Path) -> dict[str, str]:
-    """Map catalog skill name to relative path under skills_dir for hub installs."""
+    """Map catalog skill name to relative path under skills_dir for hub installs.
+
+    dir_name points at the skill's main directory — the one that directly
+    holds SKILL.md. When an install target (the dir carrying .hub_installed)
+    wraps the skill one level deep (unflattened upstream zip), the nested
+    main dir is resolved instead, so dir_name always addresses the real
+    skill content.
+    """
     index: dict[str, str] = {}
     if not skills_dir.exists():
         return index
     for marker in skills_dir.rglob(".hub_installed"):
         if not marker.is_file():
             continue
-        skill_dir = marker.parent
-        leaf = skill_dir.name
-        if not leaf or leaf.startswith("."):
+        install_dir = marker.parent
+        if not install_dir.name or install_dir.name.startswith("."):
             continue
+        skill_dir = find_skill_main_dir(install_dir) or install_dir
         dir_name = _skill_dir_rel_path(skill_dir, skills_dir)
         hub_catalog_name = _read_hub_catalog_name_sidecar(skill_dir)
         if hub_catalog_name:
             index[hub_catalog_name] = dir_name
-        catalog_name = _read_skill_catalog_name(skill_dir, leaf)
+        catalog_name = _read_skill_catalog_name(skill_dir, skill_dir.name)
         index[catalog_name] = dir_name
-        if leaf != catalog_name:
-            index.setdefault(leaf, dir_name)
+        # Leaf alias enables lookups by directory name, but only when the dir
+        # is the skill root (SKILL.md direct). With SKILL.md unresolved the
+        # leaf is just an install target (often an upstream skillId) and would
+        # resurface as a phantom "delisted" entry.
+        if skill_dir.name != catalog_name and find_skill_main_file(skill_dir):
+            index.setdefault(skill_dir.name, dir_name)
     return index
 
 
@@ -630,7 +676,7 @@ def annotate_installed(
                 skill["description"] = local_description
             skill_dir = (skills_dir / dir_name).resolve()
             if skill_path_within(skills_dir, skill_dir) and skill_dir.is_dir():
-                detail_data = read_detail_json(skill_dir)
+                detail_data = _read_local_detail_json(skill_dir)
                 if detail_data:
                     dn = str(detail_data.get("display_name") or "").strip()
                     dd = str(detail_data.get("display_description") or "").strip()
@@ -1580,7 +1626,7 @@ def delete_skill_from_profile(name: str, profile_name: str, dir_name: str = "") 
     skill_dir = _resolve_skill_dir(skills_dir, name, dir_name)
     if not skill_dir:
         return {"error": "Skill not found", "status": 404}
-    hub_installed = (skill_dir / ".hub_installed").is_file()
+    hub_installed = has_hub_installed_marker(skill_dir, skills_dir)
     skill_md = find_skill_main_file(skill_dir)
     logical_name = (
         parse_logical_name_from_skill_md(skill_md) if skill_md else None
@@ -1663,13 +1709,18 @@ def delete_skill_from_all_profiles(name: str, dir_name: str = "", source: str = 
 
 
 def _read_install_name(skill_dir: Path) -> str:
-    sidecar = skill_dir / ".install_name"
-    if not sidecar.is_file():
-        return ""
-    try:
-        return sidecar.read_text(encoding="utf-8").strip()
-    except Exception:
-        return ""
+    """Read ``.install_name`` from skill_dir, walking up to the marker dir."""
+    node = skill_dir
+    while True:
+        sidecar = node / ".install_name"
+        if sidecar.is_file():
+            try:
+                return sidecar.read_text(encoding="utf-8").strip()
+            except Exception:
+                return ""
+        if (node / ".hub_installed").is_file() or node.parent == node:
+            return ""
+        node = node.parent
 
 
 def get_skill_installed_profiles(name: str, source: str = "") -> dict:
@@ -1718,7 +1769,7 @@ def get_skill_installed_profiles(name: str, source: str = "") -> dict:
                 if any(part in _EXCLUDED_SKILL_DIRS for part in skill_md.parts):
                     continue
                 skill_dir = skill_md.parent
-                if (skill_dir / ".hub_installed").is_file():
+                if has_hub_installed_marker(skill_dir, skills_dir):
                     continue  # Already checked hub-installed
                 dir_name = _skill_dir_rel_path(skill_dir, skills_dir)
                 # Match by directory name or SKILL.md frontmatter name
