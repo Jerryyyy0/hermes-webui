@@ -10,8 +10,37 @@ _REFERENCE = re.compile(r'!?\[([^\]\n]+)\]\[([^\]\n]*)\]')
 _DEFINITION = re.compile(r'^\s*\[([^\]\n]+)\]:\s*(<[^>\n]+>|\S+).*$', re.M)
 _SHORTCUT = re.compile(r'!?\[([^\]\n]+)\]')
 _URL = re.compile(r'(?:[A-Za-z][A-Za-z0-9+.-]*://|www\.)[^\s<>`]+')
+_STRONG = re.compile(r'(?<!\*)\*\*([^\n]+?)\*\*(?!\*)')
+_FILE_SUFFIX = re.compile(r'\.[A-Za-z0-9]+$')
 _EXPLICIT = re.compile(r'(?<![\w/])(?:~/|/|\./|[\w.-]+/)[^\s`\"\'<>|，；。]+')
 _FILE = re.compile(r'(?<![\w/._-])([\w·/._()（）-]+\.[A-Za-z0-9]+)(?![\w/_-]|\.[\w])')
+_MEDIA_BRACKETED = re.compile(r'MEDIA:<([^>\r\n]+)>')
+_MEDIA_LINE = re.compile(r'^[ \t]*MEDIA:[ \t]*(?!<)([^\r\n]*?\S)[ \t]*\r?$', re.M)
+_MEDIA_LEGACY = re.compile(r'MEDIA:([^\s\]]+)')
+
+
+def media_references(text: str) -> list[str]:
+    """Return local/remote MEDIA refs without splitting standalone paths on spaces."""
+    if not isinstance(text, str) or not text:
+        return []
+    result: list[str] = []
+
+    def collect(match):
+        value = (match.group(1) or '').strip()
+        if value:
+            result.append(value)
+        return ' ' * len(match.group(0))
+
+    # Brackets are an explicit boundary and may be used inline. A legacy
+    # unbracketed ref may contain spaces only when MEDIA owns the whole line;
+    # inline legacy refs retain their historical whitespace boundary.
+    remaining = _MEDIA_BRACKETED.sub(collect, text)
+    remaining = _MEDIA_LINE.sub(collect, remaining)
+    for match in _MEDIA_LEGACY.finditer(remaining):
+        value = (match.group(1) or '').strip()
+        if value:
+            result.append(value)
+    return list(dict.fromkeys(result))
 
 
 def candidates(text: str) -> list[str]:
@@ -71,6 +100,16 @@ def candidates(text: str) -> list[str]:
         return match.group(0)
 
     remaining = _CODE.sub(code, remaining)
+
+    def strong(match):
+        value = match.group(1).strip()
+        # Markdown emphasis supplies a safe boundary for filenames containing
+        # spaces. Do not promote arbitrary emphasized prose or headings.
+        if _FILE_SUFFIX.search(value):
+            add(value)
+        return ' ' * len(match.group(0))
+
+    remaining = _STRONG.sub(strong, remaining)
     remaining = _QUOTED.sub(lambda m: (add(m.group(2)) or ' ' * len(m.group(0))), remaining)
     for match in _EXPLICIT.finditer(remaining):
         add(match.group(0).rstrip('),;:!?。，；：'))

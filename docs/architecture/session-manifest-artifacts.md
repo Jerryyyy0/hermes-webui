@@ -249,8 +249,10 @@ Mutation 工具可以先形成内部记录；最终 wire 再判断是否可预�
 
 ### 4.5 MEDIA:
 
-`_MEDIA_TOKEN_RE` 只读取非 `internal_scaffold` / `context_anchor` assistant 消息中的显式 `MEDIA:`。
-远程 URL 跳过。workspace 内 media 规范化为相对路径；workspace 外本地 media 保留绝对路径。
+Media 词法解析器只读取非 `internal_scaffold` / `context_anchor` assistant 消息中的显式
+`MEDIA:`。`MEDIA:<path with spaces>` 以尖括号为路径边界；未包裹的 `MEDIA:path with spaces`
+只在 `MEDIA:` 独占一行时允许空格，行内旧格式继续以空白为边界。远程 URL 跳过。workspace
+内 media 规范化为相对路径；workspace 外本地 media 保留绝对路径。
 
 User 消息中的 MEDIA:、工具结果 JSON 的相似字段和普通 URL 都不作为 media artifact。
 
@@ -261,7 +263,8 @@ User 消息中的 MEDIA:、工具结果 JSON 的相似字段和普通 URL 都不
 
 每个 turn 只扫描最后一条非空、非内部控制的真实 assistant 内容。`final_paths.py` 负责词法候选：
 
-- 显式路径、引号/反引号包围的路径允许空格、无扩展名和单字符扩展名；普通无扩展名词不扫描。
+- 显式路径、引号/反引号包围的路径允许空格、无扩展名和单字符扩展名；Markdown
+  `**...**` 包围的有扩展名文件候选也允许空格，普通粗体文案不作为路径。普通无扩展名词不扫描。
 - Markdown 链接只取本地目标，不扫描标签；远程链接与其标签均排除。
 - 正文、表格和代码中的有效路径使用相同文件安全校验。
 
