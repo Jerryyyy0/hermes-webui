@@ -623,3 +623,22 @@ def test_annotate_installed_index_profile_and_disabled_override(tmp_path):
     assert by_name["demo"]["description"] == "local"
     assert by_name["other"]["installed"] is False
     assert by_name["other"]["disabled"] is True
+
+
+def test_delisted_installed_for_profile_skips_dir_covered_by_hub_row(tmp_path):
+    """A versioned install dir aliased under several index names is one skill.
+
+    When the hub catalog still lists it (e.g. admin-assigned skill installed at
+    ``<uid>/foo-1.0.1``), the dir already shows up as a catalog row — its
+    directory-leaf alias must not resurface as a phantom delisted entry.
+    """
+    ctx = _ctx_with_annotated([{"name": "foo", "category": "tools"}])
+    installed_index = {
+        "foo": "uid/foo-1.0.1",
+        "foo-1.0.1": "uid/foo-1.0.1",
+        "gone": "gone",
+    }
+    with patch("integration.skills.listing.skills_dir_for_profile", return_value=tmp_path):
+        rows = listing._delisted_installed_for_profile(ctx, installed_index, "p1", set())
+    assert [r["name"] for r in rows] == ["gone"]
+    assert rows[0]["dir_name"] == "gone"

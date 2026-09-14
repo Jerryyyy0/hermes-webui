@@ -575,3 +575,42 @@ def test_do_upgrade_rejects_delisted_skill(hub_url):
     with patch("integration.skills.skillhub.is_delisted_installed", return_value=True):
         with pytest.raises(skillhub.SkillUpgradeNotFoundError, match="已从市场下架"):
             skillhub._do_upgrade("delisted-skill", "upgrade")
+
+
+def test_build_delisted_installed_skips_dir_covered_by_hub_row(tmp_path):
+    """Versioned dir aliases must not become phantom delisted rows.
+
+    ``foo`` (hub catalog name) and ``foo-1.0.1`` (directory leaf alias) point
+    at the same install; the hub row already covers it, so only genuinely
+    delisted dirs get a synthetic row.
+    """
+    profile_index = {
+        "foo": ("default", "uid/foo-1.0.1"),
+        "foo-1.0.1": ("default", "uid/foo-1.0.1"),
+        "gone": ("default", "gone"),
+    }
+    with patch("integration.skills.skillhub.skills_dir_for_profile", return_value=tmp_path):
+        rows = skillhub._build_delisted_installed(
+            hub_names={"foo"},
+            locked_names=set(),
+            profile_index=profile_index,
+            disabled_names=set(),
+        )
+    assert [r["name"] for r in rows] == ["gone"]
+
+
+def test_is_delisted_installed_alias_of_listed_skill_is_not_delisted():
+    """Directory-leaf aliases of a still-listed skill must not count as delisted."""
+    installs = {
+        "foo": [{"profile": "default", "dir_name": "uid/foo-1.0.1"}],
+        "foo-1.0.1": [{"profile": "default", "dir_name": "uid/foo-1.0.1"}],
+        "gone": [{"profile": "default", "dir_name": "gone"}],
+    }
+    with patch("integration.skills.skillhub.fetch_all_hub_skills", return_value=[{"name": "foo"}]):
+        with patch(
+            "integration.skills.skillhub._hub_installed_profiles_all",
+            return_value=installs,
+        ):
+            assert skillhub.is_delisted_installed("foo") is False
+            assert skillhub.is_delisted_installed("foo-1.0.1") is False
+            assert skillhub.is_delisted_installed("gone") is True
