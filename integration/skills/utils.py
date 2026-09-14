@@ -53,6 +53,25 @@ def has_hub_installed_marker(skill_dir: Path, skills_root: Path) -> bool:
     return False
 
 
+def skill_uninstall_root(skill_dir: Path, skills_root: Path) -> Path:
+    """Directory to remove on uninstall.
+
+    The install unit is the directory carrying ``.hub_installed``. When that
+    dir wraps the real skill content (skillId/skill-name/SKILL.md, e.g.
+    admin-assigned layouts), the whole wrapper must go so no marker-bearing
+    shell is left behind. Wrappers holding more than one skill keep their
+    other skills: only the requested skill_dir is removed.
+    """
+    node = skill_dir
+    while node != skills_root and node.parent != node:
+        if (node / ".hub_installed").is_file():
+            if len(list(node.rglob("SKILL.md"))) <= 1:
+                return node
+            return skill_dir
+        node = node.parent
+    return skill_dir
+
+
 def find_skill_main_dir(base: Path) -> Path | None:
     """Resolve the directory whose direct child SKILL.md is the skill's main file.
 

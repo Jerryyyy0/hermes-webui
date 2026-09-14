@@ -29,6 +29,7 @@ from integration.skills.utils import (
     find_skill_main_file,
     has_hub_installed_marker,
     skill_path_within,
+    skill_uninstall_root,
 )
 
 _log = get_logger(__name__)
@@ -531,7 +532,12 @@ def _hub_installed_index(skills_dir: Path) -> dict[str, str]:
         install_dir = marker.parent
         if not install_dir.name or install_dir.name.startswith("."):
             continue
-        skill_dir = find_skill_main_dir(install_dir) or install_dir
+        skill_dir = find_skill_main_dir(install_dir)
+        if skill_dir is None:
+            # No SKILL.md below the marker dir (admin-assigned stub or broken
+            # install) — not a skill; keep it out of listings. Removable via
+            # the delete API with an explicit dir_name.
+            continue
         dir_name = _skill_dir_rel_path(skill_dir, skills_dir)
         hub_catalog_name = _read_hub_catalog_name_sidecar(skill_dir)
         if hub_catalog_name:
@@ -1454,8 +1460,10 @@ def _upgrade_one_profile(
     """
     import shutil
 
-    # Verify .hub_installed still exists (prevents mid-upgrade uninstall races)
-    if not (skill_dir / ".hub_installed").is_file():
+    # Verify .hub_installed still exists (prevents mid-upgrade uninstall races).
+    # The marker may sit on an ancestor wrapper when SKILL.md nests below the
+    # install target, so walk up instead of checking skill_dir only.
+    if not has_hub_installed_marker(skill_dir, skills_dir_for_profile(profile_name)):
         return {"profile": profile_name, "ok": False, "error": "skill uninstalled during upgrade"}
 
     backup_dir = skill_dir.parent / f".upgrade-backup-{catalog_name}-{int(__import__('time').time())}"
@@ -1631,7 +1639,7 @@ def delete_skill_from_profile(name: str, profile_name: str, dir_name: str = "") 
     logical_name = (
         parse_logical_name_from_skill_md(skill_md) if skill_md else None
     ) or str(name or "").strip() or skill_dir.name
-    shutil.rmtree(skill_dir)
+    shutil.rmtree(skill_uninstall_root(skill_dir, skills_dir))
     try:
         from integration.skills.no_self_improve import remove_names
         remove_names([logical_name])
