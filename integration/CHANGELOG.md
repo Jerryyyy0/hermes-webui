@@ -6,6 +6,8 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ## [Unreleased]
 
+- 知识库 MCP 引用提示词现在明确 `chunks[]`、`page_content` 与同一知识块 `_cite` 的绑定关系，并加入误抄时仍会被既有过滤层拦截的合法格式示例及反向约束，减少跨块错引、仅因检索命中而引用及格式漂移。
+
 - 修复 state.db 压缩摘要包含原始提问时，模糊去重将摘要的内部语义标签复制给真实消息，导致历史以 assistant 开头的问题；轮次归属与语义标签仅在内容严格一致（允许既有 workspace 前缀归一化）时传递。
 
 - Session Manifest 最终真实 assistant 回复中的有效文件路径不再被同轮读取证据排除；移除正文候选数量上限，支持显式无扩展名和短扩展名路径，排除远程 Markdown 链接标签。同名递归匹配保留修改时间最新的全部并列文件；来源标签按 mutation > terminal > media > assistant_prose 保留。

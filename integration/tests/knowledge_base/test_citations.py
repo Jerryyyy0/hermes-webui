@@ -1,4 +1,5 @@
 import json
+import re
 
 from integration.knowledge_base.citations import (
     CandidateRegistry,
@@ -18,6 +19,29 @@ def _result(chunks):
         "chunks": chunks,
     }]
     return json.dumps({"result": json.dumps(rows, ensure_ascii=False)}, ensure_ascii=False)
+
+
+def test_provider_prompt_defines_chunk_evidence_and_same_chunk_token_binding():
+    scope = CandidateScope("default", "session-prompt", "stream", 1, "turn:1")
+    hook = KnowledgeBaseCitationHook(CandidateRegistry(scope))
+    prompt = hook.provider_system_prompt()
+
+    assert "`chunks` array" in prompt
+    assert "`page_content`" in prompt
+    assert "same chunk's `_cite`" in prompt
+    assert "merely because it appeared in search results" in prompt
+    assert "never reuse this example token" in prompt
+    assert "[[c:X]]" not in prompt
+    assert "[[c:TOKEN]]" not in prompt
+    example_markers = re.findall(r"\[\[c:[A-Za-z0-9_-]{16}\]\]", prompt)
+    assert len(example_markers) == 1
+
+    stream_filter = CitationTokenStreamFilter()
+    assert stream_filter.feed(f"answer{example_markers[0]}") + stream_filter.finish() == "answer"
+    assert hook.prepare_final_assistant(raw_content=f"answer{example_markers[0]}") == {
+        "content": "answer",
+        "settlement_id": "",
+    }
 
 
 def test_provider_annotation_is_chunk_scoped_and_preserves_wrapper():
