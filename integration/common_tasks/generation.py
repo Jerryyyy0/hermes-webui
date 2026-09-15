@@ -635,58 +635,6 @@ def _run_mine(task: CommonTaskJob, profile_path: Path) -> None:
     )
 
 
-def _disable_thinking_extra_body(
-    provider: str | None,
-    model: str | None,
-) -> dict[str, Any]:
-    """Return an extra_body dict that disables reasoning/thinking.
-
-    Different providers use different parameter shapes for disabling
-    built-in thinking.  Sending the wrong shape is a no-op at best (the
-    model still thinks and the request times out) and a 400 at worst.
-
-    Returns an empty dict when the provider/model is unknown — the caller
-    should still pass it through merged_extra_body so any user-configured
-    auxiliary.common_tasks.extra_body is preserved.
-    """
-    provider_lower = (provider or "").lower()
-    model_lower = (model or "").lower()
-    bare_model = model_lower.rsplit("/", 1)[-1]
-
-    # Qwen / DashScope — 同时发 enable_thinking (DashScope 官方) 和
-    #  thinking (OpenRouter/第三方网关),保证不同接入方式下都能关闭思考.
-    if (
-        "qwen" in provider_lower
-        or "qwen" in bare_model
-        or "dashscope" in provider_lower
-        or "alibaba" in provider_lower
-    ):
-        return {"enable_thinking": False, "thinking": False}
-
-    # Kimi / Moonshot — object shape {"type": "disabled"}
-    if (
-        "kimi" in provider_lower
-        or "moonshot" in provider_lower
-        or bare_model.startswith("kimi-")
-    ):
-        return {"thinking": {"type": "disabled"}}
-
-    # DeepSeek — thinking 对象格式 {"type": "disabled"}
-    if "deepseek" in provider_lower or "deepseek" in bare_model:
-        return {"thinking": {"type": "disabled"}}
-
-    # xiaomiMimo — object shape {"type": "disabled"}
-    if "mimo" in provider_lower or "deepseek" in bare_model:
-        return {"thinking": {"type": "disabled"}}
-
-    # Default / unknown — send both common shapes as a best-effort fallback.
-    # Most OpenAI-compatible gateways silently ignore unknown extra_body keys.
-    return {
-        "thinking": False,
-        "reasoning_effort": "off",
-    }
-
-
 def _call_llm(
     task: CommonTaskJob,
     system_prompt: str,
@@ -702,12 +650,6 @@ def _call_llm(
         call_llm = getattr(auxiliary_client, "call_llm")
         from api.profiles import profile_env_for_background_worker
 
-        merged_extra: dict[str, Any] = _disable_thinking_extra_body(
-            task.provider, task.model,
-        )
-        if extra_body:
-            merged_extra.update(extra_body)
-
         with profile_env_for_background_worker(task.profile, purpose="common tasks generation"):
             resp = call_llm(
                 task="common_tasks",
@@ -720,8 +662,8 @@ def _call_llm(
                 ],
                 temperature=temperature,
                 max_tokens=max_tokens,
-                timeout=120,
-                extra_body=merged_extra,
+                timeout=300,
+                extra_body=extra_body,
             )
         content = resp.choices[0].message.content
     except Exception as exc:

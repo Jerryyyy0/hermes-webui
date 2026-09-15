@@ -1478,36 +1478,14 @@ def test_call_llm_success_returns_content(tmp_path, capsys):
     assert content == "回复内容"
     assert reason == "ok"
     call_kwargs = import_module.return_value.call_llm.call_args.kwargs
-    assert call_kwargs["extra_body"]["thinking"] is False
-    assert call_kwargs["extra_body"]["reasoning_effort"] == "off"
+    assert call_kwargs["extra_body"] is None
     assert call_kwargs["max_tokens"] == 100
     assert call_kwargs["temperature"] == 0.5
-    assert call_kwargs["timeout"] == 120
+    assert call_kwargs["timeout"] == 300
     assert call_kwargs["task"] == "common_tasks"
     err = capsys.readouterr().err
     assert "[webui][common_tasks][model_call_succeeded]" in err
     assert "output_chars=4" in err
-
-
-def test_disable_thinking_extra_body_qwen_uses_boolean():
-    body = generation._disable_thinking_extra_body("qwen", "qwen3.8-32b-instruct")
-    assert body == {"enable_thinking": False, "thinking": False}
-
-
-def test_disable_thinking_extra_body_kimi_uses_object():
-    body = generation._disable_thinking_extra_body("kimi", "kimi-k2.5")
-    assert body == {"thinking": {"type": "disabled"}}
-
-
-def test_disable_thinking_extra_body_deepseek_uses_thinking_disabled():
-    body = generation._disable_thinking_extra_body("deepseek", "deepseek-r1")
-    assert body == {"thinking": {"type": "disabled"}}
-
-
-def test_disable_thinking_extra_body_default_sends_both():
-    body = generation._disable_thinking_extra_body("test", "test-model")
-    assert body["thinking"] is False
-    assert body["reasoning_effort"] == "off"
 
 
 def test_call_llm_failure_returns_none(tmp_path, capsys):
@@ -1531,16 +1509,18 @@ def test_call_llm_failure_returns_none(tmp_path, capsys):
     assert "provider timeout" in err
 
 
-def test_call_llm_injects_disable_thinking_by_default(tmp_path):
+def test_call_llm_passes_extra_body_through_untouched(tmp_path):
+    """No thinking-disable params are injected; caller extra_body wins as-is."""
     job = _make_job(tmp_path)
 
     with patch("integration.common_tasks.generation.importlib.import_module") as import_module, patch(
         "api.profiles.profile_env_for_background_worker"
     ):
         import_module.return_value.call_llm.return_value = _llm_response("ok")
-        generation._call_llm(job, "sys", "user", max_tokens=10, temperature=0.1)
+        generation._call_llm(
+            job, "sys", "user", max_tokens=10, temperature=0.1,
+            extra_body={"custom_key": 1},
+        )
 
     body = import_module.return_value.call_llm.call_args.kwargs["extra_body"]
-    assert isinstance(body, dict)
-    assert body["thinking"] is False
-    assert body["reasoning_effort"] == "off"
+    assert body == {"custom_key": 1}
