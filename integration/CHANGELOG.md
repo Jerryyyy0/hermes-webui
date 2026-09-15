@@ -53,7 +53,7 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Fixed
 
-- **Cron finish reason recovery** — WebUI 的 `state.db` 消息投影现在保留 assistant 行的 `finish_reason`；读取既有 Cron 历史会话时，会按精确消息身份将缺失值补入并持久化到 sidecar，且不覆盖已有值、不刷新会话排序时间，也不会把该字段传播到模糊匹配的其它消息。
+- **Cron finish reason recovery** — Agent 的 no-agent 脚本会话现在按执行结果为合成 assistant 消息持久化 `stop` / `error`；WebUI 的 `state.db` 消息投影保留该字段，读取 Cron 历史会话时按精确消息身份将缺失值补入 sidecar，且不覆盖已有值、不刷新会话排序时间，也不会把该字段传播到模糊匹配的其它消息。
 
 - 修复 WebUI 历史清洗过早丢弃 Agent 内部语义标记，导致异步委派完成通知、续写提示在压缩后显示为用户消息；正常、重试和恢复入口均保留历史标记，Provider 请求仍剥离内部字段。
 

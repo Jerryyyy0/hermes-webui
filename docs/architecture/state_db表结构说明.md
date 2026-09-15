@@ -183,7 +183,7 @@ CREATE TABLE IF NOT EXISTS messages (
 | `tool_name` | TEXT |  | 工具名（`tool` 角色或 assistant 工具调用） |
 | `timestamp` | REAL | ✅ | Unix epoch float |
 | `token_count` | INTEGER |  | 本条消息 token 数 |
-| `finish_reason` | TEXT |  | LLM finish reason（`stop` / `tool_calls` / `length` …） |
+| `finish_reason` | TEXT |  | assistant 消息终止原因：LLM 回复保留 provider reason（`stop` / `tool_calls` / `length` …）；no-agent 脚本合成消息使用 `stop` / `error` |
 | `reasoning` | TEXT |  | 原始推理文本（部分 provider 暴露） |
 | `reasoning_content` | TEXT |  | DeepSeek/Anthropic 等的 reasoning content |
 | `reasoning_details` | TEXT |  | **JSON 字符串**，结构化推理块 |

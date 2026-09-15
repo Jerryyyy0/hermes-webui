@@ -2225,13 +2225,14 @@ def test_cron_session_read_reconcile_preserves_newer_followup_error(
     assert Session.load(sid).messages[-1]["_error"] is True
 
 
+@pytest.mark.parametrize("finish_reason", ["stop", "error"])
 def test_cron_session_read_backfills_and_persists_finish_reason(
-    cron_env, monkeypatch
+    cron_env, monkeypatch, finish_reason
 ):
     from api.models import Session
     from integration.crons import session_bridge
 
-    sid = "cron_job1_1700000865"
+    sid = f"cron_job1_1700000865_{finish_reason}"
     with closing(sqlite3.connect(str(cron_env["db"]))) as conn:
         conn.execute("ALTER TABLE messages ADD COLUMN finish_reason TEXT")
         conn.execute(
@@ -2246,7 +2247,14 @@ def test_cron_session_read_backfills_and_persists_finish_reason(
             """,
             [
                 ("m-finish-user", sid, "user", "cron prompt", 100.0, None),
-                ("m-finish-answer", sid, "assistant", "cron answer", 101.0, "stop"),
+                (
+                    "m-finish-answer",
+                    sid,
+                    "assistant",
+                    "cron answer",
+                    101.0,
+                    finish_reason,
+                ),
             ],
         )
         conn.commit()
@@ -2268,9 +2276,9 @@ def test_cron_session_read_backfills_and_persists_finish_reason(
     refreshed = session_bridge.reconcile_cron_session_for_read(Session.load(sid))
 
     assert len(refreshed.messages) == 2
-    assert refreshed.messages[-1]["finish_reason"] == "stop"
+    assert refreshed.messages[-1]["finish_reason"] == finish_reason
     persisted = Session.load(sid)
-    assert persisted.messages[-1]["finish_reason"] == "stop"
+    assert persisted.messages[-1]["finish_reason"] == finish_reason
     assert persisted.updated_at == before_updated_at
     after_first_read = persisted.path.read_bytes()
 
