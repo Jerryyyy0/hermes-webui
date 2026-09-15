@@ -56,6 +56,46 @@ def test_state_db_reader_can_include_inactive_for_explicit_recovery(tmp_path, mo
     ]
 
 
+def test_state_db_reader_preserves_assistant_finish_reason_only(tmp_path, monkeypatch):
+    db = tmp_path / "state.db"
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        """
+        CREATE TABLE messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            role TEXT,
+            content TEXT,
+            timestamp REAL,
+            finish_reason TEXT,
+            reasoning TEXT
+        )
+        """
+    )
+    conn.executemany(
+        """
+        INSERT INTO messages (
+            session_id, role, content, timestamp, finish_reason, reasoning
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        [
+            ("sid", "user", "prompt", 1.0, "stop", None),
+            ("sid", "assistant", "", 2.0, "tool_calls", "choose a tool"),
+            ("sid", "assistant", "done", 3.0, "stop", "summarize the result"),
+        ],
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: db)
+
+    messages = get_state_db_session_messages("sid")
+
+    assert "finish_reason" not in messages[0]
+    assert messages[1]["finish_reason"] == "tool_calls"
+    assert messages[1]["reasoning"] == "choose a tool"
+    assert messages[2]["finish_reason"] == "stop"
+
+
 def test_reconciled_context_does_not_resurrect_inactive_archive_rows(tmp_path, monkeypatch):
     db = tmp_path / "state.db"
     _make_state_db(db)

@@ -2225,6 +2225,60 @@ def test_cron_session_read_reconcile_preserves_newer_followup_error(
     assert Session.load(sid).messages[-1]["_error"] is True
 
 
+def test_cron_session_read_backfills_and_persists_finish_reason(
+    cron_env, monkeypatch
+):
+    from api.models import Session
+    from integration.crons import session_bridge
+
+    sid = "cron_job1_1700000865"
+    with closing(sqlite3.connect(str(cron_env["db"]))) as conn:
+        conn.execute("ALTER TABLE messages ADD COLUMN finish_reason TEXT")
+        conn.execute(
+            "INSERT INTO sessions VALUES (?, ?, ?, ?)",
+            (sid, "Cron run", "cron", 100.0),
+        )
+        conn.executemany(
+            """
+            INSERT INTO messages (
+                id, session_id, role, content, timestamp, finish_reason
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            [
+                ("m-finish-user", sid, "user", "cron prompt", 100.0, None),
+                ("m-finish-answer", sid, "assistant", "cron answer", 101.0, "stop"),
+            ],
+        )
+        conn.commit()
+
+    Session(
+        session_id=sid,
+        profile="default",
+        source_tag="cron",
+        cron_execution_profile="default",
+        cron_execution_ended_at=102.0,
+        messages=[
+            {"role": "user", "content": "cron prompt", "timestamp": 100.0},
+            {"role": "assistant", "content": "cron answer", "timestamp": 101.0},
+        ],
+    ).save()
+    before_updated_at = Session.load(sid).updated_at
+    monkeypatch.setattr("api.models._get_profile_home", lambda _profile: cron_env["home"])
+
+    refreshed = session_bridge.reconcile_cron_session_for_read(Session.load(sid))
+
+    assert len(refreshed.messages) == 2
+    assert refreshed.messages[-1]["finish_reason"] == "stop"
+    persisted = Session.load(sid)
+    assert persisted.messages[-1]["finish_reason"] == "stop"
+    assert persisted.updated_at == before_updated_at
+    after_first_read = persisted.path.read_bytes()
+
+    session_bridge.reconcile_cron_session_for_read(persisted)
+
+    assert persisted.path.read_bytes() == after_first_read
+
+
 def test_cron_reconcile_preserves_untimestamped_persisted_followup_error(monkeypatch):
     from api import models
     from integration.crons import session_bridge

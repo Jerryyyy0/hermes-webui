@@ -135,6 +135,48 @@ def _assert_retry_meta_removed(marker):
 # ── The regression test ────────────────────────────────────────────────────
 
 
+def test_exact_duplicate_keeps_existing_sidecar_finish_reason():
+    sidecar_messages = [
+        {
+            "role": "assistant",
+            "content": "partial answer",
+            "timestamp": 1.0,
+            "finish_reason": "length",
+        }
+    ]
+    state_messages = [
+        {
+            "role": "assistant",
+            "content": "partial answer",
+            "timestamp": 1.0,
+            "finish_reason": "stop",
+        }
+    ]
+
+    merged = merge_session_messages_append_only(sidecar_messages, state_messages)
+
+    assert merged == sidecar_messages
+
+
+def test_fuzzy_replay_does_not_copy_finish_reason_to_distinct_assistant():
+    sidecar_messages = [
+        {"role": "assistant", "content": "complete answer", "timestamp": 1.0}
+    ]
+    state_messages = [
+        {
+            "role": "assistant",
+            "content": "answer",
+            "timestamp": 2.0,
+            "finish_reason": "stop",
+        }
+    ]
+
+    merged = merge_session_messages_append_only(sidecar_messages, state_messages)
+
+    assert len(merged) == 1
+    assert "finish_reason" not in merged[0]
+
+
 def test_state_db_prefix_with_float_timestamps_does_not_hide_sidecar_tail():
     """State rows replaying an already-visible prefix must not append after the tail.
 

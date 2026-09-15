@@ -7880,6 +7880,7 @@ def get_state_db_session_messages(
                 'tool_call_id',
                 'tool_calls',
                 'tool_name',
+                'finish_reason',
                 'reasoning',
                 'reasoning_details',
                 'codex_reasoning_items',
@@ -8002,6 +8003,11 @@ def get_state_db_session_messages(
                     value = row[col]
                     if value in (None, ''):
                         continue
+                    if col == 'finish_reason':
+                        if str(msg.get('role') or '').strip().lower() != 'assistant':
+                            continue
+                        if not isinstance(value, str) or not value.strip():
+                            continue
                     if col in {'tool_calls', 'reasoning_details', 'codex_reasoning_items', 'codex_message_items'}:
                         value = _json_loads_if_string(value)
                     msg[col] = value
@@ -8329,6 +8335,23 @@ def _merge_turn_binding_metadata(target: dict | None, source: dict | None) -> No
             target_key,
             source_key,
         )
+
+
+def _merge_session_finish_reason(target: dict | None, source: dict | None) -> None:
+    """Backfill a terminal reason after the caller proves one message identity."""
+    if not isinstance(target, dict) or not isinstance(source, dict):
+        return
+    source_finish_reason = source.get("finish_reason")
+    if (
+        str(target.get("role") or "").strip().lower() == "assistant"
+        and str(source.get("role") or "").strip().lower() == "assistant"
+        and not _message_display_metadata_value_present(target.get("finish_reason"))
+        and isinstance(source_finish_reason, str)
+        and source_finish_reason.strip()
+    ):
+        # The sidecar stays authoritative on conflict; this only repairs an
+        # absent value from the Agent-owned state.db projection.
+        target["finish_reason"] = source_finish_reason
 
 
 def _merge_session_display_metadata(target: dict | None, source: dict | None) -> None:
@@ -8982,7 +9005,10 @@ def chronological_merge_session_messages_for_display(
     ):
         merge_key = _session_message_merge_key(msg)
         if merge_key in seen_message_keys:
-            _merge_session_display_metadata(kept_by_merge_key.get(merge_key), msg)
+            target = kept_by_merge_key.get(merge_key)
+            _merge_session_display_metadata(target, msg)
+            if _session_message_dedup_key(target) == _session_message_dedup_key(msg):
+                _merge_session_finish_reason(target, msg)
             continue
 
         visible_key = _session_message_visible_key(msg)
@@ -9160,7 +9186,9 @@ def merge_session_messages_append_only(
                 seen_messages[key] = msg
                 deduped.append(msg)
             else:
-                _merge_session_display_metadata(seen_messages.get(key), msg)
+                target = seen_messages.get(key)
+                _merge_session_display_metadata(target, msg)
+                _merge_session_finish_reason(target, msg)
         return deduped
 
     merged_messages = []
@@ -9230,7 +9258,9 @@ def merge_session_messages_append_only(
         content_key = _cached_message_key(msg, "content")
         execution_key = _tool_execution_identity(msg)
         if execution_key is not None and execution_key in merged_by_tool_execution:
-            _merge_session_display_metadata(merged_by_tool_execution[execution_key], msg)
+            target = merged_by_tool_execution[execution_key]
+            _merge_session_display_metadata(target, msg)
+            _merge_session_finish_reason(target, msg)
             continue
         replays_sidecar_prefix = False
         replay_target = None
@@ -9244,6 +9274,8 @@ def merge_session_messages_append_only(
                 state_replay_idx += 1
         if replays_sidecar_prefix:
             _merge_session_display_metadata(replay_target, msg)
+            if _cached_message_key(replay_target, "dedup") == dedup_key:
+                _merge_session_finish_reason(replay_target, msg)
             matched_visible_key = _matching_visible_duplicate(
                 visible_key,
                 sidecar_visible_keys,
@@ -9342,7 +9374,9 @@ def merge_session_messages_append_only(
         # collapsed.  The merge key truncates to seconds; the dedup key does
         # not.
         if dedup_key in seen_dedup_keys:
-            _merge_session_display_metadata(merged_by_dedup_key.get(dedup_key), msg)
+            target = merged_by_dedup_key.get(dedup_key)
+            _merge_session_display_metadata(target, msg)
+            _merge_session_finish_reason(target, msg)
             continue
         if max_sidecar_timestamp is not None and timestamp is not None and timestamp <= max_sidecar_timestamp:
             # For message_id keys the merge key is authoritative — skip if
@@ -9350,7 +9384,9 @@ def merge_session_messages_append_only(
             # handled true duplicates; same-second distinct messages must
             # fall through.
             if key in seen_message_keys and key[0] == "message_id":
-                _merge_session_display_metadata(merged_by_message_key.get(key), msg)
+                target = merged_by_message_key.get(key)
+                _merge_session_display_metadata(target, msg)
+                _merge_session_finish_reason(target, msg)
                 continue
             if not (isinstance(key, tuple) and key[:1] == ("message_id",)):
                 # Legacy key within sidecar timestamp range — only skip if
@@ -9362,7 +9398,9 @@ def merge_session_messages_append_only(
                     _merge_session_display_metadata(merged_by_message_key.get(key), msg)
                     continue
         if key in seen_message_keys and key[0] == "message_id":
-            _merge_session_display_metadata(merged_by_message_key.get(key), msg)
+            target = merged_by_message_key.get(key)
+            _merge_session_display_metadata(target, msg)
+            _merge_session_finish_reason(target, msg)
             continue
         matched_visible_key = _matching_visible_duplicate(
             visible_key,
