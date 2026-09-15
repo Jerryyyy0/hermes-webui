@@ -1561,6 +1561,7 @@ def run_campaign(
     model: str | None = None,
     cancel_verify_session: bool = False,
     allow_concurrent: bool = True,
+    include_custom_session: bool = True,
 ) -> int:
     if prompt_source == "model" and turns < 3:
         raise RuntimeError("prompt_source='model' requires turns >= 3 for the multi-turn file scenario")
@@ -1632,7 +1633,7 @@ def run_campaign(
         session_count, turns, cancel_verify_session=cancel_verify_session, rng=rng,
     )
     custom_pool: list[HistoryPrompt] = []
-    if prompt_source == "model":
+    if prompt_source == "model" and include_custom_session:
         custom_pool = load_custom_prompt_pool()
         if not custom_pool:
             raise RuntimeError("prompt_source='model' requires CUSTOM_MESSAGES to be non-empty")
@@ -1673,8 +1674,8 @@ def run_campaign(
         "prompt_source": prompt_source,
         "model_sessions": session_count if prompt_source == "model" else 0,
         "model_rounds": turns if prompt_source == "model" else 0,
-        "custom_sessions": 1 if prompt_source == "model" else 0,
-        "custom_rounds": 1 if prompt_source == "model" else 0,
+        "custom_sessions": 1 if custom_pool else 0,
+        "custom_rounds": 1 if custom_pool else 0,
         "history_pool_size": len(pool),
         "history_pool_first_turn": first_n,
         "history_pool_replay": replay_n,
@@ -1829,44 +1830,50 @@ def run_campaign(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--sessions", type=int, default=5, help="Number of campaign batches")
-    parser.add_argument("--turns", type=int, default=15, help="Trials per batch")
-    parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
+    parser.add_argument("--sessions", type=int, default=5, help="模型场景批次数")
+    parser.add_argument("--turns", type=int, default=15, help="每个批次的测试轮数")
+    parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help="WebUI 服务地址")
     parser.add_argument(
         "--model",
-        default="gemini-3.8-flash",
-        help="Model ID resolved through the active profile's config.yaml (default: gemini-3.8-flash)",
+        default="qwen3.8",
+        help="通过当前 Profile 的 config.yaml 解析的模型 ID（默认：qwen3.8）",
     )
-    parser.add_argument("--seed", type=int, default=None, help="RNG seed for reproducible history prompt sampling")
+    parser.add_argument("--seed", type=int, default=None, help="用于可复现提示词采样的随机种子")
     parser.add_argument(
         "--prompt-source",
         choices=("custom", "database", "model"),
-        default="database",
-        help="custom: built-in custom messages; database: sample history prompts; model: generate multi-turn file scenarios",
+        default="model",
+        help="提示词来源：custom=内置自定义消息；database=历史提示词；model=模型生成多轮文件场景",
     )
     parser.add_argument(
         "--context-mode",
         choices=("mixed", "first", "replay"),
         default="first",
-        help="default first=only opening prompts; replay/mixed keep mid-turn import (experimental)",
+        help="上下文模式：first=仅首轮提示词（默认）；replay/mixed=保留中途导入（实验性）",
     )
     parser.add_argument(
         "--cancel-verify",
         type=parse_bool_arg,
         default=True,
         metavar="BOOL",
-        help="true: first session is cancel-only (every turn cancels with a random trigger); default true",
+        help="true：首个会话仅验证取消（每轮随机触发取消）；默认 true",
+    )
+    parser.add_argument(
+        "--skip-custom",
+        action="store_true",
+        default=True,
+        help="仅在 model 模式生效：跳过额外的 CUSTOM_MESSAGES 基线会话（默认跳过）",
     )
     parser.add_argument(
         "--allow-concurrent",
         action="store_true",
         default=True,
-        help="Compatibility option; campaign sessions allow other WebUI streams or runs by default",
+        help="兼容参数：默认允许 WebUI 存在其他流或运行任务",
     )
     parser.add_argument(
         "--cleanup",
         action="store_true",
-        help="Delete campaign sessions and their campaign-owned workspaces, then exit",
+        help="删除 campaign 创建的会话及其工作区后退出",
     )
     args = parser.parse_args(argv)
     if args.cleanup:
@@ -1889,6 +1896,7 @@ def main(argv: list[str] | None = None) -> int:
         model=args.model,
         cancel_verify_session=args.cancel_verify,
         allow_concurrent=args.allow_concurrent,
+        include_custom_session=not args.skip_custom,
     )
 
 

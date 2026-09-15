@@ -176,6 +176,20 @@ def test_main_forwards_model_override_to_campaign(monkeypatch):
 
     assert main(["--model", "configured/provider-model"]) == 0
     assert received["model"] == "configured/provider-model"
+    assert received["include_custom_session"] is False
+
+
+def test_main_forwards_skip_custom_to_campaign(monkeypatch):
+    received = {}
+
+    def fake_run_campaign(*_args, **kwargs):
+        received.update(kwargs)
+        return 0
+
+    monkeypatch.setattr("scripts.real_model_campaign.run_campaign", fake_run_campaign)
+
+    assert main(["--skip-custom"]) == 0
+    assert received["include_custom_session"] is False
 
 
 def test_main_forwards_default_model_to_campaign(monkeypatch):
@@ -188,7 +202,8 @@ def test_main_forwards_default_model_to_campaign(monkeypatch):
     monkeypatch.setattr("scripts.real_model_campaign.run_campaign", fake_run_campaign)
 
     assert main([]) == 0
-    assert received["model"] == "gemini-3.8-flash"
+    assert received["model"] == "qwen3.8"
+    assert received["include_custom_session"] is False
 
 
 def test_model_prompt_pool_calls_auxiliary_model_without_creating_session(monkeypatch):
@@ -674,6 +689,44 @@ def test_model_prompt_source_adds_one_separate_custom_session(tmp_path, monkeypa
         ("sid-2", 3, "generated", True, False),
     ]
     assert len(created_sessions) == 2
+
+
+def test_model_prompt_source_can_skip_the_optional_custom_session(tmp_path, monkeypatch):
+    question = HistoryPrompt("generated", "model-generated", "生成一份 Markdown 报告", 1, "generated:1", 0, 0, ())
+    api = _CancelFlowApi([], workspace=tmp_path / "workspace" / "sessions" / "sid-1")
+    rounds = []
+    monkeypatch.setattr("api.config.get_config", lambda: {"model": {"default": "test-model"}})
+    monkeypatch.setattr("scripts.real_model_campaign.Api", lambda _base_url: api)
+    monkeypatch.setattr("scripts.real_model_campaign._state_dir", lambda: tmp_path)
+    monkeypatch.setattr(
+        "scripts.real_model_campaign.generate_model_prompt_pool",
+        lambda _model, _count, **_kwargs: [question],
+    )
+    monkeypatch.setattr(
+        "scripts.real_model_campaign.create_plain_session",
+        lambda _api, **_kwargs: ("sid-1", tmp_path / "workspace-sid-1"),
+    )
+
+    def record_round(_api, _session_id, _workspace, round_question, _campaign_id, turn, _trigger, **kwargs):
+        rounds.append((turn, round_question.source_session_id, kwargs["model_campaign"], kwargs["custom_campaign"]))
+        return {"turn": turn, "alignment_failures": [], "observations": []}
+
+    monkeypatch.setattr("scripts.real_model_campaign._run_round", record_round)
+
+    assert run_campaign(
+        1,
+        3,
+        "http://test",
+        prompt_source="model",
+        cancel_verify_session=False,
+        include_custom_session=False,
+    ) == 0
+
+    assert rounds == [
+        (1, "generated", True, False),
+        (2, "generated", True, False),
+        (3, "generated", True, False),
+    ]
 
 
 def test_model_prompt_source_reuses_one_scenario_for_every_turn_in_a_batch(tmp_path, monkeypatch):
