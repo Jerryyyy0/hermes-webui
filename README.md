@@ -700,6 +700,8 @@ The WebUI is still coupled to Hermes Agent internals for runtime execution, prov
 - [`THEMES.md`](THEMES.md) — theme + skin system, custom theme guide
 - [`docs/guides/workspace-git.md`](docs/guides/workspace-git.md) — the workspace Git controls
 - [`docs/EXTENSIONS.md`](docs/EXTENSIONS.md) — administrator-controlled WebUI extension injection
+- [`docs/api/slash-commands-and-skills.md`](docs/api/slash-commands-and-skills.md) — WebUI slash-command and skill request/dispatch flow
+- [`docs/api/external-slash-commands-v1.md`](docs/api/external-slash-commands-v1.md) — proposed V1 `/compact` API for external frontends
 
 **Deploying & operating**
 - [`docs/guides/remote-access.md`](docs/guides/remote-access.md) — SSH tunnel, Tailscale, and phone access (incl. a community ARM64-Android field report)
