@@ -26,6 +26,8 @@ Fork 特有变更（SkillHub、profiles enrich、Swagger 等）记在此文件�
 
 ### Added
 
+- **Current-container user avatar** — `POST /api/upload?purpose=user_avatar` 复用既有认证与 CSRF 入口，为当前 WebUI 容器校验并保存 PNG/JPEG/GIF/WebP/SVG 头像（最大 10M），将相对路径写入 `webui-appearance.json` 的 `user_avatar_path`；成功响应仅为 `{ok:true}`，外部前端通过既有外观配置查询和文件预览接口获取头像。
+
 - **Profile memory backend API** — 新增 Profile 级 `MEMORY.md` 读取与编辑接口，以及每页默认 20 条、时间倒序的记忆时间线；时间线只展示 `MEMORY.md` 的形成、修改、删除事件，上线前历史不回算。
 
 - **Profile overview backend API** — 新增 `GET /api/integration/profiles/{profile}/overview`，聚合 Profile 基础资料、累计在岗天数、现存 Cron/普通对话任务数、过去一年最终助理回复热力数据和近 7 日最新技能；新增固定 `SOUL.md`、`MEMORY.md`、`USER.md` 的列表、预览与下载接口。创建时间读取 Hermes-X 提供的 `info.time`，缺失时兼容返回空时间与 0 天。

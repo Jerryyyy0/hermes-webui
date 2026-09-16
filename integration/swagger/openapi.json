@@ -36,7 +36,7 @@
     { "name": "IntegrationProfileOverview", "description": "助理主页后端聚合（需 HERMES_INTEGRATION=1）。按 Profile 返回基础资料、工作指标、年度活跃度、最近技能和原始档案。" },
     { "name": "IntegrationProfileMemory", "description": "助理画像记忆（需 HERMES_INTEGRATION=1）。只读取和编辑 MEMORY.md，分页查询其形成、修改、删除事件。" },
     { "name": "IntegrationAssistantBubbles", "description": "Profile 助理气泡（需 HERMES_INTEGRATION=1）。读取 `<profile.path>/assistant_bubbles.json` 独立缓存；定时任务槽位实时统计，不写回。" },
-    { "name": "IntegrationWebuiAppearance", "description": "WebUI 外观配置（需 HERMES_INTEGRATION=1）。只读读取进程级 `{HERMES_HOME}/webui-appearance/` 下的 JSON 与资源文件；不做 schema 校验或写入。" },
+    { "name": "IntegrationWebuiAppearance", "description": "WebUI 外观配置（需 HERMES_INTEGRATION=1）。读取进程级 `{HERMES_HOME}/webui-appearance/` 下的 JSON 与资源文件；头像上传会写入配置中的 `user_avatar_path`。" },
     { "name": "IntegrationConfig", "description": "运行时环境配置（需 HERMES_INTEGRATION=1）。仅返回白名单环境变量 BROWSER_PREVIEW_URL。" },
     { "name": "IntegrationSlashCommands", "description": "外部前端可用的斜杠命令目录（需 HERMES_INTEGRATION=1）。" }
   ],
@@ -520,9 +520,16 @@
     "/api/upload": {
       "post": {
         "tags": ["Workspace"],
-        "summary": "上传会话附件",
-        "description": "将文件保存为指定会话的附件，不写入会话工作区。`session_id` 必须存在，且必须归属请求 Profile。优先使用有效的 `hermes_profile` Cookie；未携带该 Cookie 时，使用 multipart `profile` 字段校验。Profile 不匹配时，服务端为防止跨 Profile 枚举会话而返回 404 `Session not found`。WebUI 不对该 multipart 上传施加文件大小限制。",
+        "summary": "上传会话附件或当前容器头像",
+        "description": "未传 `purpose=user_avatar` 时，将文件保存为指定会话的附件，不写入会话工作区。此时 `session_id` 必须存在，且必须归属请求 Profile；优先使用有效的 `hermes_profile` Cookie，未携带该 Cookie 时使用 multipart `profile` 校验。传 `purpose=user_avatar` 时，接口仅接收 `file`，将当前 WebUI 容器的头像写入进程级外观配置；不接受用户标识或会话参数，图片限 PNG/JPEG/GIF/WebP/SVG 且最大 10M。头像成功响应仅为 `{\"ok\":true}`，前端随后通过 `GET /api/integration/webui_appearance` 读取相对路径 `user_avatar_path`。普通会话附件上传不施加本接口的文件大小限制。",
         "parameters": [
+          {
+            "name": "purpose",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "enum": ["user_avatar"] },
+            "description": "值为 `user_avatar` 时进入当前容器头像上传分支；省略时保持既有会话附件上传行为。"
+          },
           {
             "name": "hermes_profile",
             "in": "cookie",
@@ -540,7 +547,7 @@
                 "properties": {
                   "session_id": {
                     "type": "string",
-                    "description": "目标会话 ID，必须属于请求 Profile。"
+                    "description": "普通会话附件上传的目标会话 ID，必须属于请求 Profile；`purpose=user_avatar` 时忽略。"
                   },
                   "profile": {
                     "type": "string",
@@ -552,14 +559,14 @@
                     "description": "待上传的二进制文件。"
                   }
                 },
-                "required": ["session_id", "file"]
+                "required": ["file"]
               }
             }
           }
         },
         "responses": {
           "200": {
-            "description": "上传成功",
+            "description": "上传成功。头像分支仅返回 `{ok:true}`；普通会话附件分支返回文件元数据。",
             "content": {
               "application/json": {
                 "schema": {
@@ -570,7 +577,8 @@
                     "path": { "type": "string", "description": "服务器上的附件绝对路径。" },
                     "size": { "type": "integer", "format": "int64", "description": "文件大小（字节）。" },
                     "mime": { "type": "string", "description": "根据文件名推断的 MIME 类型。" },
-                    "is_image": { "type": "boolean", "description": "是否为图片文件。" }
+                    "is_image": { "type": "boolean", "description": "是否为图片文件。" },
+                    "ok": { "type": "boolean", "description": "仅 `purpose=user_avatar` 成功时返回 true。" }
                   }
                 }
               }
@@ -579,6 +587,7 @@
           "400": { "description": "请求格式无效、缺少文件、文件名无效或其他上传参数错误" },
           "404": { "description": "会话不存在，或会话不属于当前 Profile（返回 `Session not found`）" },
           "413": { "description": "文件大小超过服务端上限" },
+          "409": { "description": "头像上传时，现有外观配置不是 JSON 对象，无法写入 user_avatar_path" },
           "500": { "description": "服务器保存附件失败" }
         }
       }
@@ -2077,13 +2086,22 @@
       "get": {
         "tags": ["IntegrationWebuiAppearance"],
         "summary": "读取 WebUI 外观配置 JSON",
-        "description": "需 `HERMES_INTEGRATION=1`。读取进程级 `{HERMES_HOME}/webui-appearance/webui-appearance.json` 并原样返回；不做 schema 校验或字段改写。",
+        "description": "需 `HERMES_INTEGRATION=1`。读取进程级 `{HERMES_HOME}/webui-appearance/webui-appearance.json` 并原样返回。`POST /api/upload?purpose=user_avatar` 成功后，会在顶层保留其它配置字段并写入相对路径 `user_avatar_path`；前端将该路径作为本组 file 接口的 path 参数预览头像。",
         "responses": {
           "200": {
-            "description": "外观配置 JSON 对象（原样）",
+            "description": "外观配置 JSON 对象（原样，头像设置后可含 user_avatar_path）",
             "content": {
               "application/json": {
-                "schema": { "type": "object", "additionalProperties": true }
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "user_avatar_path": {
+                      "type": "string",
+                      "description": "当前容器头像相对于 webui-appearance/ 的路径；未设置头像时不存在。"
+                    }
+                  },
+                  "additionalProperties": true
+                }
               }
             }
           },

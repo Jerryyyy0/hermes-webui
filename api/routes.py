@@ -12529,6 +12529,13 @@ def handle_post(handler, parsed) -> bool:
         return _handle_shutdown(handler)
 
     if parsed.path == "/api/upload":
+        try:
+            from integration.user_avatar.handlers import try_handle_upload as _user_avatar_try_upload
+
+            if _user_avatar_try_upload(handler, parsed) is True:
+                return True
+        except ImportError:
+            pass
         return handle_upload(handler)
     if parsed.path == "/api/upload/extract":
         return handle_upload_extract(handler)
