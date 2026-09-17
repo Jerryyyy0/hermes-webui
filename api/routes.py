@@ -403,6 +403,7 @@ def _request_session_visibility_exempt(method: str, path: str | None) -> bool:
         "/api/session/import",
         "/api/session/import_cli",
         "/api/chat/start",
+        "/api/session/append"
     }
 
 
@@ -14808,6 +14809,37 @@ def handle_post(handler, parsed) -> bool:
     # ── Session import from JSON (POST) ──
     if parsed.path == "/api/session/import":
         return _handle_session_import(handler, body)
+
+    if parsed.path == "/api/session/append":
+        try:
+            require(body, "session_id")
+        except ValueError as e:
+            return bad(handler, str(e))
+        messages = body.get("messages")
+        if not isinstance(messages, list):
+            return bad(handler, 'JSON must contain a "messages" array')
+        sid = body["session_id"]
+        try:
+            s = get_session(sid)
+            # #1558: save() refuses metadata-only session stubs because their
+            # messages list is intentionally empty. If a sidebar/status preload
+            # left one in the LRU cache, upgrade to a full disk load before
+            # mutating archived state so the guard stays intact.
+            if getattr(s, "_loaded_metadata_only", False):
+                s = Session.load(sid)
+                if s is None:
+                    raise KeyError(sid)
+            with LOCK:
+                s.messages += messages
+                SESSIONS[s.session_id] = s
+                SESSIONS.move_to_end(s.session_id)
+                while len(SESSIONS) > SESSIONS_MAX:
+                    SESSIONS.popitem(last=False)
+            s.save()
+            publish_session_list_changed("session_import")
+            return j(handler, {"ok": True, "session": s.compact() | {"messages": s.messages}})
+        except KeyError:
+            return bad(handler, "Session not found", 404)
 
     # ── Self-update (POST) ──
     if parsed.path == "/api/updates/apply":
