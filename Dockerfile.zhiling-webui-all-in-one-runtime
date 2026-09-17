@@ -1,0 +1,60 @@
+# syntax=docker/dockerfile:1.7
+#
+# 基于无源码 zhiling-webui-all-in-one:base 镜像的运行时镜像。
+#
+# 构建时将匹配版本的 Hermes Agent 检出目录作为命名上下文传入：
+#
+#   docker buildx build --load \
+#     --build-context agent-src=/absolute/path/to/hermes-agent \
+#     --file Dockerfile.zhiling-webui-all-in-one-runtime \
+#     --tag zhiling-webui-all-in-one:runtime .
+
+ARG BASE_IMAGE=zhiling-webui-all-in-one:base
+FROM ${BASE_IMAGE}
+
+LABEL org.opencontainers.image.title="智灵 WebUI 一体化运行时" \
+      org.opencontainers.image.description="Camofox 浏览器与 Hermes WebUI 运行时；构建阶段复制源码版本"
+
+USER root
+
+# 基础 venv 只包含已解析的第三方依赖。在此复制匹配版本的 Agent 检出目录，并通过
+# PYTHONPATH 暴露它；运行时不访问网络，也不修改密封 venv。
+COPY --from=agent-src . /opt/hermes-agent
+COPY . /opt/hermes-webui
+
+RUN touch /.within_container \
+    && HERMES_WEBUI_AGENT_DIR=/opt/hermes-agent PYTHONPATH=/opt/hermes-agent \
+       "$HERMES_RUNTIME_PYTHON" -c "from run_agent import AIAgent; import cryptography, httpx, loguru, pypinyin, yaml"
+
+COPY --chmod=0755 docker_zhiling_webui_all_in_one_entrypoint.sh /usr/local/bin/zhiling-webui-all-in-one-entrypoint
+
+# 此镜像运行 Camofox + x11vnc + noVNC，不提供 KasmVNC RPC；模式必须与浏览器栈一致。
+ENV HERMES_HOME=/data/zhiling \
+    HERMES_WEBUI_STATE_DIR=/data/zhiling/webui \
+    HERMES_WEBUI_DEFAULT_WORKSPACE=/workspace \
+    HERMES_WEBUI_HOST=0.0.0.0 \
+    HERMES_WEBUI_PORT=8787 \
+    HERMES_WEBUI_AGENT_DIR=/opt/hermes-agent \
+    HERMES_WEBUI_PYTHON=/opt/zhiling/.venv/bin/python \
+    HERMES_WEBUI_AUTO_INSTALL=0 \
+    PYTHONPATH=/opt/hermes-agent \
+    BROWSER_SESSION_MODE=camoufox \
+    BROWSER_CONTROL_PROTOCOL=camofox-rest \
+    CAMOFOX_URL=http://127.0.0.1:9377 \
+    BROWSER_RUNTIME_URL=http://127.0.0.1:9390 \
+    BROWSER_DESKTOP_URL=http://127.0.0.1:6901 \
+    BROWSER_DESKTOP_USERNAME=browser \
+    BROWSER_DESKTOP_PASSWORD= \
+    BROWSER_RUNTIME_TOKEN_SECRET= \
+    BROWSER_PREVIEW_URL=http://127.0.0.1:6901/vnc.html \
+    BROWSER_PREVIEW_BASE_PATH=/browser \
+    BROWSER_SESSION_PUBLIC_BASE_PATH=/browser \
+    BROWSER_SESSION_PROXY_BASE_PATH=/browser/session \
+    NODE_OPTIONS=
+
+EXPOSE 8787 9377 9390 6901
+
+HEALTHCHECK --interval=30s --timeout=8s --start-period=60s --retries=3 \
+  CMD "$HERMES_RUNTIME_PYTHON" -c "from urllib.request import urlopen; urlopen('http://127.0.0.1:8787/health', timeout=5)" || exit 1
+
+ENTRYPOINT ["/usr/local/bin/zhiling-webui-all-in-one-entrypoint"]

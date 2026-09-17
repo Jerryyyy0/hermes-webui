@@ -1,0 +1,62 @@
+replicaCount: 1
+
+image:
+  # CI writes the fully-qualified Harbor repository into the packaged chart.
+  repository: ""
+  pullPolicy: IfNotPresent
+  # Empty selects Chart.appVersion, which CI sets to the immutable commit SHA.
+  tag: ""
+  pullSecrets: []
+
+service:
+  type: ClusterIP
+  port: 8787
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: hermes-webui.example.invalid
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# Runtime 镜像将 Hermes 状态保存在 /data/zhiling；该 PVC 必须跨 Pod 重建保留。
+persistence:
+  enabled: true
+  existingClaim: ""
+  storageClass: ""
+  accessModes:
+    - ReadWriteOnce
+  size: 10Gi
+
+resources: {}
+
+# Deployment 可调整的运行时路径；默认值与运行时镜像的 /data/zhiling 契约一致。
+# hermesHome 挂载 PVC，defaultWorkspace 挂载 emptyDir。stateDir 必须位于
+# hermesHome 下，才能随同一 PVC 持久化。
+runtime:
+  hermesHome: /data/zhiling
+  stateDir: /data/zhiling/webui
+  defaultWorkspace: /workspace
+
+# 浏览器凭据默认留空，镜像内的启动脚本会使用其内置默认行为。仅在需要显式
+# 控制凭据时开启 Secret 引用；不要把真实密码写入 Git 内的 values.yaml。
+browser:
+  secret:
+    enabled: false
+    # 留空时使用 release 名称派生的 Secret。
+    name: ""
+    desktopPasswordKey: browser-desktop-password
+    runtimeTokenSecretKey: browser-runtime-token-secret
+
+# 通用非敏感运行时环境变量；不要通过该项注入密码、令牌或私有地址。
+extraEnv: []
+
+# 137 的 K3s 节点和运行时镜像均为 ARM64，避免将 ARM64 镜像调度到异构节点。
+nodeSelector:
+  kubernetes.io/arch: arm64
+tolerations: []
+affinity: {}

@@ -1,0 +1,191 @@
+# GitLab CI 入口：遵循“构建镜像 → 推送 Harbor OCI 制品 → ArgoCD 同步”的 GitOps 交付链路。
+#
+# GitLab「设置 → CI/CD → 变量」中必须配置：
+#   HARBOR_HOST       Harbor 主机和可选端口，不带 http:// 或 https://；默认值为 137 当前 Harbor
+#   HARBOR_PROJECT    存放容器镜像与 OCI Helm Chart 的 Harbor 项目名
+#   HARBOR_USER       Harbor 机器人账户用户名
+#   HARBOR_PASS       Harbor 机器人账户令牌；生产环境应设为 Masked 与 Protected
+#   CI_HELM_IMAGE     Harbor 内 ARM64 Helm 镜像；默认使用 137 已验证的公共镜像
+#   CI_DOCKER_CLI_IMAGE / CI_DOCKER_DIND_IMAGE  Harbor 内 ARM64 Docker 27.4.1 CLI（须含 git）/ DinD 镜像
+#   UV_IMAGE          Harbor 内 ARM64 uv 基础镜像
+#   OPENSANDBOX_IMAGE Harbor 内 ARM64 OpenSandbox 基础镜像
+#   BROWSER_IMAGE     Harbor 内 ARM64 智灵浏览器运行时镜像
+#   UV_INDEX_URL      内部 Python 包索引；137 无法访问 PyPI
+#   HF_ENDPOINT       内部 Hugging Face 镜像；基础镜像构建时下载语音模型
+#
+# 137 当前 Harbor 使用内网 HTTP，默认启用 HARBOR_PLAIN_HTTP=true；此时 GitLab Runner 的
+# Docker 守护进程也必须将该仓库配置为 insecure registry。若迁移到 HTTPS Harbor，再覆盖该变量。
+# Hermes Agent 源码由同一 GitLab 的 sgitg_x/hermes-agent 提供；必须在该项目
+# 的 Job token allowlist 中允许本项目读取。Docker-in-Docker 服务要求专用
+# GitLab Runner 开启 privileged 模式。
+
+workflow:
+  rules:
+    # 发布标签始终执行，用于生成正式版镜像与 Chart。
+    - if: '$CI_COMMIT_TAG'
+    # 默认分支执行，用于持续发布 CI 预发布 Chart，供 ArgoCD 发现与同步。
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    # dev 的每次变更构建镜像并发布 CI 预发布 Chart，供 ArgoCD 自动同步。
+    - if: '$CI_COMMIT_BRANCH == "dev"'
+    # 其他功能分支不创建流水线，避免与合并请求流水线重复。
+    - when: never
+
+stages:
+  # 构建并推送不可变容器镜像。
+  - build
+  # 打包并推送 OCI Helm Chart；不直接操作 Kubernetes 集群。
+  - publish
+
+variables:
+  # 已在 137 核实的 Harbor 地址；项目级变量可在迁移环境中覆盖该默认值。
+  HARBOR_HOST: "192.168.1.137:18000"
+  HARBOR_PLAIN_HTTP: "true"
+  # 该镜像位于 137 的公开 helm 项目，可在 Runner 登录 Harbor 前被直接拉取。
+  CI_HELM_IMAGE: "192.168.1.137:18000/helm/helm:v4.2.4"
+  # 137 主机、GitLab Runner 与 K3s 节点均为 ARM64，镜像必须按该架构构建。
+  TARGET_PLATFORM: linux/arm64
+  # Docker CLI 通过未启用 TLS 的 Docker-in-Docker 服务构建镜像。
+  DOCKER_HOST: tcp://docker:2375
+  DOCKER_TLS_CERTDIR: ""
+  # 强制启用 BuildKit，以支持 Dockerfile 的 --build-context agent-src。
+  DOCKER_BUILDKIT: "1"
+  # 仓库内 Helm Chart 的固定位置。
+  CHART_DIR: deploy/hermes-webui
+  # 同组 Hermes Agent 项目及其默认构建分支。
+  HERMES_AGENT_PROJECT_PATH: sgitg_x/hermes-agent
+  HERMES_AGENT_REF: main
+  # 基础镜像和最终运行时镜像分开发布；Chart 只引用最终运行时镜像。
+  BASE_IMAGE_NAME: hermes-webui-all-in-one-base
+  RUNTIME_IMAGE_NAME: hermes-webui-all-in-one
+
+.docker:
+  # Docker CLI 与 DinD 均需使用 Harbor 内的 ARM64 镜像。
+  image: "$CI_DOCKER_CLI_IMAGE"
+  services:
+    - name: "$CI_DOCKER_DIND_IMAGE"
+      alias: docker
+      # 137 的 Harbor 18000 是 HTTP；DinD 是独立守护进程，需单独声明不安全仓库。
+      command: ["--insecure-registry=192.168.1.137:18000"]
+  before_script:
+    # 缺少 Harbor 必需变量时立即失败，避免向错误仓库发布制品。
+    - ': "${HARBOR_HOST:?请配置 HARBOR_HOST}"'
+    - ': "${HARBOR_PROJECT:?请配置 HARBOR_PROJECT}"'
+    - ': "${HARBOR_USER:?请配置 HARBOR_USER}"'
+    - ': "${HARBOR_PASS:?请配置 HARBOR_PASS}"'
+    # 基础镜像与运行时镜像均使用当前 commit SHA，保证彼此可追溯。
+    - export BASE_IMAGE_REPOSITORY="$HARBOR_HOST/$HARBOR_PROJECT/$BASE_IMAGE_NAME"
+    - export RUNTIME_IMAGE_REPOSITORY="$HARBOR_HOST/$HARBOR_PROJECT/$RUNTIME_IMAGE_NAME"
+    - export IMAGE_TAG="$CI_COMMIT_SHA"
+    # 从标准输入读取机器人令牌登录 Harbor，避免令牌出现在命令行或日志中。
+    - printf '%s' "$HARBOR_PASS" | docker login "$HARBOR_HOST" --username "$HARBOR_USER" --password-stdin
+    - |
+      # CI Job Token 读取同组 Agent 源码；Agent 项目须显式允许此项目访问。
+      AGENT_SOURCE_DIR="$CI_PROJECT_DIR/.ci/hermes-agent"
+      mkdir -p "$(dirname "$AGENT_SOURCE_DIR")"
+      : "${CI_JOB_TOKEN:?GitLab 未提供 CI_JOB_TOKEN，无法读取 Hermes Agent 源码}"
+      # 通过 HTTP Job-Token 请求头认证，令牌不会拼入仓库 URL 或写入 .git/config。
+      git -c http.extraHeader="JOB-TOKEN: ${CI_JOB_TOKEN}" clone --depth 1 --branch "$HERMES_AGENT_REF" \
+        "${CI_SERVER_URL%/}/${HERMES_AGENT_PROJECT_PATH}.git" \
+        "$AGENT_SOURCE_DIR"
+      test -f "$AGENT_SOURCE_DIR/pyproject.toml"
+      test -f "$AGENT_SOURCE_DIR/uv.lock"
+
+image-publish:
+  extends: .docker
+  stage: build
+  script:
+    - |
+      set -eu
+      : "${UV_IMAGE:?请配置 Harbor 内的 UV_IMAGE}"
+      : "${OPENSANDBOX_IMAGE:?请配置 Harbor 内的 OPENSANDBOX_IMAGE}"
+      : "${BROWSER_IMAGE:?请配置 Harbor 内的 BROWSER_IMAGE}"
+      : "${UV_INDEX_URL:?请配置内部 Python 包索引 UV_INDEX_URL}"
+      : "${HF_ENDPOINT:?请配置内部 Hugging Face 镜像 HF_ENDPOINT}"
+      AGENT_SOURCE_DIR="$CI_PROJECT_DIR/.ci/hermes-agent"
+      # 先构建不含源码的基础镜像：浏览器、OpenSandbox 与预构建 Python 依赖。
+      docker build --pull --platform "$TARGET_PLATFORM" \
+        --build-context "agent-src=$AGENT_SOURCE_DIR" \
+        --file Dockerfile.zhiling-webui-all-in-one-base \
+        --build-arg "UV_IMAGE=$UV_IMAGE" \
+        --build-arg "OPENSANDBOX_IMAGE=$OPENSANDBOX_IMAGE" \
+        --build-arg "BROWSER_IMAGE=$BROWSER_IMAGE" \
+        --build-arg "UV_INDEX_URL=$UV_INDEX_URL" \
+        --build-arg "HF_ENDPOINT=$HF_ENDPOINT" \
+        --tag "$BASE_IMAGE_REPOSITORY:$IMAGE_TAG" .
+      docker push "$BASE_IMAGE_REPOSITORY:$IMAGE_TAG"
+      # 再基于同一 SHA 的基础镜像构建最终运行时，写入 WebUI 与 Agent 源码。
+      docker build --pull --platform "$TARGET_PLATFORM" \
+        --build-context "agent-src=$AGENT_SOURCE_DIR" \
+        --file Dockerfile.zhiling-webui-all-in-one-runtime \
+        --build-arg "BASE_IMAGE=$BASE_IMAGE_REPOSITORY:$IMAGE_TAG" \
+        --tag "$RUNTIME_IMAGE_REPOSITORY:$IMAGE_TAG" .
+      docker push "$RUNTIME_IMAGE_REPOSITORY:$IMAGE_TAG"
+
+chart-publish:
+  stage: publish
+  rules:
+    # 默认分支、dev 与正式 tag 均发布可被 ArgoCD 发现的 OCI Chart。
+    - if: '$CI_COMMIT_TAG'
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - if: '$CI_COMMIT_BRANCH == "dev"'
+    - when: never
+  image:
+    # 使用 Harbor 内镜像，避免 137 在任务启动时访问 Docker Hub。
+    name: "$CI_HELM_IMAGE"
+    entrypoint: [""]
+  needs:
+    - image-publish
+  before_script:
+    # 发布 Chart 前确认 Harbor 认证变量完整。
+    - ': "${HARBOR_HOST:?请配置 HARBOR_HOST}"'
+    - ': "${HARBOR_PROJECT:?请配置 HARBOR_PROJECT}"'
+    - ': "${HARBOR_USER:?请配置 HARBOR_USER}"'
+    - ': "${HARBOR_PASS:?请配置 HARBOR_PASS}"'
+    # Chart 只引用最终运行时镜像，而非无源码的基础镜像。
+    - export IMAGE_REPOSITORY="$HARBOR_HOST/$HARBOR_PROJECT/$RUNTIME_IMAGE_NAME"
+    - |
+      # Harbor 默认使用 HTTPS；仅显式开启 HARBOR_PLAIN_HTTP 时使用内网 HTTP。
+      if [ "${HARBOR_PLAIN_HTTP:-false}" = "true" ]; then
+        printf '%s' "$HARBOR_PASS" | helm registry login "$HARBOR_HOST" --username "$HARBOR_USER" --password-stdin --plain-http
+      else
+        printf '%s' "$HARBOR_PASS" | helm registry login "$HARBOR_HOST" --username "$HARBOR_USER" --password-stdin
+      fi
+  script:
+    - |
+      set -eu
+      # 在临时副本中写入 Harbor 地址，保持 Git 中的 Chart 不包含环境私有地址。
+      PACKAGE_CHART_DIR="$(mktemp -d)/hermes-webui"
+      cp -R "$CHART_DIR" "$PACKAGE_CHART_DIR"
+      # 从 Chart.yaml 读取唯一权威的基础版本号。
+      CHART_BASE_VERSION="$(sed -n 's/^version: *//p' "$PACKAGE_CHART_DIR/Chart.yaml" | head -n 1)"
+      test -n "$CHART_BASE_VERSION"
+      if [ -n "${CI_COMMIT_TAG:-}" ]; then
+        # 正式发布必须使用 v1.2.3 格式的 Git Tag，且必须与 Chart.yaml 版本一致。
+        printf '%s' "$CI_COMMIT_TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'
+        CHART_VERSION="${CI_COMMIT_TAG#v}"
+        test "$CHART_VERSION" = "$CHART_BASE_VERSION"
+      else
+        # 默认分支构建使用符合 SemVer 的 CI 预发布版本，供 ArgoCD 识别新制品。
+        CHART_VERSION="${CHART_BASE_VERSION}-ci.${CI_PIPELINE_IID}"
+      fi
+      # 注入本次镜像的 Harbor 仓库地址；未匹配时失败，避免发布指向错误镜像的 Chart。
+      grep -Fqx '  repository: ""' "$PACKAGE_CHART_DIR/values.yaml"
+      sed -i "s|  repository: \"\"|  repository: \"$IMAGE_REPOSITORY\"|" "$PACKAGE_CHART_DIR/values.yaml"
+      # 下载可选 Chart 依赖并在推送前再次执行 Helm 校验。
+      helm dependency build "$PACKAGE_CHART_DIR"
+      helm lint "$PACKAGE_CHART_DIR"
+      mkdir -p dist
+      # 将镜像 commit SHA 写入 Chart appVersion，再生成 OCI Chart 包。
+      helm package "$PACKAGE_CHART_DIR" --destination dist --version "$CHART_VERSION" --app-version "$CI_COMMIT_SHA"
+      CHART_PACKAGE="dist/hermes-webui-${CHART_VERSION}.tgz"
+      test -f "$CHART_PACKAGE"
+      # 推送 Chart 到 Harbor OCI 仓库；ArgoCD 后续从该仓库检测并同步。
+      if [ "${HARBOR_PLAIN_HTTP:-false}" = "true" ]; then
+        helm push "$CHART_PACKAGE" "oci://$HARBOR_HOST/$HARBOR_PROJECT" --plain-http
+      else
+        helm push "$CHART_PACKAGE" "oci://$HARBOR_HOST/$HARBOR_PROJECT"
+      fi
+  artifacts:
+    paths:
+      - dist/*.tgz
+    expire_in: 14 days

@@ -2,116 +2,68 @@
 
 **状态：** Proposed（仅设计，不代表已实现）
 
-**范围：** 同一 WebUI 会话内的用户消息排队、排序、编辑、删除，以及将待处理消息转换为当前活跃 Agent run 的补充指令。
+**范围：** 同一 WebUI 会话内的用户消息排队、排序、编辑、删除，以及将排队消息作为当前 Agent run 的补充指令发送。
 
 **关联契约：** [`../rfcs/webui-pending-intent-controls.md`](../rfcs/webui-pending-intent-controls.md)、[`../rfcs/live-to-final-assistant-replies.md`](../rfcs/live-to-final-assistant-replies.md)、[`../rfcs/session-sse-contract-v1.md`](../rfcs/session-sse-contract-v1.md)。
 
-**关联实现：** [`../../integration/pending_chat_turns.py`](../../integration/pending_chat_turns.py)、[`../../api/routes.py`](../../api/routes.py)、[`../../api/streaming.py`](../../api/streaming.py)、[`../../static/ui.js`](../../static/ui.js)。
+**关联实现：** [`../../integration/pending_chat_turns.py`](../../integration/pending_chat_turns.py)、[`../../api/routes.py`](../../api/routes.py)、[`../../api/streaming.py`](../../api/streaming.py)、[`../../static/messages.js`](../../static/messages.js)。
 
 ## 1. 结论
 
-采用“一个已有提交入口、一个查询接口、一个统一命令接口”的极简方案：
+第一期只保留三个入口：
 
 ```text
-POST /api/chat/start          提交用户消息；会话空闲时立即启动，忙碌时持久入队
-GET  /api/chat/queue          查询当前会话的权威队列快照
-POST /api/chat/queue/commands 排序、开始编辑、提交编辑、取消编辑、删除、转为补充指令
+POST /api/chat/start          提交消息；能立即执行则启动，否则持久入队
+GET  /api/chat/queue          查询会话的权威 Queue 快照
+POST /api/chat/queue/commands 排序、更新、删除、转补充指令、显式启动队首
 ```
 
-如果该能力仅作为当前 Fork 的定制功能落地，应遵守 integration 边界，将两个新增接口实现为：
+不新增独立入队接口，也不增加 `enqueue` action。普通消息统一提交到 `/api/chat/start`，由后端在 session lock 内原子决定立即启动或入队：
+
+```text
+session 空闲且 Queue 为空 → 200 running
+session 忙碌或 Queue 非空 → 202 queued
+```
+
+入队和消费是两件事。后端可以接收并持久化 Queue Item，但不得在 worker teardown、cancel、服务恢复或后台扫描时主动消费用户 Queue。只有前端显式调用 `dispatch_next`，后端才能启动队首任务。
+
+如果作为当前 Fork 的定制能力实现，两个新增接口映射为：
 
 ```text
 GET  /api/integration/chat_queue
 POST /api/integration/chat_queue/commands
 ```
 
-两组路径只选择一组，不同时维护别名。本文后续使用较短的 `/api/chat/queue` 表示其逻辑契约；Fork 实现时按上面的 integration 路径映射。
+本文后续使用较短的逻辑路径 `/api/chat/queue`。实现时只提供一组路径，不维护别名。
 
-方案的核心原则：
+## 2. 必须成立的不变量
 
-1. 后端会话队列是唯一权威状态；浏览器内存、`sessionStorage` 和 `localStorage` 只能做临时缓存。
-2. 同一会话仍然最多只有一个 active Agent stream。“多个任务同时问”表示可以连续提交多个任务，但后端按队列顺序串行答复，不表示同一会话并行运行多个 Agent turn。
-3. `/api/chat/start`、队列命令、自动 drain、取消和 Steer 必须共享同一个 session 级控制锁及同一份队列状态。
-4. Queue 与 Supplement/Steer 是不同语义：Queue 等当前 run 结束后开始一个正常新 turn；Supplement/Steer 属于当前 active run。
-5. “Agent 已接收补充指令”和“模型已经读取补充指令”必须分开建模。没有 Agent 侧证据时，WebUI 只能声明前者。
+1. 后端 Queue 是唯一权威状态；浏览器存储只能作为渲染缓存。
+2. 同一 session 任意时刻最多一个 active Agent run。
+3. 新消息不能越过已经存在的 Queue Item。
+4. 只有 `dispatch_next` 可以消费 `source=user_queue` 的项目。
+5. 前端不能把 Queue Item 文本重新提交给 `/api/chat/start`；后端必须按 `entry_id` 原子领取已持久化项目。
+6. 页面关闭或网络断开时，用户 Queue 保持等待，不自动执行。
+7. 系统 wakeup 使用独立调度路径，不能借后台任务入口消费用户 Queue。
+8. Supplement 的“已送达 Agent”和“模型已读取”必须分开表示。
 
-## 2. 当前基础与缺口
+## 3. 当前实现需要调整的地方
 
-### 2.1 已有能力
+现有后端已经能在会话忙碌时把 `/api/chat/start` 消息保存到 `session.pending_next_turns`，也已有 `drain_pending_chat_turn()`。现有前端还有页面内 Queue 和 `setBusy(false)` 后重新发送文本的逻辑。
 
-- `POST /api/chat/start` 在 WebUI 会话忙碌时，可以把消息持久化到 `session.pending_next_turns` 并返回 `202 queued`。
-- `drain_pending_chat_turn(session_id)` 会在会话空闲后领取第一条 `queued` 项，启动后继 stream。
-- 浏览器端 `SESSION_QUEUES` 已支持队列卡片、拖动排序、文本编辑和删除。
-- `POST /api/chat/steer` 可以把文本交给当前进程缓存的 Agent，在下一个工具结果边界注入模型上下文。
-- `pending_steer_leftover` 可以表示 run 结束时仍未消费的 Steer 文本。
+第一期需要：
 
-### 2.2 当前缺口
+- 把 `pending_next_turns` 升级为前后端共同使用的权威 Queue。
+- 为 Queue 增加查询、排序、更新、删除和显式 dispatch 能力。
+- 移除 cancel、worker teardown、服务恢复和 async delegation inbox 对用户 Queue 的自动 drain。
+- 移除浏览器本地 `shift() + send()`；改为调用 `dispatch_next`。
+- 保留系统 wakeup 的既有后端调度，但与 `source=user_queue` 明确隔离。
 
-- 浏览器队列和后端 `pending_next_turns` 是两份不同状态，没有统一版本和同步协议。
-- 后端没有队列明细查询、排序、编辑、删除接口。
-- `pending_next_turns` 当前主要面向 FIFO drain，没有正式的可编辑状态机。
-- `/api/chat/steer` 只返回是否被 Agent 接受，没有稳定的 `supplement_id`，也没有模型已应用的回调。
-- 当前 Steer 指示主要是临时 DOM 状态，不能单独保证刷新、会话切换或历史回放后仍可重建。
-- Steer 在 Agent 模型输入中可能表现为 `tool.content` 内的 out-of-band 标记，不能把该内部结构当成 WebUI 历史展示协议。
+## 4. 数据模型
 
-## 3. 状态所有权
+### 4.1 Queue 容器
 
-| 状态 | 权威 owner | 持久位置 | 说明 |
-| --- | --- | --- | --- |
-| 待执行 Queue | WebUI session | `pending_next_turns` 或等价 session 字段 | 排序、编辑、删除、drain 的唯一数据源 |
-| Queue schema/revision | WebUI session | `queue_schema_version`、`queue_revision` | schema version 描述数据结构；revision 在每次队列可见变更后递增 |
-| active stream/run | WebUI runtime | 现有 stream、`ACTIVE_RUNS` 和 session generation | 判断能否启动、取消或注入 |
-| Supplement 投递状态 | WebUI + Agent runtime | `turn_interventions`/journal + Agent 回调 | 区分 delivering、delivered、applied、leftover |
-| 浏览器 Queue UI | 浏览器 | 内存中的服务端快照 | 仅用于渲染和乐观更新，不拥有最终状态 |
-
-第一期可以继续扩展 `session.pending_next_turns`，不新增第二份数据库队列。若未来需要多个 WebUI 进程共同消费，才考虑迁移到带事务、租约和 outbox 的独立持久层。
-
-## 4. Queue 数据模型
-
-本方案区分三种数据形态：最小入队请求、持久化基础 Queue Item，以及只在特定状态下出现的扩展字段。不能把所有可能字段都预先写成 `null`，否则基础结构过重，也难以看出每个字段由哪个状态拥有。
-
-### 4.1 最小入队请求
-
-调用方创建一条普通 Queue Item 时，最少提交：
-
-```json
-{
-  "session_id": "session-001",
-  "message": "只分析登录模块，不要修改代码",
-  "idempotency_key": "message-20260915-001"
-}
-```
-
-约束：
-
-- `session_id`、`message` 必填。
-- 新接口要求 `idempotency_key` 必填；兼容旧 `/api/chat/start` 调用时可以暂时允许缺失，但只能保证消息被保留，不能保证 HTTP 重试最多入队一次。
-- `attachments`、`model`、`model_provider`、`workspace` 和 `profile` 是可选请求字段。
-- 服务端生成 `entry_id`、时间戳、初始状态和版本号，调用方不能指定。
-
-### 4.2 逻辑队列容器
-
-逻辑上的持久结构为：
-
-```json
-{
-  "version": 2,
-  "revision": 7,
-  "items": [
-    {
-      "entry_id": "queue-001",
-      "idempotency_key": "message-20260915-001",
-      "text": "只分析登录模块，不要修改代码",
-      "attachments": [],
-      "status": "queued",
-      "item_version": 1,
-      "created_at": 1789441200
-    }
-  ]
-}
-```
-
-为兼容当前 Session 模型，第一期不必立刻把 `pending_next_turns` 从数组迁移成对象。可以采用等价映射：
+第一期继续使用 Session 持久化，不新增数据库或第二份 Queue：
 
 ```text
 session.queue_schema_version = 2
@@ -119,138 +71,70 @@ session.queue_revision = 7
 session.pending_next_turns = [QueueItem, ...]
 ```
 
-这样既能保留当前 `pending_next_turns` 的读取和恢复路径，又避免在每条 Queue Item 上重复保存 schema version、revision 和 session ID。以后若迁移到独立表或完整容器，HTTP 契约不需要随存储形态一起变化。
+数组顺序就是权威顺序；`position` 只在 GET 响应中计算，不持久化。
 
-### 4.3 最小持久化 Queue Item
-
-Queue 调度本身要求的最小字段是：
-
-| 字段 | 说明 |
-| --- | --- |
-| `entry_id` | 服务端生成的稳定身份；接口和 UI 不使用数组下标定位项目 |
-| `idempotency_key` | 消息提交重试去重键 |
-| `text` | 用户消息正文 |
-| `attachments` | 已规范化的附件引用；无附件时为空数组 |
-| `status` | 当前队列状态 |
-| `item_version` | 单条项目的乐观并发版本 |
-| `created_at` | 入队时间 |
-
-`session_id` 不在单条记录中重复保存，因为 Queue Item 已由所属 Session 容器隔离。日志、SSE 和 HTTP 响应需要时由容器上下文补充。
-
-`position` 不持久化。数组顺序是权威顺序，GET 响应可按当前数组下标计算 `position`。排序成功后只重排数组并递增 `queue_revision`。
-
-### 4.4 执行环境快照
-
-如果产品选择“任务按入队时配置执行”，Queue Item 增加可选的执行快照：
+### 4.2 Queue Item
 
 ```json
 {
+  "entry_id": "queue-001",
+  "client_message_id": "01994580-6934-7d84-88d7-0d919be8e213",
+  "text": "只分析登录模块，不要修改代码",
+  "attachments": [],
   "execution": {
     "workspace": "/workspace/project",
     "model": "gpt-5",
     "model_provider": "openai",
     "profile": "default"
-  }
+  },
+  "source": "user_queue",
+  "status": "queued",
+  "item_version": 1,
+  "created_at": 1789441200
 }
 ```
 
-推荐在入队时由服务端解析并冻结完整执行快照，避免用户之后切换模型、Provider、Profile 或 workspace，导致已排队任务的执行环境静默变化。兼容旧记录时，如果 `execution` 缺失，dispatch 可以沿用当前 Session 配置，但必须把这种回退视为兼容契约并记录诊断信息。
+字段说明：
 
-### 4.5 状态专用字段
+| 字段 | 说明 |
+| --- | --- |
+| `entry_id` | 服务端生成的稳定 Queue Item ID |
+| `client_message_id` | 逻辑消息 ID；新版前端生成，旧版调用缺失时由后端兼容补齐 |
+| `text`、`attachments` | 已规范化的用户输入 |
+| `execution` | 入队时解析完成的执行环境快照 |
+| `source` | 普通消息固定为 `user_queue`，客户端不能覆盖 |
+| `status` | Queue Item 当前状态 |
+| `item_version` | 单项乐观并发版本 |
+| `created_at` | 入队时间 |
 
-以下字段只在对应状态存在，不在基础记录中预置 `null`。
+入队时冻结 `execution`，避免用户随后切换模型、Profile 或 workspace，导致排队任务的执行环境静默变化。
 
-编辑中：
+历史 Queue Item 缺少 `client_message_id` 时必须继续正常读取，不能因为 schema 升级导致旧队列不可见或不可执行。兼容读取层使用现有 `entry_id` 补成稳定值 `legacy:<entry_id>`，并在项目下一次正常写回时持久化；不要求一次性重写全部历史 Session。
 
-```json
-{
-  "status": "editing",
-  "edit_token": "edit-token-001",
-  "edit_started_at": 1789441220,
-  "edit_lease_expires_at": 1789441820
-}
-```
-
-正在 dispatch 或重试失败：
-
-```json
-{
-  "status": "dispatching",
-  "dispatch_token": "dispatch-token-001",
-  "attempts": 1
-}
-```
-
-```json
-{
-  "status": "failed",
-  "attempts": 2,
-  "last_error": "chat start failed",
-  "updated_at": 1789441300
-}
-```
-
-来源于 Stop-and-send 或 leftover Steer：
-
-```json
-{
-  "source": "stop_and_send",
-  "origin_stream_id": "stream-000",
-  "origin_generation": 3
-}
-```
-
-转为当前 run 的 Supplement：
-
-```json
-{
-  "status": "supplement_delivering",
-  "supplement_id": "supplement-001",
-  "target_stream_id": "stream-000",
-  "target_generation": 3
-}
-```
-
-`target_stream_id + target_generation` 必须共同约束 Supplement 的目标，不能只按 session ID 注入。
-
-## 5. Queue 状态机
+### 4.3 状态
 
 ```text
 queued
- ├─→ editing ───────────────→ queued
- ├─→ dispatching ───────────→ sent
- ├─→ supplement_delivering ─→ supplement_delivered ─→ supplement_applied
+ ├─→ dispatching ─→ sent
  ├─→ deleted
- └─→ failed ────────────────→ queued
-
-supplement_delivering
- ├─→ queued             明确确认尚未注入
- └─→ delivery_unknown   无法确认 Agent 是否已经接收
-
-supplement_delivered
- └─→ queued             run 结束前未应用，作为 leftover 重新排队
+ ├─→ failed ──────→ queued
+ └─→ supplement_delivering
+       ├─→ supplement_delivered ─→ supplement_applied
+       ├─→ queued
+       └─→ delivery_unknown
 ```
 
-操作权限：
-
-- `queued`：可以排序、开始编辑、删除、转为 Supplement。
-- `editing`：可以提交编辑、取消编辑、删除；不能被 drain。
-- `dispatching`：不能排序、编辑或删除；启动失败后恢复为 `queued` 或进入 `failed`。
-- `supplement_delivering`：禁止重复操作，直到得到明确结果或进入 `delivery_unknown`。
-- `supplement_delivered`：已离开普通 Queue，不能再编辑、删除或作为下一 turn 发送。
-- `delivery_unknown`：不能自动重试注入，需要恢复界面提示用户选择保留、重新排队或放弃。
+- `queued`：允许排序、更新、删除、转 Supplement 或 dispatch。
+- `dispatching`：正在启动新 run，不能再编辑或删除。
+- `failed`：启动明确失败，保留内容供用户重试或删除。
+- `delivery_unknown`：无法确认 Supplement 是否已经注入，禁止自动重试。
 - `sent`、`deleted`、`supplement_applied`：终态，不计入待处理数量。
 
-当队首处于 `editing` 时，推荐阻塞后续 drain，不能跳过它发送第二项，否则用户看到的顺序与实际执行顺序会发生变化。
+不设置 `editing` 状态、edit token 或 edit lease。点击编辑只把内容复制到 Composer；保存时调用原子 `update`，取消编辑只清理本地草稿。
 
-## 6. 接口一：`POST /api/chat/start`
+## 5. `POST /api/chat/start`
 
-### 6.1 请求
-
-```http
-POST /api/chat/start
-Content-Type: application/json
-```
+### 5.1 请求
 
 ```json
 {
@@ -260,79 +144,77 @@ Content-Type: application/json
   "model": "gpt-5",
   "model_provider": "openai",
   "workspace": "/workspace/project",
-  "idempotency_key": "message-20260915-001"
+  "profile": "default",
+  "client_message_id": "01994580-6934-7d84-88d7-0d919be8e213"
 }
 ```
 
-客户端应为每次逻辑发送生成稳定的 `idempotency_key`。网络重试必须复用相同 key。
+`session_id` 和 `message` 必填。新版前端必须为每次逻辑发送生成 `client_message_id`，同一次 HTTP 重试复用原值；但后端必须兼容历史版本前端缺少该字段，不能直接返回 `400`。
 
-### 6.2 会话空闲
+HTTP 边界按以下顺序归一化：
 
-后端在 session lock 内确认不存在阻塞启动的 active stream/run，按现有流程启动 Agent：
+```text
+存在 client_message_id
+    → 使用 client_message_id
 
-```http
-HTTP/1.1 200 OK
+否则
+    → 后端生成 legacy:<uuid>，继续接受请求
 ```
+
+后端兜底生成的 ID 只保证本次请求能够正常处理；旧前端在响应丢失后重新发送时会得到新的 ID，因此不承诺“最多入队一次”。这项限制不影响正常发送和历史会话使用。
+
+### 5.2 原子决策
+
+后端在同一把 session lock 内重新读取 session，并执行：
+
+```text
+没有 active run 且 Queue 为空
+    → 启动 Agent，返回 200 running
+
+存在 active run 或 Queue 非空
+    → 追加到队尾并保存，返回 202 queued
+```
+
+前端不预查 busy，也不在 `/start` 失败后补调另一个入队接口。这样可以避免“前端看到空闲，但请求到达时已经变忙”的竞态。
+
+运行响应：
 
 ```json
 {
   "status": "running",
   "session_id": "session-001",
-  "stream_id": "stream-001"
+  "stream_id": "stream-001",
+  "client_message_id": "01994580-6934-7d84-88d7-0d919be8e213"
 }
 ```
 
-### 6.3 会话忙碌
-
-后端在同一把 session lock 内追加 Queue Item、递增 `queue_revision` 并保存 session：
-
-```http
-HTTP/1.1 202 Accepted
-```
+入队响应：
 
 ```json
 {
   "status": "queued",
-  "queued": true,
   "session_id": "session-001",
   "entry_id": "queue-001",
   "position": 1,
   "queue_revision": 7,
   "active_stream_id": "stream-000",
-  "retryable": true
+  "client_message_id": "01994580-6934-7d84-88d7-0d919be8e213"
 }
 ```
 
-前端不应先通过状态接口判断 busy 再决定调用哪个提交接口。是否立即启动或入队必须由 `/api/chat/start` 在使用点原子决定，避免 check-then-use 竞态。
+响应始终返回归一化后的 `client_message_id`。新版前端提交相同 ID 重试时，后端返回第一次提交产生的结果，不重复启动或入队。入队结果可通过 Queue Item 去重；立即启动的结果必须在现有 pending turn/journal 中保存 `client_message_id → stream_id` 关联，不能只在 Queue 中查重。
 
-### 6.4 重复提交
-
-相同 session 内再次提交同一个 `idempotency_key` 时，返回现有条目或已启动结果，不重复追加 Queue Item：
-
-```json
-{
-  "status": "queued",
-  "queued": true,
-  "entry_id": "queue-001",
-  "duplicate": true,
-  "queue_revision": 7
-}
-```
-
-## 7. 接口二：`GET /api/chat/queue`
-
-### 7.1 请求
+## 6. `GET /api/chat/queue`
 
 ```http
 GET /api/chat/queue?session_id=session-001
 ```
 
-### 7.2 响应
+响应：
 
 ```json
 {
   "session_id": "session-001",
-  "queue_schema_version": 2,
   "queue_revision": 7,
   "active_run": {
     "stream_id": "stream-000",
@@ -354,548 +236,262 @@ GET /api/chat/queue?session_id=session-001
         "profile": "default"
       },
       "created_at": 1789441200
-    },
-    {
-      "entry_id": "queue-002",
-      "position": 1,
-      "status": "editing",
-      "item_version": 2,
-      "text": "补充移动端测试",
-      "attachments": [],
-      "execution": {
-        "workspace": "/workspace/project",
-        "model": "gpt-5",
-        "model_provider": "openai",
-        "profile": "default"
-      },
-      "created_at": 1789441260
     }
   ]
 }
 ```
 
-使用场景：
+默认只返回仍需用户处理的项目，例如 `queued`、`failed` 和 `delivery_unknown`。前端在页面加载、会话切换、SSE 重连、收到 `queue_changed` 或命令冲突后重新获取该快照。
 
-- 页面首次加载或刷新；
-- 切换回目标会话；
-- SSE 重连或收到 `queue_changed`；
-- 命令返回 revision conflict；
-- 多标签页需要收敛到同一状态。
+## 7. `POST /api/chat/queue/commands`
 
-默认只返回仍需要用户关注的项目，例如 `queued`、`editing`、`failed` 和 `delivery_unknown`。终态记录保留在内部审计或 timeline 中，不计入 `items` 和角标数量。
-
-## 8. 接口三：`POST /api/chat/queue/commands`
-
-### 8.1 公共请求信封
-
-```http
-POST /api/chat/queue/commands
-Content-Type: application/json
-```
+### 7.1 公共字段
 
 ```json
 {
   "session_id": "session-001",
-  "command_id": "command-001",
-  "action": "reorder",
-  "expected_queue_revision": 7
+  "action": "reorder"
 }
 ```
 
-字段：
+| 字段 | 必填 | 说明 |
+| --- | --- | --- |
+| `session_id` | 是 | Queue 所属会话 |
+| `action` | 是 | `reorder`、`update`、`delete`、`send_as_supplement` 或 `dispatch_next` |
+| `expected_queue_revision` | 按 action | 整个 Queue 的乐观并发版本 |
+| `entry_id` | 按 action | Queue Item ID |
+| `expected_item_version` | 按 action | 单项乐观并发版本 |
 
-| 字段 | 类型 | 必填 | 说明 |
-| --- | --- | --- | --- |
-| `session_id` | string | 是 | Queue 所属会话 |
-| `command_id` | string | 是 | 一次逻辑命令的幂等标识；重试必须复用 |
-| `action` | string | 是 | 命令类型 |
-| `expected_queue_revision` | integer | 按 action | 集合级乐观并发控制 |
-| `entry_id` | string | 按 action | 稳定 Queue Item ID |
-| `expected_item_version` | integer | 按 action | 项目级乐观并发控制 |
+第一期不增加通用 `command_id`。`reorder`、`update`、`delete` 和 `dispatch_next` 已由 revision、item version、状态机与 session lock 防止重复生效；Supplement 使用持久化的 `supplement_id` 标识投递。
 
-公共成功响应：
+### 7.2 版本从哪里获取
 
-```json
-{
-  "accepted": true,
-  "action": "reorder",
-  "queue_revision": 8,
-  "item": null
-}
-```
+版本均由后端生成，前端不能自行计算：
 
-公共 revision 冲突响应：
+- `expected_queue_revision` 来自 GET 响应顶层的 `queue_revision`。
+- `expected_item_version` 来自目标项目的 `item_version`。
+- 成功后采用命令响应中的新版本；响应未返回完整项目时重新 GET。
+- 收到 `409` 后重新 GET，不在本地递增版本或自动覆盖。
 
-```http
-HTTP/1.1 409 Conflict
-```
+编辑时，前端把 `entry_id + item_version` 与草稿绑定。即使期间收到 `queue_changed`，也不能静默替换草稿绑定的版本，否则会绕过冲突检测。
 
-```json
-{
-  "error": "queue_revision_conflict",
-  "message": "队列已经发生变化，请刷新后重试",
-  "queue_revision": 9,
-  "items": []
-}
-```
-
-后端应缓存或持久记录已完成的 `command_id` 及结果摘要，使浏览器因超时重试同一命令时得到相同结果，而不是重复执行。
-
-### 8.2 `reorder`：拖动排序
-
-请求提交当前所有可排序项目的完整顺序：
+### 7.3 `reorder`
 
 ```json
 {
   "session_id": "session-001",
-  "command_id": "reorder-001",
   "action": "reorder",
   "expected_queue_revision": 7,
-  "ordered_entry_ids": [
-    "queue-002",
-    "queue-001",
-    "queue-003"
-  ]
+  "ordered_entry_ids": ["queue-002", "queue-001"]
 }
 ```
 
-服务端校验：
+`ordered_entry_ids` 必须无重复，并完整覆盖当前所有可排序的 `queued` 项。后端在 session lock 内校验 revision 后重排数组并递增 `queue_revision`。
 
-1. `ordered_entry_ids` 不得重复。
-2. 必须完整覆盖当前全部可排序 `queued` 项。
-3. 不得包含 `dispatching`、`supplement_delivering` 或终态项目。
-4. `expected_queue_revision` 必须等于当前 revision。
-5. 校验和写入都在同一 session lock 内完成。
-
-采用完整 ID 顺序，不采用 `from_index/to_index`。数组下标会因后台 drain 或其它标签页追加任务而失效。
-
-### 8.3 `begin_edit`：回到输入框编辑
+### 7.4 `update`
 
 ```json
 {
   "session_id": "session-001",
-  "command_id": "begin-edit-001",
-  "action": "begin_edit",
+  "action": "update",
+  "entry_id": "queue-001",
+  "expected_item_version": 1,
+  "text": "只分析登录模块，不要修改代码",
+  "attachments": []
+}
+```
+
+只允许更新 `queued` 项。成功后递增 `item_version` 和 `queue_revision`，并保持原位置。版本冲突返回 `409 queue_item_version_conflict`，前端保留本地草稿。
+
+### 7.5 `delete`
+
+```json
+{
+  "session_id": "session-001",
+  "action": "delete",
   "entry_id": "queue-001",
   "expected_item_version": 1
 }
 ```
 
-后端原子执行：
+只允许删除 `queued` 或 `failed` 项。项目已经进入 dispatch 或 Supplement 投递时返回 `409 queue_item_not_mutable`。
 
-```text
-queued → editing
+### 7.6 `dispatch_next`
+
+```json
+{
+  "session_id": "session-001",
+  "action": "dispatch_next",
+  "expected_queue_revision": 7
+}
 ```
 
-响应：
+请求不携带 `entry_id`。后端始终选择当前权威顺序中的第一条 `queued` 项；要优先执行其它任务，必须先成功 reorder。
+
+后端流程：
+
+1. 在 session lock 内校验 `expected_queue_revision`。
+2. 确认不存在 active stream/run，且旧 worker 已退出 `ACTIVE_RUNS`。
+3. 队首执行 `queued → dispatching`，保存后释放锁。
+4. 使用 Queue Item 中已持久化的内容和执行环境启动 Agent。
+5. 获得新 `stream_id` 后执行 `dispatching → sent`。
+6. 启动明确失败时恢复为 `queued` 或标记 `failed`，不自动重试。
+
+成功响应：
 
 ```json
 {
   "accepted": true,
-  "action": "begin_edit",
-  "queue_revision": 8,
-  "edit_token": "edit-token-001",
-  "draft": {
-    "entry_id": "queue-001",
-    "text": "分析登录模块",
-    "attachments": [],
-    "model": "gpt-5",
-    "model_provider": "openai"
-  }
-}
-```
-
-前端把 `draft` 放入输入框并保留 `entry_id + edit_token`。不能使用“前端先读取内容、再删除原队列项”的两步流程，因为 drain 可能在两步之间启动该项目。
-
-### 8.4 `commit_edit`：提交编辑
-
-```json
-{
-  "session_id": "session-001",
-  "command_id": "commit-edit-001",
-  "action": "commit_edit",
+  "action": "dispatch_next",
+  "status": "running",
   "entry_id": "queue-001",
-  "edit_token": "edit-token-001",
-  "text": "只分析登录模块，不要修改代码",
-  "attachments": [],
-  "model": "gpt-5",
-  "model_provider": "openai"
+  "stream_id": "stream-002",
+  "queue_revision": 8
 }
 ```
 
-后端校验 edit token 和项目状态后执行：
+Queue 为空时返回 `status=empty`，不创建 stream。旧 run 尚未结算时返回 `409 session_not_ready`。
 
-```text
-editing → queued
-```
-
-编辑后的项目默认回到原相对位置。若产品决定编辑后的任务应移动到队尾，必须作为显式契约记录，不能由数组删除后重新追加偶然决定。
-
-### 8.5 `cancel_edit`：放弃编辑
+### 7.7 `send_as_supplement`
 
 ```json
 {
   "session_id": "session-001",
-  "command_id": "cancel-edit-001",
-  "action": "cancel_edit",
-  "entry_id": "queue-001",
-  "edit_token": "edit-token-001"
-}
-```
-
-恢复编辑前保存的内容并执行：
-
-```text
-editing → queued
-```
-
-如果浏览器关闭或 edit lease 超时，后端也应安全恢复为 `queued`，不能永久卡住队列。恢复策略应保存原内容快照，并通过会话事件通知其它页面。
-
-### 8.6 `delete`：删除排队任务
-
-```json
-{
-  "session_id": "session-001",
-  "command_id": "delete-001",
-  "action": "delete",
-  "entry_id": "queue-002",
-  "expected_item_version": 2
-}
-```
-
-只允许：
-
-```text
-queued  → deleted
-editing → deleted
-failed  → deleted
-```
-
-如果项目已经开始 dispatch 或 Supplement 投递，返回：
-
-```http
-HTTP/1.1 409 Conflict
-```
-
-```json
-{
-  "error": "queue_item_not_mutable",
-  "message": "任务已经开始处理，不能从队列中删除",
-  "status": "dispatching"
-}
-```
-
-删除可以从活跃数组中移除，但应保留短期 tombstone 或 timeline 记录用于命令幂等和问题诊断。
-
-### 8.7 `send_as_supplement`：转为当前任务补充信息
-
-```json
-{
-  "session_id": "session-001",
-  "command_id": "supplement-001",
   "action": "send_as_supplement",
   "entry_id": "queue-003",
-  "expected_queue_revision": 10,
+  "expected_item_version": 2,
   "target_stream_id": "stream-000",
-  "target_generation": 3,
-  "idempotency_key": "supplement-queue-003-stream-000"
+  "target_generation": 3
 }
 ```
 
 后端流程：
 
-1. 在 session lock 内重新读取 session 和目标 Queue Item。
-2. 确认项目仍为 `queued`，目标 `stream_id + generation` 仍是当前 active run。
-3. 把项目更新为 `supplement_delivering`，生成稳定 `supplement_id` 并持久化。
-4. 释放 session lock，再调用 RuntimeAdapter 或当前 Agent 的 `steer()`。不得在 session lock 内进行跨进程或网络等待。
-5. 明确拒绝或确认未送达时，重新加锁并恢复为 `queued`。
-6. Agent 接受时，重新加锁更新为 `supplement_delivered`，写入可回放 intervention 记录。
-7. Agent 证明下一次模型调用已包含该内容时，更新为 `supplement_applied`。
-8. 如果 run 在应用前结束，转成来源为 `leftover_steer` 的普通 `queued` 项，不能丢弃。
+1. 在 session lock 内确认项目仍为 `queued`，目标 `stream_id + generation` 仍是当前 active run。
+2. 执行 `queued → supplement_delivering`，生成并保存稳定 `supplement_id`。
+3. 释放锁后调用 RuntimeAdapter 或 Agent `steer()`。
+4. 明确未送达时恢复 `queued`；确认送达时进入 `supplement_delivered`。
+5. Agent 证明下一次模型输入已经包含该内容时，进入 `supplement_applied`。
+6. 无法确认是否送达时进入 `delivery_unknown`，禁止自动重试。
 
-接口接受响应：
+目标 run 已变化时返回 `409 active_stream_changed`，Queue Item 保持 `queued`。
 
-```http
-HTTP/1.1 202 Accepted
+## 8. 前端调度与事件
+
+### 8.1 下一任务由前端触发
+
+```text
+后端：旧 run 完成并退出 ACTIVE_RUNS
+        ↓
+后端：持久化并发送 run_settled，不消费 Queue
+        ↓
+前端：GET Queue
+        ↓
+前端：根据产品策略或用户点击调用 dispatch_next
+        ↓
+后端：原子领取队首并启动 Agent
 ```
 
-```json
-{
-  "accepted": true,
-  "action": "send_as_supplement",
-  "entry_id": "queue-003",
-  "supplement_id": "supplement-001",
-  "delivery_state": "delivered",
-  "target_stream_id": "stream-000",
-  "queue_revision": 11
-}
-```
+普通 `done` 只表示结果已经产生，不保证 worker teardown 完成。`run_settled` 才表示 session 可以接受 `dispatch_next`。如果重连期间错过事件，前端可以尝试 `dispatch_next`，并对 `409 session_not_ready` 做有限退避重试。
 
-目标已经变化时必须失败关闭：
+### 8.2 必须移除的自动消费点
 
-```http
-HTTP/1.1 409 Conflict
-```
+以下路径不得启动 `source=user_queue` 的项目：
 
-```json
-{
-  "error": "active_stream_changed",
-  "message": "当前任务已经发生变化，补充信息仍保留在队列中",
-  "entry_id": "queue-003",
-  "status": "queued"
-}
-```
+- `/api/chat/cancel` settle 后自动 drain；
+- streaming worker teardown 自动 drain；
+- 服务启动或恢复扫描；
+- async delegation inbox；
+- 浏览器 `setBusy(false)` 后本地 `shift() + send()`。
 
-## 9. Supplement 的 UI、SSE 与历史语义
+后端可以保留一个内部 dispatch 原语，但只能由通过认证和 CSRF 校验的 `dispatch_next` 调用。
 
-### 9.1 不把 accepted 当成 applied
+### 8.3 Queue 与 Supplement 事件
 
-当前 Agent 的 `steer(text)` 只证明文本已被缓存在 Agent 中。文本通常要等到下一个工具结果边界才会进入下一次模型输入。因此：
-
-- `supplement_delivered`：WebUI 可以显示“已收到用户补充指令，继续处理中”。
-- `supplement_applied`：只有收到 Agent/TUI Gateway 的消费证据后，才能显示“已读取用户补充指令”。
-- 没有 `supplement_applied` 能力时，UI 不得根据等待时间、后续 token 或 tool 输出猜测模型已经读取。
-
-### 9.2 会话事件
-
-复用已有的会话级 SSE：
-
-```http
-GET /api/sessions/{session_id}/events
-```
-
-建议新增可回放事件：
+复用会话级 SSE，新增或明确以下可回放事件：
 
 ```text
 queue_changed
+run_settled
 supplement_delivered
-assistant_segment_completed
 supplement_applied
 supplement_fallback_queued
 ```
 
-`queue_changed` 只携带失效通知和 revision，前端收到后重新读取权威快照：
+事件必须先持久化、后广播。
 
-```json
-{
-  "event_id": "event-101",
-  "session_id": "session-001",
-  "queue_revision": 11,
-  "reason": "send_as_supplement"
-}
-```
+- `supplement_delivered`：只能显示“已收到用户补充指令，继续处理中”。
+- `supplement_applied`：可以显示“上一阶段已完成 · 已读取用户补充指令”。
 
-`supplement_delivered`：
+“上一阶段已完成”只表示补充前的可视 assistant segment 已结束，不表示整个 run 已结束。
 
-```json
-{
-  "event_id": "event-102",
-  "session_id": "session-001",
-  "stream_id": "stream-000",
-  "generation": 3,
-  "queue_entry_id": "queue-003",
-  "supplement_id": "supplement-001",
-  "text": "请同时考虑移动端"
-}
-```
+### 8.4 历史展示
 
-`supplement_applied`：
+Queue Item 创建时不能直接写成普通 `Session.messages.role=user`，否则尚未执行的任务可能进入 Agent 上下文。
 
-```json
-{
-  "event_id": "event-103",
-  "session_id": "session-001",
-  "stream_id": "stream-000",
-  "supplement_id": "supplement-001",
-  "applied_at_model_iteration": 4
-}
-```
-
-事件必须先持久化、后广播。仅发送临时 SSE 而不写 session/journal，会导致刷新和重连后无法恢复相同时间线。
-
-### 9.3 展示顺序
-
-前端收到 `supplement_delivered` 后：
-
-1. 固化补充前的 assistant 展示段。
-2. 显示“已收到用户补充指令，继续处理中”。
-3. 插入带 `kind=supplement` 的用户消息气泡。
-4. 在同一 `stream_id` 下建立新的 assistant continuation 展示段。
-
-收到 `supplement_applied` 后，可以把边界文案升级为：
+建议继续分开保存：
 
 ```text
-上一阶段已完成 · 已读取用户补充指令
+pending_next_turns  待执行 Queue
+turn_interventions Supplement 及其投递状态
+Session.messages    正常 Agent/provider 历史
 ```
 
-这里的“已完成”只表示补充前的可视 assistant segment 已结束，不表示整个 Agent run 已经进入 `done`。最终回答仍属于同一个 run 和同一个稳定 assistant-turn owner。
+历史接口把 `turn_interventions` 投影为带 `kind=supplement` 的用户可见消息。该投影只用于展示，不能再次作为普通下一 turn 喂给 Agent，也不能依赖解析 `tool.content` 中的 out-of-band 标记。
 
-目标展示：
+## 9. 并发与错误处理
 
-```text
-Assistant 原执行内容
+### 9.1 锁范围
 
-✓ 上一阶段已完成 · 已读取用户补充指令
+所有 Queue 读改写使用 `_get_session_agent_lock(session_id)` 或其统一服务封装。锁内完成 session 重读、状态和版本校验、状态修改及 `session.save()`；锁内不得等待 Agent、Provider、SSE、文件上传或 worker 退出。
 
-User 补充：请同时考虑移动端
+### 9.2 Revision
 
-Assistant 继续执行过程……
-Assistant 最终回答……
-```
+- `queue_revision`：Queue 可见内容、顺序或状态变化时递增。
+- `item_version`：单个项目内容或状态变化时递增。
+- 多标签页提交旧版本时返回 `409`，不能覆盖新状态。
 
-### 9.4 历史持久化
-
-不要在 Queue Item 刚创建时就把它写成普通 `Session.messages.role=user`，否则尚未执行的任务可能进入 Agent 历史上下文。
-
-建议分别保存：
-
-```text
-pending_next_turns  调度队列
-turn_interventions 补充指令、投递状态和 assistant segment 边界
-Session.messages    Agent/provider 的正常持久对话上下文
-```
-
-历史读取接口把 `turn_interventions` 投影为用户可见事件：
-
-```json
-{
-  "role": "user",
-  "content": "请同时考虑移动端",
-  "metadata": {
-    "kind": "supplement",
-    "queue_entry_id": "queue-003",
-    "supplement_id": "supplement-001",
-    "stream_id": "stream-000",
-    "delivery_state": "applied"
-  }
-}
-```
-
-该投影用于 WebUI 历史展示，不应再次作为普通下一 turn 用户消息重复喂给 Agent。实现时可以把 intervention 投影接入现有 `activity_scene_v1`/稳定 assistant-turn anchor，而不是依赖解析 `tool.content` 内部的 out-of-band 标记。
-
-## 10. 自动 drain
-
-当前 active run 结束、取消或 teardown 后，由后端检查队列：
-
-```text
-读取第一个可执行 queued 项
-        ↓
-锁内 queued → dispatching，写 dispatch_token/attempts 并保存
-        ↓
-释放锁，调用现有 chat-start 内核
-        ↓
-启动成功：dispatching → sent
-启动失败：dispatching → queued/failed
-```
-
-不变量：
-
-1. drain 只能领取 `queued` 项。
-2. 一个 Queue Item 同一时间只有一个有效 `dispatch_token`。
-3. 启动新 stream 前必须再次验证 session 没有 active stream/run。
-4. 只有成功获得后继 `stream_id` 后才能标记 `sent`。
-5. worker teardown、cancel settle、服务启动恢复都可以触发 drain，但依靠同一把锁和 lease 保证不会重复启动。
-6. `editing` 队首阻塞后续项目；`delivery_unknown` 不自动转换或跳过，需用户处理。
-
-## 11. 并发与幂等
-
-### 11.1 锁范围
-
-所有 Queue 读改写必须使用 `_get_session_agent_lock(session_id)` 或其统一服务封装。
-
-锁内只允许：
-
-- 重新读取 session；
-- 校验 active stream/generation；
-- 校验 revision/version/token；
-- 修改 Queue Item、intervention 和 session 控制字段；
-- `session.save()`。
-
-锁内不得等待：
-
-- LLM/provider 请求；
-- Agent `steer()` 的跨进程或网络实现；
-- SSE 客户端；
-- 文件上传；
-- worker 退出。
-
-### 11.2 Revision
-
-- `queue_revision`：排序、追加、开始/结束编辑、删除、dispatch claim、Supplement 状态变化时递增。
-- `item_version`：单条项目内容或状态变化时递增。
-- revision 冲突返回 `409` 和最新 revision；调用方重新 GET 后决定是否重试。
-
-### 11.3 幂等键
-
-- 消息提交：`idempotency_key`。
-- Queue 命令：`command_id`。
-- Supplement 投递：稳定 `supplement_id` 或由 `entry_id + target stream generation` 派生的幂等键。
-
-“Agent 已接收，但 HTTP 响应丢失”是最危险的 Supplement 竞态。Agent 侧没有投递 ID 去重前，WebUI 不能盲目重试，只能记录 `delivery_unknown`。
-
-### 11.4 多标签页
-
-多个标签页可以同时读取队列，但修改必须携带 revision。一个页面修改成功后广播 `queue_changed`；其它页面重新 GET。旧 revision 的拖动、编辑或删除请求返回冲突，不能覆盖新状态。
-
-### 11.5 多进程与 Gateway
-
-当前本地 `SESSION_AGENT_CACHE` 具有进程亲和性。如果运行多个 WebUI worker，`send_as_supplement` 必须被路由到 active run owner，或通过 RuntimeAdapter/TUI Gateway 控制面发送。无法确认 owner 时应保留 Queue Item 并返回明确失败，不能向任意进程的缓存 Agent 注入。
-
-## 12. 错误约定
+### 9.3 错误码
 
 | HTTP | error | 场景 |
 | --- | --- | --- |
-| `400` | `invalid_queue_command` | 请求字段或 action 非法 |
-| `404` | `session_not_found` | 会话不存在或调用方不可见 |
+| `400` | `invalid_queue_command` | 字段或 action 非法 |
+| `404` | `session_not_found` | session 不存在或不可见 |
 | `404` | `queue_item_not_found` | Queue Item 不存在 |
-| `409` | `queue_revision_conflict` | 队列 revision 已变化 |
-| `409` | `queue_item_version_conflict` | 项目已经被修改 |
-| `409` | `queue_item_not_mutable` | 项目已经 dispatch/投递/终结 |
+| `409` | `queue_revision_conflict` | Queue 已变化 |
+| `409` | `queue_item_version_conflict` | Queue Item 已变化 |
+| `409` | `queue_item_not_mutable` | 项目已进入不可修改状态 |
+| `409` | `session_not_ready` | session 仍有 active run 或 worker 未结算 |
 | `409` | `active_stream_changed` | Supplement 目标 run 已变化 |
-| `409` | `supplement_delivery_unknown` | 无法确认是否已经注入，禁止自动重试 |
-| `422` | `supplement_unsupported` | 当前 backend/Agent 不支持 Steer |
-| `500` | `queue_persist_failed` | session 队列持久化失败 |
+| `409` | `supplement_delivery_unknown` | 无法确认 Supplement 是否已注入 |
+| `422` | `supplement_unsupported` | 当前 runtime 不支持 Steer |
+| `500` | `queue_persist_failed` | Queue 持久化失败 |
 
-面向调用方的 `message` 使用中文；内部异常详情只进入服务端日志，不直接暴露。
+面向调用方的错误说明使用中文。接口沿用现有 cookie 认证和 CSRF 约定，并校验 session 属于当前可见 Profile。
 
-普通接口继续使用现有 `hermes_session` cookie 认证和 CSRF 约定。服务端必须验证 session 属于当前调用方可见 Profile，不能仅凭请求中的 session ID 修改其它 Profile 的队列。
+## 10. 前端接入
 
-## 13. 前端接入
+1. 会话加载、切换、重连和 `queue_changed` 后调用 GET Queue。
+2. 普通发送统一调用 `/api/chat/start`；`200 running` 连接 stream，`202 queued` 更新 Queue UI。
+3. 拖动结束后提交完整 ID 顺序。
+4. 编辑时把文本和 `item_version` 放入 Composer；保存调用 `update`，取消只清理本地草稿。
+5. 删除成功后从本地快照移除，冲突时重新 GET。
+6. 收到 `run_settled` 后，根据产品策略自动调用 `dispatch_next`，或等待用户点击“执行下一条”。
+7. `dispatch_next` 成功后连接返回的 `stream_id`。
+8. Supplement 按 delivered/applied 两阶段显示。
 
-### 13.1 数据源迁移
+Queue 卡片保留拖动、编辑、删除和“作为补充信息发送”操作。窄屏可以把低频操作放入单项菜单。`failed` 和 `delivery_unknown` 必须有可见状态，不能只写日志。
 
-当前 `SESSION_QUEUES` 可以保留为页面内缓存，但内容必须来自 `GET /api/chat/queue`。逐步停止直接把 `sessionStorage/localStorage` 当成队列持久层。
+## 11. 实现边界
 
-推荐流程：
-
-1. 加载会话时 GET 服务端队列。
-2. `POST /api/chat/start` 返回 `202 queued` 时，把响应项目乐观加入当前快照。
-3. 收到 `queue_changed` 后重新 GET 收敛。
-4. 拖动完成后提交完整 ID 顺序；冲突时回滚并刷新。
-5. 编辑按钮调用 `begin_edit`，成功后再回填 Composer。
-6. 删除按钮只在服务端成功后移除，或乐观移除但保留可回滚快照。
-7. Supplement 按 delivered/applied 两阶段显示，不用单个 toast 代替持久时间线。
-
-### 13.2 控件布局
-
-- Queue 卡片继续位于 Composer 上方。
-- 拖动手柄作为主要操作。
-- 编辑、删除、转 Supplement 属于单项操作；窄屏可放入单项溢出菜单，避免每行堆满图标。
-- `delivery_unknown`、`failed` 必须有可见状态和恢复动作，不能只写控制台日志。
-
-UI 实施时需要按仓库规范补桌面、窄屏和移动端前后对比证据。
-
-## 14. 推荐代码边界
-
-若作为 Fork 能力实现：
+Fork 特有实现放在：
 
 ```text
 integration/chat_queue/
-  __init__.py
-  models.py       Queue Item 归一化、状态和版本
-  service.py      list/command/drain/supplement 的业务原子操作
-  handlers.py     GET/POST HTTP 解析与 j()/bad() 响应
-  projection.py   Queue 与 turn_interventions 的历史/SSE 投影
+  models.py
+  service.py
+  handlers.py
+  projection.py
 
 integration/tests/chat_queue/
   test_handlers.py
@@ -906,117 +502,53 @@ integration/tests/chat_queue/
 
 上游接缝只保留薄调用：
 
-- `api/routes.py`：integration GET/POST 分发和 `/api/chat/start` 入队钩子。
-- `api/streaming.py`：worker teardown 后 drain、Supplement leftover/applied 事件钩子。
-- `static/ui.js`、`static/messages.js`：调用接口和渲染状态；复杂 Fork UI 逻辑优先放入 `integration/assets/`。
+- `api/routes.py`：integration 路由分发和 `/api/chat/start` 入队钩子。
+- `api/streaming.py`：发出 `run_settled` 及 Supplement 事件，不消费用户 Queue。
+- `static/messages.js`：调用接口并渲染 Queue；复杂 Fork UI 放在 `integration/assets/`。
 
-新增 integration HTTP 接口时，同步更新：
+新增 integration HTTP 接口时同步更新 `integration/swagger/openapi.json`、`integration/README.md` 和 `integration/CHANGELOG.md`。
 
-- `integration/swagger/openapi.json`
-- `integration/README.md`
-- `integration/CHANGELOG.md`（功能实际实现并产生用户可见行为时）
+## 12. 实施顺序
 
-## 15. 分阶段实施
+### 第一阶段：Queue
 
-### 阶段一：后端 Queue CRUD 与排序
+- 扩展 `pending_next_turns`，增加 `queue_revision` 和 `item_version`。
+- 实现 GET Queue 及 `reorder`、`update`、`delete`、`dispatch_next`。
+- 让 `/api/chat/start` 和 `dispatch_next` 复用同一个 Queue Service。
+- 移除所有用户 Queue 自动 drain 和浏览器本地 `shift() + send()`。
+- 增加持久化 `queue_changed` 和 `run_settled`。
 
-- 增加逻辑 Queue 容器 v2，并以 Session 的 `queue_schema_version + queue_revision + pending_next_turns` 兼容映射落地。
-- 为 Queue 集合增加 `queue_revision`，为单条 Queue Item 增加 `item_version`。
-- 实现 GET、`reorder`、`begin_edit`、`commit_edit`、`cancel_edit`、`delete`。
-- 让 `/api/chat/start` 和 drain 调用同一个 Queue Service。
-- 前端读取后端快照，浏览器存储降级为非权威缓存。
+### 第二阶段：Supplement
 
-该阶段不改变 Steer 语义。
+- 实现 `send_as_supplement` 和稳定 `supplement_id`。
+- 持久化 `turn_interventions`，支持历史恢复。
+- Agent/runtime 先提供 `supplement_applied` 证据，再启用“已读取用户补充指令”文案。
 
-### 阶段二：Supplement delivered 与持久时间线
+## 13. 测试与验收
 
-- 实现 `send_as_supplement`。
-- 增加稳定 `supplement_id` 和 `turn_interventions`。
-- 发出可回放 `queue_changed`、`supplement_delivered`、`supplement_fallback_queued`。
-- 历史接口和 `activity_scene_v1` 能恢复 Supplement 用户消息及前后 segment。
-- UI 只显示“已收到用户补充指令”，不声称模型已读取。
+至少覆盖：
 
-### 阶段三：Agent applied 证明
+1. session 空闲且 Queue 为空时 `/start` 立即启动。
+2. session 忙碌或 Queue 非空时 `/start` 按顺序入队。
+3. 新版前端相同 `client_message_id` 重试不重复启动或入队。
+4. 旧版前端不发送 `client_message_id` 时仍能正常提交，响应返回后端生成的 `legacy:<uuid>`。
+5. 历史 Queue Item 缺少 `client_message_id` 时仍能查询、更新、删除和 dispatch，写回后获得稳定的 `legacy:<entry_id>`。
+6. 刷新、切换会话和多标签页读取相同 Queue。
+7. reorder、update、delete 与 dispatch 并发时最多一个操作基于匹配版本成功。
+8. 两个标签页同时 `dispatch_next` 时最多启动一个 run。
+9. Queue 为空时 `dispatch_next` 不创建 stream。
+10. 正常完成、错误、取消、worker teardown、浏览器关闭和服务重启都不会自动消费用户 Queue。
+11. Supplement 只投递给匹配的 `stream_id + generation`，不会同时作为下一 turn 重复发送。
+12. 历史恢复保持“原执行内容 → 用户补充 → 继续执行 → 最终回答”的顺序。
+13. 只有收到 `supplement_applied` 才显示“已读取用户补充指令”。
+14. 同一 session 任意时刻最多一个 active Agent run。
 
-关联 Hermes Agent/TUI Gateway 增加：
+## 14. 非目标与待确认项
 
-- `steer(supplement_id, text)` 或等价带 ID 控制接口；
-- 模型输入真正包含该补充内容后的 `supplement_applied` 回调；
-- leftover 返回同一 `supplement_id`；
-- 重复 ID 去重。
-
-完成后 WebUI 才启用“已读取用户补充指令”文案。
-
-### 阶段四：恢复与多 owner
-
-- 服务启动时恢复 `dispatching` lease、`editing` lease 和 `delivery_unknown`。
-- 验证 Gateway 与本地 Agent 两种 backend。
-- 明确多 WebUI worker 下的 active run owner 路由。
-
-## 16. 测试矩阵
-
-### 16.1 Queue 基础行为
-
-1. 会话空闲时 `/api/chat/start` 立即启动。
-2. 会话忙碌时连续提交多条消息，按提交顺序持久入队。
-3. 相同 `idempotency_key` 重试不会重复入队。
-4. 页面刷新、会话切换和多标签页读取到同一队列。
-5. 零项、一项、多项和重复请求都返回稳定结构。
-
-### 16.2 排序、编辑和删除
-
-1. 完整 ID 排序成功并递增 revision。
-2. 排序与 drain 并发时，只有一个操作基于匹配 revision 成功。
-3. `begin_edit` 与 drain 并发时，项目只能进入 `editing` 或 `dispatching` 之一。
-4. 编辑期间刷新仍能恢复草稿和 edit token/lease。
-5. 删除与 dispatch 并发时，不会出现“接口报告删除成功但任务仍启动”。
-6. 旧 revision/version 命令返回 `409`，不覆盖新状态。
-
-### 16.3 Supplement
-
-1. 只允许向匹配的 active `stream_id + generation` 投递。
-2. Agent 明确拒绝时项目恢复 `queued`。
-3. Agent 接受后响应丢失时进入 `delivery_unknown`，不自动重复注入。
-4. delivered 与 applied 分开显示和持久化。
-5. run 在 applied 前结束时，以同一 supplement 身份回到 Queue，不产生副本。
-6. Supplement 不会同时作为下一 turn 再发送。
-7. 历史加载和 SSE replay 得到相同的“前段 → 补充 → 后段 → 最终回答”顺序。
-
-### 16.4 生命周期出口
-
-覆盖：
-
-- 正常完成；
-- Agent/provider 错误；
-- 用户取消；
-- stream 替换；
-- session 切换；
-- 浏览器刷新；
-- WebUI 进程重启；
-- Gateway/local backend；
-- worker teardown；
-- 队列清空和 session 删除。
-
-## 17. 验收标准
-
-1. 用户在同一 active 会话中连续提交多条任务，后端全部持久接受并按用户确认的顺序串行启动。
-2. 拖动、编辑、删除与自动 drain 并发时，不发生重复发送、错误删除、跨会话发送或静默丢失。
-3. 页面刷新、会话切换、多标签页和服务恢复后，队列状态从后端收敛且不会依赖原页面内存。
-4. 点击编辑后，任务原子退出可消费状态并回到 Composer；提交或放弃编辑均有确定恢复路径。
-5. Queue Item 转 Supplement 后不会再作为普通下一 turn 重复发送。
-6. 历史接口能够恢复用户补充信息及其 run/segment 所属关系，不依赖解析 `tool.content`。
-7. WebUI 只有在 Agent 提供 applied 证据时才显示“已读取”；否则只显示“已收到”。
-8. 同一 session 任意时刻最多一个 active Agent stream。
-
-## 18. 非目标与待确认项
-
-本方案不实现同一会话内多个 Agent turn 并行运行。需要真正并行执行时，应使用不同会话、后台任务或子 Agent，不应放宽 session 单 active-run 不变量。
+本方案不实现同一 session 内多个 Agent turn 并行运行，也不在第一期新增独立数据库、分布式 Queue 或多 WebUI worker 调度。
 
 待产品确认：
 
-1. 编辑完成后保留原位置还是移动到队尾；本文默认保留原位置。
-2. `editing` 队首是否阻塞后续任务；本文默认阻塞。
-3. `delivery_unknown` 允许用户执行哪些恢复操作，以及是否需要管理员诊断入口。
-4. 删除是否提供短时间撤销；本文仅要求内部 tombstone，不要求 UI 撤销。
-5. Supplement 是否允许携带附件；如允许，需要先完成附件上传并把稳定路径交给 Agent，而不是保存浏览器 `File` 对象。
-6. Queue Item 的模型/Profile 是否采用入队时快照；本文建议冻结 model/provider/workspace，Profile 切换需另行定义完整身份契约。
+1. 收到 `run_settled` 后，前端默认自动调用 `dispatch_next`，还是等待用户点击“执行下一条”。
+2. `delivery_unknown` 允许用户执行“保留、重新排队或放弃”中的哪些操作。
+3. Supplement 第一阶段是否只支持文本；本文默认不支持附件。
