@@ -397,14 +397,19 @@ Session Manifest 的 `preview=file` 若返回绝对 `path`，前端仍调用此 
 
 ### WebUI appearance（`HERMES_INTEGRATION=1`）
 
-只读接口，根目录为进程级 **`{HERMES_HOME}/webui-appearance/`**（默认 `~/.hermes/webui-appearance/`）。配置 JSON 原样返回，不做 schema 校验或字段改写。文件预览 `path` 必须为该目录下的相对路径（如 `src/ly.jpg`）；禁止绝对路径与 `..` 逃逸。
+根目录为进程级 **`{HERMES_HOME}/webui-appearance/`**（默认 `~/.hermes/webui-appearance/`）。配置 JSON 原样返回；头像上传会在顶层写入相对路径 `user_avatar_path`，其余已有配置字段保持不变。文件预览 `path` 必须为该目录下的相对路径（如 `src/ly.jpg`）；禁止绝对路径与 `..` 逃逸。
 
 | Method | Path | Purpose |
 |--------|------|---------|
+| POST | `/api/upload?purpose=user_avatar` | 设置当前 WebUI 容器的个人头像；只接受 multipart `file`，成功仅返回 `{ "ok": true }` |
 | GET | `/api/integration/webui_appearance` | 读取 `webui-appearance.json` 并原样返回 JSON |
 | GET | `/api/integration/webui_appearance/file?path=` | 原始文件字节流（`path` 必填）；`Content-Type` 按扩展名；不设 `Content-Disposition` |
 
+头像只支持 PNG、JPEG、GIF、WebP、SVG，最大 10M；SVG 复用 Profile logo 的安全校验。上传请求不携带用户标识或 `session_id`。外部前端在上传成功后重新请求外观配置，读取 `user_avatar_path`，再拼为 `/api/integration/webui_appearance/file?path=${encodeURIComponent(user_avatar_path)}` 作为头像 `src`：
+
 ```bash
+curl -sS -X POST 'http://127.0.0.1:8787/api/upload?purpose=user_avatar' \
+  -F 'file=@avatar.png;type=image/png'
 curl -sS 'http://127.0.0.1:8787/api/integration/webui_appearance'
 curl -sS 'http://127.0.0.1:8787/api/integration/webui_appearance/file?path=src/ly.jpg' -o ly.jpg
 ```

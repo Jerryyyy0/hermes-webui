@@ -1,0 +1,96 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "hermes-webui.fullname" . }}
+  labels:
+    {{- include "hermes-webui.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "hermes-webui.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        {{- include "hermes-webui.labels" . | nindent 8 }}
+    spec:
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: hermes-webui
+          image: "{{ required "image.repository 必须由 CI 写入或在部署时设置" .Values.image.repository }}:{{ default .Chart.AppVersion .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8787
+              protocol: TCP
+          env:
+            - name: HERMES_WEBUI_HOST
+              value: "0.0.0.0"
+            - name: HERMES_WEBUI_PORT
+              value: "8787"
+            - name: HERMES_HOME
+              value: {{ .Values.runtime.hermesHome | quote }}
+            - name: HERMES_WEBUI_STATE_DIR
+              value: {{ .Values.runtime.stateDir | quote }}
+            - name: HERMES_WEBUI_DEFAULT_WORKSPACE
+              value: {{ .Values.runtime.defaultWorkspace | quote }}
+          {{- if .Values.browser.secret.enabled }}
+            - name: BROWSER_DESKTOP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ default (include "hermes-webui.fullname" .) .Values.browser.secret.name }}
+                  key: {{ .Values.browser.secret.desktopPasswordKey }}
+            - name: BROWSER_RUNTIME_TOKEN_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ default (include "hermes-webui.fullname" .) .Values.browser.secret.name }}
+                  key: {{ .Values.browser.secret.runtimeTokenSecretKey }}
+          {{- end }}
+          {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 45
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: hermes-state
+              mountPath: {{ .Values.runtime.hermesHome }}
+            - name: workspace
+              mountPath: {{ .Values.runtime.defaultWorkspace }}
+      volumes:
+        - name: hermes-state
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ default (include "hermes-webui.fullname" .) .Values.persistence.existingClaim }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        - name: workspace
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

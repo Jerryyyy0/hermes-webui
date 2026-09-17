@@ -1,0 +1,29 @@
+# Apply this from the GitOps/Argo CD administration repository after replacing
+# every <...> placeholder. CI does not apply it; Argo CD owns cluster sync.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: hermes-webui
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: oci://<harbor-host>/<harbor-project>
+    chart: hermes-webui
+    # This includes release tags and CI prereleases produced on the default branch.
+    targetRevision: ">=0.1.0-0"
+    helm:
+      releaseName: hermes-webui
+      valuesObject:
+        image:
+          pullSecrets:
+            - name: harbor-pull
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: hermes-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

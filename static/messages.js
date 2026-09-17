@@ -6231,6 +6231,29 @@ const APPROVAL_MIN_VISIBLE_MS = 30000;
 
 // showApprovalCard moved above respondApproval
 
+// A prompt flyout is both a visual control and a dialog. Keep inactive cards
+// out of the accessibility tree, but remove the native hidden/inert state
+// before adding `.visible` so a pending prompt can actually be rendered.
+function _setPromptFlyoutHidden(card, hidden) {
+  if (!card) return;
+  if (hidden) {
+    card.setAttribute("aria-hidden", "true");
+    card.setAttribute("inert", "");
+    const markHidden = () => {
+      if (!card.classList || !card.classList.contains("visible")) card.hidden = true;
+    };
+    if (typeof setTimeout === "function") setTimeout(markHidden, 450);
+    else markHidden();
+    return;
+  }
+  card.hidden = false;
+  card.setAttribute("aria-hidden", "false");
+  card.removeAttribute("inert");
+  // Let the browser observe the unhidden pre-visible state so the existing
+  // transform/opacity transition still runs when `.visible` is added.
+  void card.offsetHeight;
+}
+
 function _clearApprovalHideTimer() {
   if (_approvalHideTimer) {
     clearTimeout(_approvalHideTimer);
@@ -6264,6 +6287,7 @@ function hideApprovalCard(force=false) {
   _resetApprovalCardState();
   card.classList.remove("visible");
   card.classList.remove("collapsed");
+  _setPromptFlyoutHidden(card, true);
   _syncApprovalTranscriptSpace(null);
   $("approvalCmd").textContent = "";
   $("approvalDesc").textContent = "";
@@ -6349,6 +6373,7 @@ function showApprovalCard(pending, pendingCount) {
   ["approvalBtnOnce","approvalBtnSession","approvalBtnAlways","approvalBtnDeny"].forEach(id => {
     const b = $(id); if (b) { b.disabled = false; b.classList.remove("loading"); }
   });
+  _setPromptFlyoutHidden(card, false);
   card.classList.add("visible");
   _syncApprovalCollapseButton(card);
   _syncApprovalTranscriptSpace(card, {immediate: true});
@@ -6442,44 +6467,10 @@ async function respondApproval(choice) {
 function startApprovalPolling(sid) {
   stopApprovalPolling();
   _approvalPollingSessionId = sid || null;
-  // ── SSE (preferred): long-lived connection, server pushes instantly ──
-  try {
-    const es = new EventSource(new URL('api/approval/stream?session_id=' + encodeURIComponent(sid), document.baseURI || location.href).href);
-    let _fallbackActive = false;
-
-    es.addEventListener('initial', e => {
-      const d = JSON.parse(e.data);
-      if (d.pending) { showApprovalForSession(sid, d.pending, d.pending_count || 1); }
-      else { _clearApprovalPendingForSession(sid); _hideApprovalCardIfOwner(sid); }
-    });
-
-    es.addEventListener('approval', e => {
-      const d = JSON.parse(e.data);
-      if (d.pending) { showApprovalForSession(sid, d.pending, d.pending_count || 1); }
-      else { _clearApprovalPendingForSession(sid); _hideApprovalCardIfOwner(sid); }
-    });
-
-    es.onerror = () => {
-      // SSE failed — fall back to HTTP polling (3s interval)
-      if (_fallbackActive) return;
-      _fallbackActive = true;
-      try { es.close(); } catch(_){}
-      _startApprovalFallbackPoll(sid);
-    };
-
-    // If the session changes or stops being busy, close the SSE.
-    // We detect this via a periodic check (cheap — no network request).
-    _approvalSSEHealthTimer = setInterval(() => {
-      if (!S.busy || !S.session || S.session.session_id !== sid) {
-        stopApprovalPolling(); _hideApprovalCardIfOwner(sid, true);
-      }
-    }, 5000);
-
-    _approvalEventSource = es;
-  } catch(_e) {
-    // EventSource constructor failed — use polling directly
-    _startApprovalFallbackPoll(sid);
-  }
+  // Keep these two prompt transports as short HTTP requests. Together with
+  // the chat, session and gateway streams, permanent EventSource connections
+  // can exhaust the browser's six HTTP/1.1 connections per origin.
+  _startApprovalFallbackPoll(sid);
 }
 
 let _approvalEventSource = null;
@@ -6579,6 +6570,7 @@ function _ensureClarifyCardDom() {
   card.setAttribute("role", "dialog");
   card.setAttribute("aria-labelledby", "clarifyHeading");
   card.setAttribute("aria-describedby", "clarifyQuestion clarifyHint");
+  _setPromptFlyoutHidden(card, true);
   card.innerHTML = `
     <div class="clarify-inner">
       <div class="clarify-header">
@@ -6791,6 +6783,7 @@ function hideClarifyCard(force=false, reason="dismissed") {
   _clarifySessionId = null;
   _resetClarifyCardState();
   card.classList.remove("visible");
+  _setPromptFlyoutHidden(card, true);
   _syncClarifyTranscriptSpace(null);
   if (typeof unlockComposerForClarify === "function") unlockComposerForClarify();
   $("clarifyQuestion").textContent = "";
@@ -6913,6 +6906,7 @@ function showClarifyCard(pending) {
   }
   _clarifySetControlsDisabled(false, false);
   _ensureClarifyResizeListener();
+  _setPromptFlyoutHidden(card, false);
   card.classList.add("visible");
   _syncClarifyCollapseButton(card);
   _syncClarifyTranscriptSpace(card, {immediate: true});
@@ -7000,60 +6994,9 @@ function startClarifyPolling(sid) {
   stopClarifyPolling();
   _clarifyPollingSessionId = sid || null;
   _clarifyMissingEndpointWarned = false;
-
-  // SSE primary path: long-lived connection pushes events instantly.
-  try {
-    _clarifyEventSource = new EventSource(new URL('api/clarify/stream?session_id=' + encodeURIComponent(sid), document.baseURI || location.href).href);
-  } catch(e) {
-    _startClarifyFallbackPoll(sid);
-    return;
-  }
-
-  _clarifyEventSource.addEventListener('initial', function(ev) {
-    try {
-      var d = JSON.parse(ev.data);
-      if (d.pending) { showClarifyForSession(sid, d.pending); }
-      else { _clearClarifyPendingForSession(sid); _hideClarifyCardIfOwner(sid, false, 'expired'); }
-    } catch(e) {}
-  });
-
-  _clarifyEventSource.addEventListener('clarify', function(ev) {
-    try {
-      var d = JSON.parse(ev.data);
-      if (d.pending) { showClarifyForSession(sid, d.pending); }
-      else { _clearClarifyPendingForSession(sid); _hideClarifyCardIfOwner(sid, false, 'expired'); }
-    } catch(e) {}
-  });
-
-  _clarifyEventSource.onerror = function() {
-    if (_clarifyEventSource) { try { _clarifyEventSource.close(); } catch(_){} _clarifyEventSource = null; }
-    if (_clarifyHealthTimer) { clearInterval(_clarifyHealthTimer); _clarifyHealthTimer = null; }
-    _startClarifyFallbackPoll(sid);
-  };
-
-  // Stale-detector: track last event timestamp; only reconnect if no event
-  // (initial or clarify) has arrived in 60s. The server sends a keepalive
-  // comment line every 30s but EventSource silently consumes those; we only
-  // bump lastEventAt on actual application events. With no real events for
-  // 60s on a long-lived clarify connection the server is effectively silent
-  // and a reconnect is the safe move.
-  //
-  // Without the lastEventAt gate the original PR force-reconnected every 60s
-  // regardless of activity, which churned one TCP/SSE setup per minute per
-  // active session. (Opus pre-release review of v0.50.249.)
-  let _lastClarifyEventAt = Date.now();
-  const _markClarifyEvent = () => { _lastClarifyEventAt = Date.now(); };
-  _clarifyEventSource.addEventListener('initial', _markClarifyEvent);
-  _clarifyEventSource.addEventListener('clarify', _markClarifyEvent);
-  _clarifyHealthTimer = setInterval(function() {
-    if (Date.now() - _lastClarifyEventAt < 60000) return;
-    if (_clarifyEventSource) {
-      try { _clarifyEventSource.close(); } catch(_){}
-      _clarifyEventSource = null;
-    }
-    clearInterval(_clarifyHealthTimer); _clarifyHealthTimer = null;
-    startClarifyPolling(sid);
-  }, 60000);
+  // See startApprovalPolling(): polling preserves browser connections for
+  // the live chat/session streams while retaining the established 3s cadence.
+  _startClarifyFallbackPoll(sid);
 }
 
 function _startClarifyFallbackPoll(sid) {

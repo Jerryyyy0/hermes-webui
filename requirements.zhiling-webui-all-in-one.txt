@@ -1,0 +1,36 @@
+# 智灵 all-in-one 基础镜像的附加 Python 依赖。
+#
+# 保持上游 requirements.txt 为通用、可选功能的最小集合；本文件仅描述当前
+# all-in-one 镜像承诺提供的 Office、OCR、数据库客户端、数据分析与可视化能力。
+-r requirements.txt
+
+# Office / PDF：创建、读取、修改及转换 DOCX、XLSX、PPTX、PDF。
+python-docx>=1.1.2
+openpyxl>=3.1.5
+python-pptx>=1.0.2
+pypdf>=5.0
+pdfplumber>=0.11
+reportlab>=4.2
+PyMuPDF>=1.24
+odfpy>=1.4
+
+# OCR：调用基础镜像内的 Tesseract；Pillow 已由 Hermes 依赖提供。
+pytesseract>=0.3.13
+
+# 数据库客户端：仅提供连接库，不在该镜像内运行 MySQL 或 Redis 服务。
+# redis 同时提供 redis.sync 与 redis.asyncio；hiredis 为可选的响应解析加速器。
+redis[hiredis]>=6.0
+PyMySQL>=1.1
+aiomysql>=0.2
+SQLAlchemy>=2.0
+
+# 数据分析与可视化：覆盖表格处理、统计建模、科学计算与常见图表输出。
+pandas>=2.2
+polars>=1.0
+pyarrow>=18.0
+duckdb>=1.0
+scipy>=1.14
+scikit-learn>=1.5
+matplotlib>=3.8
+seaborn>=0.13
+plotly>=5.24

@@ -1,0 +1,187 @@
+# syntax=docker/dockerfile:1.7
+#
+# 智灵 Camofox 浏览器与 Hermes WebUI 的无源码基础镜像。
+#
+# 构建 ARM64 镜像时，将 Hermes Agent 检出目录作为仅构建阶段使用的命名上下文：
+#
+#   docker buildx build --load \
+#     --platform=linux/arm64 \
+#     --build-context agent-src=/absolute/path/to/hermes-agent \
+#     --file Dockerfile.zhiling-webui-all-in-one-base \
+#     --tag zhiling-webui-all-in-one:base .
+#
+# 构建 AMD64 镜像时，将 --platform 改为 linux/amd64，并传入具备 AMD64
+# manifest 的浏览器底座，例如：
+#
+#   docker buildx build --load \
+#     --platform=linux/amd64 \
+#     --build-arg BROWSER_IMAGE=registry.example/zhiling-browser-runtime:camoufox-integrated-dev-amd64 \
+#     --build-context agent-src=/absolute/path/to/hermes-agent \
+#     --file Dockerfile.zhiling-webui-all-in-one-base \
+#     --tag zhiling-webui-all-in-one:base-amd64 .
+#
+# 发布多架构 manifest 时，两个上游镜像都必须提供对应平台：
+#   docker buildx build --platform=linux/arm64,linux/amd64 --push ...
+#
+# 最终镜像刻意不包含 Hermes Agent 或 WebUI 源码。下游运行时镜像复制匹配
+# 的源码版本，并将 Agent 检出目录添加到 PYTHONPATH。venv 保留 pip，便于
+# 容器内使用 python/pip 做诊断；正式依赖仍只在镜像构建阶段安装。OpenSandbox
+# 仅保留 Go/Node 工具链；Python/Jupyter 已移除，避免与 Hermes Python 重复维护。
+
+ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.11.6-python3.13-trixie@sha256:b3c543b6c4f23a5f2df22866bd7857e5d304b67a564f4feab6ac22044dde719b
+ARG OPENSANDBOX_IMAGE=opensandbox/code-interpreter:v1.1.0
+ARG BROWSER_IMAGE=zhiling-browser-runtime:camoufox-integrated-dev
+
+# 根据 Hermes Agent 锁文件解析依赖，但不安装 Agent 项目本身。
+# `agent-src` 是命名构建上下文，其源码文件不会进入最终镜像。
+FROM ${UV_IMAGE} AS hermes-python-deps
+
+# 137 生产环境无法访问公网 PyPI；CI 通过构建参数传入内部 Python 包索引。
+ARG UV_INDEX_URL
+
+# 浏览器运行时提供 Debian 的 /usr/bin/python3。使用该解释器路径创建 venv，
+# 不使用 uv 镜像内的 /usr/local/bin/python3，确保复制后的 venv 在最终镜像中
+# 仍然可执行。
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /opt/zhiling
+COPY --from=agent-src pyproject.toml uv.lock ./
+RUN touch README.md \
+    && if [ -n "$UV_INDEX_URL" ]; then export UV_INDEX_URL; fi \
+    && uv venv --seed --python /usr/bin/python3 .venv \
+    && UV_LINK_MODE=copy uv sync --frozen --no-install-project --extra all --extra voice \
+    && /opt/zhiling/.venv/bin/python -m ensurepip --upgrade --default-pip
+
+# 当前 WebUI 会在首次启动时安装这些包。all-in-one 专用清单在保持上游通用
+# requirements.txt 不变的同时，补齐 Office、OCR 与数据库客户端能力；全部改为
+# 构建时写入 venv，使下游运行时镜像不依赖 PyPI。
+COPY requirements.txt requirements.zhiling-webui-all-in-one.txt /tmp/
+RUN UV_LINK_MODE=copy uv pip install \
+      --python /opt/zhiling/.venv/bin/python \
+      --no-cache \
+      -r /tmp/requirements.zhiling-webui-all-in-one.txt \
+      "hindsight-client>=0.4.22" \
+    && /opt/zhiling/.venv/bin/python -c \
+      "import aiomysql, docx, duckdb, matplotlib, numpy, pandas, pdfplumber, plotly, polars, pptx, pyarrow, pymupdf, pymysql, pytesseract, redis, reportlab, scipy, seaborn, sklearn, sqlalchemy; print('all-in-one dependency venv OK')"
+
+# 本地 STT 使用 faster-whisper。构建时下载 small 的多语言权重；最终镜像将
+# 该 Hugging Face 缓存设置为严格离线，容器首次语音转写不会访问互联网。
+ENV HF_HOME=/opt/hermes-stt-cache
+COPY --from=stt-cache /stt-cache /opt/hermes-stt-cache
+RUN HF_HOME="$HF_HOME" HF_HUB_OFFLINE=1 /opt/zhiling/.venv/bin/python -c \
+      "from faster_whisper import WhisperModel; WhisperModel('small', device='cpu', compute_type='int8')" \
+    && test -d "$HF_HOME"
+
+FROM ${OPENSANDBOX_IMAGE} AS opensandbox
+
+# 以浏览器镜像作为最终操作系统，并由其保有原始入口脚本。
+FROM ${BROWSER_IMAGE}
+
+ARG OSB_GO_VERSION=1.25.5
+ARG OSB_NODE_VERSION=v22.2.0
+
+LABEL org.opencontainers.image.title="智灵浏览器 + Hermes 运行时基础镜像" \
+      org.opencontainers.image.description="无源码基础镜像：Camofox 浏览器运行时、OpenSandbox Go/Node 工具链、Office/OCR 与预构建 Hermes/WebUI Python 依赖"
+
+USER root
+
+# 浏览器底座刻意保持精简，默认未提供交互编辑器和常用网络/进程诊断命令。
+# 将这些工具固定在基础镜像，避免下游运行时容器临时安装后在重建时丢失：
+# - vim：完整终端编辑器（含 vi 命令）；less：分页查看日志；curl/wget：HTTP 排查。
+# - git/jq：仓库与 JSON 检查；lsof/net-tools/iproute2/iputils-ping/dnsutils：网络诊断。
+# - procps：ps/top；bash-completion：交互式 Bash 补全。
+# - LibreOffice：无界面创建/转换 DOCX、XLSX、PPTX；Noto CJK：中文文档字体。
+# - Tesseract：本地轻量 OCR，仅安装简体中文与英文语言包，不下载模型。
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       vim \
+       less \
+       curl \
+       wget \
+       git \
+       jq \
+       lsof \
+       net-tools \
+       dnsutils \
+       bash-completion \
+       procps \
+       iproute2 \
+       iputils-ping \
+       libreoffice-core \
+       libreoffice-common \
+       libreoffice-writer \
+       libreoffice-calc \
+       libreoffice-impress \
+       fonts-noto-cjk \
+       tesseract-ocr \
+       tesseract-ocr-eng \
+       tesseract-ocr-chi-sim \
+    && rm -rf /var/lib/apt/lists/*
+
+# 复制的 venv 基于 Debian 13 系统 Python 3.13 创建。若未来浏览器底座不再
+# 提供该 ABI，则立即构建失败。
+RUN python3 -c "import sys; assert sys.version_info[:2] == (3, 13), sys.version"
+
+# 不要将 OpenSandbox 默认 Node 复制到 /usr/local；浏览器服务可能依赖浏览器
+# 镜像自身的 Node 运行时。OpenSandbox Python/Jupyter 没有当前调用方，刻意不复制，
+# 由 Hermes Python 3.13 作为唯一长期维护的 Python 环境。
+COPY --from=opensandbox /opt/go /opt/go
+COPY --from=opensandbox /opt/node /opt/opensandbox-node
+
+# 此目录仅包含第三方包。上方的 `uv sync --no-install-project` 刻意排除了
+# Hermes Agent 源码。
+COPY --from=hermes-python-deps /opt/zhiling/.venv /opt/zhiling/.venv
+# `small` 的离线模型权重；与下方 HF_HOME 保持同一路径，避免运行时重复下载。
+COPY --from=hermes-python-deps /opt/hermes-stt-cache /opt/hermes-stt-cache
+
+# 浏览器底座的登录 shell 会重置 PATH。使用包装器而不是直接软链接 venv 的
+# python，确保 Python 仍能识别 /opt/zhiling/.venv 为 sys.prefix。
+COPY --chmod=0755 docker_zhiling_runtime_python.sh /usr/local/bin/python
+RUN ln -s python /usr/local/bin/python3 \
+    && ln -s python /usr/local/bin/python3.13 \
+    && ln -s /opt/zhiling/.venv/bin/pip /usr/local/bin/pip \
+    && ln -s pip /usr/local/bin/pip3 \
+    && ln -s pip /usr/local/bin/pip3.13
+
+ENV HERMES_RUNTIME_PYTHON=/opt/zhiling/.venv/bin/python \
+    OSB_GO=/opt/go/${OSB_GO_VERSION}/bin/go \
+    OSB_NODE=/opt/opensandbox-node/${OSB_NODE_VERSION}/bin/node \
+    VIRTUAL_ENV=/opt/zhiling/.venv \
+    PATH=/opt/zhiling/.venv/bin:${PATH} \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_ROOT_USER_ACTION=ignore \
+    HF_HOME=/opt/hermes-stt-cache \
+    HF_HUB_OFFLINE=1
+
+# 验证 venv 不含源码检出目录、所有复制的工具入口均存在。构建期间不调用浏览器
+# 镜像入口脚本。
+RUN test ! -e /opt/zhiling/pyproject.toml \
+    && test ! -e /opt/zhiling/.venv/lib/python3.13/site-packages/hermes_agent \
+    && python --version \
+    && pip --version \
+    && "$HERMES_RUNTIME_PYTHON" -c "import aiomysql, cryptography, docx, pymupdf, httpx, loguru, openpyxl, pdfplumber, pypdf, pptx, pymysql, pypinyin, pytesseract, redis, reportlab, sqlalchemy, yaml, faster_whisper" \
+    && "$HERMES_RUNTIME_PYTHON" -c "from faster_whisper import WhisperModel; WhisperModel('small', device='cpu', compute_type='int8')" \
+    && soffice --headless --version \
+    && dpkg -s libreoffice-writer libreoffice-calc libreoffice-impress >/dev/null \
+    && tesseract --list-langs | grep -qx 'eng' \
+    && tesseract --list-langs | grep -qx 'chi_sim' \
+    && "$OSB_GO" version \
+    && "$OSB_NODE" --version \
+    && command -v vi \
+    && command -v vim \
+    && command -v less \
+    && command -v curl \
+    && command -v wget \
+    && command -v git \
+    && command -v jq \
+    && command -v lsof \
+    && command -v ifconfig \
+    && command -v dig \
+    && command -v ps \
+    && command -v ip \
+    && command -v ping
+
+# 刻意保留 zhiling-browser-runtime 的 ENTRYPOINT：
+# /usr/local/bin/zhiling-camofox-entrypoint
